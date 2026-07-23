@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://seo.example/contracts/crawler-task.schema.json",
+  "title": "Crawler Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "organization_id",
+    "project_id",
+    "run_id",
+    "type"
+  ],
+  "properties": {
+    "organization_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "site_understanding",
+        "technical_audit",
+        "backlink_validation"
+      ]
+    },
+    "target_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://"
+    },
+    "country": {
+      "type": "string",
+      "minLength": 1
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1
+    },
+    "max_pages": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "domain",
+        "subdomains",
+        "directory"
+      ],
+      "default": "domain"
+    },
+    "directory": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/"
+    },
+    "rendering": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "off",
+        "all"
+      ],
+      "default": "auto"
+    },
+    "allowed_paths": {
+      "$ref": "#/$defs/pathList"
+    },
+    "excluded_paths": {
+      "$ref": "#/$defs/pathList"
+    },
+    "issue_exclusion_patterns": {
+      "type": "array",
+      "maxItems": 250,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      }
+    },
+    "ignored_parameters": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_.-]+\\*?$"
+      }
+    },
+    "additional_hosts": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9.-]+$"
+      }
+    },
+    "urls": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "format": "uri",
+        "pattern": "^https?://"
+      }
+    },
+    "expected_links": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uri",
+        "pattern": "^https?://"
+      }
+    },
+    "enable_pagespeed": {
+      "type": "boolean",
+      "default": false
+    },
+    "enable_duplication_check": {
+      "type": "boolean",
+      "default": true
+    },
+    "duplication_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.85
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "site_understanding"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "target_url",
+          "country",
+          "language"
+        ],
+        "properties": {
+          "max_pages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "technical_audit"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "target_url",
+          "country",
+          "language"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "scope": {
+                  "const": "directory"
+                }
+              },
+              "required": [
+                "scope"
+              ]
+            },
+            "then": {
+              "required": [
+                "directory"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "backlink_validation"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "urls"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "pathList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^/"
+      }
+    }
+  }
+}

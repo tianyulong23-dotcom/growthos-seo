@@ -3,22 +3,21 @@ import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
-  Check,
   Download,
   ExternalLink,
   FilePlus2,
   Filter,
   Link2,
   LoaderCircle,
-  Play,
   Plus,
   RefreshCw,
   Search,
   Send,
 } from "lucide-react"
-import { Navigate, useNavigate, useParams } from "react-router"
+import { Navigate, useNavigate, useParams, useSearchParams } from "react-router"
 
 import { PageHeader } from "@/components/shared/page-header"
+import { createAuditRun, getAuditRun, type AuditRun } from "@/api/audits"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -42,15 +41,23 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Textarea } from "@/components/ui/textarea"
+import { BusinessProfileForm } from "@/features/projects/business-profile-form"
 import {
-  auditRows,
   backlinkRows,
   contentRows,
   keywordRows,
   modules,
-  projects,
 } from "@/data/mock-data"
+import type { AuditSettings } from "@/features/audit/audit-settings"
+import { useAuditRunPolling } from "@/features/audit/use-audit-run-polling"
+import { useProjects } from "@/features/projects/project-context"
+import type { BusinessProfileInput, Project } from "@/features/projects/types"
+
+const AuditWorkspace = React.lazy(() =>
+  import("@/features/audit/audit-workspace").then((module) => ({
+    default: module.AuditWorkspace,
+  }))
+)
 
 function StatusBadge({ value }: { value: string }) {
   const style =
@@ -109,131 +116,6 @@ function Toolbar({
         导出
       </Button>
     </div>
-  )
-}
-
-function AuditContent({ view }: { view: string }) {
-  const [search, setSearch] = React.useState("")
-  const [filter, setFilter] = React.useState("全部")
-  const rows = auditRows.filter(
-    (row) =>
-      row.item.toLowerCase().includes(search.toLowerCase()) &&
-      (filter === "全部" || row.type === filter)
-  )
-
-  if (view === "overview") {
-    return (
-      <div className="grid gap-6 xl:grid-cols-[1fr_1.3fr]">
-        <Card>
-          <CardHeader>
-            <CardTitle>审计健康度</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-end justify-between">
-              <div className="text-5xl font-semibold">86</div>
-              <Badge className="bg-emerald-600">良好</Badge>
-            </div>
-            <Progress value={86} className="mt-4" />
-            <div className="mt-6 grid grid-cols-3 gap-px overflow-hidden rounded-md border bg-border text-center">
-              {[
-                ["29", "错误"],
-                ["76", "警告"],
-                ["143", "提示"],
-              ].map(([value, label]) => (
-                <div key={label} className="bg-background p-3">
-                  <div className="text-xl font-semibold tabular-nums">
-                    {value}
-                  </div>
-                  <div className="text-xs text-muted-foreground">{label}</div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>问题分布</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {[
-              ["索引与抓取", 73, 18],
-              ["页面元素", 58, 31],
-              ["性能体验", 42, 26],
-              ["站内链接", 81, 11],
-              ["结构化数据", 89, 7],
-            ].map(([label, score, count]) => (
-              <div key={label}>
-                <div className="mb-1.5 flex justify-between text-sm">
-                  <span>{label}</span>
-                  <span className="text-muted-foreground">{count} 个问题</span>
-                </div>
-                <Progress value={Number(score)} className="h-2" />
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      </div>
-    )
-  }
-
-  return (
-    <Card className="overflow-hidden">
-      <Toolbar
-        search={search}
-        setSearch={setSearch}
-        filter={filter}
-        setFilter={setFilter}
-        options={["全部", "错误", "警告", "提示"]}
-      />
-      <div className="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-10">
-                <Checkbox aria-label="选择全部" />
-              </TableHead>
-              <TableHead>{view === "pages" ? "页面问题" : "问题"}</TableHead>
-              <TableHead>类型</TableHead>
-              <TableHead className="text-right">受影响</TableHead>
-              <TableHead className="text-right">变化</TableHead>
-              <TableHead>负责人</TableHead>
-              <TableHead className="w-12" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.item}>
-                <TableCell>
-                  <Checkbox aria-label={`选择 ${row.item}`} />
-                </TableCell>
-                <TableCell className="font-medium">{row.item}</TableCell>
-                <TableCell>
-                  <StatusBadge value={row.type} />
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {row.count}
-                </TableCell>
-                <TableCell
-                  className={`text-right tabular-nums ${
-                    row.change.startsWith("+")
-                      ? "text-destructive"
-                      : "text-emerald-600"
-                  }`}
-                >
-                  {row.change}
-                </TableCell>
-                <TableCell>{row.owner}</TableCell>
-                <TableCell>
-                  <Button variant="ghost" size="icon-sm" title="查看详情">
-                    <ArrowRight />
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
   )
 }
 
@@ -534,8 +416,21 @@ function PerformanceContent({ view }: { view: string }) {
   )
 }
 
-function SettingsContent({ view }: { view: string }) {
-  const [saved, setSaved] = React.useState(false)
+function SettingsContent({
+  view,
+  project,
+  onSaveBusinessProfile,
+  onRefreshBusinessProfile,
+}: {
+  view: string
+  project: Project
+  onSaveBusinessProfile: (input: BusinessProfileInput) => Promise<unknown>
+  onRefreshBusinessProfile: () => Promise<unknown>
+}) {
+  const understandingInProgress =
+    project.understandingStatus === "queued" ||
+    project.understandingStatus === "running"
+  const waitingForProfile = !project.siteProfile && understandingInProgress
 
   if (view === "sources") {
     return (
@@ -594,66 +489,258 @@ function SettingsContent({ view }: { view: string }) {
     )
   }
 
+  if (project.siteProfile) {
+    return (
+      <BusinessProfileForm
+        project={project}
+        onSave={onSaveBusinessProfile}
+        onRefresh={onRefreshBusinessProfile}
+        refreshing={understandingInProgress}
+      />
+    )
+  }
+
+  if (waitingForProfile) {
+    return (
+      <div className="max-w-2xl py-10">
+        <div className="flex items-start gap-3">
+          <LoaderCircle className="mt-0.5 size-5 animate-spin text-primary" />
+          <div className="min-w-0 flex-1">
+            <h2 className="font-medium">正在识别网站业务</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              完成后可在这里确认企业、客户和产品服务信息。
+            </p>
+            <Progress
+              value={project.understandingProgress}
+              className="mt-4 h-1.5"
+            />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (project.understandingStatus === "failed") {
+    return (
+      <div className="max-w-2xl py-10">
+        <h2 className="font-medium">暂时无法生成业务资料</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {project.understandingMessage ||
+            "网站业务识别未完成，当前没有可确认的业务资料。"}
+        </p>
+      </div>
+    )
+  }
+
   return (
-    <Card className="max-w-3xl">
-      <CardHeader>
-        <CardTitle>项目资料</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        <div className="grid gap-5 sm:grid-cols-2">
-          <label className="space-y-2 text-sm">
-            <span className="font-medium">项目名称</span>
-            <Input defaultValue="Solar Reviews" />
-          </label>
-          <label className="space-y-2 text-sm">
-            <span className="font-medium">网站域名</span>
-            <Input defaultValue="https://solarreviews.com" />
-          </label>
-        </div>
-        <label className="block space-y-2 text-sm">
-          <span className="font-medium">项目说明</span>
-          <Textarea
-            defaultValue="面向美国市场的太阳能评测和安装商平台。"
-            className="min-h-24"
-          />
-        </label>
-        <div className="flex items-center gap-3">
-          <Button
-            onClick={() => {
-              setSaved(true)
-              window.setTimeout(() => setSaved(false), 1800)
-            }}
-          >
-            {saved ? <Check /> : null}
-            {saved ? "已保存" : "保存更改"}
-          </Button>
-          {saved && (
-            <span className="text-xs text-emerald-600">
-              项目资料已保存到本地状态
-            </span>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+    <div className="max-w-2xl py-10">
+      <h2 className="font-medium">还没有业务资料</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        网站业务识别完成后，业务资料会显示在这里。
+      </p>
+    </div>
   )
 }
 
-function ModuleBody({ moduleId, view }: { moduleId: string; view: string }) {
-  if (moduleId === "audit") return <AuditContent view={view} />
+function ModuleBody({
+  moduleId,
+  view,
+  project,
+  onStart,
+  auditRun,
+  auditError,
+  onAuditRunChange,
+  onProjectRefresh,
+  onSaveBusinessProfile,
+  onRefreshBusinessProfile,
+}: {
+  moduleId: string
+  view: string
+  project: Project
+  onStart: (settings: AuditSettings) => Promise<void>
+  auditRun: AuditRun | null
+  auditError: string
+  onAuditRunChange: (run: AuditRun | null) => void
+  onProjectRefresh: () => Promise<unknown>
+  onSaveBusinessProfile: (input: BusinessProfileInput) => Promise<unknown>
+  onRefreshBusinessProfile: () => Promise<unknown>
+}) {
+  if (moduleId === "audit")
+    return (
+      <React.Suspense
+        fallback={
+          <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">
+            <LoaderCircle className="mr-2 size-4 animate-spin" />
+            正在加载网站审计
+          </div>
+        }
+      >
+        <AuditWorkspace
+          key={project.id}
+          view={view}
+          project={project}
+          onStart={onStart}
+          run={auditRun}
+          error={auditError}
+          onRunChange={onAuditRunChange}
+          onProjectRefresh={onProjectRefresh}
+        />
+      </React.Suspense>
+    )
   if (moduleId === "keywords") return <KeywordsContent view={view} />
   if (moduleId === "content") return <ContentContent view={view} />
   if (moduleId === "backlinks") return <BacklinksContent view={view} />
   if (moduleId === "performance") return <PerformanceContent view={view} />
-  if (moduleId === "settings") return <SettingsContent view={view} />
+  if (moduleId === "settings")
+    return (
+      <SettingsContent
+        key={project.id}
+        view={view}
+        project={project}
+        onSaveBusinessProfile={onSaveBusinessProfile}
+        onRefreshBusinessProfile={onRefreshBusinessProfile}
+      />
+    )
   return null
 }
 
 export function ModulePage() {
   const navigate = useNavigate()
-  const { projectId = projects[0].id, module = "", view } = useParams()
+  const [searchParams] = useSearchParams()
+  const {
+    projects,
+    getProject,
+    refreshProject,
+    updateBusinessProfile,
+    refreshBusinessProfile,
+  } = useProjects()
+  const { projectId = projects[0]?.id ?? "", module = "", view } = useParams()
+  const project = getProject(projectId)
   const currentModule = modules.find((item) => item.id === module)
-  const [running, setRunning] = React.useState(false)
+  const requestedAuditRunId =
+    module === "audit" ? searchParams.get("runId") : null
+  const targetAuditRunId = requestedAuditRunId || project.auditRunId
+  const [auditState, setAuditState] = React.useState<{
+    projectId: string
+    targetRunId: string | null
+    run: AuditRun | null
+    error: string
+  }>({
+    projectId: project.id,
+    targetRunId: null,
+    run: null,
+    error: "",
+  })
   const [actionCount, setActionCount] = React.useState(0)
+  const auditSelectionVersion = React.useRef(0)
+  const activeProjectId = React.useRef(project.id)
+  React.useLayoutEffect(() => {
+    activeProjectId.current = project.id
+    return () => {
+      activeProjectId.current = ""
+    }
+  }, [project.id])
+  const currentAuditRun =
+    auditState.projectId === project.id &&
+    auditState.targetRunId === targetAuditRunId &&
+    auditState.run?.project_id === project.id
+      ? auditState.run
+      : null
+  const currentAuditError =
+    auditState.projectId === project.id &&
+    auditState.targetRunId === targetAuditRunId
+      ? auditState.error
+      : ""
+  const running =
+    currentAuditRun?.status === "queued" ||
+    currentAuditRun?.status === "running" ||
+    currentAuditRun?.status === "stopping" ||
+    currentAuditRun?.status === "recalculating"
+
+  const handleAuditRunChange = React.useCallback(
+    (run: AuditRun | null, sourceProjectId: string) => {
+      if (
+        sourceProjectId !== activeProjectId.current ||
+        (run && run.project_id !== sourceProjectId)
+      ) {
+        return
+      }
+      auditSelectionVersion.current += 1
+      setAuditState({
+        projectId: sourceProjectId,
+        targetRunId: run?.run_id ?? null,
+        run,
+        error: "",
+      })
+    },
+    [setAuditState]
+  )
+
+  const handleAuditError = React.useCallback(
+    (
+      message: string,
+      sourceProjectId: string,
+      sourceRunId: string | null = targetAuditRunId
+    ) => {
+      if (sourceProjectId !== activeProjectId.current) {
+        return
+      }
+      setAuditState((current) => ({
+        projectId: sourceProjectId,
+        targetRunId: sourceRunId,
+        run: current.projectId === sourceProjectId ? current.run : null,
+        error: message,
+      }))
+    },
+    [setAuditState, targetAuditRunId]
+  )
+
+  React.useEffect(() => {
+    if (!project.id || !targetAuditRunId) return
+    const selectionVersion = auditSelectionVersion.current
+    let active = true
+    void getAuditRun(project.id, targetAuditRunId)
+      .then((run) => {
+        if (
+          active &&
+          selectionVersion === auditSelectionVersion.current &&
+          run.project_id === activeProjectId.current &&
+          run.run_id === targetAuditRunId
+        ) {
+          setAuditState({
+            projectId: run.project_id,
+            targetRunId: run.run_id,
+            run,
+            error: "",
+          })
+        }
+      })
+      .catch((error: unknown) => {
+        if (
+          active &&
+          selectionVersion === auditSelectionVersion.current &&
+          project.id === activeProjectId.current
+        ) {
+          setAuditState({
+            projectId: project.id,
+            targetRunId: targetAuditRunId,
+            run: null,
+            error: error instanceof Error ? error.message : "读取审计状态失败",
+          })
+        }
+      })
+    return () => {
+      active = false
+    }
+  }, [project.id, targetAuditRunId])
+
+  useAuditRunPolling({
+    run: currentAuditRun,
+    onRunChange: (run) => handleAuditRunChange(run, run.project_id),
+    onError: (message) =>
+      handleAuditError(message, project.id, currentAuditRun?.run_id ?? null),
+    onTerminal: refreshProject,
+  })
 
   if (!currentModule || currentModule.id === "overview") {
     return <Navigate to={`/projects/${projectId}/overview`} replace />
@@ -673,23 +760,37 @@ export function ModulePage() {
     )
   }
 
-  function handleAction() {
-    if (moduleConfig.id === "audit") {
-      setRunning(true)
-      window.setTimeout(() => setRunning(false), 2200)
-      return
+  async function handleAuditStart(settings: AuditSettings) {
+    handleAuditError("", project.id)
+    const run = await createAuditRun(project, settings)
+    handleAuditRunChange(run, project.id)
+    navigate(
+      `/projects/${project.id}/audit/overview?runId=${encodeURIComponent(
+        run.run_id
+      )}`,
+      { replace: true }
+    )
+    try {
+      await refreshProject(project.id)
+    } catch (error) {
+      if (project.id === activeProjectId.current) {
+        handleAuditError(
+          `审计已启动，但项目状态刷新失败：${
+            error instanceof Error ? error.message : "未知错误"
+          }`,
+          project.id,
+          run.run_id
+        )
+      }
     }
+  }
+
+  function handleAction() {
     setActionCount((count) => count + 1)
   }
 
   const actionIcon =
-    moduleConfig.id === "audit" ? (
-      running ? (
-        <LoaderCircle className="animate-spin" />
-      ) : (
-        <Play />
-      )
-    ) : moduleConfig.id === "content" ? (
+    moduleConfig.id === "content" ? (
       <FilePlus2 />
     ) : moduleConfig.id === "backlinks" ? (
       <Link2 />
@@ -704,8 +805,8 @@ export function ModulePage() {
       <PageHeader
         module={moduleConfig}
         actionLabel={
-          running
-            ? "扫描中..."
+          moduleConfig.id === "audit" || moduleConfig.id === "settings"
+            ? undefined
             : actionCount > 0
               ? `已添加 ${actionCount} 项`
               : moduleConfig.action
@@ -714,41 +815,57 @@ export function ModulePage() {
         onAction={handleAction}
         actionDisabled={running}
       />
-      <div className="border-b px-4 sm:px-6 lg:px-8">
-        <Tabs
-          value={activeView}
-          onValueChange={(nextView) =>
-            navigate(`/projects/${projectId}/${module}/${nextView}`)
-          }
-        >
-          <TabsList
-            variant="line"
-            className="h-11 max-w-full justify-start overflow-x-auto"
+      {moduleConfig.tabs.length > 0 && (
+        <div className="border-b px-4 sm:px-6 lg:px-8">
+          <Tabs
+            value={activeView}
+            onValueChange={(nextView) => {
+              const query =
+                moduleConfig.id === "audit" && requestedAuditRunId
+                  ? `?runId=${encodeURIComponent(requestedAuditRunId)}`
+                  : ""
+              navigate(
+                `/projects/${projectId}/${moduleConfig.id}/${nextView}${query}`
+              )
+            }}
           >
-            {moduleConfig.tabs.map((tab) => (
-              <TabsTrigger key={tab.id} value={tab.id}>
-                {tab.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-      </div>
+            <TabsList
+              variant="line"
+              className="no-scrollbar h-11 max-w-full justify-start overflow-x-auto"
+            >
+              {moduleConfig.tabs.map((tab) => (
+                <TabsTrigger key={tab.id} value={tab.id}>
+                  {tab.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+        </div>
+      )}
       <div className="p-4 sm:p-6 lg:p-8">
-        {running && (
-          <div className="mb-5 rounded-md border bg-muted/40 p-4">
-            <div className="flex items-center gap-3">
-              <LoaderCircle className="size-4 animate-spin text-primary" />
-              <div className="flex-1">
-                <div className="text-sm font-medium">正在扫描网站页面</div>
-                <div className="text-xs text-muted-foreground">
-                  当前为前端演示，任务将在几秒后完成
-                </div>
-              </div>
-            </div>
-            <Progress value={68} className="mt-3 h-1.5" />
-          </div>
-        )}
-        <ModuleBody moduleId={moduleConfig.id} view={activeView} />
+        <ModuleBody
+          moduleId={moduleConfig.id}
+          view={activeView}
+          project={project}
+          onStart={handleAuditStart}
+          auditRun={currentAuditRun}
+          auditError={currentAuditError}
+          onAuditRunChange={(run) => {
+            handleAuditRunChange(run, project.id)
+            if (run && run.run_id !== targetAuditRunId) {
+              navigate(
+                `/projects/${project.id}/audit/${activeView}?runId=${encodeURIComponent(
+                  run.run_id
+                )}`
+              )
+            }
+          }}
+          onProjectRefresh={() => refreshProject(project.id)}
+          onSaveBusinessProfile={(input) =>
+            updateBusinessProfile(project.id, input)
+          }
+          onRefreshBusinessProfile={() => refreshBusinessProfile(project.id)}
+        />
       </div>
     </div>
   )

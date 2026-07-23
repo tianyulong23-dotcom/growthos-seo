@@ -13,7 +13,8 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart"
 import { Progress } from "@/components/ui/progress"
-import { modules, projects, trendData } from "@/data/mock-data"
+import { modules, trendData } from "@/data/mock-data"
+import { useProjects } from "@/features/projects/project-context"
 
 const chartConfig = {
   clicks: { label: "自然点击", color: "var(--chart-4)" },
@@ -48,9 +49,11 @@ const metrics = [
 ]
 
 export function OverviewPage() {
-  const { projectId = projects[0].id } = useParams()
+  const { projects, getProject } = useProjects()
+  const { projectId = projects[0]?.id ?? "" } = useParams()
   const overview = modules[0]
-  const project = projects.find((item) => item.id === projectId) ?? projects[0]
+  const project = getProject(projectId)
+  const auditStarted = project.auditStatus !== "never_started"
 
   return (
     <div className="min-w-0">
@@ -137,33 +140,35 @@ export function OverviewPage() {
               <CardTitle>项目健康度</CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
-              <div>
-                <div className="mb-2 flex items-end justify-between">
-                  <span className="text-4xl font-semibold tabular-nums">
-                    {project.health}
-                  </span>
-                  <span className="text-xs text-emerald-600">
-                    本周提升 4 分
-                  </span>
-                </div>
-                <Progress value={project.health} />
-              </div>
-              {[
-                ["可抓取性", 94],
-                ["页面体验", 82],
-                ["内容质量", 79],
-                ["内部链接", 88],
-              ].map(([label, score]) => (
-                <div key={label} className="space-y-1.5">
-                  <div className="flex justify-between text-xs">
-                    <span>{label}</span>
-                    <span className="text-muted-foreground tabular-nums">
-                      {score}
-                    </span>
+              {auditStarted ? (
+                <div>
+                  <div className="mb-2 text-4xl font-semibold tabular-nums">
+                    {project.auditHealth ?? "--"}
                   </div>
-                  <Progress value={Number(score)} className="h-1.5" />
+                  <Progress value={project.auditHealth ?? 0} />
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    详细问题和页面数据请前往网站审计查看。
+                  </p>
                 </div>
-              ))}
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-sm font-medium">尚未开始网站审计</p>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    网站业务识别不会自动运行技术审计。
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    nativeButton={false}
+                    render={
+                      <Link to={`/projects/${project.id}/audit/overview`} />
+                    }
+                  >
+                    开始网站审计
+                    <ArrowRight />
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
         </section>
@@ -183,28 +188,11 @@ export function OverviewPage() {
               </Button>
             </CardHeader>
             <CardContent className="space-y-1">
-              {[
-                ["内部链接指向 4xx 页面", "11 个页面", "高"],
-                ["标题标签重复", "18 个页面", "高"],
-                ["排名下降超过 5 位", "7 个关键词", "中"],
-                ["内容需要更新", "12 篇文章", "中"],
-              ].map(([title, meta, priority]) => (
-                <div
-                  key={title}
-                  className="flex items-center gap-3 border-b py-3 last:border-b-0"
-                >
-                  <span
-                    className={`size-2 rounded-full ${
-                      priority === "高" ? "bg-destructive" : "bg-amber-500"
-                    }`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{title}</div>
-                    <div className="text-xs text-muted-foreground">{meta}</div>
-                  </div>
-                  <Badge variant="outline">{priority}</Badge>
-                </div>
-              ))}
+              <p className="py-6 text-sm text-muted-foreground">
+                {auditStarted
+                  ? "请前往网站审计查看实际检测到的问题。"
+                  : "完成网站审计后，待处理问题会显示在这里。"}
+              </p>
             </CardContent>
           </Card>
 
@@ -214,7 +202,6 @@ export function OverviewPage() {
             </CardHeader>
             <CardContent className="space-y-4">
               {[
-                ["网站审计已完成", "发现 29 个需要优先处理的问题", "12 分钟前"],
                 ["内容简报已创建", "2026 年太阳能税收抵免完整指南", "1 小时前"],
                 ["关键词已导入", "新增 86 个商业意图关键词", "昨天"],
                 [

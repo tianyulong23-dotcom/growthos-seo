@@ -3,7 +3,8 @@ import { Link, useParams } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { projects, type ModuleConfig } from "@/data/mock-data"
+import { type ModuleConfig } from "@/data/mock-data"
+import { useProjects } from "@/features/projects/project-context"
 
 type PageHeaderProps = {
   module: ModuleConfig
@@ -20,8 +21,9 @@ export function PageHeader({
   onAction,
   actionDisabled,
 }: PageHeaderProps) {
-  const { projectId = projects[0].id } = useParams()
-  const project = projects.find((item) => item.id === projectId) ?? projects[0]
+  const { projects, getProject } = useProjects()
+  const { projectId = projects[0]?.id ?? "" } = useParams()
+  const project = getProject(projectId)
 
   return (
     <div className="flex flex-col gap-4 border-b px-4 py-5 sm:px-6 lg:flex-row lg:items-end lg:justify-between lg:px-8">
@@ -38,8 +40,8 @@ export function PageHeader({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-semibold">{module.label}</h1>
-          {module.id === "audit" && (
-            <Badge variant="secondary">健康度 {project.health}</Badge>
+          {module.id === "audit" && project.auditHealth !== null && (
+            <Badge variant="secondary">健康度 {project.auditHealth}</Badge>
           )}
         </div>
         <p className="mt-1 max-w-2xl text-sm text-muted-foreground">

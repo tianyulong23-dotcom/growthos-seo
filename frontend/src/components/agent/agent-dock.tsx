@@ -1,19 +1,18 @@
 import * as React from "react"
 import {
-  ArrowRight,
   Bot,
   Check,
   CircleStop,
   FileSearch,
+  Globe2,
   LoaderCircle,
   MessageSquarePlus,
-  PanelLeftClose,
-  PanelLeftOpen,
   Paperclip,
+  RefreshCw,
   Send,
   X,
 } from "lucide-react"
-import { useLocation, useNavigate, useParams } from "react-router"
+import { useLocation, useParams } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -25,9 +24,10 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet"
-import { useSidebar } from "@/components/ui/sidebar"
 import { Textarea } from "@/components/ui/textarea"
-import { modules, projects } from "@/data/mock-data"
+import { modules } from "@/data/mock-data"
+import { useProjects } from "@/features/projects/project-context"
+import type { Project } from "@/features/projects/types"
 
 type AgentMessage = {
   id: number
@@ -37,7 +37,6 @@ type AgentMessage = {
 }
 
 type AgentDockContentProps = {
-  onNavigate?: () => void
   onClose?: () => void
 }
 
@@ -45,20 +44,7 @@ const initialMessages: AgentMessage[] = [
   {
     id: 1,
     role: "agent",
-    content:
-      "我可以读取当前项目的审计、关键词、内容和外链数据，并协助完成跨模块任务。",
-  },
-  {
-    id: 2,
-    role: "user",
-    content: "先告诉我当前最值得优先处理的问题。",
-  },
-  {
-    id: 3,
-    role: "agent",
-    content:
-      "建议优先修复 11 个指向 4xx 页面的内部链接，其次处理 18 个重复标题。这两项会直接影响抓取效率和重要页面的权重传递。",
-    task: true,
+    content: "我会结合当前项目的数据协助分析，并在这里显示后台任务的实际进度。",
   },
 ]
 
@@ -88,63 +74,177 @@ function buildReply(prompt: string, context?: string | null) {
     : "我已经收到任务，并会结合当前项目数据继续分析。"
 }
 
-function AgentTaskCard({
-  projectId,
-  onNavigate,
+const understandingSteps = [
+  "项目创建完成",
+  "分析网站入口",
+  "发现站内页面",
+  "抓取并提取重要页面",
+  "整理业务相关页面",
+  "生成业务资料",
+]
+
+function getUnderstandingStep(project: Project) {
+  if (
+    (project.understandingStatus === "completed" ||
+      project.understandingStatus === "partial") &&
+    project.siteProfile
+  ) {
+    return 5
+  }
+  if (
+    project.understandingStage === "generating_profile" ||
+    project.understandingStage === "completed"
+  ) {
+    return 5
+  }
+  if (project.understandingStage === "selecting_pages") {
+    return 4
+  }
+  if (project.understandingStage === "extracting_pages") {
+    return 3
+  }
+  if (project.understandingStage === "discovering_pages") {
+    return 2
+  }
+  if (project.understandingStage === "analyzing_site") {
+    return 1
+  }
+  return 0
+}
+
+function BusinessUnderstandingProgress({
+  project,
+  onRetry,
 }: {
-  projectId: string
-  onNavigate?: () => void
+  project: Project
+  onRetry: () => Promise<unknown>
 }) {
-  const navigate = useNavigate()
+  const failed = project.understandingStatus === "failed"
+  const partial = project.understandingStatus === "partial"
+  const activeStep = getUnderstandingStep(project)
+  const message =
+    project.understandingMessage ||
+    (failed ? "网站业务识别未完成" : `正在分析 ${project.domain}`)
+  const [retrying, setRetrying] = React.useState(false)
+  const [retryError, setRetryError] = React.useState("")
+
+  async function retry() {
+    setRetrying(true)
+    setRetryError("")
+    try {
+      await onRetry()
+    } catch (error) {
+      setRetryError(
+        error instanceof Error ? error.message : "重新识别网站业务失败"
+      )
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   return (
-    <div className="mt-3 rounded-md border bg-muted/20">
+    <div className="rounded-md border bg-muted/20">
       <div className="flex items-center justify-between border-b px-3 py-2">
         <div className="flex items-center gap-2 text-xs font-medium">
-          <FileSearch className="size-3.5 text-muted-foreground" />
-          优先问题分析
+          <Globe2 className="size-3.5 text-muted-foreground" />
+          网站业务识别
         </div>
-        <Badge variant="outline" className="h-5 rounded-sm font-normal">
-          已完成
+        <Badge
+          variant={failed ? "destructive" : partial ? "secondary" : "outline"}
+          className="h-5 rounded-sm font-normal"
+        >
+          {failed ? "未完成" : partial ? "部分完成" : "进行中"}
         </Badge>
       </div>
-      <div className="space-y-2.5 p-3">
-        {["读取最近一次网站审计", "评估问题影响范围", "生成修复优先级"].map(
-          (step) => (
-            <div key={step} className="flex items-center gap-2 text-xs">
-              <span className="flex size-4 items-center justify-center text-emerald-600 dark:text-emerald-400">
-                <Check className="size-3.5" />
-              </span>
-              <span>{step}</span>
-            </div>
-          )
+      <div className="space-y-3 p-3">
+        {failed ? (
+          <div className="space-y-2 text-xs">
+            <div className="font-medium text-destructive">失败原因</div>
+            <div className="leading-5 text-muted-foreground">{message}</div>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              disabled={retrying}
+              onClick={() => void retry()}
+            >
+              {retrying ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <RefreshCw />
+              )}
+              {retrying ? "正在重试" : "重新识别"}
+            </Button>
+            {retryError && <div className="text-destructive">{retryError}</div>}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-xs">
+            {partial ? (
+              <Check className="size-3.5 text-amber-600" />
+            ) : (
+              <LoaderCircle className="size-3.5 animate-spin" />
+            )}
+            <span>{message}</span>
+          </div>
         )}
+        <div className="space-y-2">
+          {understandingSteps.map((step, index) => {
+            const completed =
+              !failed &&
+              (index < activeStep || (partial && index === activeStep))
+            const active = !failed && !partial && index === activeStep
+            return (
+              <div
+                key={step}
+                className={
+                  completed || active
+                    ? "flex items-center gap-2 text-xs"
+                    : "flex items-center gap-2 text-xs text-muted-foreground"
+                }
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center">
+                  {completed ? (
+                    <Check className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                  ) : (
+                    <span
+                      className={
+                        active
+                          ? "size-2 rounded-full bg-primary"
+                          : "size-1.5 rounded-full bg-border"
+                      }
+                    />
+                  )}
+                </span>
+                <span>{step}</span>
+              </div>
+            )
+          })}
+        </div>
         <Progress
-          value={100}
-          className="h-1 [&_[data-slot=progress-indicator]]:bg-emerald-500/70"
+          value={partial ? 100 : project.understandingProgress}
+          className="h-1"
         />
-        <Button
-          variant="outline"
-          size="sm"
-          className="w-full justify-between rounded-md bg-background"
-          onClick={() => {
-            navigate(`/projects/${projectId}/audit/issues`)
-            onNavigate?.()
-          }}
-        >
-          打开问题清单
-          <ArrowRight />
-        </Button>
+        <div className="text-[11px] text-muted-foreground">
+          第 {project.understandingAttempt} 次
+          {project.understandingStartedAt
+            ? ` · ${project.understandingElapsedSeconds.toFixed(1)} 秒`
+            : ""}
+        </div>
       </div>
     </div>
   )
 }
 
-function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
+function AgentDockContent({ onClose }: AgentDockContentProps) {
   const location = useLocation()
-  const { state: sidebarState, toggleSidebar } = useSidebar()
-  const { projectId = projects[0].id } = useParams()
-  const project = projects.find((item) => item.id === projectId) ?? projects[0]
+  const { projects, getProject, refreshBusinessProfile } = useProjects()
+  const { projectId = projects[0]?.id ?? "" } = useParams()
+  const project = getProject(projectId)
+  const showUnderstandingProgress =
+    project.understandingStatus === "queued" ||
+    project.understandingStatus === "running" ||
+    project.understandingStatus === "partial" ||
+    project.understandingStatus === "failed"
   const context = getPageContext(location.pathname)
   const [histories, setHistories] = React.useState<
     Record<string, AgentMessage[]>
@@ -170,7 +270,7 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
     attachedContext?.projectId === project.id ? attachedContext.label : null
 
   React.useEffect(() => {
-    viewportRef.current?.scrollTo({
+    viewportRef.current?.scrollTo?.({
       top: viewportRef.current.scrollHeight,
       behavior: "smooth",
     })
@@ -231,7 +331,7 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
     }
     setIsThinking(false)
     setAttachedContext(null)
-    replaceProjectMessages([initialMessages[0]])
+    replaceProjectMessages([{ ...initialMessages[0] }])
   }
 
   function stopTask() {
@@ -245,20 +345,6 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="flex h-14 shrink-0 items-center gap-3 border-b px-3">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="hidden xl:inline-flex"
-          title={sidebarState === "collapsed" ? "展开导航" : "收起导航"}
-          aria-label={sidebarState === "collapsed" ? "展开导航" : "收起导航"}
-          onClick={toggleSidebar}
-        >
-          {sidebarState === "collapsed" ? (
-            <PanelLeftOpen />
-          ) : (
-            <PanelLeftClose />
-          )}
-        </Button>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span className="text-sm font-semibold">AI Agent</span>
           <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
@@ -292,6 +378,13 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
         ref={viewportRef}
         className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4"
       >
+        {showUnderstandingProgress && (
+          <BusinessUnderstandingProgress
+            project={project}
+            onRetry={() => refreshBusinessProfile(project.id)}
+          />
+        )}
+
         {messages.map((message) =>
           message.role === "user" ? (
             <div key={message.id} className="flex justify-end">
@@ -308,9 +401,6 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
                 </div>
               )}
               <p>{message.content}</p>
-              {message.task && (
-                <AgentTaskCard projectId={project.id} onNavigate={onNavigate} />
-              )}
             </div>
           )
         )}
@@ -438,7 +528,7 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
 
 export function AgentDock() {
   return (
-    <aside className="sticky top-0 hidden h-svh w-[360px] shrink-0 border-r xl:block">
+    <aside className="sticky top-0 hidden h-svh w-80 shrink-0 overflow-hidden border-r xl:block 2xl:w-[340px]">
       <AgentDockContent />
     </aside>
   )
@@ -471,10 +561,7 @@ export function MobileAgentSheet() {
         <SheetDescription className="sr-only">
           当前项目的常驻 SEO Agent 工作区
         </SheetDescription>
-        <AgentDockContent
-          onNavigate={() => setOpen(false)}
-          onClose={() => setOpen(false)}
-        />
+        <AgentDockContent onClose={() => setOpen(false)} />
       </SheetContent>
     </Sheet>
   )

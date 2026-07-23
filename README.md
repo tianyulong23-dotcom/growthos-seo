@@ -10,8 +10,7 @@ seo/
   backend/
     api/                    FastAPI 业务接口
     workers/                Python 分析、AI、接入和发布 Worker
-    crawler/                Go 普通网页抓取 Worker
-    browser-worker/         Node.js + Playwright 渲染 Worker
+    crawler/                Go 统一爬虫 Worker
     contracts/              OpenAPI、事件和任务契约
     tests/                  后端跨模块测试
   docs/                     项目文档
@@ -64,14 +63,11 @@ go test ./...
 go run ./cmd/crawler
 ```
 
-## Browser Worker
-
-```bash
-cd backend/browser-worker
-npm ci
-npm run typecheck
-npm test
-```
+Go 爬虫通过 Temporal 后台运行，统一处理项目初始化、技术审查和已知外链验证。
+项目初始化的网站业务识别只使用 Go HTTP + Colly；其他任务可按配置使用
+Rod + Chromium。本模块不提供独立爬虫前端。
+结构化抓取结果保存到 PostgreSQL，大页面内容保存到 S3；本地开发使用
+`deploy/compose/compose.yaml` 启动 PostgreSQL 和 MinIO。
 
 ## Git 协作
 

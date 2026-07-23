@@ -7,8 +7,7 @@
 backend/
   api/               FastAPI、PostgreSQL、Redis 和任务创建
   workers/           Python 分析、AI、第三方接入和发布任务
-  crawler/           Go 普通网页抓取
-  browser-worker/    Playwright 动态网页渲染
+  crawler/           Go 网站抓取与任务处理
   contracts/         跨语言共享的数据格式
   tests/             后端完整流程、契约和性能测试
 ```

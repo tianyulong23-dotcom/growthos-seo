@@ -1,0 +1,3 @@
+.worker.err.log
+.worker.log
+*.log

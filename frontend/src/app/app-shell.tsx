@@ -3,9 +3,9 @@ import {
   Bell,
   CheckCircle2,
   ChevronDown,
-  CircleHelp,
-  Command,
-  Globe2,
+  ChevronLeft,
+  ChevronRight,
+  LayoutGrid,
   ListTodo,
   LogOut,
   Moon,
@@ -47,7 +47,11 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { modules, projects } from "@/data/mock-data"
+import { modules } from "@/data/mock-data"
+import { CreateProjectDialog } from "@/features/projects/create-project-dialog"
+import { BusinessProfileOnboardingController } from "@/features/projects/business-profile-onboarding"
+import { ProjectFavicon } from "@/features/projects/project-favicon"
+import { useProjects } from "@/features/projects/project-context"
 
 function getModulePath(projectId: string, moduleId: string) {
   const currentModule = modules.find((item) => item.id === moduleId)
@@ -60,9 +64,12 @@ function getModulePath(projectId: string, moduleId: string) {
 function AppSidebar() {
   const location = useLocation()
   const navigate = useNavigate()
-  const { isMobile, setOpenMobile } = useSidebar()
-  const { projectId = projects[0].id } = useParams()
-  const project = projects.find((item) => item.id === projectId) ?? projects[0]
+  const { projects, getProject } = useProjects()
+  const [createOpen, setCreateOpen] = React.useState(false)
+  const { isMobile, setOpenMobile, state, toggleSidebar } = useSidebar()
+  const { projectId = projects[0]?.id ?? "" } = useParams()
+  const project = getProject(projectId)
+  const currentProjectId = project.id || projectId
   const activeModule = location.pathname.split("/")[3] ?? "overview"
 
   function switchProject(nextProjectId: string) {
@@ -82,148 +89,134 @@ function AppSidebar() {
   }
 
   return (
-    <Sidebar collapsible="icon">
-      <SidebarHeader className="border-b border-sidebar-border p-2">
-        <div className="flex h-10 items-center">
-          <Link
-            to={`/projects/${project.id}/overview`}
-            onClick={closeMobileSidebar}
-            className="flex min-w-0 flex-1 items-center gap-2.5 overflow-hidden"
-          >
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Command className="size-4.5" />
-            </div>
-            <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-              <div className="truncate text-sm font-semibold">SEO</div>
-              <div className="truncate text-xs text-muted-foreground">
-                SEO 工作台
-              </div>
-            </div>
-          </Link>
-        </div>
-
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <button className="flex h-12 w-full items-center gap-2 rounded-md border bg-background px-2 text-left shadow-xs outline-none group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:border-0 group-data-[collapsible=icon]:p-0 hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-sidebar-ring" />
-            }
-          >
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-background text-muted-foreground">
-              <Globe2 className="size-3.5" />
-            </span>
-            <span className="min-w-0 flex-1 group-data-[collapsible=icon]:hidden">
-              <span className="block truncate text-sm font-medium">
-                {project.name}
-              </span>
-              <span className="block truncate text-xs text-muted-foreground">
-                {project.domain}
-              </span>
-            </span>
-            <ChevronDown className="size-4 text-muted-foreground group-data-[collapsible=icon]:hidden" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            className="w-64"
-            side="right"
-            align="start"
-            sideOffset={8}
-          >
-            <DropdownMenuGroup>
-              <DropdownMenuLabel>切换项目</DropdownMenuLabel>
-              {projects.map((item) => (
-                <DropdownMenuItem
-                  key={item.id}
-                  onClick={() => switchProject(item.id)}
+    <>
+      <Sidebar collapsible="icon">
+        <SidebarHeader className="h-16 min-h-16 shrink-0 justify-center border-b border-sidebar-border p-2">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <SidebarMenuButton
+                      size="lg"
+                      tooltip={`SEO · ${project.domain}`}
+                      className="h-12 transition-[width,padding] data-open:bg-sidebar-accent data-open:text-sidebar-accent-foreground"
+                    />
+                  }
                 >
-                  <Avatar className="size-7 rounded-md">
-                    <AvatarFallback className="rounded-md text-xs">
-                      {item.name.slice(0, 2)}
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate">{item.name}</span>
-                    <span className="block truncate text-xs font-normal text-muted-foreground">
-                      {item.domain}
+                  <ProjectFavicon project={project} />
+                  <span className="grid min-w-0 flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden">
+                    <span className="truncate font-semibold">SEO</span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {project.domain}
                     </span>
                   </span>
-                  {item.id === project.id && (
-                    <CheckCircle2 className="size-4 text-primary" />
-                  )}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuGroup>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem>
-              <Plus />
-              新建项目
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </SidebarHeader>
+                  <ChevronDown className="ml-auto size-4 text-muted-foreground group-data-[collapsible=icon]:hidden" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  className="w-64"
+                  side={isMobile ? "bottom" : "right"}
+                  align="start"
+                  sideOffset={4}
+                >
+                  <DropdownMenuGroup>
+                    <DropdownMenuLabel>切换项目</DropdownMenuLabel>
+                    {projects.map((item) => (
+                      <DropdownMenuItem
+                        key={item.id}
+                        onClick={() => switchProject(item.id)}
+                      >
+                        <ProjectFavicon project={item} className="size-7" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate">{item.name}</span>
+                          <span className="block truncate text-xs font-normal text-muted-foreground">
+                            {item.domain}
+                          </span>
+                        </span>
+                        {item.id === project.id && (
+                          <CheckCircle2 className="size-4 text-primary" />
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => navigate("/projects")}>
+                    <LayoutGrid />
+                    所有项目
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setCreateOpen(true)}>
+                    <Plus />
+                    新建项目
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarHeader>
 
-      <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>工作区</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {modules.slice(0, -1).map((item) => {
-                const Icon = item.icon
-                return (
-                  <SidebarMenuItem key={item.id}>
-                    <SidebarMenuButton
-                      tooltip={item.label}
-                      isActive={activeModule === item.id}
-                      render={
-                        <Link
-                          to={getModulePath(project.id, item.id)}
-                          onClick={closeMobileSidebar}
-                        />
-                      }
-                    >
-                      <Icon />
-                      <span>{item.label}</span>
-                      {item.id === "audit" && (
-                        <Badge
-                          variant="destructive"
-                          className="ml-auto h-5 min-w-5 px-1.5 group-data-[collapsible=icon]:hidden"
-                        >
-                          29
-                        </Badge>
-                      )}
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                )
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-      </SidebarContent>
+        <Button
+          variant="outline"
+          size="icon-sm"
+          className="absolute top-12 -right-4 z-30 hidden bg-background shadow-xs group-data-[collapsible=icon]:top-[2.875rem] group-data-[collapsible=icon]:-right-3 group-data-[collapsible=icon]:size-6 xl:inline-flex"
+          title={state === "collapsed" ? "展开导航" : "收起导航"}
+          aria-label={state === "collapsed" ? "展开导航" : "收起导航"}
+          onClick={toggleSidebar}
+        >
+          {state === "collapsed" ? <ChevronRight /> : <ChevronLeft />}
+        </Button>
 
-      <SidebarFooter className="border-t border-sidebar-border">
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              tooltip="项目设置"
-              isActive={activeModule === "settings"}
-              render={
-                <Link
-                  to={getModulePath(project.id, "settings")}
-                  onClick={closeMobileSidebar}
-                />
-              }
-            >
-              <Settings />
-              <span>项目设置</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton tooltip="帮助中心">
-              <CircleHelp />
-              <span>帮助中心</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarFooter>
-    </Sidebar>
+        <SidebarContent>
+          <SidebarGroup>
+            <SidebarGroupLabel>工作区</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {modules.slice(0, -1).map((item) => {
+                  const Icon = item.icon
+                  return (
+                    <SidebarMenuItem key={item.id}>
+                      <SidebarMenuButton
+                        tooltip={item.label}
+                        isActive={activeModule === item.id}
+                        render={
+                          <Link
+                            to={getModulePath(currentProjectId, item.id)}
+                            onClick={closeMobileSidebar}
+                          />
+                        }
+                      >
+                        <Icon />
+                        <span>{item.label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )
+                })}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        </SidebarContent>
+
+        <SidebarFooter className="border-t border-sidebar-border">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                tooltip="设置"
+                isActive={activeModule === "settings"}
+                render={
+                  <Link
+                    to={getModulePath(currentProjectId, "settings")}
+                    onClick={closeMobileSidebar}
+                  />
+                }
+              >
+                <Settings />
+                <span>设置</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarFooter>
+      </Sidebar>
+      <CreateProjectDialog open={createOpen} onOpenChange={setCreateOpen} />
+    </>
   )
 }
 
@@ -377,6 +370,7 @@ function HeaderActions() {
 export function AppShell() {
   return (
     <TooltipProvider>
+      <BusinessProfileOnboardingController />
       <SidebarProvider
         defaultOpen={false}
         style={{ "--sidebar-width": "14rem" } as React.CSSProperties}

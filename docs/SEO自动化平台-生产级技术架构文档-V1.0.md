@@ -33,8 +33,7 @@
 | 表单 | React Hook Form + Zod |
 | 业务 API | FastAPI + Pydantic |
 | Python 数据访问 | SQLAlchemy + Alembic + psycopg |
-| 普通网页抓取 | Go |
-| JavaScript 渲染 | Node.js + Playwright Worker |
+| 网页抓取与 JavaScript 渲染 | Go + Colly + Rod/Chromium |
 | 工作流 | Temporal |
 | 数据库 | PostgreSQL |
 | 缓存与限速 | Redis |
@@ -57,18 +56,15 @@ flowchart TB
     API --> Temporal["Temporal"]
     API --> S3[("S3")]
 
-    Temporal --> GoWorker["Go Crawler Worker"]
-    Temporal --> BrowserWorker["Playwright Worker"]
+    Temporal --> GoWorker["Go Crawler Worker<br/>Colly + Rod/Chromium"]
     Temporal --> AnalysisWorker["Python Analysis Worker"]
     Temporal --> AIWorker["Python AI Worker"]
     Temporal --> IntegrationWorker["Python Integration Worker"]
     Temporal --> PublishWorker["Python Publish Worker"]
 
     GoWorker --> Website["目标网站"]
-    BrowserWorker --> Website
     GoWorker --> PG
     GoWorker --> S3
-    BrowserWorker --> S3
     AnalysisWorker --> PG
     AIWorker --> AIProvider["AI Provider"]
     IntegrationWorker --> External["Search Console / Analytics / SERP"]
@@ -85,8 +81,7 @@ flowchart TB
 |---|---|---|
 | React | 页面、交互、表单、查询状态 | 权限事实、长任务执行 |
 | FastAPI | 认证、授权、业务接口、任务创建、结果查询 | 抓取、浏览器渲染、同步等待 AI |
-| Go Worker | URL 发现、普通 HTTP 抓取、限速、重试 | 用户业务接口、AI、数据库迁移 |
-| Browser Worker | JavaScript 渲染、截图、渲染 DOM | 普通 API 请求 |
+| Go Worker | URL 发现、HTTP 抓取、按需 JavaScript 渲染、限速、重试 | 用户业务接口、AI、数据库迁移 |
 | Python Worker | SEO 分析、AI、第三方接入、发布 | 保存工作流状态 |
 | PostgreSQL | 业务事实、权限、结果、用量、审计 | HTML 和截图文件 |
 | Redis | 缓存、限速、短期锁、实时通知 | 唯一任务状态和业务数据 |
@@ -230,6 +225,8 @@ Go Crawler Worker 负责：
 - robots.txt 获取、解析和强制执行；Sitemap 发现。
 - URL 发现、规范化、范围判断和去重。
 - HTTP 连接复用、超时、重试和重定向。
+- JavaScript 壳页面和 403/429 页面按需使用 Rod + Chromium 渲染。
+- 项目初始化、技术审查和已知外链验证使用同一个任务入口。
 - 每组织、项目和目标 Host 的并发限制。
 - 响应状态、Header、链接和基础页面信号提取。
 - 原始 HTML 写入 S3。
@@ -288,36 +285,33 @@ Go 使用 `pgx/v5` 和 `pgxpool`。
 
 Go 只写入抓取相关表，不执行数据库迁移。所有 DDL 由 Alembic 管理。
 
-## 7. JavaScript 渲染
+## 7. Go 内置 JavaScript 渲染
 
-默认使用独立 Node.js + Playwright Worker，监听 `browser-node` Task Queue。
+JavaScript 渲染不再使用独立 Node.js Worker。Go Crawler Worker 在同一个
+`crawler-go` Task Queue 内按需调用 Rod + Chromium。
 
 只有满足以下条件的页面才进入浏览器：
 
-- 初始 HTML 缺少主要内容。
-- Canonical、链接或结构化数据需要脚本执行。
-- 项目配置要求渲染指定路径。
-- 普通抓取和渲染结果存在明显差异。
+- 初始 HTML 正文不足 300 字，并具有常见 JavaScript 应用壳特征。
+- 普通 HTTP 抓取返回 403 或 429。
 
 浏览器输出：
 
-- 渲染后 DOM 的 S3 引用。
-- 截图的 S3 引用。
+- 渲染后的 HTML/DOM。
 - 最终 URL。
-- 控制台错误摘要。
-- 关键网络失败摘要。
 - 渲染耗时。
 
-浏览器 Worker 必须设置：
+浏览器抓取必须设置：
 
 - CPU、内存和并发上限。
 - 页面和网络超时。
 - 单任务资源大小限制。
-- 独立 Cookie 和浏览器上下文。
-- 浏览器进程定期回收。
+- 同一 Activity 复用 Cookie 会话，Activity 结束后回收浏览器进程。
 - 非 Root 用户、Chromium Sandbox 和只读根文件系统。
 - 不挂载业务凭证，不允许直接访问 PostgreSQL、Redis 和云元数据服务。
-- 浏览器出站请求复用与 Go 爬虫相同的 SSRF、robots.txt 和 Host 限速策略。
+- 浏览器的每个 HTTP/HTTPS 子请求都执行 SSRF 校验，生产环境同时使用独立网络和受控出站策略。
+- 浏览器页面导航和重定向不能绕过 robots.txt、目标域名范围和 Host 限速策略。
+- 页面依赖的跨域静态资源和 API 可以加载，但每个 HTTP/HTTPS 子请求仍必须通过 SSRF 校验。
 
 ## 8. Temporal 工作流
 
@@ -326,8 +320,7 @@ Go 只写入抓取相关表，不执行数据库迁移。所有 DDL 由 Alembic 
 | Task Queue | Worker | 用途 |
 |---|---|---|
 | `workflow-python` | Python | Workflow 编排 |
-| `crawler-go` | Go | 普通抓取 |
-| `browser-node` | Node.js | JavaScript 渲染 |
+| `crawler-go` | Go | 项目初始化、技术审查、外链验证和按需 JavaScript 渲染 |
 | `analysis-python` | Python | 页面分析、规则和聚合 |
 | `ai-python` | Python | AI 分析和内容生成 |
 | `integration-python` | Python | 第三方数据接入 |
@@ -338,6 +331,9 @@ Go 只写入抓取相关表，不执行数据库迁移。所有 DDL 由 Alembic 
 
 ```text
 site-audit:{crawl_run_id}
+crawler:project_initialization:{project_id}
+crawler:technical_audit:{crawl_run_id}
+crawler:backlink_validation:{validation_run_id}
 content-generation:{article_version_id}
 publication:{publication_id}
 fix-validation:{validation_run_id}
@@ -539,7 +535,7 @@ erDiagram
 
 ### 11.3 SSRF 防护
 
-爬虫和浏览器 Worker 必须：
+Go 爬虫的 HTTP 和浏览器抓取必须：
 
 - 只允许 HTTP 和 HTTPS。
 - 默认只允许 80 和 443 端口。
@@ -553,7 +549,7 @@ erDiagram
 
 - 按用户、组织、项目、目标 Host 和出口 IP 设置配额与限速。
 - 同一目标 Host 的限速在全平台共享，不能通过创建多个组织绕过。
-- 限制单任务页面数、跳转次数、响应大小、失败重试和 Browser 渲染量。
+- 限制单任务页面数、跳转次数、响应大小、失败重试和 Chromium 渲染量。
 - 检测大量不同 Host、异常路径枚举、持续失败和集中攻击单站等行为。
 - 保存任务创建者、目标 Host、抓取量、robots.txt 决策和封禁操作审计日志。
 - 支持目标域名封禁、组织暂停、投诉处理和全局停止抓取开关。
@@ -594,8 +590,7 @@ flowchart TB
     subgraph Compute["容器运行环境"]
         Web["Web 静态站点"]
         API["FastAPI 多副本"]
-        Go["Go Crawler Pool"]
-        Browser["Browser Pool"]
+        Go["Go Crawler Pool<br/>包含 Chromium"]
         Python["Python Worker Pools"]
         Relay["Outbox Relay"]
     end
@@ -616,10 +611,8 @@ flowchart TB
     API --> RedisHA
     API --> TemporalHA
     Go --> TemporalHA
-    Browser --> TemporalHA
     Python --> TemporalHA
     Go --> S3
-    Browser --> S3
     Relay --> PGPrimary
     Relay --> RedisHA
 ```
@@ -629,8 +622,7 @@ flowchart TB
 | 模块 | 扩容指标 |
 |---|---|
 | FastAPI | CPU、并发、P95 延迟、连接池等待 |
-| Go Worker | Queue Lag、抓取吞吐、网络和 CPU |
-| Browser Worker | Queue Lag、内存、任务时长 |
+| Go Worker | Queue Lag、HTTP/Chromium 抓取吞吐、网络、CPU 和内存 |
 | Analysis Worker | Queue Lag、CPU、数据库写入延迟 |
 | AI Worker | Queue Lag、供应商限速、调用量 |
 | PostgreSQL | CPU、连接、锁等待、复制延迟 |
@@ -641,7 +633,7 @@ flowchart TB
 - 超额任务保持排队，不直接丢弃。
 - Worker 设置最大并发 Activity。
 - 抓取按平台级目标 Host 限速，所有组织共享同一目标站限额。
-- Browser 和 AI 使用独立 Task Queue。
+- 爬虫和 AI 使用独立 Task Queue。
 - 队列积压时暂停低优先级定时任务。
 - 外部供应商持续异常时熔断。
 
@@ -657,7 +649,7 @@ flowchart TB
 ### 12.4 降级
 
 - AI 不可用：规则审查继续。
-- Browser Worker 不可用：普通抓取继续，渲染页面进入待处理状态。
+- Chromium 启动失败：保留普通 HTTP 抓取结果并记录渲染失败，由同一 Activity 按策略重试。
 - Redis 不可用：缓存和实时通知降级；公开网站抓取切换到保守本地限速或暂停。
 - 第三方数据不可用：展示最后成功同步时间。
 - S3 暂时不可用：Activity 重试，不改存数据库。
@@ -697,7 +689,7 @@ flowchart TB
 - Temporal Queue Lag、失败率、重试率和最老任务年龄。
 - 抓取成功率、状态码、超时、吞吐、robots.txt 拒绝率和 Host 限速等待。
 - 按目标 Host 统计请求量、并发、429、封禁和投诉。
-- Browser 任务耗时、内存和失败率。
+- Chromium 渲染耗时、内存、升级比例和失败率。
 - PostgreSQL 连接、锁、慢查询、复制延迟和磁盘。
 - Redis 延迟、内存和 Eviction。
 - S3 写入错误和存储增长。
@@ -756,11 +748,11 @@ Go：
 - Worker 重启后任务继续。
 - Redis 清空后业务状态仍可恢复。
 - CMS 请求超时但远端成功时不重复发布。
-- Browser Worker 故障不阻塞普通抓取。
+- Chromium 启动失败时普通 HTTP 抓取结果仍可保留。
 - SSRF 覆盖 IPv4、IPv6、重定向和 DNS Rebinding。
 - robots.txt 禁止的 URL 没有产生页面请求。
 - robots.txt 不可用时保持禁止抓取并按策略重试。
-- Sitemap、跨 Host 重定向和 Browser 请求不能绕过 robots.txt。
+- Sitemap、跨 Host 重定向和 Chromium 请求不能绕过 robots.txt。
 - 多个组织抓取同一目标 Host 时共享限速。
 - Alembic 可从空数据库升级到最新版本。
 - PostgreSQL 备份能够恢复并通过一致性检查。
@@ -771,12 +763,11 @@ Go：
 seo-v4/
   frontend/
   backend/
-  crawler/
-  browser-worker/
-  contracts/
-    temporal/
-    events/
-    json-schema/
+    crawler/
+    contracts/
+      temporal/
+      events/
+      json-schema/
   deploy/
     compose/
     kubernetes/
@@ -827,7 +818,7 @@ seo-v4/
 ### 阶段 3：技术审查
 
 - 页面快照和链接关系。
-- Playwright 按需渲染。
+- Rod + Chromium 按需渲染。
 - SEO 规则、问题聚合和优先级。
 - 修复验证。
 
@@ -867,7 +858,7 @@ seo-v4/
 | 目标网站 | 允许抓取任意公开网站 |
 | robots.txt | 强制遵守，不可用时禁止抓取并重试 |
 | 域名验证 | 基础公开分析不强制；DNS TXT 优先，指定文件和 Meta 标签备用 |
-| 浏览器 Worker | Node.js + Playwright |
+| JavaScript 渲染 | Go + Rod/Chromium |
 | ID | UUIDv7 |
 | 搜索 | MVP 使用 PostgreSQL，达到瓶颈后评估 OpenSearch |
 
@@ -877,7 +868,6 @@ seo-v4/
 React + TypeScript + Vite + Shadcn UI
 FastAPI + Pydantic + SQLAlchemy + Alembic
 Go Crawler Worker
-Node.js Playwright Worker
 Python Analysis / AI / Integration / Publish Workers
 PostgreSQL + Redis + Temporal + S3
 OpenTelemetry
@@ -886,8 +876,7 @@ OpenTelemetry
 职责划分：
 
 - FastAPI 管理业务接口和权限。
-- Go 负责高并发普通抓取。
-- Playwright Worker 负责 JavaScript 渲染。
+- Go 统一负责普通抓取和按需 JavaScript 渲染。
 - Python Worker 负责 SEO、AI、接入和发布。
 - PostgreSQL 保存业务事实。
 - Redis 提供缓存、限速和实时通知。

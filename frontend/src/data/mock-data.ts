@@ -9,12 +9,7 @@ import {
   type LucideIcon,
 } from "lucide-react"
 
-export type Project = {
-  id: string
-  name: string
-  domain: string
-  health: number
-}
+import type { Project } from "@/features/projects/types"
 
 export type ModuleTab = {
   id: string
@@ -35,19 +30,64 @@ export const projects: Project[] = [
     id: "solarreviews",
     name: "Solar Reviews",
     domain: "solarreviews.com",
-    health: 86,
+    country: "美国",
+    language: "英语",
+    understandingRunId: null,
+    understandingStatus: "completed",
+    understandingStage: "completed",
+    understandingMessage: "网站业务识别已完成",
+    understandingProgress: 100,
+    understandingAttempt: 1,
+    understandingStartedAt: null,
+    understandingFinishedAt: null,
+    understandingElapsedSeconds: 0,
+    auditRunId: null,
+    auditStatus: "completed",
+    auditHealth: 86,
+    siteProfile: null,
+    createdAt: "2026-07-02",
   },
   {
     id: "growthlab",
     name: "Growth Lab",
     domain: "growthlab.io",
-    health: 73,
+    country: "英国",
+    language: "英语",
+    understandingRunId: null,
+    understandingStatus: "completed",
+    understandingStage: "completed",
+    understandingMessage: "网站业务识别已完成",
+    understandingProgress: 100,
+    understandingAttempt: 1,
+    understandingStartedAt: null,
+    understandingFinishedAt: null,
+    understandingElapsedSeconds: 0,
+    auditRunId: null,
+    auditStatus: "completed",
+    auditHealth: 73,
+    siteProfile: null,
+    createdAt: "2026-07-08",
   },
   {
     id: "northstar",
     name: "Northstar 中文站",
     domain: "cn.northstar.com",
-    health: 91,
+    country: "中国",
+    language: "简体中文",
+    understandingRunId: null,
+    understandingStatus: "completed",
+    understandingStage: "completed",
+    understandingMessage: "网站业务识别已完成",
+    understandingProgress: 100,
+    understandingAttempt: 1,
+    understandingStartedAt: null,
+    understandingFinishedAt: null,
+    understandingElapsedSeconds: 0,
+    auditRunId: null,
+    auditStatus: "completed",
+    auditHealth: 91,
+    siteProfile: null,
+    createdAt: "2026-07-11",
   },
 ]
 
@@ -66,9 +106,15 @@ export const modules: ModuleConfig[] = [
     description: "持续发现并修复影响抓取、索引和体验的问题",
     icon: SearchCheck,
     tabs: [
-      { id: "overview", label: "审计概览" },
+      { id: "overview", label: "概览" },
+      { id: "internal", label: "内部资源" },
+      { id: "external", label: "外部资源" },
+      { id: "status-codes", label: "状态码" },
+      { id: "links", label: "链接" },
       { id: "issues", label: "问题清单" },
-      { id: "pages", label: "页面资源" },
+      { id: "pagespeed", label: "PageSpeed" },
+      { id: "visualization", label: "可视化" },
+      { id: "history", label: "审计历史" },
     ],
     action: "立即扫描",
   },
@@ -125,7 +171,7 @@ export const modules: ModuleConfig[] = [
     description: "管理项目资料、数据源与通知规则",
     icon: Settings2,
     tabs: [
-      { id: "profile", label: "项目资料" },
+      { id: "business", label: "业务资料" },
       { id: "sources", label: "数据连接" },
       { id: "notifications", label: "通知设置" },
     ],
