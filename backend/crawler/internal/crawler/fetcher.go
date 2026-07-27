@@ -36,12 +36,13 @@ type StatusChecker interface {
 }
 
 type HTTPFetcher struct {
-	config   Config
-	resolver *net.Resolver
-	jar      http.CookieJar
-	limiter  *RequestLimiter
-	clientMu sync.Mutex
-	clients  map[httpClientKey]*http.Client
+	config        Config
+	resolver      *net.Resolver
+	jar           http.CookieJar
+	limiter       *RequestLimiter
+	statusLimiter *RequestLimiter
+	clientMu      sync.Mutex
+	clients       map[httpClientKey]*http.Client
 }
 
 type httpClientKey struct {
@@ -71,7 +72,11 @@ func NewHTTPFetcherWithLimiter(
 		resolver: net.DefaultResolver,
 		jar:      jar,
 		limiter:  limiter,
-		clients:  make(map[httpClientKey]*http.Client),
+		statusLimiter: NewRequestLimiter(
+			config.StatusRequestDelay,
+			config.StatusRandomDelay,
+		),
+		clients: make(map[httpClientKey]*http.Client),
 	}, nil
 }
 
@@ -103,6 +108,10 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) (Resource, error
 		}
 		proxyURL := proxies[min(attempt, len(proxies)-1)]
 		resource, fetchErr := f.fetchOnce(ctx, target, proxyURL)
+		f.limiter.Observe(
+			resource.StatusCode,
+			http.Header(resource.Header).Get("Retry-After"),
+		)
 		resource.ProxyURL = proxyURL
 		lastResource, lastErr = resource, fetchErr
 		if !shouldRetry(resource, fetchErr) {
@@ -166,7 +175,7 @@ func (f *HTTPFetcher) CheckStatus(ctx context.Context, rawURL string) (int, erro
 	var lastErr error
 	attempts := max(f.config.MaxRetries, len(proxies))
 	for attempt := 0; attempt < attempts; attempt++ {
-		if err := f.limiter.Wait(ctx); err != nil {
+		if err := f.statusLimiter.Wait(ctx); err != nil {
 			return lastStatus, err
 		}
 		client, clientErr := f.client(ctx, proxies[min(attempt, len(proxies)-1)], false)
@@ -185,6 +194,7 @@ func (f *HTTPFetcher) CheckStatus(ctx context.Context, rawURL string) (int, erro
 			continue
 		}
 		lastStatus = response.StatusCode
+		f.statusLimiter.Observe(response.StatusCode, response.Header.Get("Retry-After"))
 		_ = response.Body.Close()
 		if !shouldRetry(Resource{StatusCode: lastStatus}, nil) {
 			return lastStatus, nil

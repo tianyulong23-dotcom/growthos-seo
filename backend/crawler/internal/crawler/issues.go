@@ -5,9 +5,16 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
-const duplicateSimilarityThreshold = 0.85
+const (
+	duplicateSimilarityThreshold    = 0.85
+	exhaustiveDuplicatePageLimit    = 250
+	duplicateTemplateRepresentative = 32
+	duplicateFingerprintBucketSize  = 64
+	duplicateCandidateLimit         = 128
+)
 
 type IssueDetector struct {
 	ExclusionPatterns  []string
@@ -28,16 +35,47 @@ func (detector IssueDetector) Detect(pages []Page) []Issue {
 	excluded := make([]bool, len(pages))
 	signals := make([]duplicatePageSignals, len(pages))
 	for index, page := range pages {
-		excluded[index] = detector.shouldExclude(page.URL)
 		signals[index] = newDuplicatePageSignals(page)
+		excluded[index] = detector.shouldExclude(page.URL) ||
+			!isAuditableHTMLPage(page) ||
+			signals[index].empty()
 	}
+	bestMatches := findDuplicateMatches(signals, excluded, threshold)
+	for pageIndex, match := range bestMatches {
+		if !match.found {
+			continue
+		}
+		issues = append(
+			issues,
+			duplicateIssue(pages[pageIndex], pages[match.relatedIndex], match.similarity),
+		)
+	}
+	return issues
+}
+
+func findDuplicateMatches(
+	signals []duplicatePageSignals,
+	excluded []bool,
+	threshold float64,
+) []duplicateMatch {
+	if len(signals) <= exhaustiveDuplicatePageLimit {
+		return findDuplicateMatchesExhaustive(signals, excluded, threshold)
+	}
+	return findDuplicateMatchesIndexed(signals, excluded, threshold)
+}
+
+func findDuplicateMatchesExhaustive(
+	signals []duplicatePageSignals,
+	excluded []bool,
+	threshold float64,
+) []duplicateMatch {
 	scratch := duplicateComparisonScratch{}
-	bestMatches := make([]duplicateMatch, len(pages))
-	for leftIndex := 0; leftIndex < len(pages); leftIndex++ {
+	bestMatches := make([]duplicateMatch, len(signals))
+	for leftIndex := 0; leftIndex < len(signals); leftIndex++ {
 		if excluded[leftIndex] {
 			continue
 		}
-		for rightIndex := leftIndex + 1; rightIndex < len(pages); rightIndex++ {
+		for rightIndex := leftIndex + 1; rightIndex < len(signals); rightIndex++ {
 			if excluded[rightIndex] {
 				continue
 			}
@@ -53,16 +91,194 @@ func (detector IssueDetector) Detect(pages []Page) []Issue {
 			bestMatches[rightIndex].consider(leftIndex, similarity)
 		}
 	}
-	for pageIndex, match := range bestMatches {
-		if !match.found {
+	return bestMatches
+}
+
+func findDuplicateMatchesIndexed(
+	signals []duplicatePageSignals,
+	excluded []bool,
+	threshold float64,
+) []duplicateMatch {
+	// Shortlist large audits by template and fingerprint, then apply the exact weighted score.
+	bestMatches := make([]duplicateMatch, len(signals))
+	templateRepresentatives := make(map[string][]int)
+	fingerprintBuckets := make(map[uint64][]int)
+	candidateMarks := make([]int, len(signals))
+	scratch := duplicateComparisonScratch{}
+
+	for pageIndex, signal := range signals {
+		if excluded[pageIndex] {
 			continue
 		}
-		issues = append(
-			issues,
-			duplicateIssue(pages[pageIndex], pages[match.relatedIndex], match.similarity),
+		templateKey := duplicateTemplateKey(signal)
+		representatives := templateRepresentatives[templateKey]
+		templateMatched := compareDuplicateCandidates(
+			pageIndex,
+			representatives,
+			signals,
+			threshold,
+			bestMatches,
+			&scratch,
 		)
+		fingerprint := duplicateFingerprint(signal)
+		if !templateMatched {
+			candidates := make([]int, 0, duplicateCandidateLimit)
+			generation := pageIndex + 1
+			for _, bucketKey := range duplicateFingerprintBands(fingerprint) {
+				for _, candidate := range fingerprintBuckets[bucketKey] {
+					if candidateMarks[candidate] == generation {
+						continue
+					}
+					candidateMarks[candidate] = generation
+					candidates = append(candidates, candidate)
+					if len(candidates) >= duplicateCandidateLimit {
+						break
+					}
+				}
+				if len(candidates) >= duplicateCandidateLimit {
+					break
+				}
+			}
+			compareDuplicateCandidates(
+				pageIndex,
+				candidates,
+				signals,
+				threshold,
+				bestMatches,
+				&scratch,
+			)
+		}
+
+		if !templateMatched && len(representatives) < duplicateTemplateRepresentative {
+			templateRepresentatives[templateKey] = append(representatives, pageIndex)
+		}
+		for _, bucketKey := range duplicateFingerprintBands(fingerprint) {
+			fingerprintBuckets[bucketKey] = appendFingerprintCandidate(
+				fingerprintBuckets[bucketKey],
+				pageIndex,
+			)
+		}
 	}
-	return issues
+	return bestMatches
+}
+
+func compareDuplicateCandidates(
+	pageIndex int,
+	candidates []int,
+	signals []duplicatePageSignals,
+	threshold float64,
+	bestMatches []duplicateMatch,
+	scratch *duplicateComparisonScratch,
+) bool {
+	matched := false
+	for _, candidate := range candidates {
+		similarity := duplicateSimilaritySignalsWithScratch(
+			signals[pageIndex],
+			signals[candidate],
+			scratch,
+		)
+		if similarity < threshold {
+			continue
+		}
+		matched = true
+		bestMatches[pageIndex].consider(candidate, similarity)
+		bestMatches[candidate].consider(pageIndex, similarity)
+		if similarity == 1 {
+			break
+		}
+	}
+	return matched
+}
+
+func duplicateTemplateKey(signal duplicatePageSignals) string {
+	return duplicateTemplate(signal.title.runes) + "\x1f" +
+		duplicateTemplate(signal.description.runes) + "\x1f" +
+		duplicateTemplate(signal.h1.runes)
+}
+
+func duplicateTemplate(value []rune) string {
+	result := make([]rune, 0, len(value))
+	lastWasSpace := true
+	lastWasDigit := false
+	for _, current := range value {
+		switch {
+		case unicode.IsDigit(current):
+			if !lastWasDigit {
+				result = append(result, '#')
+			}
+			lastWasDigit = true
+			lastWasSpace = false
+		case unicode.IsLetter(current):
+			result = append(result, unicode.ToLower(current))
+			lastWasDigit = false
+			lastWasSpace = false
+		default:
+			lastWasDigit = false
+			if !lastWasSpace {
+				result = append(result, ' ')
+				lastWasSpace = true
+			}
+		}
+	}
+	return strings.TrimSpace(string(result))
+}
+
+func duplicateFingerprint(signal duplicatePageSignals) uint64 {
+	weights := [64]int{}
+	addSequenceFingerprint(&weights, signal.title.runes, 7)
+	addSequenceFingerprint(&weights, signal.description.runes, 7)
+	addSequenceFingerprint(&weights, signal.h1.runes, 4)
+	addFingerprintHash(&weights, uint64(max(signal.wordCount, 0)/10), 2)
+	var fingerprint uint64
+	for bit, weight := range weights {
+		if weight >= 0 {
+			fingerprint |= 1 << bit
+		}
+	}
+	return fingerprint
+}
+
+func addSequenceFingerprint(weights *[64]int, value []rune, weight int) {
+	if len(value) == 0 {
+		return
+	}
+	windowSize := min(3, len(value))
+	for start := 0; start+windowSize <= len(value); start++ {
+		hash := uint64(14695981039346656037)
+		for _, current := range value[start : start+windowSize] {
+			hash ^= uint64(unicode.ToLower(current))
+			hash *= 1099511628211
+		}
+		addFingerprintHash(weights, hash, weight)
+	}
+}
+
+func addFingerprintHash(weights *[64]int, hash uint64, weight int) {
+	for bit := range 64 {
+		if hash&(1<<bit) != 0 {
+			weights[bit] += weight
+		} else {
+			weights[bit] -= weight
+		}
+	}
+}
+
+func duplicateFingerprintBands(fingerprint uint64) [4]uint64 {
+	var bands [4]uint64
+	for band := range bands {
+		bands[band] = uint64(band)<<16 | (fingerprint >> (band * 16) & 0xffff)
+	}
+	return bands
+}
+
+func appendFingerprintCandidate(values []int, pageIndex int) []int {
+	if len(values) < duplicateFingerprintBucketSize {
+		return append(values, pageIndex)
+	}
+	retainedPrefix := duplicateFingerprintBucketSize / 2
+	replacement := retainedPrefix + pageIndex%(duplicateFingerprintBucketSize-retainedPrefix)
+	values[replacement] = pageIndex
+	return values
 }
 
 type duplicateMatch struct {
@@ -92,7 +308,11 @@ func (detector IssueDetector) DetectPageIssues(pages []Page) []Issue {
 }
 
 func detectPageIssues(page Page) []Issue {
-	issues := make([]Issue, 0)
+	issues := detectResponseIssues(page)
+	if !isAuditableHTMLPage(page) {
+		return issues
+	}
+
 	title := strings.TrimSpace(page.Title)
 	switch {
 	case title == "":
@@ -155,35 +375,6 @@ func detectPageIssues(page Page) []Issue {
 		))
 	}
 
-	if page.StatusCode == 0 &&
-		strings.TrimSpace(page.ErrorType) != "" &&
-		page.ErrorType != "file_too_large" {
-		issue, details := noResponseIssue(page)
-		issues = append(issues, pageIssue(
-			page, "error", "Technical", "crawl_error", issue, details,
-		))
-	}
-	switch {
-	case page.StatusCode >= 400 && page.StatusCode < 500:
-		issues = append(issues, pageIssue(
-			page, "error", "Technical", "client_error",
-			fmt.Sprintf("%d Client Error", page.StatusCode),
-			statusCodeMessage(page.StatusCode),
-		))
-	case page.StatusCode >= 500:
-		issues = append(issues, pageIssue(
-			page, "error", "Technical", "server_error",
-			fmt.Sprintf("%d Server Error", page.StatusCode),
-			statusCodeMessage(page.StatusCode),
-		))
-	case page.StatusCode >= 300:
-		issues = append(issues, pageIssue(
-			page, "info", "Technical", "redirect",
-			fmt.Sprintf("%d Redirect", page.StatusCode),
-			"URL redirects to another location",
-		))
-	}
-
 	canonical := strings.TrimSpace(page.Canonical)
 	if canonical == "" {
 		issues = append(issues, pageIssue(
@@ -236,7 +427,7 @@ func detectPageIssues(page Page) []Issue {
 	}
 	if len(page.StructuredData) == 0 && len(page.SchemaMicrodata) == 0 {
 		issues = append(issues, pageIssue(
-			page, "error", "Structured Data", "no_structured_data",
+			page, "info", "Structured Data", "no_structured_data",
 			"No Structured Data", "Page has no JSON-LD or Schema.org markup",
 		))
 	}
@@ -285,14 +476,14 @@ func detectPageIssues(page Page) []Issue {
 	robots := strings.ToLower(page.Robots)
 	if strings.Contains(robots, "noindex") {
 		issues = append(issues, pageIssue(
-			page, "error", "Indexability", "noindex",
+			page, "info", "Indexability", "noindex",
 			"Noindex Tag Present",
 			"Page is BLOCKED from search engines - has noindex directive",
 		))
 	}
 	if strings.Contains(robots, "nofollow") {
 		issues = append(issues, pageIssue(
-			page, "error", "Indexability", "nofollow",
+			page, "info", "Indexability", "nofollow",
 			"Nofollow Tag Present",
 			"Links on this page are NOT followed by search engines - has nofollow directive",
 		))
@@ -315,6 +506,54 @@ func detectPageIssues(page Page) []Issue {
 	}
 
 	return issues
+}
+
+func detectResponseIssues(page Page) []Issue {
+	issues := make([]Issue, 0, 1)
+	if page.StatusCode == 0 &&
+		strings.TrimSpace(page.ErrorType) != "" &&
+		page.ErrorType != "file_too_large" {
+		issue, details := noResponseIssue(page)
+		return append(issues, pageIssue(
+			page, "error", "Technical", "crawl_error", issue, details,
+		))
+	}
+	switch {
+	case page.StatusCode >= 400 && page.StatusCode < 500:
+		issues = append(issues, pageIssue(
+			page, "error", "Technical", "client_error",
+			fmt.Sprintf("%d Client Error", page.StatusCode),
+			statusCodeMessage(page.StatusCode),
+		))
+	case page.StatusCode >= 500:
+		issues = append(issues, pageIssue(
+			page, "error", "Technical", "server_error",
+			fmt.Sprintf("%d Server Error", page.StatusCode),
+			statusCodeMessage(page.StatusCode),
+		))
+	case page.StatusCode >= 300:
+		issues = append(issues, pageIssue(
+			page, "info", "Technical", "redirect",
+			fmt.Sprintf("%d Redirect", page.StatusCode),
+			"URL redirects to another location",
+		))
+	}
+	return issues
+}
+
+func isAuditableHTMLPage(page Page) bool {
+	if page.StatusCode < 200 || page.StatusCode >= 300 ||
+		page.StatusCode == 204 || page.StatusCode == 205 ||
+		strings.TrimSpace(page.Error) != "" ||
+		strings.TrimSpace(page.ErrorType) != "" {
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(
+		strings.SplitN(page.ContentType, ";", 2)[0],
+	))
+	return contentType == "" ||
+		contentType == "text/html" ||
+		contentType == "application/xhtml+xml"
 }
 
 func noResponseIssue(page Page) (string, string) {
@@ -414,6 +653,13 @@ type duplicatePageSignals struct {
 	description sequenceSignal
 	h1          sequenceSignal
 	wordCount   int
+}
+
+func (signals duplicatePageSignals) empty() bool {
+	return len(signals.title.runes) == 0 &&
+		len(signals.description.runes) == 0 &&
+		len(signals.h1.runes) == 0 &&
+		signals.wordCount <= 0
 }
 
 func newDuplicatePageSignals(page Page) duplicatePageSignals {

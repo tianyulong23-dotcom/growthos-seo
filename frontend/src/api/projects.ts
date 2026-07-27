@@ -31,7 +31,9 @@ type SiteProfileResponse = {
     field: string
     value: string
     source_url: string
+    quote?: string
   }[]
+  user_overridden_fields?: string[]
   confidence: number
   ai_content_rules: string
   confirmed_at: string | null
@@ -100,7 +102,9 @@ function mapSiteProfile(profile: SiteProfileResponse): SiteProfile {
       field: item.field,
       value: item.value,
       sourceUrl: item.source_url,
+      quote: item.quote ?? "",
     })),
+    userOverriddenFields: profile.user_overridden_fields ?? [],
     confidence: profile.confidence,
     aiContentRules: profile.ai_content_rules,
     confirmedAt: profile.confirmed_at,
@@ -176,6 +180,7 @@ export async function updateBusinessProfile(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           business_name: input.businessName,
+          business_type: input.businessType,
           business_summary: input.businessSummary,
           target_audiences: input.targetAudiences,
           products_services: input.productsServices,

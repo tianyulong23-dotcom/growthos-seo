@@ -52,6 +52,7 @@ const project: Project = {
     conversionActions: [],
     keyPages: [],
     evidence: [],
+    userOverriddenFields: [],
     confidence: 0.8,
     aiContentRules: "Use a concise tone.",
     confirmedAt: null,
@@ -69,11 +70,14 @@ describe("BusinessProfileForm", () => {
     projectApi.listBusinessProfileRuns.mockResolvedValue([])
   })
 
-  it("submits the six editable business fields", async () => {
+  it("submits all editable business fields", async () => {
     const onSave = vi.fn().mockResolvedValue(project)
     render(<BusinessProfileForm project={project} onSave={onSave} />)
 
     expect(screen.getByDisplayValue("Example Inc.")).toBeTruthy()
+    fireEvent.change(screen.getByLabelText("业务类型"), {
+      target: { value: "Analytics SaaS" },
+    })
     fireEvent.change(screen.getByLabelText("目标客户"), {
       target: { value: "Teams\nAgencies\nTeams" },
     })
@@ -85,6 +89,7 @@ describe("BusinessProfileForm", () => {
     await waitFor(() => {
       expect(onSave).toHaveBeenCalledWith({
         businessName: "Example Inc.",
+        businessType: "Analytics SaaS",
         businessSummary: "Original summary",
         targetAudiences: ["Teams", "Agencies"],
         productsServices: ["Analytics", "Reporting"],
@@ -92,6 +97,47 @@ describe("BusinessProfileForm", () => {
         aiContentRules: "Use a concise tone.",
       })
     })
+  })
+
+  it("shows field ownership and grounded source quotes", () => {
+    render(
+      <BusinessProfileForm
+        project={{
+          ...project,
+          siteProfile: {
+            ...project.siteProfile!,
+            userOverriddenFields: ["business_type"],
+            evidence: [
+              {
+                field: "business_summary",
+                value: "Example provides analytics.",
+                sourceUrl: "https://example.com/about",
+                quote: "Analytics for modern teams",
+              },
+              {
+                field: "conversion_actions",
+                value: "Start free",
+                sourceUrl: "https://example.com/signup",
+                quote: "Start free",
+              },
+            ],
+          },
+        }}
+        onSave={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText("人工确认")).toBeTruthy()
+    expect(screen.getAllByText("AI 识别").length).toBeGreaterThan(0)
+    expect(screen.getByText("转化动作")).toBeTruthy()
+    expect(screen.queryByText("conversion_actions")).toBeNull()
+    fireEvent.click(screen.getByText("Example provides analytics."))
+    expect(screen.getByText("Analytics for modern teams")).toBeTruthy()
+    expect(
+      screen
+        .getByRole("link", { name: /https:\/\/example.com\/about/ })
+        .getAttribute("href")
+    ).toBe("https://example.com/about")
   })
 
   it("starts website business recognition without submitting the form", async () => {

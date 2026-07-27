@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     crawler_fallback_proxy_url: str | None = None
     site_understanding_request_timeout: str = "12s"
     site_understanding_max_retries: int = 2
+    site_understanding_dispatch_interval_seconds: float = 5
     audit_control_timeout_seconds: float = 30
     audit_checkpoint_poll_interval_seconds: float = 0.1
     audit_reconcile_timeout_seconds: float = 10
@@ -40,7 +41,9 @@ class Settings(BaseSettings):
     business_profile_ai_base_url: str | None = None
     business_profile_ai_api_key: str | None = None
     business_profile_ai_model: str = "gpt-5.4-mini"
-    business_profile_ai_timeout: str = "20s"
+    business_profile_ai_timeout: str = "90s"
+    business_profile_ai_max_retries: int = 1
+    ai_settings_encryption_key: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

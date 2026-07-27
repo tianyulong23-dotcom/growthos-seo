@@ -23,6 +23,7 @@ export type AuditSummary = {
   warnings: number
   notices: number
   rendered_pages: number
+  resource_checks_truncated: boolean
 }
 
 export type AuditPageSpeedState = {
@@ -288,6 +289,8 @@ function normalizeSummary(value: unknown): AuditSummary | null {
     warnings: number(record, "warnings", "warning_count") ?? 0,
     notices: number(record, "notices", "notice_count", "info_count") ?? 0,
     rendered_pages: number(record, "rendered_pages", "rendered") ?? 0,
+    resource_checks_truncated:
+      boolean(record, "resource_checks_truncated") ?? false,
   }
 }
 

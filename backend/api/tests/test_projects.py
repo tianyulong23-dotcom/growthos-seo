@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -20,6 +22,8 @@ from app.modules.projects.service import (
     ProjectRecord,
     ProjectService,
     SiteProfileNotReadyError,
+    SiteUnderstandingAlreadyRunningError,
+    WorkflowDispatchRecord,
 )
 
 
@@ -28,11 +32,13 @@ class FakeWorkflowLauncher:
         self.error = error
         self.task: dict[str, Any] | None = None
         self.workflow_id = ""
+        self.start_calls: list[tuple[dict[str, Any], str]] = []
         self.cancelled_workflow_ids: list[str] = []
 
     async def start(self, task: dict[str, Any], workflow_id: str) -> None:
         self.task = task
         self.workflow_id = workflow_id
+        self.start_calls.append((task, workflow_id))
         if self.error is not None:
             raise self.error
 
@@ -44,14 +50,20 @@ class FakeProjectRepository:
     def __init__(self) -> None:
         self.projects: list[ProjectRecord] = []
         self.runs: dict[str, CrawlRun] = {}
+        self.dispatches: dict[str, WorkflowDispatchRecord] = {}
+        self.dispatch_statuses: dict[str, str] = {}
+        self.dispatch_errors: dict[str, str] = {}
 
     async def create_with_understanding_run(
         self,
         project: ProjectRecord,
         run: CrawlRun,
+        dispatch: WorkflowDispatchRecord,
     ) -> None:
         self.projects.append(project)
         self.runs[run.run_id] = run
+        self.dispatches[dispatch.run_id] = dispatch
+        self.dispatch_statuses[dispatch.run_id] = "pending"
 
     async def list(self, organization_id: str) -> list[ProjectRecord]:
         projects: list[ProjectRecord] = []
@@ -100,20 +112,18 @@ class FakeProjectRepository:
             None,
         )
 
-    async def mark_run_failed(self, run_id: str, message: str) -> None:
-        self.runs[run_id].status = "failed"
-        self.runs[run_id].stage = "failed"
-        self.runs[run_id].message = message
-        self.runs[run_id].finished_at = datetime.now(UTC)
-
     async def start_understanding_run(
         self,
         organization_id: str,
         project_id: str,
         run: CrawlRun,
+        dispatch: WorkflowDispatchRecord,
     ) -> ProjectRecord:
         for index, project in enumerate(self.projects):
             if project.id == project_id and project.organization_id == organization_id:
+                current = self.runs.get(project.understanding_run_id or "")
+                if current is not None and current.status in {"queued", "running"}:
+                    raise SiteUnderstandingAlreadyRunningError
                 updated = replace(
                     project,
                     country=run.country or project.country,
@@ -127,8 +137,30 @@ class FakeProjectRepository:
                 )
                 self.projects[index] = updated
                 self.runs[run.run_id] = run
+                self.dispatches[dispatch.run_id] = dispatch
+                self.dispatch_statuses[dispatch.run_id] = "pending"
                 return updated
         raise ProjectNotFoundError
+
+    async def list_pending_dispatches(
+        self,
+        limit: int,
+    ) -> list[WorkflowDispatchRecord]:
+        return [
+            dispatch
+            for run_id, dispatch in self.dispatches.items()
+            if self.dispatch_statuses[run_id] == "pending"
+        ][:limit]
+
+    async def mark_dispatch_succeeded(self, run_id: str) -> None:
+        self.dispatch_statuses[run_id] = "dispatched"
+        self.dispatch_errors.pop(run_id, None)
+
+    async def record_dispatch_failure(self, run_id: str, message: str) -> None:
+        self.dispatch_errors[run_id] = message
+        run = self.runs[run_id]
+        if run.status == "queued":
+            run.message = "任务已保存，等待网站识别服务恢复后自动重试"
 
     async def update_business_profile(
         self,
@@ -143,6 +175,10 @@ class FakeProjectRepository:
                 updated = replace(
                     project,
                     site_profile={**project.site_profile, **updates},
+                    site_profile_user_overrides={
+                        **project.site_profile_user_overrides,
+                        **updates,
+                    },
                 )
                 self.projects[index] = updated
                 return updated
@@ -211,9 +247,33 @@ class FakeSiteIconReader:
         return self.icons.get(key)
 
 
+class FakeProjectObjectCleaner:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.project_calls: list[tuple[str, str]] = []
+
+    async def delete_run_objects(
+        self,
+        organization_id: str,
+        project_id: str,
+        run_id: str,
+    ) -> None:
+        return None
+
+    async def delete_project_objects(
+        self,
+        organization_id: str,
+        project_id: str,
+    ) -> None:
+        self.project_calls.append((organization_id, project_id))
+        if self.error is not None:
+            raise self.error
+
+
 def build_service(
     *,
     launch_error: Exception | None = None,
+    object_cleaner: FakeProjectObjectCleaner | None = None,
 ) -> tuple[
     ProjectService,
     FakeWorkflowLauncher,
@@ -229,6 +289,7 @@ def build_service(
             launcher=launcher,
             repository=repository,
             site_icon_reader=site_icon_reader,
+            object_cleaner=object_cleaner,
         ),
         launcher,
         repository,
@@ -262,19 +323,20 @@ def test_create_project_starts_site_understanding() -> None:
     assert launcher.task["country"] == "US"
     assert launcher.task["language"] == "en"
     assert launcher.task["max_pages"] == 5
-    assert launcher.task["rendering"] == "off"
+    assert launcher.task["rendering"] == "auto"
     assert launcher.workflow_id == (
         f"crawler:site_understanding:{response.id}:{response.understanding_run_id}"
     )
     assert repository.runs[response.understanding_run_id].task_type == "site_understanding"
+    assert repository.dispatch_statuses[response.understanding_run_id] == "dispatched"
     assert response.understanding_attempt == 1
     assert response.understanding_started_at is None
     assert response.understanding_finished_at is None
     assert response.understanding_elapsed_seconds == 0
 
 
-def test_create_project_returns_failed_project_when_workflow_cannot_start() -> None:
-    service, _, repository, _ = build_service(
+def test_create_project_keeps_queued_dispatch_when_workflow_cannot_start() -> None:
+    service, launcher, repository, _ = build_service(
         launch_error=RuntimeError("temporal unavailable")
     )
 
@@ -288,10 +350,17 @@ def test_create_project_returns_failed_project_when_workflow_cannot_start() -> N
         )
     )
 
-    assert response.understanding_status == "failed"
-    assert response.understanding_stage == "failed"
-    assert response.understanding_message == "无法启动网站业务识别：任务服务暂时不可用"
-    assert repository.runs[response.understanding_run_id].finished_at is not None
+    assert response.understanding_status == "queued"
+    assert response.understanding_stage == "queued"
+    assert response.understanding_message == "任务已保存，等待网站识别服务恢复后自动重试"
+    assert repository.dispatch_statuses[response.understanding_run_id] == "pending"
+
+    launcher.error = None
+    dispatched = asyncio.run(service.dispatch_pending_workflows())
+
+    assert dispatched == 1
+    assert len(launcher.start_calls) == 2
+    assert repository.dispatch_statuses[response.understanding_run_id] == "dispatched"
 
 
 def test_project_response_reports_actual_understanding_elapsed_time() -> None:
@@ -479,7 +548,8 @@ def test_project_routes_create_list_and_get_projects() -> None:
 
 
 def test_delete_project_route_removes_project_and_cancels_active_workflow() -> None:
-    service, launcher, _, _ = build_service()
+    cleaner = FakeProjectObjectCleaner()
+    service, launcher, _, _ = build_service(object_cleaner=cleaner)
     created = asyncio.run(
         service.create(CreateProjectRequest(domain="example.com", country="US", language="en"))
     )
@@ -504,6 +574,41 @@ def test_delete_project_route_removes_project_and_cancels_active_workflow() -> N
     assert launcher.cancelled_workflow_ids == [
         f"crawler:site_understanding:{created.id}:{created.understanding_run_id}"
     ]
+    assert cleaner.project_calls == [("test-org", created.id)]
+
+
+def test_delete_project_keeps_project_when_object_cleanup_fails() -> None:
+    cleaner = FakeProjectObjectCleaner(RuntimeError("s3 unavailable"))
+    service, _, _, _ = build_service(object_cleaner=cleaner)
+    created = asyncio.run(
+        service.create(
+            CreateProjectRequest(
+                domain="example.com",
+                country="US",
+                language="en",
+            )
+        )
+    )
+    app.dependency_overrides[get_project_service] = lambda: service
+
+    async def request() -> tuple[int, int]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            deleted = await client.delete(f"/api/v1/projects/{created.id}")
+            loaded = await client.get(f"/api/v1/projects/{created.id}")
+            return deleted.status_code, loaded.status_code
+
+    try:
+        delete_status, get_status = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert delete_status == 503
+    assert get_status == 200
+    assert cleaner.project_calls == [("test-org", created.id)]
 
 
 def test_update_business_profile_preserves_crawler_fields() -> None:
@@ -550,6 +655,7 @@ def test_update_business_profile_preserves_crawler_fields() -> None:
             created.id,
             UpdateBusinessProfileRequest(
                 business_name="Example Inc.",
+                business_type="Analytics SaaS",
                 business_summary="Updated summary",
                 target_audiences=["Teams", "Teams", "  Agencies  "],
                 products_services=["Analytics"],
@@ -566,8 +672,13 @@ def test_update_business_profile_preserves_crawler_fields() -> None:
     assert updated.site_profile.target_audiences == ["Teams", "Agencies"]
     assert updated.site_profile.ai_content_rules == "Use a concise tone."
     assert updated.site_profile.confirmed_at is not None
-    assert updated.site_profile.business_type == "SaaS"
-    assert updated.site_profile.evidence[0].source_url == "https://example.com"
+    assert updated.site_profile.business_type == "Analytics SaaS"
+    assert updated.site_profile.evidence == []
+    assert set(updated.site_profile.user_overridden_fields) >= {
+        "business_name",
+        "business_type",
+        "business_summary",
+    }
 
 
 def test_update_business_profile_route_persists_changes() -> None:
@@ -603,6 +714,7 @@ def test_update_business_profile_route_persists_changes() -> None:
                 f"/api/v1/projects/{created.id}/business-profile",
                 json={
                     "business_name": "Example Inc.",
+                    "business_type": "Analytics SaaS",
                     "business_summary": "Updated summary",
                     "target_audiences": ["Teams"],
                     "products_services": ["Analytics"],
@@ -620,6 +732,7 @@ def test_update_business_profile_route_persists_changes() -> None:
 
     assert status_code == 200
     assert saved["site_profile"]["business_name"] == "Example"
+    assert loaded["site_profile"]["business_type"] == "Analytics SaaS"
     assert loaded["site_profile"]["business_name"] == "Example"
     assert loaded["site_profile"]["confirmed_at"] is not None
 
@@ -644,6 +757,7 @@ def test_update_business_profile_returns_conflict_before_understanding_finishes(
                 f"/api/v1/projects/{created.id}/business-profile",
                 json={
                     "business_name": "Example",
+                    "business_type": "SaaS",
                     "business_summary": "",
                     "target_audiences": [],
                     "products_services": [],
@@ -685,8 +799,31 @@ def test_refresh_business_profile_starts_new_understanding_without_audit() -> No
     assert refreshed.audit_status == "never_started"
     assert launcher.task is not None
     assert launcher.task["type"] == "site_understanding"
-    assert launcher.task["rendering"] == "off"
+    assert launcher.task["rendering"] == "auto"
     assert launcher.workflow_id.endswith(refreshed.understanding_run_id)
+
+
+def test_refresh_business_profile_rejects_an_active_understanding_run() -> None:
+    service, _, repository, _ = build_service()
+    created = asyncio.run(
+        service.create(
+            CreateProjectRequest(
+                domain="example.com",
+                country="US",
+                language="en",
+            )
+        )
+    )
+
+    try:
+        asyncio.run(service.refresh_business_profile(created.id))
+    except SiteUnderstandingAlreadyRunningError:
+        pass
+    else:
+        raise AssertionError("active understanding run was not rejected")
+
+    assert len(repository.runs) == 1
+    assert created.understanding_run_id in repository.runs
 
 
 def test_business_profile_run_history_is_newest_first_with_attempt_numbers() -> None:

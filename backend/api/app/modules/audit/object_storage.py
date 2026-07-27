@@ -16,6 +16,12 @@ class AuditObjectCleaner(Protocol):
         run_id: str,
     ) -> None: ...
 
+    async def delete_project_objects(
+        self,
+        organization_id: str,
+        project_id: str,
+    ) -> None: ...
+
 
 class NoopAuditObjectCleaner:
     async def delete_run_objects(
@@ -23,6 +29,13 @@ class NoopAuditObjectCleaner:
         organization_id: str,
         project_id: str,
         run_id: str,
+    ) -> None:
+        return None
+
+    async def delete_project_objects(
+        self,
+        organization_id: str,
+        project_id: str,
     ) -> None:
         return None
 
@@ -37,27 +50,43 @@ class S3AuditObjectCleaner:
         project_id: str,
         run_id: str,
     ) -> None:
-        prefix = "/".join(
-            (
-                "crawler",
-                quote(organization_id.strip(), safe=""),
-                quote(project_id.strip(), safe=""),
-                quote(run_id.strip(), safe=""),
-                "",
-            )
+        prefix = self._prefix(
+            organization_id,
+            project_id,
+            run_id,
         )
         await asyncio.to_thread(self._delete_prefix, prefix)
+
+    async def delete_project_objects(
+        self,
+        organization_id: str,
+        project_id: str,
+    ) -> None:
+        prefix = self._prefix(organization_id, project_id)
+        await asyncio.to_thread(self._delete_prefix, prefix)
+
+    @staticmethod
+    def _prefix(
+        organization_id: str,
+        project_id: str,
+        run_id: str | None = None,
+    ) -> str:
+        parts = [
+            "crawler",
+            quote(organization_id.strip(), safe=""),
+            quote(project_id.strip(), safe=""),
+        ]
+        if run_id is not None:
+            parts.append(quote(run_id.strip(), safe=""))
+        parts.append("")
+        return "/".join(parts)
 
     def _delete_prefix(self, prefix: str) -> None:
         client_options: dict = {
             "service_name": "s3",
             "region_name": self.settings.s3_region,
             "config": Config(
-                s3={
-                    "addressing_style": (
-                        "path" if self.settings.s3_use_path_style else "auto"
-                    )
-                }
+                s3={"addressing_style": ("path" if self.settings.s3_use_path_style else "auto")}
             ),
         }
         if self.settings.s3_endpoint_url:
@@ -79,10 +108,16 @@ class S3AuditObjectCleaner:
             response = client.list_objects_v2(**request)
             objects = [{"Key": item["Key"]} for item in response.get("Contents", [])]
             if objects:
-                client.delete_objects(
+                delete_response = client.delete_objects(
                     Bucket=self.settings.s3_bucket,
                     Delete={"Objects": objects, "Quiet": True},
                 )
+                errors = delete_response.get("Errors", [])
+                if errors:
+                    failed_keys = ", ".join(
+                        str(item.get("Key") or "unknown") for item in errors[:5]
+                    )
+                    raise RuntimeError(f"object storage failed to delete: {failed_keys}")
             if not response.get("IsTruncated"):
                 return
             continuation_token = response.get("NextContinuationToken")

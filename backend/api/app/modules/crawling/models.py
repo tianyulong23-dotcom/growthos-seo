@@ -1,6 +1,18 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Identity, Index, Integer, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -10,6 +22,19 @@ from app.db.base import Base
 
 class CrawlRun(Base):
     __tablename__ = "crawl_runs"
+    __table_args__ = (
+        Index(
+            "uq_crawl_runs_active_technical_audit",
+            "organization_id",
+            "project_id",
+            unique=True,
+            postgresql_where=text(
+                "task_type = 'technical_audit' "
+                "AND archived_at IS NULL "
+                "AND status IN ('queued', 'running', 'stopping')"
+            ),
+        ),
+    )
 
     run_id: Mapped[str] = mapped_column(Text, primary_key=True)
     organization_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
@@ -178,6 +203,11 @@ class BacklinkCheck(Base):
 
 class AuditIssue(Base):
     __tablename__ = "audit_issues"
+    __table_args__ = (
+        Index("ix_audit_issues_run_severity", "run_id", "severity"),
+        Index("ix_audit_issues_run_category", "run_id", "category"),
+        Index("ix_audit_issues_run_code", "run_id", "code"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     run_id: Mapped[str] = mapped_column(
@@ -206,11 +236,10 @@ class AuditIssue(Base):
 class ExternalResource(Base):
     __tablename__ = "external_resources"
     __table_args__ = (
-        Index(
-            "uq_external_resources_run_url",
+        UniqueConstraint(
             "run_id",
             "url",
-            unique=True,
+            name="uq_external_resources_run_url",
         ),
     )
 
@@ -250,12 +279,11 @@ class CrawlCheckpoint(Base):
 class PageSpeedResult(Base):
     __tablename__ = "pagespeed_results"
     __table_args__ = (
-        Index(
-            "uq_pagespeed_run_url_strategy",
+        UniqueConstraint(
             "run_id",
             "url",
             "strategy",
-            unique=True,
+            name="uq_pagespeed_run_url_strategy",
         ),
     )
 

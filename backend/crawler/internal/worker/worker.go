@@ -18,11 +18,13 @@ import (
 )
 
 const (
-	runTaskActivityName          = "Activities.RunTask"
-	recalculateActivityName      = "Activities.RecalculateIssues"
-	activityHeartbeatInterval    = 10 * time.Second
-	failurePersistenceTimeout    = 10 * time.Second
-	recalculationActivityTimeout = 30 * time.Minute
+	runTaskActivityName           = "Activities.RunTask"
+	recalculateActivityName       = "Activities.RecalculateIssues"
+	activityHeartbeatInterval     = 10 * time.Second
+	failurePersistenceTimeout     = 10 * time.Second
+	recalculationActivityTimeout  = 30 * time.Minute
+	technicalAuditActivityTimeout = 6 * time.Hour
+	siteUnderstandingTotalTimeout = 30 * time.Minute
 )
 
 func Run(ctx context.Context) error {
@@ -225,7 +227,22 @@ func (a *Activities) RunTask(ctx context.Context, task crawler.Task) (crawler.St
 		reporter.Report(generatingProgress)
 		fallback := crawler.BuildSiteProfile(task, result.Pages)
 		result.SiteProfile = &fallback
-		synthesizer := crawler.NewAIProfileSynthesizer(taskConfig)
+		aiConfig, settingsErr := aiProviderConfig(
+			ctx,
+			a.Store,
+			task.OrganizationID,
+			taskConfig,
+		)
+		if settingsErr != nil {
+			slog.Warn(
+				"load AI provider settings; using environment configuration",
+				"run_id",
+				task.RunID,
+				"error",
+				settingsErr,
+			)
+		}
+		synthesizer := crawler.NewAIProfileSynthesizer(aiConfig)
 		if synthesizer.Configured() {
 			profile, synthErr := synthesizer.Synthesize(
 				ctx,
@@ -264,6 +281,31 @@ func (a *Activities) RunTask(ctx context.Context, task crawler.Task) (crawler.St
 		return crawler.StoredResult{}, err
 	}
 	return stored, nil
+}
+
+func aiProviderConfig(
+	ctx context.Context,
+	store crawler.ResultStore,
+	organizationID string,
+	fallback crawler.Config,
+) (crawler.Config, error) {
+	settingsStore, ok := store.(crawler.AIProviderSettingsStore)
+	if !ok {
+		return fallback, nil
+	}
+	settings, found, err := settingsStore.LoadAIProviderSettings(
+		ctx,
+		organizationID,
+	)
+	if err != nil || !found {
+		return fallback, err
+	}
+	fallback.BusinessProfileAIBaseURL = settings.BaseURL
+	fallback.BusinessProfileAIAPIKey = settings.APIKey
+	fallback.BusinessProfileAIModel = settings.Model
+	fallback.BusinessProfileAITimeout = settings.RequestTimeout
+	fallback.BusinessProfileAIMaxRetries = settings.MaxRetries
+	return fallback, nil
 }
 
 func (a *Activities) startActivity() func() {
@@ -367,6 +409,8 @@ func aiSynthesisFailureReason(err error) string {
 		strings.Contains(reason, "no choices"),
 		strings.Contains(reason, "omitted"):
 		return "模型返回格式无效"
+	case strings.Contains(reason, "grounding"):
+		return "模型引用证据无效"
 	default:
 		return "模型服务暂时不可用"
 	}
@@ -543,8 +587,9 @@ func RecalculateIssuesWorkflow(
 
 func activityOptions(task crawler.Task) workflow.ActivityOptions {
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Hour,
-		HeartbeatTimeout:    30 * time.Second,
+		ScheduleToCloseTimeout: technicalAuditActivityTimeout,
+		StartToCloseTimeout:    technicalAuditActivityTimeout,
+		HeartbeatTimeout:       30 * time.Second,
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval:    2 * time.Second,
 			BackoffCoefficient: 2,
@@ -553,7 +598,8 @@ func activityOptions(task crawler.Task) workflow.ActivityOptions {
 		},
 	}
 	if task.Type == crawler.TaskSiteUnderstanding {
-		options.StartToCloseTimeout = 3 * time.Minute
+		options.ScheduleToCloseTimeout = siteUnderstandingTotalTimeout
+		options.StartToCloseTimeout = 10 * time.Minute
 		options.RetryPolicy.MaximumAttempts = 2
 	}
 	return options

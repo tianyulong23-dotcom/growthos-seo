@@ -66,3 +66,19 @@ func TestCompletionMessageUsesSpecificDegradedReason(t *testing.T) {
 		t.Fatalf("completionMessageForResult() = %q, want %q", got, result.CompletionNote)
 	}
 }
+
+func TestTechnicalAuditCompletionMessageUsesResourceWarning(t *testing.T) {
+	result := Result{
+		CompletionStatus: CompletionComplete,
+		CompletionNote:   "部分附加资源未检查状态",
+	}
+
+	got := completionMessageForResult(Task{Type: TaskTechnicalAudit}, result)
+	if got != result.CompletionNote {
+		t.Fatalf("completionMessageForResult() = %q, want %q", got, result.CompletionNote)
+	}
+	summary := buildStoredAuditSummary(Result{ResourceChecksTruncated: true})
+	if summary["resource_checks_truncated"] != 1 {
+		t.Fatalf("summary = %#v", summary)
+	}
+}

@@ -7,22 +7,33 @@ import (
 	"time"
 )
 
+const defaultCrawlerUserAgent = "Mozilla/5.0 (Linux; Android 10; K) " +
+	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 " +
+	"Mobile Safari/537.36 SEOPlatformBot/1.0"
+
+const defaultRobotsUserAgent = "SEOPlatformBot"
+
 type Config struct {
 	TemporalAddress                 string
 	TemporalNamespace               string
 	TaskQueue                       string
 	WorkerIdleTimeout               time.Duration
 	UserAgent                       string
+	RobotsUserAgent                 string
 	RequestTimeout                  time.Duration
 	SiteUnderstandingRequestTimeout time.Duration
 	BrowserTimeout                  time.Duration
 	RequestDelay                    time.Duration
 	RandomDelay                     time.Duration
+	StatusRequestDelay              time.Duration
+	StatusRandomDelay               time.Duration
 	HTTPConcurrency                 int
+	StatusConcurrency               int
 	BrowserConcurrency              int
 	BrowserWait                     time.Duration
 	MaxBodyBytes                    int
 	MaxRetries                      int
+	ResourceCheckLimit              int
 	SiteUnderstandingMaxRetries     int
 	DiscoveryLimit                  int
 	BrowserEnabled                  bool
@@ -44,6 +55,8 @@ type Config struct {
 	BusinessProfileAIAPIKey         string
 	BusinessProfileAIModel          string
 	BusinessProfileAITimeout        time.Duration
+	BusinessProfileAIMaxRetries     int
+	AISettingsEncryptionKey         string
 }
 
 func LoadConfig() Config {
@@ -52,23 +65,45 @@ func LoadConfig() Config {
 		TemporalNamespace: envString("TEMPORAL_NAMESPACE", "default"),
 		TaskQueue:         envString("CRAWLER_TASK_QUEUE", "crawler-go"),
 		WorkerIdleTimeout: envDuration("CRAWLER_WORKER_IDLE_TIMEOUT", 0),
-		UserAgent:         envString("CRAWLER_USER_AGENT", "SEOPlatformBot/1.0"),
+		UserAgent:         envString("CRAWLER_USER_AGENT", defaultCrawlerUserAgent),
+		RobotsUserAgent:   envString("CRAWLER_ROBOTS_USER_AGENT", defaultRobotsUserAgent),
 		RequestTimeout:    envDuration("CRAWLER_REQUEST_TIMEOUT", 30*time.Second),
 		SiteUnderstandingRequestTimeout: envDuration(
 			"SITE_UNDERSTANDING_REQUEST_TIMEOUT",
 			12*time.Second,
 		),
-		BrowserTimeout:  envDuration("CRAWLER_BROWSER_TIMEOUT", 45*time.Second),
-		RequestDelay:    envDuration("CRAWLER_REQUEST_DELAY", 750*time.Millisecond),
-		RandomDelay:     envDuration("CRAWLER_RANDOM_DELAY", 500*time.Millisecond),
-		HTTPConcurrency: envInt("CRAWLER_HTTP_CONCURRENCY", 5),
-		BrowserConcurrency: envInt(
+		BrowserTimeout:     envDuration("CRAWLER_BROWSER_TIMEOUT", 45*time.Second),
+		RequestDelay:       envDuration("CRAWLER_REQUEST_DELAY", 250*time.Millisecond),
+		RandomDelay:        envDuration("CRAWLER_RANDOM_DELAY", 150*time.Millisecond),
+		StatusRequestDelay: envDuration("CRAWLER_STATUS_REQUEST_DELAY", 50*time.Millisecond),
+		StatusRandomDelay:  envDuration("CRAWLER_STATUS_RANDOM_DELAY", 50*time.Millisecond),
+		HTTPConcurrency: envIntInRange(
+			"CRAWLER_HTTP_CONCURRENCY",
+			5,
+			1,
+			50,
+		),
+		StatusConcurrency: envIntInRange(
+			"CRAWLER_STATUS_CONCURRENCY",
+			5,
+			1,
+			50,
+		),
+		BrowserConcurrency: envIntInRange(
 			"CRAWLER_BROWSER_CONCURRENCY",
 			3,
+			1,
+			10,
 		),
 		BrowserWait:  envDuration("CRAWLER_BROWSER_WAIT", 3*time.Second),
 		MaxBodyBytes: envInt("CRAWLER_MAX_BODY_BYTES", 5*1024*1024),
 		MaxRetries:   envInt("CRAWLER_MAX_RETRIES", 3),
+		ResourceCheckLimit: envIntInRange(
+			"CRAWLER_RESOURCE_CHECK_LIMIT",
+			50_000,
+			1,
+			50_000,
+		),
 		SiteUnderstandingMaxRetries: envInt(
 			"SITE_UNDERSTANDING_MAX_RETRIES",
 			2,
@@ -103,8 +138,13 @@ func LoadConfig() Config {
 		),
 		BusinessProfileAITimeout: envDuration(
 			"BUSINESS_PROFILE_AI_TIMEOUT",
-			20*time.Second,
+			90*time.Second,
 		),
+		BusinessProfileAIMaxRetries: envNonNegativeInt(
+			"BUSINESS_PROFILE_AI_MAX_RETRIES",
+			1,
+		),
+		AISettingsEncryptionKey: os.Getenv("AI_SETTINGS_ENCRYPTION_KEY"),
 	}
 }
 
@@ -141,6 +181,22 @@ func envInt(name string, fallback int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func envIntInRange(name string, fallback, lower, upper int) int {
+	return min(max(envInt(name, fallback), lower), upper)
+}
+
+func envNonNegativeInt(name string, fallback int) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
 		return fallback
 	}
 	return parsed

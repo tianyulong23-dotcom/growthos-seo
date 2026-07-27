@@ -1,5 +1,11 @@
 import * as React from "react"
-import { Check, LoaderCircle, RefreshCw } from "lucide-react"
+import {
+  Check,
+  ChevronDown,
+  ExternalLink,
+  LoaderCircle,
+  RefreshCw,
+} from "lucide-react"
 
 import { listBusinessProfileRuns } from "@/api/projects"
 import { Badge } from "@/components/ui/badge"
@@ -39,6 +45,36 @@ const recognitionStatusLabels: Record<BusinessProfileRun["status"], string> = {
   failed: "失败",
 }
 
+const profileFieldLabels: Record<string, string> = {
+  business_name: "企业 / 品牌名称",
+  business_type: "业务类型",
+  business_summary: "公司简介",
+  target_audiences: "目标客户",
+  products_services: "产品与服务",
+  value_propositions: "选择理由",
+  use_cases: "典型用途",
+  target_markets: "目标市场",
+  languages: "语言",
+  content_topics: "内容主题",
+  conversion_actions: "转化动作",
+  key_pages: "关键页面",
+}
+
+function FieldSource({
+  field,
+  overriddenFields,
+}: {
+  field: string
+  overriddenFields: string[]
+}) {
+  const userConfirmed = overriddenFields.includes(field)
+  return (
+    <Badge variant="outline" className="font-normal text-muted-foreground">
+      {userConfirmed ? "人工确认" : "AI 识别"}
+    </Badge>
+  )
+}
+
 function formatElapsed(seconds: number) {
   if (seconds < 1) {
     return "< 1 秒"
@@ -57,6 +93,9 @@ export function BusinessProfileForm({
   const profile = project.siteProfile
   const [businessName, setBusinessName] = React.useState(
     profile?.businessName || project.name
+  )
+  const [businessType, setBusinessType] = React.useState(
+    profile?.businessType ?? ""
   )
   const [businessSummary, setBusinessSummary] = React.useState(
     profile?.businessSummary ?? ""
@@ -111,6 +150,7 @@ export function BusinessProfileForm({
     }
 
     setBusinessName(profile?.businessName || project.name)
+    setBusinessType(profile?.businessType ?? "")
     setBusinessSummary(profile?.businessSummary ?? "")
     setTargetAudiences(valuesToLines(profile?.targetAudiences ?? []))
     setProductsServices(valuesToLines(profile?.productsServices ?? []))
@@ -169,6 +209,7 @@ export function BusinessProfileForm({
     try {
       await onSave({
         businessName: businessName.trim(),
+        businessType: businessType.trim(),
         businessSummary: businessSummary.trim(),
         targetAudiences: linesToValues(targetAudiences),
         productsServices: linesToValues(productsServices),
@@ -238,8 +279,15 @@ export function BusinessProfileForm({
         </div>
 
         <label className="block max-w-xl space-y-2 text-sm">
-          <span className="font-medium">企业 / 品牌名称</span>
+          <span className="flex items-center gap-2 font-medium">
+            企业 / 品牌名称
+            <FieldSource
+              field="business_name"
+              overriddenFields={profile?.userOverriddenFields ?? []}
+            />
+          </span>
           <Input
+            aria-label="企业 / 品牌名称"
             value={businessName}
             onChange={(event) => setBusinessName(event.target.value)}
             disabled={busy}
@@ -247,9 +295,33 @@ export function BusinessProfileForm({
           />
         </label>
 
+        <label className="block max-w-xl space-y-2 text-sm">
+          <span className="flex items-center gap-2 font-medium">
+            业务类型
+            <FieldSource
+              field="business_type"
+              overriddenFields={profile?.userOverriddenFields ?? []}
+            />
+          </span>
+          <Input
+            aria-label="业务类型"
+            value={businessType}
+            onChange={(event) => setBusinessType(event.target.value)}
+            disabled={busy}
+            required
+          />
+        </label>
+
         <label className="block space-y-2 text-sm">
-          <span className="font-medium">公司简介</span>
+          <span className="flex items-center gap-2 font-medium">
+            公司简介
+            <FieldSource
+              field="business_summary"
+              overriddenFields={profile?.userOverriddenFields ?? []}
+            />
+          </span>
           <Textarea
+            aria-label="公司简介"
             value={businessSummary}
             onChange={(event) => setBusinessSummary(event.target.value)}
             className="min-h-28 resize-y"
@@ -259,8 +331,15 @@ export function BusinessProfileForm({
 
         <div className="grid gap-6 lg:grid-cols-2">
           <label className="block space-y-2 text-sm">
-            <span className="font-medium">目标客户</span>
+            <span className="flex items-center gap-2 font-medium">
+              目标客户
+              <FieldSource
+                field="target_audiences"
+                overriddenFields={profile?.userOverriddenFields ?? []}
+              />
+            </span>
             <Textarea
+              aria-label="目标客户"
               value={targetAudiences}
               onChange={(event) => setTargetAudiences(event.target.value)}
               className="min-h-40 resize-y"
@@ -269,8 +348,15 @@ export function BusinessProfileForm({
           </label>
 
           <label className="block space-y-2 text-sm">
-            <span className="font-medium">产品与服务</span>
+            <span className="flex items-center gap-2 font-medium">
+              产品与服务
+              <FieldSource
+                field="products_services"
+                overriddenFields={profile?.userOverriddenFields ?? []}
+              />
+            </span>
             <Textarea
+              aria-label="产品与服务"
               value={productsServices}
               onChange={(event) => setProductsServices(event.target.value)}
               className="min-h-40 resize-y"
@@ -280,8 +366,15 @@ export function BusinessProfileForm({
         </div>
 
         <label className="block space-y-2 text-sm">
-          <span className="font-medium">客户为什么选择您</span>
+          <span className="flex items-center gap-2 font-medium">
+            客户为什么选择您
+            <FieldSource
+              field="value_propositions"
+              overriddenFields={profile?.userOverriddenFields ?? []}
+            />
+          </span>
           <Textarea
+            aria-label="客户为什么选择您"
             value={valuePropositions}
             onChange={(event) => setValuePropositions(event.target.value)}
             className="min-h-36 resize-y"
@@ -289,6 +382,46 @@ export function BusinessProfileForm({
           />
         </label>
       </section>
+
+      {profile && profile.evidence.length > 0 && (
+        <section className="space-y-3 border-b py-8">
+          <h2 className="text-lg font-semibold">资料依据</h2>
+          <div className="divide-y border-y">
+            {profile.evidence.map((item, index) => (
+              <details
+                key={`${item.field}-${item.value}-${item.sourceUrl}-${index}`}
+                className="group"
+              >
+                <summary className="grid cursor-pointer list-none grid-cols-[minmax(96px,0.35fr)_minmax(0,1fr)_20px] items-center gap-3 py-3 text-sm [&::-webkit-details-marker]:hidden">
+                  <span className="min-w-0 font-medium break-words">
+                    {profileFieldLabels[item.field] ?? item.field}
+                  </span>
+                  <span className="min-w-0 truncate text-muted-foreground">
+                    {item.value}
+                  </span>
+                  <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="space-y-3 pb-4 pl-0 text-sm sm:pl-[calc(35%+12px)]">
+                  {item.quote && (
+                    <blockquote className="border-l-2 pl-3 leading-6 text-foreground">
+                      {item.quote}
+                    </blockquote>
+                  )}
+                  <a
+                    href={item.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex max-w-full items-center gap-1.5 text-muted-foreground hover:text-foreground"
+                  >
+                    <span className="truncate">{item.sourceUrl}</span>
+                    <ExternalLink className="size-3.5 shrink-0" />
+                  </a>
+                </div>
+              </details>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="space-y-4 pt-8">
         <div>
@@ -304,7 +437,10 @@ export function BusinessProfileForm({
       </section>
 
       <div className="mt-8 flex flex-wrap items-center gap-3 border-t pt-6">
-        <Button type="submit" disabled={busy || !businessName.trim()}>
+        <Button
+          type="submit"
+          disabled={busy || !businessName.trim() || !businessType.trim()}
+        >
           {saving ? (
             <LoaderCircle className="animate-spin" />
           ) : saved ? (

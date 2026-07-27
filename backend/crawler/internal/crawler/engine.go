@@ -15,23 +15,28 @@ import (
 )
 
 type Engine struct {
-	config     Config
-	http       Fetcher
-	status     StatusChecker
-	fetcher    Fetcher
-	parser     Parser
-	reporter   ProgressReporter
-	processor  PageArtifactProcessor
-	checkpoint CheckpointStore
-	pagespeed  PageSpeedAnalyzer
+	config                  Config
+	http                    Fetcher
+	status                  StatusChecker
+	fetcher                 Fetcher
+	parser                  Parser
+	reporter                ProgressReporter
+	processor               PageArtifactProcessor
+	checkpoint              CheckpointStore
+	pagespeed               PageSpeedAnalyzer
+	resourceChecksTruncated bool
 }
 
 const (
 	siteUnderstandingSitemapDocumentLimit = 4
 	siteUnderstandingSitemapTimeout       = 5 * time.Second
 	siteUnderstandingBatchSize            = 5
-	technicalAuditBatchSize               = 5
-	technicalAuditMaxDepth                = 3
+	technicalAuditBatchSize               = 50
+	imageStatusPageConcurrency            = 5
+	imageStatusPerPageConcurrency         = 5
+	imageStatusPerPageLimit               = 50
+	checkpointAttemptBatchSize            = 50
+	checkpointInterval                    = 30 * time.Second
 )
 
 type EngineOption func(*Engine)
@@ -86,6 +91,7 @@ func (e *Engine) Run(ctx context.Context, task Task) (result Result, err error) 
 		return Result{}, err
 	}
 	result = Result{TaskType: task.Type, RunID: task.RunID, StartedAt: time.Now().UTC()}
+	e.resourceChecksTruncated = false
 
 	switch task.Type {
 	case TaskSiteUnderstanding, TaskTechnicalAudit:
@@ -113,6 +119,10 @@ func (e *Engine) Run(ctx context.Context, task Task) (result Result, err error) 
 					nil,
 					result.ExternalResources,
 				)
+			}
+			if e.resourceChecksTruncated {
+				result.ResourceChecksTruncated = true
+				result.CompletionNote = "技术审计已完成，但部分附加资源超过检查保护上限，部分图片或链接未检查状态"
 			}
 		}
 		if err == nil && task.Type == TaskTechnicalAudit {
@@ -258,7 +268,10 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 	preferredLocales := preferredLocaleValues(task.Language, task.Country)
 	var sitemapResults <-chan []Candidate
 	var cancelSitemap context.CancelFunc
-	robots := NewRobotsPolicyCache(e.http, e.config.UserAgent)
+	robots := NewRobotsPolicyCache(
+		e.http,
+		defaultString(e.config.RobotsUserAgent, defaultRobotsUserAgent),
+	)
 	policy, policyErr := robots.Policy(ctx, root)
 	if policyErr != nil {
 		return nil, policyErr
@@ -374,6 +387,25 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 			return nil, err
 		}
 	}
+	lastCheckpointAttempted := attempted
+	lastCheckpointAt := time.Now()
+	var imageScheduler *imageStatusScheduler
+	if task.Type == TaskTechnicalAudit && e.status != nil {
+		imageCtx, cancelImages := context.WithCancel(ctx)
+		imageScheduler = newImageStatusScheduler(
+			imageCtx,
+			e.status,
+			e.config,
+			imageStatusCache,
+		)
+		defer func() {
+			cancelImages()
+			imageScheduler.CloseAndWait()
+		}()
+		for _, page := range pages {
+			imageScheduler.EnqueuePage(page)
+		}
+	}
 	if task.Type == TaskSiteUnderstanding && restored {
 		startSitemapDiscovery()
 		if cancelSitemap != nil {
@@ -397,18 +429,6 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 		}
 		if task.Type == TaskSiteUnderstanding && siteUnderstandingComplete(task, pages) {
 			break
-		}
-		if err := e.saveCheckpoint(
-			ctx,
-			task,
-			candidates,
-			processed,
-			pages,
-			attempted,
-			imageStatusCache,
-			rejectedLanguages,
-		); err != nil {
-			return nil, err
 		}
 		candidate, ok := bestCandidate(candidates, processed, task.Type, pages)
 		if !ok && sitemapResults != nil {
@@ -468,7 +488,6 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 		if task.Type == TaskTechnicalAudit && supportsBatch && !firstIsPrefetched {
 			batchLimit := min(
 				technicalAuditBatchSize,
-				positiveOrDefault(e.config.HTTPConcurrency, technicalAuditBatchSize),
 				limit-len(pages),
 				attemptLimit-attempted+1,
 			)
@@ -528,6 +547,7 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 			outcomes[0] = FetchOutcome{Resource: resource, Err: fetchErr}
 		}
 
+		batchPageStart := len(pages)
 		for index, candidate := range batch {
 			if task.Type == TaskSiteUnderstanding && siteUnderstandingComplete(task, pages) {
 				break
@@ -587,9 +607,6 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 				continue
 			}
 			page.Score = ScorePage(page)
-			if task.Type == TaskTechnicalAudit {
-				e.checkImageStatuses(ctx, &page, imageStatusCache)
-			}
 
 			if task.Type == TaskSiteUnderstanding && (page.StatusCode < 200 || page.StatusCode >= 400) {
 				continue
@@ -620,17 +637,46 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 			selectedURLs[finalKey] = struct{}{}
 			e.report(StageExtracting, "正在整理重要页面", len(candidates), attempted, len(pages))
 		}
-		if err := e.saveCheckpoint(
-			ctx,
-			task,
-			candidates,
-			processed,
-			pages,
+		if imageScheduler != nil && len(pages) > batchPageStart {
+			for index := batchPageStart; index < len(pages); index++ {
+				imageScheduler.EnqueuePage(pages[index])
+			}
+		}
+		now := time.Now()
+		if checkpointDue(
+			lastCheckpointAttempted,
 			attempted,
-			imageStatusCache,
-			rejectedLanguages,
-		); err != nil {
-			return nil, err
+			lastCheckpointAt,
+			now,
+		) {
+			if imageScheduler != nil {
+				imageStatusCache = imageScheduler.Snapshot()
+			}
+			if err := e.saveCheckpoint(
+				ctx,
+				task,
+				candidates,
+				processed,
+				pages,
+				attempted,
+				imageStatusCache,
+				rejectedLanguages,
+			); err != nil {
+				return nil, err
+			}
+			lastCheckpointAttempted = attempted
+			lastCheckpointAt = now
+		}
+	}
+	if imageScheduler != nil {
+		for _, page := range pages {
+			imageScheduler.EnqueuePage(page)
+		}
+		imageScheduler.CloseAndWait()
+		imageStatusCache = imageScheduler.Snapshot()
+		applyImageStatuses(pages, imageStatusCache)
+		if imageScheduler.Truncated() {
+			e.resourceChecksTruncated = true
 		}
 	}
 	if err := e.saveCheckpoint(
@@ -687,6 +733,16 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 	return pages, nil
 }
 
+func checkpointDue(
+	lastAttempted int,
+	attempted int,
+	lastSavedAt time.Time,
+	now time.Time,
+) bool {
+	return attempted-lastAttempted >= checkpointAttemptBatchSize ||
+		(!lastSavedAt.IsZero() && now.Sub(lastSavedAt) >= checkpointInterval)
+}
+
 func (e *Engine) saveCheckpoint(
 	ctx context.Context,
 	task Task,
@@ -703,7 +759,7 @@ func (e *Engine) saveCheckpoint(
 	checkpoint := CrawlCheckpoint{
 		Candidates:  make([]CandidateState, 0, len(candidates)),
 		Processed:   make([]string, 0, len(processed)),
-		Pages:       append([]Page(nil), pages...),
+		Pages:       checkpointPages(task, pages),
 		Attempted:   attempted,
 		ImageStatus: make(map[string]int, len(imageStatus)),
 	}
@@ -746,7 +802,7 @@ func (e *Engine) updateResultCheckpoint(
 	if err != nil || !found {
 		return err
 	}
-	checkpoint.Pages = append([]Page(nil), pages...)
+	checkpoint.Pages = checkpointPages(task, pages)
 	if issues != nil {
 		checkpoint.Issues = append([]Issue(nil), issues...)
 	}
@@ -757,6 +813,18 @@ func (e *Engine) updateResultCheckpoint(
 		)
 	}
 	return e.checkpoint.SaveCheckpoint(ctx, task, checkpoint)
+}
+
+func checkpointPages(task Task, pages []Page) []Page {
+	checkpointPages := append([]Page(nil), pages...)
+	if task.Type != TaskTechnicalAudit {
+		return checkpointPages
+	}
+	for index := range checkpointPages {
+		checkpointPages[index].MainText = ""
+		checkpointPages[index].MainHTML = ""
+	}
+	return checkpointPages
 }
 
 func candidateState(candidate Candidate) CandidateState {
@@ -802,54 +870,208 @@ func (e *Engine) checkImageStatuses(
 	page *Page,
 	cache map[string]int,
 ) {
-	if e.status == nil {
+	pages := []Page{*page}
+	e.checkImageStatusesForPages(ctx, pages, cache)
+	*page = pages[0]
+}
+
+type imageStatusScheduler struct {
+	ctx                context.Context
+	checker            StatusChecker
+	perPageConcurrency int
+	resourceLimit      int
+	pageJobs           chan []string
+	workerGroup        sync.WaitGroup
+	closeOnce          sync.Once
+
+	mu        sync.Mutex
+	statuses  map[string]int
+	pending   map[string]struct{}
+	truncated bool
+}
+
+func newImageStatusScheduler(
+	ctx context.Context,
+	checker StatusChecker,
+	config Config,
+	initial map[string]int,
+) *imageStatusScheduler {
+	statuses := make(map[string]int, len(initial))
+	for rawURL, status := range initial {
+		statuses[rawURL] = status
+	}
+	scheduler := &imageStatusScheduler{
+		ctx:     ctx,
+		checker: checker,
+		perPageConcurrency: min(
+			positiveOrDefault(config.StatusConcurrency, imageStatusPerPageConcurrency),
+			imageStatusPerPageConcurrency,
+		),
+		resourceLimit: positiveOrDefault(config.ResourceCheckLimit, 50_000),
+		pageJobs:      make(chan []string, technicalAuditBatchSize),
+		statuses:      statuses,
+		pending:       make(map[string]struct{}),
+	}
+	for range imageStatusPageConcurrency {
+		scheduler.workerGroup.Add(1)
+		go func() {
+			defer scheduler.workerGroup.Done()
+			for urls := range scheduler.pageJobs {
+				scheduler.checkPage(urls)
+			}
+		}()
+	}
+	return scheduler
+}
+
+func (s *imageStatusScheduler) EnqueuePage(page Page) {
+	if s == nil {
 		return
 	}
-
-	imageIndexes := make([]int, 0, 50)
-	for index := range page.Links {
-		link := &page.Links[index]
+	urls := make([]string, 0, imageStatusPerPageLimit)
+	for _, link := range page.Links {
 		if link.Placement != "image" {
 			continue
 		}
-		if status, exists := cache[link.URL]; exists {
-			link.TargetStatus = &status
-		} else if len(imageIndexes) < 50 {
-			imageIndexes = append(imageIndexes, index)
+		s.mu.Lock()
+		_, completed := s.statuses[link.URL]
+		_, queued := s.pending[link.URL]
+		if completed || queued {
+			s.mu.Unlock()
+			continue
 		}
+		if len(urls) >= imageStatusPerPageLimit ||
+			len(s.statuses)+len(s.pending) >= s.resourceLimit {
+			s.truncated = true
+			s.mu.Unlock()
+			continue
+		}
+		s.pending[link.URL] = struct{}{}
+		s.mu.Unlock()
+		urls = append(urls, link.URL)
 	}
+	if len(urls) == 0 {
+		return
+	}
+	select {
+	case s.pageJobs <- urls:
+	case <-s.ctx.Done():
+		s.releasePending(urls)
+	}
+}
 
-	var mutex sync.Mutex
-	semaphore := make(chan struct{}, 5)
+func (s *imageStatusScheduler) checkPage(urls []string) {
+	jobs := make(chan string, len(urls))
+	for _, rawURL := range urls {
+		jobs <- rawURL
+	}
+	close(jobs)
+
 	var group sync.WaitGroup
-	for _, index := range imageIndexes {
+	for range min(s.perPageConcurrency, len(urls)) {
 		group.Add(1)
-		go func(linkIndex int) {
+		go func() {
 			defer group.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			status, err := e.status.CheckStatus(ctx, page.Links[linkIndex].URL)
-			if err != nil {
-				status = 0
+			for rawURL := range jobs {
+				status, err := s.checker.CheckStatus(s.ctx, rawURL)
+				if err != nil {
+					status = 0
+				}
+				s.mu.Lock()
+				s.statuses[rawURL] = status
+				delete(s.pending, rawURL)
+				s.mu.Unlock()
 			}
-			mutex.Lock()
-			cache[page.Links[linkIndex].URL] = status
-			page.Links[linkIndex].TargetStatus = &status
-			mutex.Unlock()
-		}(index)
+		}()
 	}
 	group.Wait()
+}
 
-	page.BrokenImages = page.BrokenImages[:0]
-	for _, link := range page.Links {
-		if link.Placement == "image" &&
-			link.TargetStatus != nil &&
-			(*link.TargetStatus == 0 || *link.TargetStatus >= 400) {
-			page.BrokenImages = append(page.BrokenImages, BrokenImage{
-				URL:        link.URL,
-				StatusCode: *link.TargetStatus,
-			})
+func (s *imageStatusScheduler) releasePending(urls []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rawURL := range urls {
+		delete(s.pending, rawURL)
+	}
+}
+
+func (s *imageStatusScheduler) CloseAndWait() {
+	if s == nil {
+		return
+	}
+	s.closeOnce.Do(func() {
+		close(s.pageJobs)
+	})
+	s.workerGroup.Wait()
+}
+
+func (s *imageStatusScheduler) Snapshot() map[string]int {
+	if s == nil {
+		return map[string]int{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	statuses := make(map[string]int, len(s.statuses))
+	for rawURL, status := range s.statuses {
+		statuses[rawURL] = status
+	}
+	return statuses
+}
+
+func (s *imageStatusScheduler) Truncated() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.truncated
+}
+
+func (e *Engine) checkImageStatusesForPages(
+	ctx context.Context,
+	pages []Page,
+	cache map[string]int,
+) {
+	if e.status == nil {
+		return
+	}
+	imageCtx, cancelImages := context.WithCancel(ctx)
+	defer cancelImages()
+	scheduler := newImageStatusScheduler(imageCtx, e.status, e.config, cache)
+	for _, page := range pages {
+		scheduler.EnqueuePage(page)
+	}
+	scheduler.CloseAndWait()
+	statuses := scheduler.Snapshot()
+	clear(cache)
+	for rawURL, status := range statuses {
+		cache[rawURL] = status
+	}
+	applyImageStatuses(pages, cache)
+	if scheduler.Truncated() {
+		e.resourceChecksTruncated = true
+	}
+}
+
+func applyImageStatuses(pages []Page, statuses map[string]int) {
+	for pageIndex := range pages {
+		page := &pages[pageIndex]
+		page.BrokenImages = page.BrokenImages[:0]
+		for linkIndex := range page.Links {
+			link := &page.Links[linkIndex]
+			if link.Placement != "image" {
+				continue
+			}
+			if status, exists := statuses[link.URL]; exists {
+				link.TargetStatus = intPointer(status)
+			}
+			if link.TargetStatus != nil &&
+				(*link.TargetStatus == 0 || *link.TargetStatus >= 400) {
+				page.BrokenImages = append(page.BrokenImages, BrokenImage{
+					URL:        link.URL,
+					StatusCode: *link.TargetStatus,
+				})
+			}
 		}
 	}
 }
@@ -859,12 +1081,15 @@ func (e *Engine) checkLinkStatuses(
 	pages []Page,
 ) ([]ExternalResource, error) {
 	statusByURL := make(map[string]int, len(pages)*2)
+	checkedResourceKeys := make(map[string]struct{})
 	for _, page := range pages {
 		statusByURL[crawlURLKey(page.URL)] = page.StatusCode
 		statusByURL[crawlURLKey(defaultString(page.FinalURL, page.URL))] = page.StatusCode
 		for _, link := range page.Links {
 			if link.TargetStatus != nil {
-				statusByURL[crawlURLKey(link.URL)] = *link.TargetStatus
+				key := crawlURLKey(link.URL)
+				statusByURL[key] = *link.TargetStatus
+				checkedResourceKeys[key] = struct{}{}
 			}
 		}
 	}
@@ -888,6 +1113,19 @@ func (e *Engine) checkLinkStatuses(
 			}
 		}
 	}
+	resourceLimit := positiveOrDefault(e.config.ResourceCheckLimit, 50_000)
+	remainingChecks := max(resourceLimit-len(checkedResourceKeys), 0)
+	if len(pendingInternalByURL)+len(pendingExternalByURL) > remainingChecks {
+		e.resourceChecksTruncated = true
+	}
+	pendingInternalByURL, remainingChecks = limitedPendingResources(
+		pendingInternalByURL,
+		remainingChecks,
+	)
+	pendingExternalByURL, _ = limitedPendingResources(
+		pendingExternalByURL,
+		remainingChecks,
+	)
 	if len(pendingInternalByURL) == 0 && len(pendingExternalByURL) == 0 {
 		return nil, ctx.Err()
 	}
@@ -909,7 +1147,10 @@ func (e *Engine) checkLinkStatuses(
 	var mutex sync.Mutex
 	var group sync.WaitGroup
 	externalByURL := make(map[string]ExternalResource, len(pendingExternalByURL))
-	workerCount := min(8, len(pendingInternalByURL)+len(pendingExternalByURL))
+	workerCount := min(
+		positiveOrDefault(e.config.StatusConcurrency, 5),
+		len(pendingInternalByURL)+len(pendingExternalByURL),
+	)
 	for range workerCount {
 		group.Add(1)
 		go func() {
@@ -973,6 +1214,25 @@ func (e *Engine) checkLinkStatuses(
 		return externalResources[i].URL < externalResources[j].URL
 	})
 	return externalResources, nil
+}
+
+func limitedPendingResources(
+	resources map[string]string,
+	remaining int,
+) (map[string]string, int) {
+	if len(resources) <= remaining {
+		return resources, remaining - len(resources)
+	}
+	keys := make([]string, 0, len(resources))
+	for key := range resources {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	limited := make(map[string]string, remaining)
+	for _, key := range keys[:remaining] {
+		limited[key] = resources[key]
+	}
+	return limited, 0
 }
 
 func externalResourceFromFetched(resource Resource) ExternalResource {
@@ -1168,9 +1428,6 @@ func addPageLinks(
 	if len(candidates) >= limit {
 		return
 	}
-	if taskType == TaskTechnicalAudit && page.Depth >= technicalAuditMaxDepth {
-		return
-	}
 	base, err := url.Parse(page.FinalURL)
 	if err != nil {
 		return
@@ -1214,8 +1471,7 @@ func bestCandidate(
 			if _, exists := processed[value]; exists {
 				continue
 			}
-			if candidate.Depth > technicalAuditMaxDepth ||
-				!technicalAuditURLAllowed(candidate.URL) {
+			if !technicalAuditURLAllowed(candidate.URL) {
 				continue
 			}
 			if !found ||
@@ -1270,8 +1526,7 @@ func pendingTechnicalCandidates(
 		if _, exists := processed[value]; exists {
 			continue
 		}
-		if candidate.Depth > technicalAuditMaxDepth ||
-			!technicalAuditURLAllowed(candidate.URL) {
+		if !technicalAuditURLAllowed(candidate.URL) {
 			continue
 		}
 		choice := technicalCandidateChoice{candidate: candidate, key: value}

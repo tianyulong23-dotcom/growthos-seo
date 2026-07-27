@@ -23,6 +23,7 @@ from app.modules.audit.models import (
     RecalculateAuditIssuesRequest,
 )
 from app.modules.audit.service import (
+    AuditCleanupError,
     AuditLaunchError,
     AuditProjectNotFoundError,
     AuditRunNotFoundError,
@@ -56,6 +57,8 @@ def audit_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, AuditLaunchError):
         return HTTPException(status_code=503, detail="技术审计服务暂时不可用")
+    if isinstance(exc, AuditCleanupError):
+        return HTTPException(status_code=503, detail="审计数据清理失败，请稍后重试")
     if isinstance(exc, ValueError):
         return HTTPException(status_code=422, detail=str(exc))
     return HTTPException(status_code=500, detail="技术审计请求失败")
@@ -88,7 +91,10 @@ async def list_audit_runs(
     search: str = "",
     run_status: Annotated[
         str | None,
-        Query(alias="status", pattern="^(queued|running|paused|stopping|stopped|recalculating|completed|failed)$"),
+        Query(
+            alias="status",
+            pattern="^(queued|running|paused|stopping|stopped|recalculating|completed|failed)$",
+        ),
     ] = None,
 ) -> AuditRunCollection:
     try:
@@ -228,6 +234,7 @@ async def delete_audit_run(
         AuditRunNotFoundError,
         AuditStateError,
         AuditLaunchError,
+        AuditCleanupError,
     ) as exc:
         raise audit_error(exc) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
