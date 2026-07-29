@@ -1,26 +1,53 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router"
+import {
+  BrowserRouter,
+  Navigate,
+  useRoutes,
+  type RouteObject,
+} from "react-router"
 
 import { AppShell } from "@/app/app-shell"
-import { ModulePage } from "@/pages/module-page"
+import { registeredModuleRoutes } from "@/app/module-registry"
+import { defaultProject } from "@/app/project-context"
 import { OverviewPage } from "@/pages/overview-page"
+import { PerformancePage } from "@/pages/performance-page"
+import { SettingsPage } from "@/pages/settings-page"
 
 function ProjectRedirect() {
-  return <Navigate to="/projects/solarreviews/overview" replace />
+  return <Navigate to={`/projects/${defaultProject.id}/overview`} replace />
+}
+
+const routes: RouteObject[] = [
+  {
+    path: "/",
+    element: <ProjectRedirect />,
+  },
+  {
+    path: "/projects/:projectId",
+    element: <AppShell />,
+    children: [
+      { index: true, element: <Navigate to="overview" replace /> },
+      { path: "overview", element: <OverviewPage /> },
+      ...registeredModuleRoutes,
+      { path: "performance", element: <PerformancePage /> },
+      { path: "performance/:view", element: <PerformancePage /> },
+      { path: "settings", element: <SettingsPage /> },
+      { path: "settings/:view", element: <SettingsPage /> },
+    ],
+  },
+  {
+    path: "*",
+    element: <ProjectRedirect />,
+  },
+]
+
+function AppRoutes() {
+  return useRoutes(routes)
 }
 
 export function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<ProjectRedirect />} />
-        <Route path="/projects/:projectId" element={<AppShell />}>
-          <Route index element={<Navigate to="overview" replace />} />
-          <Route path="overview" element={<OverviewPage />} />
-          <Route path=":module" element={<ModulePage />} />
-          <Route path=":module/:view" element={<ModulePage />} />
-        </Route>
-        <Route path="*" element={<ProjectRedirect />} />
-      </Routes>
+      <AppRoutes />
     </BrowserRouter>
   )
 }

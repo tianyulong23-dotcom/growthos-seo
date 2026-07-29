@@ -15,6 +15,12 @@ import {
 } from "lucide-react"
 import { useLocation, useNavigate, useParams } from "react-router"
 
+import { allNavigation } from "@/app/platform-navigation"
+import {
+  defaultProject,
+  getProject,
+  projects,
+} from "@/app/project-context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
@@ -27,7 +33,6 @@ import {
 } from "@/components/ui/sheet"
 import { useSidebar } from "@/components/ui/sidebar"
 import { Textarea } from "@/components/ui/textarea"
-import { modules, projects } from "@/data/mock-data"
 
 type AgentMessage = {
   id: number
@@ -65,7 +70,7 @@ const initialMessages: AgentMessage[] = [
 function getPageContext(pathname: string) {
   const [, , , moduleId, viewId] = pathname.split("/")
   const currentModule =
-    modules.find((item) => item.id === moduleId) ?? modules[0]
+    allNavigation.find((item) => item.id === moduleId) ?? allNavigation[0]
   const currentView = currentModule.tabs.find((item) => item.id === viewId)
 
   return currentView?.label ?? currentModule.label
@@ -143,8 +148,8 @@ function AgentTaskCard({
 function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
   const location = useLocation()
   const { state: sidebarState, toggleSidebar } = useSidebar()
-  const { projectId = projects[0].id } = useParams()
-  const project = projects.find((item) => item.id === projectId) ?? projects[0]
+  const { projectId = defaultProject.id } = useParams()
+  const project = getProject(projectId)
   const context = getPageContext(location.pathname)
   const [histories, setHistories] = React.useState<
     Record<string, AgentMessage[]>

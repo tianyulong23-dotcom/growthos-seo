@@ -1,0 +1,62 @@
+{
+  "version": "0.1.20260722",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "0.1132 sec.",
+  "cost": 0.0201,
+  "tasks_count": 1,
+  "tasks_error": 0,
+  "tasks": [
+    {
+      "id": "a8b4691c-0956-4f15-8a7a-07c113d48048",
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "time": "0.1098 sec.",
+      "cost": 0.0201,
+      "result_count": 1,
+      "path": [
+        "v3",
+        "backlinks",
+        "referring_domains",
+        "live"
+      ],
+      "data": {
+        "api": "backlinks",
+        "function": "referring_domains",
+        "target": "example.com",
+        "limit": 2
+      },
+      "result": [
+        {
+          "target": "example.com",
+          "total_count": 2,
+          "items_count": 2,
+          "items": [
+            {
+              "type": "backlinks_referring_domain",
+              "domain": "publisher.example",
+              "rank": 72,
+              "backlinks": 3,
+              "backlinks_spam_score": 4,
+              "referring_links_countries": {
+                "US": 3
+              },
+              "first_seen": "2026-07-20 08:00:00 +00:00"
+            },
+            {
+              "type": "backlinks_referring_domain",
+              "domain": "news.example",
+              "rank": 41,
+              "backlinks": 1,
+              "referring_links_countries": {
+                "GB": 1,
+                "US": 1
+              },
+              "broken_backlinks": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

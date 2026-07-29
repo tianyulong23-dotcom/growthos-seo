@@ -1,0 +1,95 @@
+{
+  "schemaVersion": "growthos.events.registry.v1",
+  "commands": [
+    {
+      "name": "crawling.evidence.requested.v1",
+      "ownerModule": "crawling",
+      "handlerModule": "crawling",
+      "producerModules": [
+        "platform",
+        "audit",
+        "backlinks"
+      ],
+      "payloadSchema": "json-schema/crawler-evidence-request.v1.schema.json",
+      "payloadSchemaVersion": 1,
+      "dedupeKey": "requestId",
+      "handlerWritePolicy": "evidence-only"
+    }
+  ],
+  "crossModuleCommands": [
+    "crawling.evidence.requested.v1"
+  ],
+  "events": [
+    {
+      "name": "backlinks.gmail-incremental-sync.requested.v1",
+      "ownerModule": "backlinks",
+      "publicationMode": "outbox",
+      "outboxOwner": "backlinks",
+      "consumerModules": [
+        "backlinks"
+      ],
+      "scope": "module-internal",
+      "payloadSchemaVersion": 1,
+      "dedupeKey": "idempotencyKey",
+      "consumerWritePolicy": "owner-only"
+    },
+    {
+      "name": "backlinks.project-analysis.requested.v1",
+      "ownerModule": "backlinks",
+      "publicationMode": "outbox",
+      "outboxOwner": "backlinks",
+      "consumerModules": [
+        "backlinks"
+      ],
+      "scope": "module-internal",
+      "payloadSchemaVersion": 1,
+      "dedupeKey": "workflowId",
+      "consumerWritePolicy": "owner-only"
+    },
+    {
+      "name": "backlinks.placement-monitoring.requested.v1",
+      "ownerModule": "backlinks",
+      "publicationMode": "outbox",
+      "outboxOwner": "backlinks",
+      "consumerModules": [
+        "backlinks"
+      ],
+      "scope": "module-internal",
+      "payloadSchemaVersion": 1,
+      "dedupeKey": "placementId",
+      "consumerWritePolicy": "owner-only"
+    },
+    {
+      "name": "backlinks.placement-monitoring.lifecycle.v1",
+      "ownerModule": "backlinks",
+      "publicationMode": "outbox",
+      "outboxOwner": "backlinks",
+      "consumerModules": [
+        "backlinks"
+      ],
+      "scope": "module-internal",
+      "payloadSchemaVersion": 1,
+      "dedupeKey": "monitorRunId",
+      "consumerWritePolicy": "owner-only"
+    },
+    {
+      "name": "crawling.evidence.recorded.v1",
+      "ownerModule": "crawling",
+      "publicationMode": "temporal-result",
+      "outboxOwner": null,
+      "consumerModules": [
+        "platform",
+        "audit",
+        "backlinks"
+      ],
+      "scope": "cross-module",
+      "payloadSchema": "json-schema/crawler-evidence.v1.schema.json",
+      "payloadSchemaVersion": 1,
+      "dedupeKey": "requestId",
+      "consumerWritePolicy": "projection-only"
+    }
+  ],
+  "crossModuleEvents": [
+    "crawling.evidence.recorded.v1"
+  ]
+}

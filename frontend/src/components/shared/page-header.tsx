@@ -1,12 +1,13 @@
 import { ChevronRight } from "lucide-react"
 import { Link, useParams } from "react-router"
 
+import type { NavigationItem } from "@/app/module-contract"
+import { defaultProject, getProject } from "@/app/project-context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { projects, type ModuleConfig } from "@/data/mock-data"
 
 type PageHeaderProps = {
-  module: ModuleConfig
+  module: NavigationItem
   actionLabel?: string
   actionIcon?: React.ReactNode
   onAction?: () => void
@@ -20,8 +21,8 @@ export function PageHeader({
   onAction,
   actionDisabled,
 }: PageHeaderProps) {
-  const { projectId = projects[0].id } = useParams()
-  const project = projects.find((item) => item.id === projectId) ?? projects[0]
+  const { projectId = defaultProject.id } = useParams()
+  const project = getProject(projectId)
 
   return (
     <div className="flex flex-col gap-4 border-b px-4 py-5 sm:px-6 lg:flex-row lg:items-end lg:justify-between lg:px-8">

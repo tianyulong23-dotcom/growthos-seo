@@ -1,0 +1,563 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:growthos:contract:crawler-evidence:v1",
+  "title": "crawler.evidence.v1",
+  "description": "Observed crawl evidence only. Platform, Audit, and Backlinks own all final business classifications and state transitions.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "crawler.evidence.v1"
+    },
+    "policyVersion": {
+      "const": "safefetch.gold.v1"
+    },
+    "evidenceId": {
+      "$ref": "#/$defs/nonBlankIdentifier"
+    },
+    "requestId": {
+      "$ref": "#/$defs/nonBlankIdentifier"
+    },
+    "taskType": {
+      "type": "string",
+      "enum": [
+        "site_understanding",
+        "technical_audit",
+        "backlink_validation"
+      ]
+    },
+    "tenant": {
+      "type": "object",
+      "properties": {
+        "organizationId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        }
+      },
+      "required": [
+        "organizationId",
+        "workspaceId"
+      ],
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "websiteProjectId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "websiteProjectKey": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        }
+      },
+      "required": [
+        "websiteProjectId",
+        "websiteProjectKey"
+      ],
+      "additionalProperties": false
+    },
+    "runId": {
+      "$ref": "#/$defs/nonBlankIdentifier"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "partial",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "collectedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "executionError": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "additionalProperties": false
+    },
+    "artifactRefs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^crawler/[^/]+/[^/]+/[^/]+/.+$"
+          },
+          "uri": {
+            "type": "string",
+            "format": "uri"
+          },
+          "contentType": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contentEncoding": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "key",
+          "uri",
+          "contentType",
+          "sha256",
+          "sizeBytes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "requestedUrl": {
+            "$ref": "#/$defs/httpUrl"
+          },
+          "finalUrl": {
+            "$ref": "#/$defs/httpUrl"
+          },
+          "statusCode": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 599
+          },
+          "contentType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "canonicalUrl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/httpUrl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "headings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "visibleTextExcerpt": {
+            "type": "string",
+            "maxLength": 12000
+          },
+          "structuredData": {
+            "type": "array",
+            "items": {}
+          },
+          "rendered": {
+            "type": "boolean"
+          },
+          "renderMode": {
+            "type": "string",
+            "enum": [
+              "",
+              "static",
+              "browser"
+            ]
+          },
+          "robotsDecision": {
+            "type": "string"
+          },
+          "securityDecision": {
+            "type": "string"
+          },
+          "resolvedIps": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "redirectChain": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/redirect"
+            }
+          },
+          "noindex": {
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/evidenceError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fetchedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "artifactKeys": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^crawler/[^/]+/[^/]+/[^/]+/.+$"
+            }
+          }
+        },
+        "required": [
+          "requestedUrl",
+          "finalUrl",
+          "statusCode",
+          "headings",
+          "visibleTextExcerpt",
+          "structuredData",
+          "rendered",
+          "renderMode",
+          "robotsDecision",
+          "securityDecision",
+          "resolvedIps",
+          "redirectChain",
+          "noindex",
+          "error",
+          "fetchedAt",
+          "artifactKeys"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "contactObservations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "sourceUrl": {
+            "$ref": "#/$defs/httpUrl"
+          },
+          "domPath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "visibleText": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "structuredRole": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedRole": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extractionConfidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "extractorVersion": {
+            "$ref": "#/$defs/nonBlankIdentifier"
+          }
+        },
+        "required": [
+          "email",
+          "sourceUrl",
+          "visibleText",
+          "extractionConfidence",
+          "extractorVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "backlinkObservations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sourceUrl": {
+            "$ref": "#/$defs/httpUrl"
+          },
+          "targetUrl": {
+            "$ref": "#/$defs/httpUrl"
+          },
+          "anchorText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "domPath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "visibleText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "statusCode": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 599
+          },
+          "finalUrl": {
+            "$ref": "#/$defs/httpUrl"
+          },
+          "robotsDecision": {
+            "type": "string"
+          },
+          "securityDecision": {
+            "type": "string"
+          },
+          "resolvedIps": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "renderMode": {
+            "type": "string",
+            "enum": [
+              "",
+              "static",
+              "browser"
+            ]
+          },
+          "redirectChain": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/redirect"
+            }
+          },
+          "noindex": {
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/evidenceError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "sourceUrl",
+          "targetUrl",
+          "present",
+          "statusCode",
+          "robotsDecision",
+          "securityDecision",
+          "resolvedIps",
+          "renderMode",
+          "redirectChain",
+          "noindex",
+          "error",
+          "observedAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "technicalObservations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sourceUrl": {
+            "$ref": "#/$defs/httpUrl"
+          },
+          "code": {
+            "$ref": "#/$defs/nonBlankIdentifier"
+          },
+          "category": {
+            "$ref": "#/$defs/nonBlankIdentifier"
+          },
+          "value": {},
+          "details": {
+            "type": "object"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "sourceUrl",
+          "code",
+          "category",
+          "value",
+          "observedAt"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "version",
+    "policyVersion",
+    "evidenceId",
+    "requestId",
+    "taskType",
+    "tenant",
+    "project",
+    "runId",
+    "outcome",
+    "collectedAt",
+    "executionError",
+    "artifactRefs",
+    "pages",
+    "contactObservations",
+    "backlinkObservations",
+    "technicalObservations"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "nonBlankIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": ".*\\S.*"
+    },
+    "httpUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://"
+    },
+    "evidenceError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "additionalProperties": false
+    },
+    "redirect": {
+      "type": "object",
+      "properties": {
+        "fromUrl": {
+          "$ref": "#/$defs/httpUrl"
+        },
+        "url": {
+          "$ref": "#/$defs/httpUrl"
+        },
+        "statusCode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 599
+        },
+        "securityDecision": {
+          "type": "string"
+        },
+        "resolvedIps": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "url",
+        "statusCode",
+        "securityDecision",
+        "resolvedIps"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

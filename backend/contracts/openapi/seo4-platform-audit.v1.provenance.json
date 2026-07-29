@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "growthos.openapi.provenance.v1",
+  "sourceRepository": "john3947/seo",
+  "sourceRef": "origin/main",
+  "sourceCommit": "8261ea91a881948e3982a0eb96383c4c8bfa2523",
+  "generatedAt": "2026-07-24",
+  "generator": "FastAPI app.openapi() under backend/api/uv.lock",
+  "document": "seo4-platform-audit.v1.json",
+  "documentSha256": "4bff20bf7680bafe9af9be49c3cc12484a8600c7231cb3318aa3797ab8a938b9",
+  "sourceBlobs": {
+    "backend/api/uv.lock": "16ea9417b4cb14346f66071e39ec93c89114ac58",
+    "backend/api/app/main.py": "936eb11f96eacfcb72a64bb15f8eee05be8505f4",
+    "backend/api/app/api/router.py": "758c51a9032ab3c7a5a26be9fc53e3b1c9e330ca",
+    "backend/api/app/api/routes/projects.py": "03357c462608b7ec86110bd2ebae047445cdf4f8",
+    "backend/api/app/api/routes/audits.py": "731d5fe6afcf522b17e1c13d0852e38b9128ae6e",
+    "backend/api/app/modules/projects/schemas.py": "cc7c893e62eb2dd53a84d9e1ecb284600e8f39cc",
+    "backend/api/app/modules/audit/models.py": "8b4292028814ef7f6115269f657de9e69534f5e5"
+  },
+  "operationCount": 27,
+  "pathCount": 23,
+  "privatePaths": [
+    "/health"
+  ],
+  "tagOwnership": {
+    "projects": "platform",
+    "audits": "audit"
+  }
+}

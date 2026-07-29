@@ -1,0 +1,28 @@
+From: Sender <sender@example.com>
+To: Recipient <recipient@example.com>
+Subject: =?UTF-8?Q?Quarterly_=E2=9C=93?=
+Message-ID: <complex@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer-boundary"
+
+--outer-boundary
+Content-Type: multipart/alternative; boundary="alternative-boundary"
+
+--alternative-boundary
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Plain body with encoded equals =3D sign.
+--alternative-boundary
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
+
+PHA+PHN0cm9uZz5IVE1MIGJvZHk8L3N0cm9uZz48L3A+
+--alternative-boundary--
+--outer-boundary
+Content-Type: text/plain; name="rates.txt"
+Content-Disposition: attachment; filename="rates.txt"
+Content-Transfer-Encoding: base64
+
+cmF0ZT0xMDAK
+--outer-boundary--

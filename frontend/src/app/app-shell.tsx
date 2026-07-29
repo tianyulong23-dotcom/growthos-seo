@@ -16,6 +16,16 @@ import {
 } from "lucide-react"
 import { Link, Outlet, useLocation, useNavigate, useParams } from "react-router"
 
+import {
+  getModulePath,
+  settingsNavigation,
+  workspaceNavigation,
+} from "@/app/platform-navigation"
+import {
+  defaultProject,
+  getProject,
+  projects,
+} from "@/app/project-context"
 import { AgentDock, MobileAgentSheet } from "@/components/agent/agent-dock"
 import { useTheme } from "@/components/theme-provider"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -47,22 +57,13 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { modules, projects } from "@/data/mock-data"
-
-function getModulePath(projectId: string, moduleId: string) {
-  const currentModule = modules.find((item) => item.id === moduleId)
-  if (!currentModule || currentModule.tabs.length === 0) {
-    return `/projects/${projectId}/${moduleId}`
-  }
-  return `/projects/${projectId}/${moduleId}/${currentModule.tabs[0].id}`
-}
 
 function AppSidebar() {
   const location = useLocation()
   const navigate = useNavigate()
   const { isMobile, setOpenMobile } = useSidebar()
-  const { projectId = projects[0].id } = useParams()
-  const project = projects.find((item) => item.id === projectId) ?? projects[0]
+  const { projectId = defaultProject.id } = useParams()
+  const project = getProject(projectId)
   const activeModule = location.pathname.split("/")[3] ?? "overview"
 
   function switchProject(nextProjectId: string) {
@@ -94,9 +95,9 @@ function AppSidebar() {
               <Command className="size-4.5" />
             </div>
             <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-              <div className="truncate text-sm font-semibold">SEO</div>
+              <div className="truncate text-sm font-semibold">GrowthOS</div>
               <div className="truncate text-xs text-muted-foreground">
-                SEO 工作台
+                SEO 与外链增长工作台
               </div>
             </div>
           </Link>
@@ -152,7 +153,11 @@ function AppSidebar() {
               ))}
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() =>
+                navigate(`/projects/${project.id}/backlinks/projects`)
+              }
+            >
               <Plus />
               新建项目
             </DropdownMenuItem>
@@ -165,7 +170,7 @@ function AppSidebar() {
           <SidebarGroupLabel>工作区</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {modules.slice(0, -1).map((item) => {
+              {workspaceNavigation.map((item) => {
                 const Icon = item.icon
                 return (
                   <SidebarMenuItem key={item.id}>
@@ -174,19 +179,19 @@ function AppSidebar() {
                       isActive={activeModule === item.id}
                       render={
                         <Link
-                          to={getModulePath(project.id, item.id)}
+                          to={getModulePath(project.id, item)}
                           onClick={closeMobileSidebar}
                         />
                       }
                     >
                       <Icon />
                       <span>{item.label}</span>
-                      {item.id === "audit" && (
+                      {item.badge && (
                         <Badge
-                          variant="destructive"
+                          variant={item.badge.variant}
                           className="ml-auto h-5 min-w-5 px-1.5 group-data-[collapsible=icon]:hidden"
                         >
-                          29
+                          {item.badge.value}
                         </Badge>
                       )}
                     </SidebarMenuButton>
@@ -206,7 +211,7 @@ function AppSidebar() {
               isActive={activeModule === "settings"}
               render={
                 <Link
-                  to={getModulePath(project.id, "settings")}
+                  to={getModulePath(project.id, settingsNavigation)}
                   onClick={closeMobileSidebar}
                 />
               }
@@ -229,9 +234,33 @@ function AppSidebar() {
 
 function HeaderActions() {
   const { theme, setTheme } = useTheme()
+  const navigate = useNavigate()
+  const { projectId = defaultProject.id } = useParams()
   const [tasks, setTasks] = React.useState([
-    { id: 1, title: "全站技术审计", detail: "已完成 8,472 / 8,472 页" },
-    { id: 2, title: "关键词排名更新", detail: "已完成 328 / 420 个" },
+    {
+      id: 1,
+      title: "补充 watchwise.io 联系人",
+      detail: "高优先级 · 外链机会",
+      href: `/projects/${projectId}/backlinks/opportunities`,
+    },
+    {
+      id: 2,
+      title: "确认 streamscope.co 开发信",
+      detail: "人工确认 · 邮件草稿",
+      href: `/projects/${projectId}/backlinks/email`,
+    },
+    {
+      id: 3,
+      title: "修复 livingroomlab.com 丢失链接",
+      detail: "高优先级 · 链接监控",
+      href: `/projects/${projectId}/performance/links`,
+    },
+    {
+      id: 4,
+      title: "生成 7 月客户报告",
+      detail: "数据完整度 86%",
+      href: `/projects/${projectId}/performance/reports`,
+    },
   ])
   const [notifications, setNotifications] = React.useState(3)
 
@@ -257,7 +286,11 @@ function HeaderActions() {
               <Badge variant="secondary">{tasks.length} 个任务</Badge>
             </DropdownMenuLabel>
             {tasks.map((task) => (
-              <DropdownMenuItem key={task.id} className="items-start">
+              <DropdownMenuItem
+                key={task.id}
+                className="items-start"
+                onClick={() => navigate(task.href)}
+              >
                 <CheckCircle2 className="mt-0.5 text-emerald-600" />
                 <span className="flex-1">
                   <span className="block">{task.title}</span>
@@ -306,16 +339,16 @@ function HeaderActions() {
             <DropdownMenuItem className="items-start">
               <span className="mt-1 size-2 rounded-full bg-destructive" />
               <span>
-                <span className="block">检测到 11 个新增 4xx 链接</span>
+                <span className="block">livingroomlab.com 链接已丢失</span>
                 <span className="text-xs font-normal text-muted-foreground">
-                  12 分钟前
+                  18 分钟前
                 </span>
               </span>
             </DropdownMenuItem>
             <DropdownMenuItem className="items-start">
               <span className="mt-1 size-2 rounded-full bg-primary" />
               <span>
-                <span className="block">关键词排名数据已更新</span>
+                <span className="block">streamerfocus.com 返回合作报价</span>
                 <span className="text-xs font-normal text-muted-foreground">
                   1 小时前
                 </span>

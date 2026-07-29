@@ -1,0 +1,217 @@
+{
+  "schemaVersion": "growthos.temporal.registry.v1",
+  "sourceCommit": "8261ea91a881948e3982a0eb96383c4c8bfa2523",
+  "legacyBindings": [
+    {
+      "kind": "taskQueue",
+      "name": "crawler-go",
+      "status": "replacement-required",
+      "replacement": "growthos.crawling.v1"
+    },
+    {
+      "kind": "workflowType",
+      "name": "CrawlWorkflow",
+      "status": "replacement-required",
+      "replacement": "crawlingEvidenceV1Workflow"
+    },
+    {
+      "kind": "workflowType",
+      "name": "RecalculateIssuesWorkflow",
+      "status": "replacement-required",
+      "replacement": "auditIssueRecalculationV1Workflow"
+    },
+    {
+      "kind": "activityType",
+      "name": "Activities.RunTask",
+      "status": "replacement-required",
+      "replacement": "crawlingCollectEvidenceV1"
+    },
+    {
+      "kind": "activityType",
+      "name": "Activities.RecalculateIssues",
+      "status": "replacement-required",
+      "replacement": "auditRecalculateIssuesV1"
+    },
+    {
+      "kind": "signalType",
+      "name": "pause",
+      "status": "replacement-required",
+      "replacement": "crawlingPauseV1"
+    },
+    {
+      "kind": "signalType",
+      "name": "stop",
+      "status": "replacement-required",
+      "replacement": "crawlingStopV1"
+    }
+  ],
+  "modules": [
+    {
+      "moduleId": "platform",
+      "implementationStatus": "target-contract",
+      "taskQueue": "growthos.platform.v1",
+      "databaseAccess": "writer",
+      "databaseRole": "growthos_platform_writer",
+      "allowedSchemas": [
+        "platform"
+      ],
+      "workflows": [
+        {
+          "workflowType": "platformSiteUnderstandingV1Workflow",
+          "workflowIdPattern": "platform:<workspaceId>:<websiteProjectId>:site-understanding:v1:<requestId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [],
+          "queryTypes": []
+        }
+      ],
+      "activityTypes": [
+        "platformBuildSiteProfileV1"
+      ],
+      "providers": [
+        {
+          "providerId": "business-profile-ai",
+          "killSwitch": "platform.business-profile-ai.v1"
+        }
+      ]
+    },
+    {
+      "moduleId": "audit",
+      "implementationStatus": "target-contract",
+      "taskQueue": "growthos.audit.v1",
+      "databaseAccess": "writer",
+      "databaseRole": "growthos_audit_writer",
+      "allowedSchemas": [
+        "audit"
+      ],
+      "workflows": [
+        {
+          "workflowType": "auditTechnicalAuditV1Workflow",
+          "workflowIdPattern": "audit:<workspaceId>:<websiteProjectId>:technical-audit:v1:<runId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [
+            "auditPauseV1",
+            "auditResumeV1",
+            "auditStopV1"
+          ],
+          "queryTypes": [
+            "auditProgressV1"
+          ]
+        },
+        {
+          "workflowType": "auditIssueRecalculationV1Workflow",
+          "workflowIdPattern": "audit:<workspaceId>:<websiteProjectId>:issue-recalculation:v1:<runId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [],
+          "queryTypes": []
+        }
+      ],
+      "activityTypes": [
+        "auditBuildConclusionsV1",
+        "auditRecalculateIssuesV1"
+      ],
+      "providers": [
+        {
+          "providerId": "google-pagespeed",
+          "killSwitch": "audit.google-pagespeed.v1"
+        }
+      ]
+    },
+    {
+      "moduleId": "crawling",
+      "implementationStatus": "executable",
+      "taskQueue": "growthos.crawling.v1",
+      "databaseAccess": "none",
+      "databaseRole": null,
+      "allowedSchemas": [],
+      "objectStorePrefix": "crawler/<organizationId>/<websiteProjectId>/<runId>/",
+      "workflows": [
+        {
+          "workflowType": "crawlingEvidenceV1Workflow",
+          "workflowIdPattern": "crawling:<workspaceId>:<websiteProjectId>:evidence:v1:<requestId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [
+            "crawlingPauseV1",
+            "crawlingStopV1"
+          ],
+          "queryTypes": [
+            "crawlingProgressV1"
+          ]
+        }
+      ],
+      "activityTypes": [
+        "crawlingCollectEvidenceV1"
+      ],
+      "providers": []
+    },
+    {
+      "moduleId": "backlinks",
+      "implementationStatus": "executable",
+      "taskQueue": "growthos.backlinks.v1",
+      "databaseAccess": "writer",
+      "databaseRole": "growthos_backlinks_writer",
+      "allowedSchemas": [
+        "backlinks"
+      ],
+      "workflows": [
+        {
+          "workflowType": "backlinksProjectAnalysisV1Workflow",
+          "workflowIdPattern": "backlinks:<workspaceId>:<websiteProjectId>:project-analysis:v1:<instanceId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [],
+          "queryTypes": []
+        },
+        {
+          "workflowType": "backlinksRecommendationRefillV1Workflow",
+          "workflowIdPattern": "backlinks:<workspaceId>:<websiteProjectId>:recommendation-refill:v1:<instanceId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [],
+          "queryTypes": []
+        },
+        {
+          "workflowType": "backlinksPlacementInitialValidationV1Workflow",
+          "workflowIdPattern": "backlinks:<workspaceId>:<websiteProjectId>:placement-initial-validation:v1:<instanceId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [],
+          "queryTypes": []
+        },
+        {
+          "workflowType": "backlinksPlacementMonitoringV1Workflow",
+          "workflowIdPattern": "backlinks:<workspaceId>:<websiteProjectId>:placement-monitoring:v1:<instanceId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [],
+          "queryTypes": []
+        }
+      ],
+      "activityTypes": [
+        "backlinksLoadProjectAnalysisContextV1",
+        "backlinksReserveRecommendationRefillV1",
+        "backlinksExecuteRecommendationRefillV1",
+        "backlinksRecordRecommendationRefillFailureV1",
+        "backlinksRunPlacementInitialValidationV1",
+        "backlinksRunPlacementMonitoringV1"
+      ],
+      "providers": [
+        {
+          "providerId": "dataforseo",
+          "killSwitch": "backlinks.dataforseo.v1"
+        }
+      ]
+    }
+  ]
+}

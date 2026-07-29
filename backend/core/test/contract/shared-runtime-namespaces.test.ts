@@ -1,0 +1,137 @@
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  backlinksRuntimeContract,
+  buildBacklinksWorkflowId,
+  isBacklinksWorkflowId,
+} from "../../src/modules/backlinks/workflows/namespaces.js";
+import {
+  BACKLINK_PLACEMENT_MONITORING_LIFECYCLE,
+  BACKLINK_PLACEMENT_MONITORING_REQUESTED,
+  BACKLINK_PROJECT_ANALYSIS_REQUESTED,
+  createTemporalBacklinkProjectAnalysisStarter,
+  createTemporalPlacementMonitoringStarter,
+} from "../../src/modules/backlinks/workflows/outbox-relay.js";
+
+const scope = {
+  workspaceId: "20000000-0000-4000-8000-000000000006",
+  websiteProjectId: "30000000-0000-4000-8000-000000000006",
+} as const;
+
+describe("BL-AI-ARCH-006 shared runtime namespaces", () => {
+  it("fixes the Backlinks queue, Worker permissions, and Provider Kill Switch", () => {
+    expect(backlinksRuntimeContract).toMatchObject({
+      moduleId: "backlinks",
+      taskQueue: "growthos.backlinks.v1",
+      databaseRole: "growthos_backlinks_writer",
+      allowedSchemas: ["backlinks"],
+      providers: {
+        dataForSeo: {
+          providerId: "dataforseo",
+          killSwitch: "backlinks.dataforseo.v1",
+        },
+      },
+    });
+  });
+
+  it("builds and validates module-scoped Workflow IDs", () => {
+    const workflowId = buildBacklinksWorkflowId({
+      ...scope,
+      workflow: "project-analysis",
+      instanceId: "40000000-0000-4000-8000-000000000006",
+    });
+
+    expect(workflowId).toBe(
+      "backlinks:20000000-0000-4000-8000-000000000006:" +
+        "30000000-0000-4000-8000-000000000006:project-analysis:v1:" +
+        "40000000-0000-4000-8000-000000000006",
+    );
+    expect(isBacklinksWorkflowId(workflowId)).toBe(true);
+    expect(isBacklinksWorkflowId("content:workspace:project:analysis:v1:job")).toBe(false);
+    expect(isBacklinksWorkflowId("backlink-recommendation-refill/job")).toBe(false);
+  });
+
+  it("starts only the registered Workflow type on the registered queue", async () => {
+    const start = vi.fn(async () => undefined);
+    const workflowId = buildBacklinksWorkflowId({
+      ...scope,
+      workflow: "project-analysis",
+      instanceId: "40000000-0000-4000-8000-000000000007",
+    });
+    const input = {
+      organizationId: "10000000-0000-4000-8000-000000000006",
+      ...scope,
+      jobId: "40000000-0000-4000-8000-000000000007",
+      workflowId,
+      snapshotVersion: 1,
+    };
+    const starter = createTemporalBacklinkProjectAnalysisStarter(
+      { start },
+      backlinksRuntimeContract.taskQueue,
+    );
+
+    await starter.start(input);
+    expect(start).toHaveBeenCalledWith(
+      backlinksRuntimeContract.workflows.projectAnalysis.workflowType,
+      {
+        workflowId,
+        taskQueue: "growthos.backlinks.v1",
+        args: [input],
+      },
+    );
+    expect(BACKLINK_PROJECT_ANALYSIS_REQUESTED).toBe(
+      "backlinks.project-analysis.requested.v1",
+    );
+    await expect(starter.start({
+      ...input,
+      workflowId: "audit:workspace:project:analysis:v1:job",
+    })).rejects.toThrow("BACKLINKS_WORKFLOW_ID_INVALID");
+  });
+
+  it("reserves Placement workflow IDs and monitoring dispatch for the same queue", async () => {
+    const start = vi.fn(async () => undefined);
+    const input = {
+      organizationId: "10000000-0000-4000-8000-000000000006",
+      ...scope,
+      placementId: "40000000-0000-4000-8000-000000000008",
+      monitorPolicyId: "40000000-0000-4000-8000-000000000009",
+      policyVersion: "placement-monitoring-v1",
+      scheduledFor: new Date("2026-07-29T10:00:00.000Z"),
+      runId: "40000000-0000-4000-8000-000000000010",
+      observationId: "40000000-0000-4000-8000-000000000011",
+      workerId: "backlinks-worker",
+      now: new Date("2026-07-29T10:00:00.000Z"),
+    };
+    const starter = createTemporalPlacementMonitoringStarter(
+      { start },
+      backlinksRuntimeContract.taskQueue,
+    );
+
+    await starter.start(input);
+    expect(start).toHaveBeenCalledWith(
+      backlinksRuntimeContract.workflows.placementMonitoring.workflowType,
+      {
+        workflowId: buildBacklinksWorkflowId({
+          ...scope,
+          workflow: "placement-monitoring",
+          instanceId: input.runId,
+        }),
+        taskQueue: backlinksRuntimeContract.taskQueue,
+        args: [input],
+      },
+    );
+    expect(
+      buildBacklinksWorkflowId({
+        ...scope,
+        workflow: "placement-initial-validation",
+        instanceId: input.placementId,
+      }),
+    ).toContain(":placement-initial-validation:v1:");
+    expect(BACKLINK_PLACEMENT_MONITORING_REQUESTED).toBe(
+      "backlinks.placement-monitoring.requested.v1",
+    );
+    expect(BACKLINK_PLACEMENT_MONITORING_LIFECYCLE).toBe(
+      "backlinks.placement-monitoring.lifecycle.v1",
+    );
+  });
+});
