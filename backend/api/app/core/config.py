@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +18,57 @@ class Settings(BaseSettings):
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     crawler_task_queue: str = "crawler-go"
+    agent_task_queue: str = "agent-ai"
+    content_task_queue: str = "content-ai"
+    content_target_seconds: int = Field(default=600, gt=0)
+    content_hard_timeout_seconds: int = Field(default=1200, gt=0)
+    content_execution_lease_seconds: int = Field(default=360, gt=0)
+    article_source_text_max_bytes: int = Field(default=2_000_000, gt=0)
+    dataforseo_login: str | None = None
+    dataforseo_password: str | None = None
+    dataforseo_base_url: str = "https://api.dataforseo.com"
+    dataforseo_cache_ttl_seconds: int = Field(default=86400, gt=0)
+    dataforseo_timeout_seconds: int = Field(default=45, gt=0)
+    article_research_provider: str = ""
+    article_research_base_url: str = ""
+    article_research_api_key: str = ""
+    article_research_model: str = ""
+    article_research_fallback_provider: str = ""
+    article_research_fallback_base_url: str = ""
+    article_research_fallback_api_key: str = ""
+    article_research_fallback_model: str = ""
+    article_research_timeout_seconds: int = Field(default=90, gt=0)
+    article_research_cache_ttl_seconds: int = Field(default=86_400, gt=0)
+    article_research_max_concurrency: int = Field(default=2, ge=1, le=8)
+    article_research_max_retries: int = Field(default=2, ge=0, le=5)
+    article_research_timeout_max_retries: int = Field(default=1, ge=0, le=2)
+    article_research_circuit_failure_threshold: int = Field(default=2, ge=1, le=10)
+    article_research_retry_initial_seconds: float = Field(default=0.5, ge=0, le=30)
+    article_research_retry_max_seconds: float = Field(default=5, ge=0, le=60)
+    article_writing_max_concurrency: int = Field(default=3, ge=1, le=6)
+    article_model_input_cost_per_million: float = Field(default=0.0, ge=0)
+    article_model_output_cost_per_million: float = Field(default=0.0, ge=0)
+    agent_actor_id: str = "local-user"
+    agent_max_model_rounds: int = Field(default=48, gt=0)
+    agent_max_consecutive_failures: int = Field(default=3, gt=0)
+    agent_tool_arguments_bytes: int = Field(default=256_000, ge=1_024)
+    agent_tool_result_bytes: int = Field(default=102_400, ge=1_024)
+    agent_tool_round_tokens: int = Field(default=8_000, ge=1_024)
+    agent_tool_context_tokens: int = Field(default=6_000, ge=1_024)
+    agent_tool_summary_tokens: int = Field(default=2_000, ge=256)
+    agent_final_answer_chars: int = Field(default=8_000, gt=0)
+    agent_model_timeout_seconds: int = Field(default=120, gt=0)
+    agent_read_tool_timeout_seconds: int = Field(default=60, gt=0)
+    agent_write_tool_timeout_seconds: int = Field(default=180, gt=0)
+    agent_run_timeout_seconds: int = Field(default=1_800, gt=0)
+    agent_execution_lease_seconds: int = Field(default=15, gt=0)
+    agent_context_window_tokens: int = Field(default=32_000, ge=8_192)
+    agent_context_trigger_tokens: int = Field(default=20_000, ge=4_096)
+    agent_context_input_tokens: int = Field(default=24_000, ge=4_096)
+    agent_context_recent_tokens: int = Field(default=5_000, ge=1_024)
+    agent_context_compaction_batch_tokens: int = Field(default=12_000, ge=1_024)
+    agent_context_summary_tokens: int = Field(default=2_000, ge=256)
+    agent_stuck_run_seconds: int = Field(default=300, gt=0)
     crawler_worker_executable: str | None = None
     crawler_worker_idle_timeout_seconds: float = 120
     crawler_database_url: str | None = None
@@ -25,6 +77,7 @@ class Settings(BaseSettings):
     crawler_fallback_proxy_url: str | None = None
     site_understanding_request_timeout: str = "12s"
     site_understanding_max_retries: int = 2
+    site_understanding_dispatch_interval_seconds: float = 5
     audit_control_timeout_seconds: float = 30
     audit_checkpoint_poll_interval_seconds: float = 0.1
     audit_reconcile_timeout_seconds: float = 10
@@ -39,8 +92,11 @@ class Settings(BaseSettings):
     google_pagespeed_api_key: str | None = None
     business_profile_ai_base_url: str | None = None
     business_profile_ai_api_key: str | None = None
+    business_profile_ai_provider: Literal["openai", "anthropic", "openrouter"] = "openai"
     business_profile_ai_model: str = "gpt-5.4-mini"
-    business_profile_ai_timeout: str = "20s"
+    business_profile_ai_timeout: str = "90s"
+    business_profile_ai_max_retries: int = 4
+    ai_settings_encryption_key: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

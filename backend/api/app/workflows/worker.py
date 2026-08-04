@@ -55,9 +55,7 @@ class LocalCrawlerWorkerLauncher:
 
             await asyncio.sleep(0.1)
             if process.returncode is not None:
-                raise RuntimeError(
-                    f"Crawler worker exited during startup; see {stderr_path}"
-                )
+                raise RuntimeError(f"Crawler worker exited during startup; see {stderr_path}")
             self._process = process
 
     async def stop(self) -> None:
@@ -107,17 +105,17 @@ class LocalCrawlerWorkerLauncher:
                 "SITE_UNDERSTANDING_REQUEST_TIMEOUT": (
                     self.settings.site_understanding_request_timeout
                 ),
-                "SITE_UNDERSTANDING_MAX_RETRIES": str(
-                    self.settings.site_understanding_max_retries
-                ),
+                "SITE_UNDERSTANDING_MAX_RETRIES": str(self.settings.site_understanding_max_retries),
                 "BUSINESS_PROFILE_AI_MODEL": self.settings.business_profile_ai_model,
                 "BUSINESS_PROFILE_AI_TIMEOUT": self.settings.business_profile_ai_timeout,
+                "BUSINESS_PROFILE_AI_MAX_RETRIES": str(
+                    self.settings.business_profile_ai_max_retries
+                ),
             }
         )
         optional_values = {
             "CRAWLER_BROWSER_CACHE_DIR": (
-                self.settings.crawler_browser_cache_dir
-                or str(self.executable.parent / "browser")
+                self.settings.crawler_browser_cache_dir or str(self.executable.parent / "browser")
             ),
             "CRAWLER_PROXY_URL": self.settings.crawler_proxy_url,
             "CRAWLER_FALLBACK_PROXY_URL": self.settings.crawler_fallback_proxy_url,
@@ -127,6 +125,7 @@ class LocalCrawlerWorkerLauncher:
             "GOOGLE_PAGESPEED_API_KEY": self.settings.google_pagespeed_api_key,
             "BUSINESS_PROFILE_AI_BASE_URL": self.settings.business_profile_ai_base_url,
             "BUSINESS_PROFILE_AI_API_KEY": self.settings.business_profile_ai_api_key,
+            "AI_SETTINGS_ENCRYPTION_KEY": self.settings.ai_settings_encryption_key,
         }
         environment.update(
             {name: value for name, value in optional_values.items() if value is not None}

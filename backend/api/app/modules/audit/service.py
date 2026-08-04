@@ -9,7 +9,7 @@ import re
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import SimpleNamespace
 from typing import Any, Protocol
@@ -18,10 +18,12 @@ from uuid import uuid4
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 from openpyxl import Workbook
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.core.config import Settings, get_settings
@@ -69,7 +71,7 @@ from app.modules.crawling.models import (
     PageSnapshot,
     PageSpeedResult,
 )
-from app.modules.projects.models import Project
+from app.modules.projects.models import Project, WorkflowDispatch
 from app.workflows.client import connect_temporal
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,8 @@ SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
 EXPORT_BATCH_SIZE = 1000
 VISUALIZATION_NODE_LIMIT = 500
 VISUALIZATION_EDGE_LIMIT = 5000
+EXCEL_CELL_CHARACTER_LIMIT = 32_767
+EXCEL_CELL_CONTENT_TARGET = 30_000
 ACTIVE_AUDIT_STATUSES = {"queued", "running", "stopping", "recalculating"}
 RESUMABLE_AUDIT_STATUSES = {"paused", "stopped", "failed"}
 
@@ -91,6 +95,10 @@ class AuditProjectNotFoundError(Exception):
 
 
 class AuditLaunchError(Exception):
+    pass
+
+
+class AuditCleanupError(Exception):
     pass
 
 
@@ -143,12 +151,16 @@ class TemporalWorkflowController:
         if self.worker_launcher is not None:
             await self.worker_launcher.ensure_started()
         client = await self._client()
-        await client.start_workflow(
-            "CrawlWorkflow",
-            task,
-            id=workflow_id,
-            task_queue=self.task_queue,
-        )
+        try:
+            await client.start_workflow(
+                "CrawlWorkflow",
+                task,
+                id=workflow_id,
+                task_queue=self.task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            # The API outbox may retry after Temporal accepted the first request.
+            return
 
     async def start_recalculation(
         self,
@@ -158,12 +170,15 @@ class TemporalWorkflowController:
         if self.worker_launcher is not None:
             await self.worker_launcher.ensure_started()
         client = await self._client()
-        await client.start_workflow(
-            "RecalculateIssuesWorkflow",
-            task,
-            id=workflow_id,
-            task_queue=self.task_queue,
-        )
+        try:
+            await client.start_workflow(
+                "RecalculateIssuesWorkflow",
+                task,
+                id=workflow_id,
+                task_queue=self.task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            return
 
     async def cancel(self, workflow_id: str) -> None:
         client = await self._client()
@@ -210,6 +225,20 @@ class AuditProjectRecord:
 
 
 @dataclass(frozen=True)
+class AuditIssueGroupRecord:
+    code: str
+    severity: str
+    category: str
+    title: str
+    affected_count: int
+    description: str
+    urls: list[str]
+    related_urls: list[str]
+    max_similarity: float
+    detail_examples: list[str]
+
+
+@dataclass(frozen=True)
 class AuditExportResult:
     filename: str
     media_type: str
@@ -248,6 +277,7 @@ class SQLAlchemyAuditRunRepository:
         self,
         project: AuditProjectRecord,
         run: CrawlRun,
+        task: dict[str, Any],
     ) -> bool:
         async with self.sessions() as session:
             locked_project = await session.scalar(
@@ -260,6 +290,13 @@ class SQLAlchemyAuditRunRepository:
             )
             if locked_project is None:
                 return False
+            existing_same_run = await session.get(CrawlRun, run.run_id)
+            if existing_same_run is not None:
+                return (
+                    existing_same_run.organization_id == project.organization_id
+                    and existing_same_run.project_id == project.id
+                    and existing_same_run.task_type == "technical_audit"
+                )
             active_run_id = await session.scalar(
                 select(CrawlRun.run_id)
                 .where(
@@ -274,6 +311,14 @@ class SQLAlchemyAuditRunRepository:
             if active_run_id is not None:
                 return False
             session.add(run)
+            session.add(
+                WorkflowDispatch(
+                    run_id=run.run_id,
+                    workflow_id=str(run.temporal_workflow_id),
+                    task_payload=task,
+                    status="pending",
+                )
+            )
             locked_project.audit_run_id = run.run_id
             locked_project.audit_health = None
             try:
@@ -282,6 +327,66 @@ class SQLAlchemyAuditRunRepository:
                 await session.rollback()
                 return False
             return True
+
+    async def list_pending_dispatches(
+        self,
+        limit: int,
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        WorkflowDispatch.run_id,
+                        WorkflowDispatch.workflow_id,
+                        WorkflowDispatch.task_payload,
+                    )
+                    .join(CrawlRun, CrawlRun.run_id == WorkflowDispatch.run_id)
+                    .where(
+                        WorkflowDispatch.status == "pending",
+                        WorkflowDispatch.next_attempt_at <= datetime.now(UTC),
+                        CrawlRun.task_type == "technical_audit",
+                    )
+                    .order_by(WorkflowDispatch.created_at, WorkflowDispatch.run_id)
+                    .limit(max(1, min(limit, 100)))
+                )
+            ).all()
+        return [
+            (row.run_id, row.workflow_id, dict(row.task_payload))
+            for row in rows
+        ]
+
+    async def mark_dispatch_succeeded(self, run_id: str) -> None:
+        async with self.sessions() as session:
+            dispatch = await session.get(WorkflowDispatch, run_id)
+            if dispatch is None:
+                return
+            dispatch.status = "dispatched"
+            dispatch.last_error = None
+            dispatch.dispatched_at = datetime.now(UTC)
+            dispatch.updated_at = datetime.now(UTC)
+            await session.commit()
+
+    async def record_dispatch_failure(self, run_id: str, message: str) -> None:
+        async with self.sessions() as session:
+            dispatch = await session.scalar(
+                select(WorkflowDispatch)
+                .where(WorkflowDispatch.run_id == run_id)
+                .with_for_update()
+            )
+            if dispatch is None or dispatch.status != "pending":
+                return
+            dispatch.attempts += 1
+            dispatch.last_error = message
+            retry_delay = min(60, 2 ** min(dispatch.attempts, 6))
+            dispatch.next_attempt_at = datetime.now(UTC) + timedelta(
+                seconds=retry_delay
+            )
+            dispatch.updated_at = datetime.now(UTC)
+            run = await session.get(CrawlRun, run_id)
+            if run is not None and run.status == "queued":
+                run.message = "任务已保存，等待技术审计服务恢复后自动重试"
+                run.updated_at = datetime.now(UTC)
+            await session.commit()
 
     async def get_run(
         self,
@@ -592,6 +697,154 @@ class SQLAlchemyAuditRunRepository:
                 ).all()
             )
 
+    async def list_issue_groups(
+        self,
+        run_id: str,
+        page: int,
+        page_size: int,
+        severity: str | None,
+        search: str,
+    ) -> tuple[list[AuditIssueGroupRecord], int, bool]:
+        async with self.sessions() as session:
+            has_persisted_issues = (
+                await session.scalar(
+                    select(AuditIssue.id).where(AuditIssue.run_id == run_id).limit(1)
+                )
+                is not None
+            )
+            if not has_persisted_issues:
+                return [], 0, False
+
+            severity_value = database_issue_severity()
+            conditions = [AuditIssue.run_id == run_id]
+            if severity:
+                conditions.append(severity_value == severity)
+            search_value = search.strip().lower()
+            if search_value:
+                conditions.append(
+                    or_(
+                        *(
+                            func.lower(column).contains(
+                                search_value,
+                                autoescape=True,
+                            )
+                            for column in (
+                                AuditIssue.code,
+                                AuditIssue.category,
+                                AuditIssue.issue,
+                                AuditIssue.details,
+                                AuditIssue.url,
+                            )
+                        )
+                    )
+                )
+
+            grouped = (
+                select(
+                    AuditIssue.code.label("code"),
+                    severity_value.label("severity"),
+                    AuditIssue.category.label("category"),
+                    AuditIssue.issue.label("title"),
+                    func.count(func.distinct(AuditIssue.url)).label("affected_count"),
+                    func.max(func.coalesce(AuditIssue.similarity, 0.0)).label("max_similarity"),
+                )
+                .where(*conditions)
+                .group_by(
+                    AuditIssue.code,
+                    severity_value,
+                    AuditIssue.category,
+                    AuditIssue.issue,
+                )
+                .subquery()
+            )
+            total = int(await session.scalar(select(func.count()).select_from(grouped)) or 0)
+            if total == 0:
+                return [], 0, True
+
+            grouped_severity_order = case(
+                (grouped.c.severity == "error", 0),
+                (grouped.c.severity == "warning", 1),
+                else_=2,
+            )
+            rows = (
+                await session.execute(
+                    select(grouped)
+                    .order_by(
+                        grouped_severity_order,
+                        grouped.c.category,
+                        grouped.c.title,
+                        grouped.c.code,
+                    )
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                )
+            ).all()
+            if not rows:
+                return [], total, True
+
+            keys = [(row.code, row.severity, row.category, row.title) for row in rows]
+            detail_groups = (
+                await session.execute(
+                    select(
+                        AuditIssue.code.label("code"),
+                        severity_value.label("severity"),
+                        AuditIssue.category.label("category"),
+                        AuditIssue.issue.label("title"),
+                        func.array_agg(func.distinct(AuditIssue.details)).label("details"),
+                        func.array_agg(func.distinct(AuditIssue.url)).label("urls"),
+                        func.array_agg(func.distinct(AuditIssue.related_url)).label(
+                            "related_urls"
+                        ),
+                    )
+                    .where(
+                        *conditions,
+                        tuple_(
+                            AuditIssue.code,
+                            severity_value,
+                            AuditIssue.category,
+                            AuditIssue.issue,
+                        ).in_(keys),
+                    )
+                    .group_by(
+                        AuditIssue.code,
+                        severity_value,
+                        AuditIssue.category,
+                        AuditIssue.issue,
+                    )
+                )
+            ).all()
+            details_by_key = {
+                (group.code, group.severity, group.category, group.title): (
+                    sorted(value for value in (group.details or []) if value)[:5],
+                    sorted(value for value in (group.urls or []) if value),
+                    sorted(value for value in (group.related_urls or []) if value),
+                )
+                for group in detail_groups
+            }
+
+            records: list[AuditIssueGroupRecord] = []
+            for row in rows:
+                key = (row.code, row.severity, row.category, row.title)
+                detail_examples, urls, related_urls = details_by_key.get(
+                    key,
+                    ([], [], []),
+                )
+                records.append(
+                    AuditIssueGroupRecord(
+                        code=row.code,
+                        severity=row.severity,
+                        category=row.category,
+                        title=row.title,
+                        affected_count=int(row.affected_count or 0),
+                        description=(detail_examples[0] if detail_examples else ""),
+                        urls=urls,
+                        related_urls=related_urls,
+                        max_similarity=float(row.max_similarity or 0),
+                        detail_examples=detail_examples,
+                    )
+                )
+            return records, total, True
+
     async def list_issues_batch(
         self,
         run_id: str,
@@ -840,29 +1093,29 @@ class SQLAlchemyAuditRunRepository:
             ).all()
             pages = [(snapshot, int(count)) for snapshot, count in page_rows]
             page_ids = [snapshot.page_id for snapshot, _ in pages]
-
+            if not page_ids:
+                return pages, [], total_nodes, 0
+            selected_page = aliased(Page)
+            selected_urls = select(func.rtrim(selected_page.normalized_url, "/")).where(
+                selected_page.id.in_(page_ids)
+            )
+            renderable_edge_filters = (
+                LinkEdge.run_id == run_id,
+                LinkEdge.is_internal.is_(True),
+                LinkEdge.source_page_id.in_(page_ids),
+                func.rtrim(LinkEdge.target_url, "/").in_(selected_urls),
+            )
             total_edges = int(
                 await session.scalar(
-                    select(func.count())
-                    .select_from(LinkEdge)
-                    .where(
-                        LinkEdge.run_id == run_id,
-                        LinkEdge.is_internal.is_(True),
-                    )
+                    select(func.count()).select_from(LinkEdge).where(*renderable_edge_filters)
                 )
                 or 0
             )
-            if not page_ids:
-                return pages, [], total_nodes, total_edges
             link_rows = (
                 await session.execute(
                     select(LinkEdge, Page.normalized_url)
                     .join(Page, Page.id == LinkEdge.source_page_id)
-                    .where(
-                        LinkEdge.run_id == run_id,
-                        LinkEdge.is_internal.is_(True),
-                        LinkEdge.source_page_id.in_(page_ids),
-                    )
+                    .where(*renderable_edge_filters)
                     .order_by(Page.normalized_url, LinkEdge.target_url)
                     .limit(VISUALIZATION_EDGE_LIMIT)
                 )
@@ -882,6 +1135,37 @@ class SQLAlchemyAuditRunRepository:
                 ).all()
             )
 
+    async def pagespeed_counts(self, run_ids: list[str]) -> dict[str, tuple[int, int]]:
+        if not run_ids:
+            return {}
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        PageSpeedResult.run_id,
+                        func.count(PageSpeedResult.id),
+                        func.sum(
+                            case(
+                                (
+                                    or_(
+                                        PageSpeedResult.error.is_(None),
+                                        PageSpeedResult.error == "",
+                                    ),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                    )
+                    .where(PageSpeedResult.run_id.in_(run_ids))
+                    .group_by(PageSpeedResult.run_id)
+                )
+            ).all()
+        return {
+            str(run_id): (int(total or 0), int(successful or 0))
+            for run_id, total, successful in rows
+        }
+
 
 class AuditService:
     def __init__(
@@ -900,10 +1184,11 @@ class AuditService:
         self,
         project_id: str,
         request: CreateAuditRunRequest,
+        operation_id: str | None = None,
     ) -> AuditRunResponse:
         self._validate_project_id(project_id)
         project = await self._project(project_id)
-        run_id = str(uuid4())
+        run_id = operation_id or str(uuid4())
         workflow_id = f"crawler:technical_audit:{run_id}"
         target_url = normalize_target_url(project.domain)
         task = build_task(self.settings, project, run_id, target_url, request)
@@ -924,24 +1209,43 @@ class AuditService:
             can_resume=False,
             created_at=now,
         )
-        created = await self.repository.create_for_project(project, run)
+        created = await self.repository.create_for_project(project, run, task)
         if not created:
             raise AuditStateError("这个项目已有正在运行的审计")
+        if not await self._dispatch(run_id, workflow_id, task):
+            run.message = "任务已保存，等待技术审计服务恢复后自动重试"
+        return run_response(run, page_speed_count=0)
+
+    async def dispatch_pending_workflows(self, limit: int = 20) -> int:
+        dispatched = 0
+        for run_id, workflow_id, task in await self.repository.list_pending_dispatches(
+            limit
+        ):
+            if await self._dispatch(run_id, workflow_id, task):
+                dispatched += 1
+        return dispatched
+
+    async def _dispatch(
+        self,
+        run_id: str,
+        workflow_id: str,
+        task: dict[str, Any],
+    ) -> bool:
         try:
             await self.controller.start(task, workflow_id)
         except Exception as exc:
-            await self.repository.update_run_if_status(
-                run_id,
-                {"queued"},
-                expected_workflow_id=workflow_id,
-                status="failed",
-                stage="failed",
-                message="无法连接技术审计任务服务",
-                can_resume=False,
-                finished_at=datetime.now(UTC),
+            logger.warning(
+                "Unable to dispatch technical audit workflow",
+                extra={"run_id": run_id},
+                exc_info=exc,
             )
-            raise AuditLaunchError from exc
-        return run_response(run, page_speed_count=0)
+            await self.repository.record_dispatch_failure(
+                run_id,
+                "技术审计任务服务暂时不可用",
+            )
+            return False
+        await self.repository.mark_dispatch_succeeded(run_id)
+        return True
 
     async def list_runs(
         self,
@@ -973,8 +1277,15 @@ class AuditService:
                 search,
                 status,
             )
+        page_speed_counts = await self.repository.pagespeed_counts([run.run_id for run in runs])
         return AuditRunCollection(
-            items=[run_response(run) for run in runs],
+            items=[
+                run_response(
+                    run,
+                    *page_speed_counts.get(run.run_id, (0, 0)),
+                )
+                for run in runs
+            ],
             total=total,
             page=page,
             page_size=page_size,
@@ -984,8 +1295,10 @@ class AuditService:
         run = await self._run(project_id, run_id)
         if await self._reconcile_visible_runs([run]):
             run = await self._run(project_id, run_id)
-        page_speed_count = len(await self.repository.list_pagespeed(run_id))
-        response = run_response(run, page_speed_count)
+        page_speed_results = await self.repository.list_pagespeed(run_id)
+        page_speed_count = len(page_speed_results)
+        page_speed_success_count = sum(not item.error for item in page_speed_results)
+        response = run_response(run, page_speed_count, page_speed_success_count)
         if response.summary is not None:
             await self.repository.update_project_health(
                 run.organization_id,
@@ -1113,9 +1426,7 @@ class AuditService:
             can_resume=False,
         )
         if not claimed:
-            raise AuditStateError(
-                "Audit status changed or another audit is currently active"
-            )
+            raise AuditStateError("Audit status changed or another audit is currently active")
         try:
             await self.controller.start_recalculation(task, workflow_id)
         except Exception as exc:
@@ -1307,7 +1618,12 @@ class AuditService:
                 run.run_id,
             )
         except Exception as exc:
-            raise AuditLaunchError("无法清理审计对象文件") from exc
+            logger.exception(
+                "audit object cleanup failed; keeping database record",
+                extra={"run_id": run.run_id},
+                exc_info=exc,
+            )
+            raise AuditCleanupError from exc
         deleted = await self.repository.delete_run(project, run_id)
         if not deleted:
             raise AuditStateError("审计状态已变化，请刷新后重试")
@@ -1322,59 +1638,22 @@ class AuditService:
         search: str,
     ) -> AuditIssueCollection:
         run = await self._run(project_id, run_id)
-        issues = await self.repository.list_issues(run_id)
-        if not issues:
-            checkpoint = await self._active_checkpoint(run)
+        groups, total, has_persisted_issues = await self.repository.list_issue_groups(
+            run_id,
+            page,
+            page_size,
+            severity,
+            search,
+        )
+        if not has_persisted_issues:
+            checkpoint = await self._result_checkpoint(run)
             issues = checkpoint_issues(checkpoint)
-        groups: dict[tuple[str, str, str, str, str], list[AuditIssue]] = {}
-        for issue in issues:
-            if severity and normalize_severity(issue.severity) != severity:
-                continue
-            haystack = (
-                f"{issue.code} {issue.category} {issue.issue} {issue.details} {issue.url}".lower()
-            )
-            if search and search.lower() not in haystack:
-                continue
-            key = (
-                issue.code,
-                normalize_severity(issue.severity),
-                issue.category,
-                issue.issue,
-                issue.details,
-            )
-            groups.setdefault(key, []).append(issue)
-        items = [
-            AuditIssueResponse(
-                id=(
-                    f"{code}:{severity_value}:"
-                    f"{hashlib.sha256(chr(31).join((code, severity_value, category, title, details)).encode()).hexdigest()[:16]}"
-                ),
-                title=title,
-                code=code,
-                severity=severity_value,
-                category=category,
-                affected_count=len({item.url for item in values}),
-                description=details,
-                recommendation=issue_recommendation(code),
-                urls=sorted({item.url for item in values}),
-                raw={
-                    "related_urls": sorted(
-                        {item.related_url for item in values if item.related_url}
-                    ),
-                    "max_similarity": max(
-                        (item.similarity or 0 for item in values),
-                        default=0,
-                    ),
-                },
-            )
-            for (code, severity_value, category, title, details), values in groups.items()
-        ]
-        severity_order = {"error": 0, "warning": 1, "notice": 2}
-        items.sort(key=lambda item: (severity_order[item.severity], item.category, item.title))
-        total = len(items)
-        start = (page - 1) * page_size
+            all_groups = group_issue_records(issues, severity, search)
+            total = len(all_groups)
+            start = (page - 1) * page_size
+            groups = all_groups[start : start + page_size]
         return AuditIssueCollection(
-            items=items[start : start + page_size],
+            items=[issue_group_response(group) for group in groups],
             total=total,
             page=page,
             page_size=page_size,
@@ -1400,7 +1679,7 @@ class AuditService:
             status_family,
         )
         if total == 0:
-            checkpoint = await self._active_checkpoint(run)
+            checkpoint = await self._result_checkpoint(run)
             checkpoint_items = checkpoint_page_responses(
                 checkpoint,
                 search,
@@ -1443,7 +1722,7 @@ class AuditService:
             status_family,
         )
         if total == 0:
-            checkpoint = await self._active_checkpoint(run)
+            checkpoint = await self._result_checkpoint(run)
             checkpoint_items = checkpoint_link_responses(
                 checkpoint,
                 search,
@@ -1484,7 +1763,7 @@ class AuditService:
             status_family,
         )
         if total == 0:
-            checkpoint = await self._active_checkpoint(run)
+            checkpoint = await self._result_checkpoint(run)
             checkpoint_items = checkpoint_external_resource_responses(
                 checkpoint,
                 search,
@@ -1514,7 +1793,7 @@ class AuditService:
         run = await self._run(project_id, run_id)
         rows = await self.repository.status_codes(run_id)
         if not rows:
-            checkpoint = await self._active_checkpoint(run)
+            checkpoint = await self._result_checkpoint(run)
             rows = checkpoint_status_codes(checkpoint)
         rows.sort(key=lambda row: (row[0] == 0, row[0], row[1]))
         total = sum(count for _, _, count in rows)
@@ -1540,7 +1819,7 @@ class AuditService:
         run = await self._run(project_id, run_id)
         pages, links, total_nodes, total_edges = await self.repository.visualization(run_id)
         if not pages:
-            checkpoint = await self._active_checkpoint(run)
+            checkpoint = await self._result_checkpoint(run)
             return checkpoint_visualization(checkpoint)
         node_by_url: dict[str, str] = {}
         nodes: list[AuditVisualizationNode] = []
@@ -1581,9 +1860,7 @@ class AuditService:
             truncated=total_nodes > len(nodes) or total_edges > len(links),
         )
 
-    async def _active_checkpoint(self, run: CrawlRun) -> dict[str, Any] | None:
-        if normalized_run_status(run.status) not in ACTIVE_AUDIT_STATUSES:
-            return None
+    async def _result_checkpoint(self, run: CrawlRun) -> dict[str, Any] | None:
         checkpoint = await self.repository.load_checkpoint(run.run_id)
         return checkpoint if isinstance(checkpoint, dict) else None
 
@@ -1620,8 +1897,8 @@ class AuditService:
         dataset: AuditExportDataset,
         format_value: AuditExportFormat,
     ) -> AuditExportResult:
-        await self._run(project_id, run_id)
-        rows = self._export_rows(run_id, dataset)
+        run = await self._run(project_id, run_id)
+        rows = self._export_rows(run, dataset)
         filename = f"audit-{run_id}-{dataset}.{format_value}"
         if format_value == "xlsx":
             return AuditExportResult(
@@ -1637,11 +1914,12 @@ class AuditService:
 
     async def _export_rows(
         self,
-        run_id: str,
+        run: CrawlRun,
         dataset: AuditExportDataset,
     ) -> AsyncIterator[dict[str, Any]]:
+        run_id = run.run_id
         if dataset == "issues":
-            async for row in self._issue_export_rows(run_id):
+            async for row in self._issue_export_rows(run):
                 yield row
             return
 
@@ -1672,6 +1950,16 @@ class AuditService:
                 export_rows = [
                     link_response(edge, source).model_dump(mode="json") for edge, source in rows
                 ]
+            if page == 1 and total == 0:
+                checkpoint = await self._result_checkpoint(run)
+                checkpoint_rows = (
+                    checkpoint_page_responses(checkpoint, "", None, None)
+                    if dataset == "pages"
+                    else checkpoint_link_responses(checkpoint, "", None, None)
+                )
+                for checkpoint_row in checkpoint_rows:
+                    yield checkpoint_row.model_dump(mode="json")
+                return
             for row in export_rows:
                 yield row
             if not rows or page * EXPORT_BATCH_SIZE >= total:
@@ -1680,54 +1968,28 @@ class AuditService:
 
     async def _issue_export_rows(
         self,
-        run_id: str,
+        run: CrawlRun,
     ) -> AsyncIterator[dict[str, Any]]:
-        current_key: tuple[str, str, str, str, str] | None = None
-        urls: set[str] = set()
-        related_urls: set[str] = set()
-        max_similarity = 0.0
+        run_id = run.run_id
         page = 1
 
         while True:
-            issues = await self.repository.list_issues_batch(
+            groups, total, has_persisted_issues = await self.repository.list_issue_groups(
                 run_id,
                 page,
                 EXPORT_BATCH_SIZE,
+                None,
+                "",
             )
-            for issue in issues:
-                key = (
-                    issue.code,
-                    normalize_severity(issue.severity),
-                    issue.category,
-                    issue.issue,
-                    issue.details,
-                )
-                if current_key is not None and key != current_key:
-                    yield issue_export_row(
-                        current_key,
-                        urls,
-                        related_urls,
-                        max_similarity,
-                    )
-                    urls = set()
-                    related_urls = set()
-                    max_similarity = 0.0
-                current_key = key
-                urls.add(issue.url)
-                if issue.related_url:
-                    related_urls.add(issue.related_url)
-                max_similarity = max(max_similarity, issue.similarity or 0)
-            if len(issues) < EXPORT_BATCH_SIZE:
-                break
+            if page == 1 and not has_persisted_issues:
+                checkpoint = await self._result_checkpoint(run)
+                groups = group_issue_records(checkpoint_issues(checkpoint), None, "")
+                total = len(groups)
+            for group in groups:
+                yield issue_group_response(group).model_dump(mode="json")
+            if not groups or page * EXPORT_BATCH_SIZE >= total:
+                return
             page += 1
-
-        if current_key is not None:
-            yield issue_export_row(
-                current_key,
-                urls,
-                related_urls,
-                max_similarity,
-            )
 
     async def _project(self, project_id: str) -> AuditProjectRecord:
         project = await self.repository.get_project(
@@ -1785,7 +2047,11 @@ def build_task(
     return task
 
 
-def run_response(run: CrawlRun, page_speed_count: int | None = None) -> AuditRunResponse:
+def run_response(
+    run: CrawlRun,
+    page_speed_count: int | None = None,
+    page_speed_success_count: int | None = None,
+) -> AuditRunResponse:
     status = normalized_audit_run_status(run.status)
     summary = (
         AuditSummary.model_validate(run.summary or {})
@@ -1803,22 +2069,27 @@ def run_response(run: CrawlRun, page_speed_count: int | None = None) -> AuditRun
             status="disabled",
             message="本次审计未启用 PageSpeed",
         )
-    elif page_speed_count is None and status not in {"completed", "failed"}:
+    elif status not in {"completed", "failed"} and not page_speed_count:
         page_speed = AuditPageSpeedState(
             configured=True,
             status="running" if status == "running" else "pending",
             message="PageSpeed 将在页面抓取后执行",
         )
     elif (page_speed_count or 0) > 0:
+        successful = page_speed_success_count or 0
         page_speed = AuditPageSpeedState(
             configured=True,
-            status="completed",
-            message=f"已完成 {page_speed_count} 条 PageSpeed 分析",
+            status="completed" if successful > 0 else "failed",
+            message=(
+                f"已完成 {successful}/{page_speed_count} 条 PageSpeed 分析"
+                if successful > 0
+                else f"{page_speed_count} 条 PageSpeed 分析全部失败"
+            ),
         )
     else:
         page_speed = AuditPageSpeedState(
             configured=True,
-            status="failed" if status == "failed" else "pending",
+            status="failed" if status in {"completed", "failed"} else "pending",
             message="尚无 PageSpeed 分析结果",
         )
     return AuditRunResponse(
@@ -1926,20 +2197,12 @@ def checkpoint_page_responses(
                 title=title,
                 description=str(value.get("description") or ""),
                 content_type=str(value.get("content_type") or ""),
-                indexable=(
-                    None
-                    if item_status in {None, 0}
-                    else "noindex" not in robots.lower()
-                ),
+                indexable=(None if item_status in {None, 0} else "noindex" not in robots.lower()),
                 word_count=optional_int(value.get("word_count")),
                 response_time_ms=optional_int(value.get("response_time_ms")),
                 rendered=bool(value.get("rendered")),
                 issues_count=issue_counts.get(requested_url, 0)
-                + (
-                    issue_counts.get(final_url, 0)
-                    if final_url != requested_url
-                    else 0
-                ),
+                + (issue_counts.get(final_url, 0) if final_url != requested_url else 0),
                 depth=optional_int(value.get("depth")),
                 canonical=str(value.get("canonical") or ""),
                 h1=dict_list(value.get("h1")),
@@ -1971,7 +2234,7 @@ def checkpoint_page_responses(
                 discovered_from=str(value.get("discovered_from") or ""),
                 error=str(value.get("error") or ""),
                 error_type=str(value.get("error_type") or ""),
-                raw=value,
+                raw={},
             )
         )
     items.sort(key=lambda item: (item.depth or 0, item.final_url))
@@ -2087,10 +2350,7 @@ def checkpoint_status_codes(
         error_type = str(value.get("error_type") or "")
         key = (status_code, error_type)
         counts[key] = counts.get(key, 0) + 1
-    return [
-        (status_code, error_type, count)
-        for (status_code, error_type), count in counts.items()
-    ]
+    return [(status_code, error_type, count) for (status_code, error_type), count in counts.items()]
 
 
 def checkpoint_visualization(
@@ -2144,10 +2404,7 @@ def checkpoint_visualization(
         edges=edges,
         total_nodes=len(all_pages),
         total_edges=len(all_links),
-        truncated=(
-            len(all_pages) > len(nodes)
-            or renderable_edge_count > len(edges)
-        ),
+        truncated=(len(all_pages) > len(nodes) or renderable_edge_count > len(edges)),
     )
 
 
@@ -2281,25 +2538,7 @@ def page_response(snapshot: PageSnapshot, issue_count: int) -> AuditPageResponse
         discovered_from=snapshot.discovered_from or "",
         error=snapshot.error or "",
         error_type=snapshot.error_type or "",
-        raw={
-            "h1": snapshot.h1,
-            "h2": snapshot.h2,
-            "h3": snapshot.h3,
-            "meta_tags": snapshot.meta_tags,
-            "open_graph": snapshot.open_graph,
-            "twitter_tags": snapshot.twitter_tags,
-            "analytics": snapshot.analytics,
-            "images": snapshot.images,
-            "broken_images": snapshot.broken_images,
-            "hreflang": snapshot.hreflang,
-            "schema_org": snapshot.schema_org,
-            "redirects": snapshot.redirects,
-            "linked_from": snapshot.linked_from,
-            "charset": snapshot.charset,
-            "viewport": snapshot.viewport,
-            "error": snapshot.error,
-            "error_type": snapshot.error_type,
-        },
+        raw={},
     )
 
 
@@ -2394,6 +2633,14 @@ def normalize_severity(value: str) -> str:
     return "notice"
 
 
+def database_issue_severity():
+    return case(
+        (AuditIssue.severity == "error", "error"),
+        (AuditIssue.severity == "warning", "warning"),
+        else_="notice",
+    )
+
+
 def progress_percentage(
     stage: str,
     discovered: int,
@@ -2407,7 +2654,7 @@ def progress_percentage(
         return 99
     target_pages = max(discovered, 1)
     if isinstance(max_pages, int) and max_pages > 0:
-        target_pages = min(target_pages, max_pages)
+        target_pages = max_pages
     crawl_progress = min(
         94,
         20 + round(70 * min(processed, target_pages) / target_pages),
@@ -2469,29 +2716,100 @@ def normalize_graph_url(value: str) -> str:
     return value.rstrip("/") or value
 
 
-def issue_export_row(
-    key: tuple[str, str, str, str, str],
-    urls: set[str],
-    related_urls: set[str],
-    max_similarity: float,
-) -> dict[str, Any]:
-    code, severity, category, title, details = key
-    digest_source = chr(31).join((code, severity, category, title, details))
+def group_issue_records(
+    issues: list[Any],
+    severity: str | None,
+    search: str,
+) -> list[AuditIssueGroupRecord]:
+    grouped: dict[
+        tuple[str, str, str, str],
+        dict[str, Any],
+    ] = {}
+    search_value = search.strip().casefold()
+    for issue in issues:
+        severity_value = normalize_severity(issue.severity)
+        if severity and severity_value != severity:
+            continue
+        haystack = (
+            f"{issue.code} {issue.category} {issue.issue} {issue.details} {issue.url}"
+        ).casefold()
+        if search_value and search_value not in haystack:
+            continue
+        key = (
+            issue.code,
+            severity_value,
+            issue.category,
+            issue.issue,
+        )
+        values = grouped.setdefault(
+            key,
+            {
+                "details": set(),
+                "urls": set(),
+                "related_urls": set(),
+                "max_similarity": 0.0,
+            },
+        )
+        if issue.details:
+            values["details"].add(issue.details)
+        values["urls"].add(issue.url)
+        if issue.related_url:
+            values["related_urls"].add(issue.related_url)
+        values["max_similarity"] = max(
+            values["max_similarity"],
+            issue.similarity or 0,
+        )
+
+    records: list[AuditIssueGroupRecord] = []
+    for (code, severity_value, category, title), values in grouped.items():
+        detail_examples = sorted(values["details"])
+        records.append(
+            AuditIssueGroupRecord(
+                code=code,
+                severity=severity_value,
+                category=category,
+                title=title,
+                affected_count=len(values["urls"]),
+                description=detail_examples[0] if detail_examples else "",
+                urls=sorted(values["urls"]),
+                related_urls=sorted(values["related_urls"]),
+                max_similarity=float(values["max_similarity"]),
+                detail_examples=detail_examples[:5],
+            )
+        )
+    severity_order = {"error": 0, "warning": 1, "notice": 2}
+    records.sort(
+        key=lambda item: (
+            severity_order[item.severity],
+            item.category,
+            item.title,
+            item.code,
+        )
+    )
+    return records
+
+
+def issue_group_response(group: AuditIssueGroupRecord) -> AuditIssueResponse:
+    digest_source = chr(31).join((group.code, group.severity, group.category, group.title))
     return AuditIssueResponse(
-        id=f"{code}:{severity}:{hashlib.sha256(digest_source.encode()).hexdigest()[:16]}",
-        title=title,
-        code=code,
-        severity=severity,
-        category=category,
-        affected_count=len(urls),
-        description=details,
-        recommendation=issue_recommendation(code),
-        urls=sorted(urls),
+        id=(
+            f"{group.code}:{group.severity}:"
+            f"{hashlib.sha256(digest_source.encode()).hexdigest()[:16]}"
+        ),
+        title=group.title,
+        code=group.code,
+        severity=group.severity,
+        category=group.category,
+        affected_count=group.affected_count,
+        description=group.description,
+        recommendation=issue_recommendation(group.code),
+        urls=group.urls,
         raw={
-            "related_urls": sorted(related_urls),
-            "max_similarity": max_similarity,
+            "related_urls": group.related_urls,
+            "max_similarity": group.max_similarity,
+            "detail_examples": group.detail_examples,
         },
-    ).model_dump(mode="json")
+    )
 
 
 def export_media_type(format_value: AuditExportFormat) -> str:
@@ -2506,6 +2824,70 @@ def export_cell(value: Any) -> Any:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return value
+
+
+def spreadsheet_cell(value: Any) -> Any:
+    cell = export_cell(value)
+    if not isinstance(cell, str):
+        return cell
+    stripped = cell.lstrip()
+    if stripped.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + cell
+    return cell
+
+
+def spreadsheet_row_variants(row: dict[str, Any]) -> list[dict[str, Any]]:
+    urls = row.get("urls")
+    raw = row.get("raw")
+    related_urls = raw.get("related_urls") if isinstance(raw, dict) else None
+    if not isinstance(urls, list) or not isinstance(related_urls, list):
+        return [row]
+    if (
+        len(str(spreadsheet_cell(urls))) <= EXCEL_CELL_CHARACTER_LIMIT
+        and len(str(spreadsheet_cell(raw))) <= EXCEL_CELL_CHARACTER_LIMIT
+    ):
+        return [row]
+
+    url_chunks = spreadsheet_list_chunks(urls)
+    related_url_chunks = spreadsheet_list_chunks(related_urls)
+    variant_count = max(len(url_chunks), len(related_url_chunks))
+    variants: list[dict[str, Any]] = []
+    for index in range(variant_count):
+        variant = dict(row)
+        variant["urls"] = url_chunks[index] if index < len(url_chunks) else []
+        if isinstance(variant.get("affected_count"), int):
+            variant["affected_count"] = len(variant["urls"])
+        variant_raw = dict(raw)
+        variant_raw["related_urls"] = (
+            related_url_chunks[index] if index < len(related_url_chunks) else []
+        )
+        variant["raw"] = variant_raw
+        variants.append(variant)
+    return variants
+
+
+def spreadsheet_list_chunks(values: list[Any]) -> list[list[Any]]:
+    if not values:
+        return [[]]
+
+    chunks: list[list[Any]] = []
+    current: list[Any] = []
+    current_length = 2
+    for value in values:
+        encoded = json.dumps(value, ensure_ascii=False)
+        if len(encoded) + 2 > EXCEL_CELL_CONTENT_TARGET:
+            raise ValueError("单个导出值超过 Excel 单元格限制")
+        separator_length = 2 if current else 0
+        if current and current_length + separator_length + len(encoded) > EXCEL_CELL_CONTENT_TARGET:
+            chunks.append(current)
+            current = []
+            current_length = 2
+            separator_length = 0
+        current.append(value)
+        current_length += separator_length + len(encoded)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 async def stream_export(
@@ -2542,7 +2924,7 @@ async def stream_export(
         if writer is None:
             writer = csv.DictWriter(output, fieldnames=list(row))
             writer.writeheader()
-        writer.writerow({key: export_cell(value) for key, value in row.items()})
+        writer.writerow({key: spreadsheet_cell(value) for key, value in row.items()})
         buffered_rows += 1
         if buffered_rows >= 100:
             yield output.getvalue().encode("utf-8")
@@ -2567,7 +2949,14 @@ async def write_xlsx_export(rows: AsyncIterator[dict[str, Any]]) -> str:
             if not fieldnames:
                 fieldnames = list(row)
                 worksheet.append(fieldnames)
-            worksheet.append([export_cell(row.get(key)) for key in fieldnames])
+            for variant in spreadsheet_row_variants(row):
+                cells = [spreadsheet_cell(variant.get(key)) for key in fieldnames]
+                if any(
+                    isinstance(cell, str) and len(cell) > EXCEL_CELL_CHARACTER_LIMIT
+                    for cell in cells
+                ):
+                    raise ValueError("导出内容超过 Excel 单元格限制")
+                worksheet.append(cells)
         workbook.save(path)
         return path
     except Exception:

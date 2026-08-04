@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from __future__ import annotations
-
+import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -16,6 +15,11 @@ from sqlalchemy.orm import aliased
 
 from app.core.config import Settings, get_settings
 from app.db.session import session_factory
+from app.modules.audit.object_storage import (
+    AuditObjectCleaner,
+    NoopAuditObjectCleaner,
+    S3AuditObjectCleaner,
+)
 from app.modules.audit.service import (
     TemporalWorkflowController,
     normalized_audit_run_status,
@@ -23,7 +27,12 @@ from app.modules.audit.service import (
     progress_percentage,
 )
 from app.modules.crawling.models import CrawlRun, Page
-from app.modules.projects.models import Project, SiteProfile
+from app.modules.projects.models import (
+    Project,
+    SiteProfile,
+    SiteProfileOperation,
+    WorkflowDispatch,
+)
 from app.modules.projects.object_storage import (
     S3SiteIconReader,
     SiteIconReader,
@@ -37,6 +46,8 @@ from app.modules.projects.schemas import (
 )
 from app.workflows.worker import get_crawler_worker_launcher
 
+logger = logging.getLogger(__name__)
+
 
 class ProjectAlreadyExistsError(Exception):
     pass
@@ -47,6 +58,10 @@ class ProjectLaunchError(Exception):
 
 
 class ProjectNotFoundError(Exception):
+    pass
+
+
+class ProjectDeleteError(Exception):
     pass
 
 
@@ -103,6 +118,7 @@ class ProjectRecord:
     audit_workflow_id: str | None
     audit_health: int | None
     site_profile: dict[str, Any] | None
+    site_profile_user_overrides: dict[str, Any]
     site_profile_confidence: float | None
     site_profile_source_run_id: str | None
     created_at: datetime
@@ -122,11 +138,19 @@ class BusinessProfileRunRecord:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class WorkflowDispatchRecord:
+    run_id: str
+    workflow_id: str
+    task_payload: dict[str, Any]
+
+
 class ProjectRepository(Protocol):
     async def create_with_understanding_run(
         self,
         project: ProjectRecord,
         run: CrawlRun,
+        dispatch: WorkflowDispatchRecord,
     ) -> None: ...
 
     async def list(self, organization_id: str) -> list[ProjectRecord]: ...
@@ -137,14 +161,22 @@ class ProjectRepository(Protocol):
         project_id: str,
     ) -> ProjectRecord | None: ...
 
-    async def mark_run_failed(self, run_id: str, message: str) -> None: ...
-
     async def start_understanding_run(
         self,
         organization_id: str,
         project_id: str,
         run: CrawlRun,
+        dispatch: WorkflowDispatchRecord,
     ) -> ProjectRecord: ...
+
+    async def list_pending_dispatches(
+        self,
+        limit: int,
+    ) -> list[WorkflowDispatchRecord]: ...
+
+    async def mark_dispatch_succeeded(self, run_id: str) -> None: ...
+
+    async def record_dispatch_failure(self, run_id: str, message: str) -> None: ...
 
     async def update_business_profile(
         self,
@@ -153,12 +185,29 @@ class ProjectRepository(Protocol):
         updates: dict[str, Any],
     ) -> ProjectRecord: ...
 
+    async def update_business_profile_once(
+        self,
+        organization_id: str,
+        project_id: str,
+        updates: dict[str, Any],
+        operation_id: str,
+        parameters_hash: str,
+        expected_before: dict[str, Any],
+    ) -> tuple[ProjectRecord, bool]: ...
+
     async def list_understanding_runs(
         self,
         organization_id: str,
         project_id: str,
         limit: int,
     ) -> list[BusinessProfileRunRecord]: ...
+
+    async def get_understanding_run(
+        self,
+        organization_id: str,
+        project_id: str,
+        run_id: str,
+    ) -> BusinessProfileRunRecord | None: ...
 
     async def delete(
         self,
@@ -175,6 +224,7 @@ class SQLAlchemyProjectRepository:
         self,
         project: ProjectRecord,
         run: CrawlRun,
+        dispatch: WorkflowDispatchRecord,
     ) -> None:
         async with self.sessions() as session:
             session.add(
@@ -194,6 +244,14 @@ class SQLAlchemyProjectRepository:
                 )
             )
             session.add(run)
+            session.add(
+                WorkflowDispatch(
+                    run_id=dispatch.run_id,
+                    workflow_id=dispatch.workflow_id,
+                    task_payload=dispatch.task_payload,
+                    status="pending",
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -218,41 +276,121 @@ class SQLAlchemyProjectRepository:
             ).first()
             return project_record_from_row(row) if row is not None else None
 
-    async def mark_run_failed(self, run_id: str, message: str) -> None:
-        async with self.sessions() as session:
-            run = await session.get(CrawlRun, run_id)
-            if run is not None:
-                run.status = "failed"
-                run.stage = "failed"
-                run.message = message
-                run.finished_at = datetime.now(UTC)
-                await session.commit()
-
     async def start_understanding_run(
         self,
         organization_id: str,
         project_id: str,
         run: CrawlRun,
+        dispatch: WorkflowDispatchRecord,
     ) -> ProjectRecord:
         async with self.sessions() as session:
             project = await session.scalar(
-                select(Project).where(
+                select(Project)
+                .where(
                     Project.id == project_id,
                     Project.organization_id == organization_id,
                 )
+                .with_for_update()
             )
             if project is None:
                 raise ProjectNotFoundError
-            session.add(run)
-            project.understanding_run_id = run.run_id
-            project.country = run.country or project.country
-            project.language = run.language or project.language
-            await session.commit()
+            existing_same_run = False
+            if project.understanding_run_id:
+                current_run = await session.scalar(
+                    select(CrawlRun).where(
+                        CrawlRun.run_id == project.understanding_run_id,
+                        CrawlRun.organization_id == organization_id,
+                        CrawlRun.project_id == project_id,
+                    )
+                )
+                existing_same_run = (
+                    current_run is not None
+                    and current_run.run_id == run.run_id
+                    and current_run.task_type == "site_understanding"
+                )
+                if not existing_same_run and current_run is not None and (
+                    current_run.status in {"queued", "running"}
+                ):
+                    raise SiteUnderstandingAlreadyRunningError
+            if not existing_same_run:
+                session.add(run)
+                session.add(
+                    WorkflowDispatch(
+                        run_id=dispatch.run_id,
+                        workflow_id=dispatch.workflow_id,
+                        task_payload=dispatch.task_payload,
+                        status="pending",
+                    )
+                )
+                project.understanding_run_id = run.run_id
+                project.country = run.country or project.country
+                project.language = run.language or project.language
+                await session.commit()
 
         updated = await self.get(organization_id, project_id)
         if updated is None:
             raise ProjectNotFoundError
         return updated
+
+    async def list_pending_dispatches(
+        self,
+        limit: int,
+    ) -> list[WorkflowDispatchRecord]:
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        WorkflowDispatch.run_id,
+                        WorkflowDispatch.workflow_id,
+                        WorkflowDispatch.task_payload,
+                    )
+                    .join(CrawlRun, CrawlRun.run_id == WorkflowDispatch.run_id)
+                    .where(
+                        WorkflowDispatch.status == "pending",
+                        WorkflowDispatch.next_attempt_at <= datetime.now(UTC),
+                        CrawlRun.task_type == "site_understanding",
+                    )
+                    .order_by(WorkflowDispatch.created_at, WorkflowDispatch.run_id)
+                    .limit(max(1, min(limit, 100)))
+                )
+            ).all()
+        return [
+            WorkflowDispatchRecord(
+                run_id=row.run_id,
+                workflow_id=row.workflow_id,
+                task_payload=dict(row.task_payload),
+            )
+            for row in rows
+        ]
+
+    async def mark_dispatch_succeeded(self, run_id: str) -> None:
+        async with self.sessions() as session:
+            dispatch = await session.get(WorkflowDispatch, run_id)
+            if dispatch is None:
+                return
+            dispatch.status = "dispatched"
+            dispatch.last_error = None
+            dispatch.dispatched_at = datetime.now(UTC)
+            dispatch.updated_at = datetime.now(UTC)
+            await session.commit()
+
+    async def record_dispatch_failure(self, run_id: str, message: str) -> None:
+        async with self.sessions() as session:
+            dispatch = await session.scalar(
+                select(WorkflowDispatch).where(WorkflowDispatch.run_id == run_id).with_for_update()
+            )
+            if dispatch is None or dispatch.status != "pending":
+                return
+            dispatch.attempts += 1
+            dispatch.last_error = message
+            retry_delay = min(60, 2 ** min(dispatch.attempts, 6))
+            dispatch.next_attempt_at = datetime.now(UTC) + timedelta(seconds=retry_delay)
+            dispatch.updated_at = datetime.now(UTC)
+            run = await session.get(CrawlRun, run_id)
+            if run is not None and run.status == "queued":
+                run.message = "任务已保存，等待网站识别服务恢复后自动重试"
+                run.updated_at = datetime.now(UTC)
+            await session.commit()
 
     async def update_business_profile(
         self,
@@ -277,12 +415,71 @@ class SQLAlchemyProjectRepository:
             profile_json = dict(site_profile.profile_json)
             profile_json.update(updates)
             site_profile.profile_json = profile_json
+            user_overrides = dict(site_profile.user_overrides or {})
+            user_overrides.update(updates)
+            site_profile.user_overrides = user_overrides
             await session.commit()
 
         updated = await self.get(organization_id, project_id)
         if updated is None:
             raise ProjectNotFoundError
         return updated
+
+    async def update_business_profile_once(
+        self,
+        organization_id: str,
+        project_id: str,
+        updates: dict[str, Any],
+        operation_id: str,
+        parameters_hash: str,
+        expected_before: dict[str, Any],
+    ) -> tuple[ProjectRecord, bool]:
+        already_completed = False
+        async with self.sessions() as session:
+            project = await session.scalar(
+                select(Project).where(
+                    Project.id == project_id,
+                    Project.organization_id == organization_id,
+                ).with_for_update()
+            )
+            if project is None:
+                raise ProjectNotFoundError
+            site_profile = await session.scalar(
+                select(SiteProfile).where(SiteProfile.project_id == project_id).with_for_update()
+            )
+            if site_profile is None:
+                raise SiteProfileNotReadyError
+            operation = await session.get(SiteProfileOperation, operation_id)
+            if operation is not None:
+                if (
+                    operation.project_id != project_id
+                    or operation.operation_type != "update_business_profile"
+                    or operation.parameters_hash != parameters_hash
+                ):
+                    raise RuntimeError("操作编号与原始参数不一致")
+                already_completed = True
+            else:
+                profile_json = dict(site_profile.profile_json)
+                if any(profile_json.get(key) != value for key, value in expected_before.items()):
+                    raise RuntimeError("项目状态已经变化，请重新发起操作")
+                profile_json.update(updates)
+                site_profile.profile_json = profile_json
+                user_overrides = dict(site_profile.user_overrides or {})
+                user_overrides.update(updates)
+                site_profile.user_overrides = user_overrides
+                session.add(SiteProfileOperation(
+                    operation_id=operation_id,
+                    project_id=project_id,
+                    operation_type="update_business_profile",
+                    parameters_hash=parameters_hash,
+                    result_json={"changes": updates},
+                ))
+            await session.commit()
+
+        updated = await self.get(organization_id, project_id)
+        if updated is None:
+            raise ProjectNotFoundError
+        return updated, already_completed
 
     async def list_understanding_runs(
         self,
@@ -315,6 +512,37 @@ class SQLAlchemyProjectRepository:
             )
             for row in rows
         ]
+
+    async def get_understanding_run(
+        self,
+        organization_id: str,
+        project_id: str,
+        run_id: str,
+    ) -> BusinessProfileRunRecord | None:
+        runs = understanding_runs_query(organization_id).subquery()
+        async with self.sessions() as session:
+            row = (
+                await session.execute(
+                    select(runs).where(
+                        runs.c.project_id == project_id,
+                        runs.c.run_id == run_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return BusinessProfileRunRecord(
+            run_id=row.run_id,
+            attempt=row.attempt,
+            status=row.status,
+            stage=row.stage,
+            message=row.message,
+            discovered=row.discovered or 0,
+            processed=row.processed or 0,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            created_at=row.created_at,
+        )
 
     async def delete(
         self,
@@ -357,11 +585,13 @@ class ProjectService:
         launcher: WorkflowLauncher,
         repository: ProjectRepository,
         site_icon_reader: SiteIconReader,
+        object_cleaner: AuditObjectCleaner | None = None,
     ) -> None:
         self.settings = settings
         self.launcher = launcher
         self.repository = repository
         self.site_icon_reader = site_icon_reader
+        self.object_cleaner = object_cleaner or NoopAuditObjectCleaner()
 
     async def create(self, request: CreateProjectRequest) -> ProjectResponse:
         domain = normalize_domain(request.domain)
@@ -391,6 +621,7 @@ class ProjectService:
             audit_workflow_id=None,
             audit_health=None,
             site_profile=None,
+            site_profile_user_overrides={},
             site_profile_confidence=None,
             site_profile_source_run_id=None,
             created_at=created_at,
@@ -408,27 +639,16 @@ class ProjectService:
             message="网站业务识别任务已进入队列",
             created_at=created_at,
         )
-        await self.repository.create_with_understanding_run(project, run)
-
         task = build_site_understanding_task(project, run_id)
-        try:
-            await self.launcher.start(
-                task,
-                workflow_id=f"crawler:site_understanding:{project.id}:{run_id}",
-            )
-        except Exception:
-            await self.repository.mark_run_failed(
-                run_id,
-                "无法启动网站业务识别：任务服务暂时不可用",
-            )
-            failed_project = await self.repository.get(
-                project.organization_id,
-                project.id,
-            )
-            if failed_project is not None:
-                return build_project_response(failed_project)
-
-        return build_project_response(project)
+        dispatch = WorkflowDispatchRecord(
+            run_id=run_id,
+            workflow_id=f"crawler:site_understanding:{project.id}:{run_id}",
+            task_payload=task,
+        )
+        await self.repository.create_with_understanding_run(project, run, dispatch)
+        await self._dispatch(dispatch)
+        current = await self.repository.get(project.organization_id, project.id)
+        return build_project_response(current or project)
 
     async def list(self) -> list[ProjectResponse]:
         projects = await self.repository.list(self.settings.default_organization_id)
@@ -458,6 +678,29 @@ class ProjectService:
         )
         return build_project_response(project)
 
+    async def update_business_profile_once(
+        self,
+        project_id: str,
+        request: UpdateBusinessProfileRequest,
+        operation_id: str,
+        parameters_hash: str,
+        expected_before: dict[str, Any],
+    ) -> tuple[ProjectResponse, bool]:
+        updates = request.model_dump()
+        updates["business_name"] = (
+            project_display_name(request.business_name) or request.business_name
+        )
+        updates["confirmed_at"] = datetime.now(UTC).isoformat()
+        project, already_completed = await self.repository.update_business_profile_once(
+            self.settings.default_organization_id,
+            project_id,
+            updates,
+            operation_id,
+            parameters_hash,
+            expected_before,
+        )
+        return build_project_response(project), already_completed
+
     async def list_business_profile_runs(
         self,
         project_id: str,
@@ -475,6 +718,18 @@ class ProjectService:
             max(1, min(limit, 50)),
         )
         return [build_business_profile_run_response(run) for run in runs]
+
+    async def get_business_profile_run(
+        self,
+        project_id: str,
+        run_id: str,
+    ) -> BusinessProfileRunResponse | None:
+        run = await self.repository.get_understanding_run(
+            self.settings.default_organization_id,
+            project_id,
+            run_id,
+        )
+        return build_business_profile_run_response(run) if run is not None else None
 
     async def get_site_icon(self, project_id: str) -> StoredSiteIcon:
         project = await self.repository.get(
@@ -494,17 +749,19 @@ class ProjectService:
             raise SiteIconNotFoundError
         return icon
 
-    async def refresh_business_profile(self, project_id: str) -> ProjectResponse:
+    async def refresh_business_profile(
+        self,
+        project_id: str,
+        operation_id: str | None = None,
+    ) -> ProjectResponse:
         project = await self.repository.get(
             self.settings.default_organization_id,
             project_id,
         )
         if project is None:
             raise ProjectNotFoundError
-        if project.understanding_status in {"queued", "running"}:
-            raise SiteUnderstandingAlreadyRunningError
 
-        run_id = str(uuid4())
+        run_id = operation_id or str(uuid4())
         created_at = datetime.now(UTC)
         country = normalize_country(project.country)
         language = normalize_language(project.language)
@@ -521,29 +778,48 @@ class ProjectService:
             message="网站业务重新识别任务已进入队列",
             created_at=created_at,
         )
+        task = build_site_understanding_task(project, run_id)
+        dispatch = WorkflowDispatchRecord(
+            run_id=run_id,
+            workflow_id=f"crawler:site_understanding:{project.id}:{run_id}",
+            task_payload=task,
+        )
         project = await self.repository.start_understanding_run(
             project.organization_id,
             project.id,
             run,
+            dispatch,
         )
-        task = build_site_understanding_task(project, run_id)
+        await self._dispatch(dispatch)
+        current = await self.repository.get(project.organization_id, project.id)
+        return build_project_response(current or project)
+
+    async def dispatch_pending_workflows(self, limit: int = 20) -> int:
+        dispatched = 0
+        for dispatch in await self.repository.list_pending_dispatches(limit):
+            if await self._dispatch(dispatch):
+                dispatched += 1
+        return dispatched
+
+    async def _dispatch(self, dispatch: WorkflowDispatchRecord) -> bool:
         try:
             await self.launcher.start(
-                task,
-                workflow_id=f"crawler:site_understanding:{project.id}:{run_id}",
+                dispatch.task_payload,
+                workflow_id=dispatch.workflow_id,
             )
-        except Exception:
-            await self.repository.mark_run_failed(
-                run_id,
-                "无法启动网站业务识别：任务服务暂时不可用",
+        except Exception as exc:
+            logger.warning(
+                "Unable to dispatch site understanding workflow",
+                extra={"run_id": dispatch.run_id},
+                exc_info=exc,
             )
-            failed_project = await self.repository.get(
-                project.organization_id,
-                project.id,
+            await self.repository.record_dispatch_failure(
+                dispatch.run_id,
+                "网站识别任务服务暂时不可用",
             )
-            if failed_project is not None:
-                return build_project_response(failed_project)
-        return build_project_response(project)
+            return False
+        await self.repository.mark_dispatch_succeeded(dispatch.run_id)
+        return True
 
     async def delete(self, project_id: str) -> None:
         project = await self.repository.get(
@@ -556,9 +832,26 @@ class ProjectService:
         for workflow_id in active_project_workflow_ids(project):
             try:
                 await self.launcher.cancel(workflow_id)
-            except Exception:
-                # Database cleanup must still work if Temporal is unavailable.
-                pass
+            except Exception as exc:
+                logger.exception(
+                    "project workflow cancellation failed; keeping project",
+                    extra={"project_id": project.id, "workflow_id": workflow_id},
+                    exc_info=exc,
+                )
+                raise ProjectDeleteError("无法停止项目正在运行的任务") from exc
+
+        try:
+            await self.object_cleaner.delete_project_objects(
+                project.organization_id,
+                project.id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "project object cleanup failed; keeping project",
+                extra={"project_id": project.id},
+                exc_info=exc,
+            )
+            raise ProjectDeleteError("项目抓取数据清理失败") from exc
 
         deleted = await self.repository.delete(
             self.settings.default_organization_id,
@@ -665,7 +958,7 @@ def build_site_understanding_task(
         "language": normalize_language(project.language),
         "max_pages": 5,
         "scope": "domain",
-        "rendering": "off",
+        "rendering": "auto",
         "ignored_parameters": [
             "utm_*",
             "gclid",
@@ -693,12 +986,20 @@ def build_project_response(project: ProjectRecord) -> ProjectResponse:
             "confidence",
             0,
         )
+        user_overridden_fields = sorted(
+            key for key in project.site_profile_user_overrides if key != "confirmed_at"
+        )
+        profile["user_overridden_fields"] = user_overridden_fields
+        evidence = profile.get("evidence")
+        if isinstance(evidence, list):
+            overridden = set(user_overridden_fields)
+            profile["evidence"] = [
+                item
+                for item in evidence
+                if not isinstance(item, dict) or item.get("field") not in overridden
+            ]
     identified_name = profile.get("business_name", "") if profile is not None else ""
-    display_name = (
-        project_display_name(identified_name)
-        if isinstance(identified_name, str)
-        else ""
-    )
+    display_name = project_display_name(identified_name) if isinstance(identified_name, str) else ""
     response_name = display_name or project.name
     if profile is not None:
         profile["business_name"] = response_name
@@ -817,6 +1118,7 @@ def project_query(organization_id: str):
             audit_run.status,
             audit_run.temporal_workflow_id,
             SiteProfile.profile_json,
+            SiteProfile.user_overrides,
             SiteProfile.confidence,
             SiteProfile.source_run_id,
         )
@@ -848,6 +1150,7 @@ def project_record_from_row(row: Any) -> ProjectRecord:
         audit_status,
         audit_workflow_id,
         site_profile,
+        site_profile_user_overrides,
         site_profile_confidence,
         site_profile_source_run_id,
     ) = row
@@ -872,6 +1175,7 @@ def project_record_from_row(row: Any) -> ProjectRecord:
         audit_workflow_id=audit_workflow_id,
         audit_health=project.audit_health,
         site_profile=site_profile,
+        site_profile_user_overrides=site_profile_user_overrides or {},
         site_profile_confidence=site_profile_confidence,
         site_profile_source_run_id=site_profile_source_run_id,
         created_at=project.created_at,
@@ -888,4 +1192,5 @@ def build_project_service() -> ProjectService:
         ),
         repository=SQLAlchemyProjectRepository(session_factory),
         site_icon_reader=S3SiteIconReader(settings),
+        object_cleaner=S3AuditObjectCleaner(settings),
     )

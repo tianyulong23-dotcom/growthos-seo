@@ -13,8 +13,10 @@ from app.core.config import Settings
 from app.main import app
 from app.modules.audit.service import (
     AuditProjectRecord,
+    AuditIssueGroupRecord,
     AuditService,
     WorkflowState,
+    group_issue_records,
     normalized_run_status,
     progress_percentage,
     run_response,
@@ -148,6 +150,7 @@ class FakeAuditRunRepository:
         self.pagespeed: dict[str, list[PageSpeedResult]] = {}
         self.health: dict[tuple[str, str], int] = {}
         self.issue_queries: list[tuple[int, int]] = []
+        self.issue_group_queries: list[tuple[int, int]] = []
         self.page_queries: list[tuple[int, int, str, int | None, str | None]] = []
         self.link_queries: list[tuple[int, int, str, bool | None, str | None]] = []
         self.page_rows: dict[str, list[tuple[Any, int]]] = {}
@@ -160,6 +163,7 @@ class FakeAuditRunRepository:
         ] = {}
         self.checkpoint_run_ids: set[str] = set()
         self.checkpoints: dict[str, dict[str, Any]] = {}
+        self.dispatches: dict[str, tuple[str, dict[str, Any]]] = {}
 
     async def get_project(
         self,
@@ -172,6 +176,7 @@ class FakeAuditRunRepository:
         self,
         project: AuditProjectRecord,
         run: CrawlRun,
+        task: dict[str, Any],
     ) -> bool:
         active_statuses = {"queued", "running", "stopping"}
         if any(
@@ -184,6 +189,7 @@ class FakeAuditRunRepository:
         ):
             return False
         self.runs[(run.organization_id, run.project_id, run.run_id)] = run
+        self.dispatches[run.run_id] = (str(run.temporal_workflow_id), task)
         self.projects[(project.organization_id, project.id)] = AuditProjectRecord(
             id=project.id,
             organization_id=project.organization_id,
@@ -193,6 +199,24 @@ class FakeAuditRunRepository:
             audit_run_id=run.run_id,
         )
         return True
+
+    async def list_pending_dispatches(
+        self,
+        limit: int,
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        return [
+            (run_id, workflow_id, task)
+            for run_id, (workflow_id, task) in list(self.dispatches.items())[:limit]
+        ]
+
+    async def mark_dispatch_succeeded(self, run_id: str) -> None:
+        return None
+
+    async def record_dispatch_failure(self, run_id: str, message: str) -> None:
+        run = next(
+            run for (_, _, item_run_id), run in self.runs.items() if item_run_id == run_id
+        )
+        run.message = "任务已保存，等待技术审计服务恢复后自动重试"
 
     async def get_run(
         self,
@@ -379,8 +403,31 @@ class FakeAuditRunRepository:
     async def list_pagespeed(self, run_id: str) -> list[PageSpeedResult]:
         return self.pagespeed.get(run_id, [])
 
+    async def pagespeed_counts(self, run_ids: list[str]) -> dict[str, tuple[int, int]]:
+        counts: dict[str, tuple[int, int]] = {}
+        for run_id in run_ids:
+            results = self.pagespeed.get(run_id, [])
+            counts[run_id] = (len(results), sum(not result.error for result in results))
+        return counts
+
     async def list_issues(self, run_id: str) -> list[AuditIssue]:
         return self.issues.get(run_id, [])
+
+    async def list_issue_groups(
+        self,
+        run_id: str,
+        page: int,
+        page_size: int,
+        severity: str | None,
+        search: str,
+    ) -> tuple[list[AuditIssueGroupRecord], int, bool]:
+        issues = self.issues.get(run_id, [])
+        if not issues:
+            return [], 0, False
+        self.issue_group_queries.append((page, page_size))
+        groups = group_issue_records(issues, severity, search)
+        start = (page - 1) * page_size
+        return groups[start : start + page_size], len(groups), True
 
     async def list_issues_batch(
         self,
@@ -1894,7 +1941,7 @@ def test_export_issues_keeps_groups_across_batch_boundaries() -> None:
     assert len(exported) == 1
     assert exported[0]["affected_count"] == 1001
     assert exported[0]["urls"][-1] == "https://example.com/page-999"
-    assert repository.issue_queries == [(1, 1000), (2, 1000)]
+    assert repository.issue_group_queries == [(1, 1000)]
 
 
 def test_exports_real_xlsx_workbook() -> None:
@@ -1975,7 +2022,7 @@ def test_pagespeed_returns_persisted_scores_and_metrics() -> None:
     assert body["items"][0]["metrics"]["largest_contentful_paint"] == 2.4
 
 
-def test_launch_failure_marks_database_run_failed() -> None:
+def test_launch_failure_keeps_database_run_queued_for_retry() -> None:
     service, _, repository = build_service(launch_error=RuntimeError("offline"))
     app.dependency_overrides[get_audit_service] = lambda: service
     try:
@@ -1985,9 +2032,9 @@ def test_launch_failure_marks_database_run_failed() -> None:
     finally:
         app.dependency_overrides.clear()
 
-    assert status_code == 503
+    assert status_code == 202
     run = next(iter(repository.runs.values()))
-    assert run.status == "failed"
+    assert run.status == "queued"
     assert run.can_resume is False
 
 
