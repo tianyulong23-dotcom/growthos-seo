@@ -619,7 +619,11 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 					task,
 					discoveryLimit,
 				)
-				if !pageMatchesRequestedLocale(task, page) {
+				// Prefer the requested locale when the site advertises one. If it does
+				// not, business understanding must use the language the site actually
+				// serves instead of failing the whole project.
+				if !pageMatchesRequestedLocale(task, page) &&
+					pageHasRequestedLocaleAlternate(task, page) {
 					if language := strings.TrimSpace(page.Language); language != "" {
 						rejectedLanguages[language] = struct{}{}
 					}

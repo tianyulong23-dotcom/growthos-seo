@@ -27,6 +27,13 @@ from app.modules.audit.service import (
     progress_percentage,
 )
 from app.modules.crawling.models import CrawlRun, Page
+from app.modules.keywords.models import KeywordBuildRun, KeywordWorkflowDispatch
+from app.modules.keywords.service import (
+    KeywordBootstrapRecord,
+    build_initial_keyword_bootstrap,
+    keyword_dispatch_from_bootstrap,
+    keyword_run_from_bootstrap,
+)
 from app.modules.projects.models import Project, SiteProfile, WorkflowDispatch
 from app.modules.projects.object_storage import (
     S3SiteIconReader,
@@ -95,6 +102,7 @@ class ProjectRecord:
     domain: str
     country: str
     language: str
+    competitor_domain: str | None
     understanding_run_id: str | None
     understanding_status: str | None
     understanding_stage: str | None
@@ -142,6 +150,7 @@ class ProjectRepository(Protocol):
         project: ProjectRecord,
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
+        keyword_bootstrap: KeywordBootstrapRecord,
     ) -> None: ...
 
     async def list(self, organization_id: str) -> list[ProjectRecord]: ...
@@ -183,6 +192,12 @@ class ProjectRepository(Protocol):
         limit: int,
     ) -> list[BusinessProfileRunRecord]: ...
 
+    async def active_keyword_workflow_ids(
+        self,
+        organization_id: str,
+        project_id: str,
+    ) -> list[str]: ...
+
     async def delete(
         self,
         organization_id: str,
@@ -199,6 +214,7 @@ class SQLAlchemyProjectRepository:
         project: ProjectRecord,
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
+        keyword_bootstrap: KeywordBootstrapRecord,
     ) -> None:
         async with self.sessions() as session:
             session.add(
@@ -209,6 +225,7 @@ class SQLAlchemyProjectRepository:
                     domain=project.domain,
                     country=project.country,
                     language=project.language,
+                    competitor_domain=project.competitor_domain,
                     health=0,
                     initial_crawl_run_id=project.understanding_run_id,
                     understanding_run_id=project.understanding_run_id,
@@ -218,6 +235,17 @@ class SQLAlchemyProjectRepository:
                 )
             )
             session.add(run)
+            try:
+                # Persist parent rows before the keyword outbox rows that
+                # reference them. These models do not declare ORM relationships,
+                # so SQLAlchemy cannot infer the required flush order.
+                await session.flush()
+            except IntegrityError as exc:
+                await session.rollback()
+                if is_project_domain_conflict(exc):
+                    raise ProjectAlreadyExistsError from exc
+                raise
+
             session.add(
                 WorkflowDispatch(
                     run_id=dispatch.run_id,
@@ -226,11 +254,15 @@ class SQLAlchemyProjectRepository:
                     status="pending",
                 )
             )
+            session.add(keyword_run_from_bootstrap(keyword_bootstrap))
+            session.add(keyword_dispatch_from_bootstrap(keyword_bootstrap))
             try:
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
-                raise ProjectAlreadyExistsError from exc
+                if is_project_domain_conflict(exc):
+                    raise ProjectAlreadyExistsError from exc
+                raise
 
     async def list(self, organization_id: str) -> list[ProjectRecord]:
         async with self.sessions() as session:
@@ -420,6 +452,27 @@ class SQLAlchemyProjectRepository:
             for row in rows
         ]
 
+    async def active_keyword_workflow_ids(
+        self,
+        organization_id: str,
+        project_id: str,
+    ) -> list[str]:
+        async with self.sessions() as session:
+            workflow_ids = await session.scalars(
+                select(KeywordWorkflowDispatch.workflow_id)
+                .join(
+                    KeywordBuildRun,
+                    KeywordBuildRun.id == KeywordWorkflowDispatch.run_id,
+                )
+                .where(
+                    KeywordBuildRun.organization_id == organization_id,
+                    KeywordBuildRun.project_id == project_id,
+                    KeywordBuildRun.status.in_(("queued", "running", "waiting")),
+                    KeywordWorkflowDispatch.status == "dispatched",
+                )
+            )
+            return list(workflow_ids.all())
+
     async def delete(
         self,
         organization_id: str,
@@ -473,6 +526,11 @@ class ProjectService:
         domain = normalize_domain(request.domain)
         country = normalize_country(request.country)
         language = normalize_language(request.language)
+        competitor_domain = (
+            normalize_domain(request.competitor_domain) if request.competitor_domain else None
+        )
+        if competitor_domain == domain:
+            raise ValueError("竞争对手不能与当前网站相同")
         project_id = str(uuid4())
         run_id = str(uuid4())
         created_at = datetime.now(UTC)
@@ -483,6 +541,7 @@ class ProjectService:
             domain=domain,
             country=country,
             language=language,
+            competitor_domain=competitor_domain,
             understanding_run_id=run_id,
             understanding_status="queued",
             understanding_stage="queued",
@@ -521,7 +580,17 @@ class ProjectService:
             workflow_id=f"crawler:site_understanding:{project.id}:{run_id}",
             task_payload=task,
         )
-        await self.repository.create_with_understanding_run(project, run, dispatch)
+        keyword_bootstrap = build_initial_keyword_bootstrap(
+            organization_id=project.organization_id,
+            project_id=project.id,
+            created_at=created_at,
+        )
+        await self.repository.create_with_understanding_run(
+            project,
+            run,
+            dispatch,
+            keyword_bootstrap,
+        )
         await self._dispatch(dispatch)
         current = await self.repository.get(project.organization_id, project.id)
         return build_project_response(current or project)
@@ -666,7 +735,12 @@ class ProjectService:
         if project is None:
             raise ProjectNotFoundError
 
-        for workflow_id in active_project_workflow_ids(project):
+        keyword_workflow_ids = await self.repository.active_keyword_workflow_ids(
+            project.organization_id,
+            project.id,
+        )
+        workflow_ids = [*active_project_workflow_ids(project), *keyword_workflow_ids]
+        for workflow_id in dict.fromkeys(workflow_ids):
             try:
                 await self.launcher.cancel(workflow_id)
             except Exception as exc:
@@ -712,6 +786,20 @@ def normalize_domain(value: str) -> str:
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise ValueError("这里只能填写域名，不能包含路径或参数")
     return parsed.hostname.lower().rstrip(".").removeprefix("www.")
+
+
+def is_project_domain_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    candidates = (
+        original,
+        getattr(original, "__cause__", None),
+        getattr(original, "__context__", None),
+    )
+    return any(
+        getattr(candidate, "constraint_name", None) == "uq_projects_organization_domain"
+        for candidate in candidates
+        if candidate is not None
+    ) or "uq_projects_organization_domain" in str(original)
 
 
 def project_name_from_domain(domain: str) -> str:
@@ -846,6 +934,7 @@ def build_project_response(project: ProjectRecord) -> ProjectResponse:
         domain=normalize_domain(project.domain),
         country=project.country,
         language=project.language,
+        competitor_domain=project.competitor_domain,
         understanding_run_id=project.understanding_run_id,
         understanding_status=understanding_status,
         understanding_stage=project.understanding_stage,
@@ -998,6 +1087,7 @@ def project_record_from_row(row: Any) -> ProjectRecord:
         domain=project.domain,
         country=project.country,
         language=project.language,
+        competitor_domain=project.competitor_domain,
         understanding_run_id=project.understanding_run_id,
         understanding_status=understanding_status,
         understanding_stage=understanding_stage,

@@ -11,6 +11,7 @@ from app.api.routes.projects import get_project_service
 from app.core.config import Settings
 from app.main import app
 from app.modules.crawling.models import CrawlRun
+from app.modules.keywords.service import KeywordBootstrapRecord
 from app.modules.projects.schemas import (
     CreateProjectRequest,
     UpdateBusinessProfileRequest,
@@ -21,6 +22,7 @@ from app.modules.projects.service import (
     ProjectNotFoundError,
     ProjectRecord,
     ProjectService,
+    SQLAlchemyProjectRepository,
     SiteProfileNotReadyError,
     SiteUnderstandingAlreadyRunningError,
     WorkflowDispatchRecord,
@@ -53,17 +55,21 @@ class FakeProjectRepository:
         self.dispatches: dict[str, WorkflowDispatchRecord] = {}
         self.dispatch_statuses: dict[str, str] = {}
         self.dispatch_errors: dict[str, str] = {}
+        self.keyword_bootstraps: dict[str, KeywordBootstrapRecord] = {}
+        self.keyword_workflow_ids: list[str] = []
 
     async def create_with_understanding_run(
         self,
         project: ProjectRecord,
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
+        keyword_bootstrap: KeywordBootstrapRecord,
     ) -> None:
         self.projects.append(project)
         self.runs[run.run_id] = run
         self.dispatches[dispatch.run_id] = dispatch
         self.dispatch_statuses[dispatch.run_id] = "pending"
+        self.keyword_bootstraps[keyword_bootstrap.run_id] = keyword_bootstrap
 
     async def list(self, organization_id: str) -> list[ProjectRecord]:
         projects: list[ProjectRecord] = []
@@ -217,6 +223,13 @@ class FakeProjectRepository:
         ]
         return list(reversed(records))[:limit]
 
+    async def active_keyword_workflow_ids(
+        self,
+        organization_id: str,
+        project_id: str,
+    ) -> list[str]:
+        return list(self.keyword_workflow_ids)
+
     async def delete(
         self,
         organization_id: str,
@@ -333,6 +346,89 @@ def test_create_project_starts_site_understanding() -> None:
     assert response.understanding_started_at is None
     assert response.understanding_finished_at is None
     assert response.understanding_elapsed_seconds == 0
+    [keyword_bootstrap] = repository.keyword_bootstraps.values()
+    assert keyword_bootstrap.project_id == response.id
+    assert keyword_bootstrap.kind == "initial"
+    assert keyword_bootstrap.round_number == 1
+    assert keyword_bootstrap.task_payload["project_id"] == response.id
+
+
+def test_create_project_normalizes_competitor_for_the_parallel_keyword_task() -> None:
+    service, _, repository, _ = build_service()
+
+    response = asyncio.run(
+        service.create(
+            CreateProjectRequest(
+                domain="https://www.Example.com/",
+                country="美国",
+                language="英语",
+                competitor_domain="https://WWW.Competitor.com/",
+            )
+        )
+    )
+
+    assert response.competitor_domain == "competitor.com"
+    [project] = repository.projects
+    assert project.competitor_domain == "competitor.com"
+    [keyword_bootstrap] = repository.keyword_bootstraps.values()
+    assert keyword_bootstrap.created_at == project.created_at
+    assert keyword_bootstrap.task_payload == {
+        "organization_id": project.organization_id,
+        "project_id": project.id,
+        "run_id": keyword_bootstrap.run_id,
+        "kind": "initial",
+        "round_number": 1,
+    }
+
+
+def test_sql_repository_flushes_project_before_keyword_run() -> None:
+    service, _, repository, _ = build_service()
+    asyncio.run(
+        service.create(CreateProjectRequest(domain="example.com", country="US", language="en"))
+    )
+    project = repository.projects[0]
+    run = repository.runs[project.understanding_run_id or ""]
+    dispatch = repository.dispatches[run.run_id]
+    keyword_bootstrap = next(iter(repository.keyword_bootstraps.values()))
+
+    class FlushOrderSession:
+        def __init__(self) -> None:
+            self.flush_count = 0
+            self.committed = False
+
+        async def __aenter__(self) -> FlushOrderSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        def add(self, instance: object) -> None:
+            if type(instance).__name__ == "KeywordBuildRun":
+                assert self.flush_count == 1
+
+        async def flush(self) -> None:
+            self.flush_count += 1
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def rollback(self) -> None:
+            return None
+
+    session = FlushOrderSession()
+    sql_repository = SQLAlchemyProjectRepository(lambda: session)  # type: ignore[arg-type]
+
+    asyncio.run(
+        sql_repository.create_with_understanding_run(
+            project,
+            run,
+            dispatch,
+            keyword_bootstrap,
+        )
+    )
+
+    assert session.flush_count == 1
+    assert session.committed is True
 
 
 def test_create_project_keeps_queued_dispatch_when_workflow_cannot_start() -> None:
@@ -549,10 +645,11 @@ def test_project_routes_create_list_and_get_projects() -> None:
 
 def test_delete_project_route_removes_project_and_cancels_active_workflow() -> None:
     cleaner = FakeProjectObjectCleaner()
-    service, launcher, _, _ = build_service(object_cleaner=cleaner)
+    service, launcher, repository, _ = build_service(object_cleaner=cleaner)
     created = asyncio.run(
         service.create(CreateProjectRequest(domain="example.com", country="US", language="en"))
     )
+    repository.keyword_workflow_ids = ["keywords:build:run-1"]
     app.dependency_overrides[get_project_service] = lambda: service
 
     async def request() -> tuple[int, int, int]:
@@ -572,7 +669,8 @@ def test_delete_project_route_removes_project_and_cancels_active_workflow() -> N
     assert get_status == 404
     assert project_count == 0
     assert launcher.cancelled_workflow_ids == [
-        f"crawler:site_understanding:{created.id}:{created.understanding_run_id}"
+        f"crawler:site_understanding:{created.id}:{created.understanding_run_id}",
+        "keywords:build:run-1",
     ]
     assert cleaner.project_calls == [("test-org", created.id)]
 

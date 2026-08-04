@@ -24,6 +24,7 @@ class Project(Base):
     domain: Mapped[str] = mapped_column(Text, nullable=False)
     country: Mapped[str] = mapped_column(Text, nullable=False)
     language: Mapped[str] = mapped_column(Text, nullable=False)
+    competitor_domain: Mapped[str | None] = mapped_column(Text)
     health: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     initial_crawl_run_id: Mapped[str | None] = mapped_column(Text)
     understanding_run_id: Mapped[str | None] = mapped_column(Text)

@@ -163,6 +163,38 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  keyword-worker:
+    build:
+      context: ../../backend/workers
+    env_file:
+      - ../../backend/api/.env
+    environment:
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/compose/.env}@postgres:5432/seo"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      KEYWORD_TASK_QUEUE: keywords-python
+      KEYWORD_WORKER_HEALTH_HOST: 0.0.0.0
+      KEYWORD_WORKER_HEALTH_PORT: 8090
+      KEYWORD_MAX_CONCURRENT_ACTIVITIES: 8
+    depends_on:
+      api:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >
+          import urllib.request;
+          urllib.request.urlopen("http://127.0.0.1:8090/health", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
   frontend:
     build:
       context: ../../frontend

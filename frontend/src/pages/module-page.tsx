@@ -1,8 +1,6 @@
 import * as React from "react"
 import {
-  ArrowDown,
   ArrowRight,
-  ArrowUp,
   Download,
   ExternalLink,
   FilePlus2,
@@ -21,7 +19,6 @@ import { createAuditRun, getAuditRun, type AuditRun } from "@/api/audits"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import {
@@ -43,13 +40,12 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
 import { AIModelSettings } from "@/features/settings/ai-model-settings"
-import {
-  backlinkRows,
-  contentRows,
-  keywordRows,
-  modules,
-} from "@/data/mock-data"
+import { backlinkRows, contentRows, modules } from "@/data/mock-data"
 import type { AuditSettings } from "@/features/audit/audit-settings"
+import {
+  getCachedCompletedAuditRun,
+  rememberAuditRun,
+} from "@/features/audit/audit-session-cache"
 import { useAuditRunPolling } from "@/features/audit/use-audit-run-polling"
 import { useProjects } from "@/features/projects/project-context"
 import type { BusinessProfileInput, Project } from "@/features/projects/types"
@@ -57,6 +53,12 @@ import type { BusinessProfileInput, Project } from "@/features/projects/types"
 const AuditWorkspace = React.lazy(() =>
   import("@/features/audit/audit-workspace").then((module) => ({
     default: module.AuditWorkspace,
+  }))
+)
+
+const KeywordWorkspace = React.lazy(() =>
+  import("@/features/keywords/keyword-workspace").then((module) => ({
+    default: module.KeywordWorkspace,
   }))
 )
 
@@ -117,98 +119,6 @@ function Toolbar({
         导出
       </Button>
     </div>
-  )
-}
-
-function KeywordsContent({ view }: { view: string }) {
-  const [search, setSearch] = React.useState("")
-  const [filter, setFilter] = React.useState("全部")
-  const rows = keywordRows.filter(
-    (row) =>
-      row.keyword.includes(search.toLowerCase()) &&
-      (filter === "全部" || row.intent === filter)
-  )
-
-  return (
-    <Card className="overflow-hidden">
-      <div className="grid gap-px border-b bg-border sm:grid-cols-3">
-        {[
-          [view === "opportunities" ? "可争取机会" : "跟踪关键词", "420"],
-          ["前 10 名", "286"],
-          ["本周上升", "78"],
-        ].map(([label, value]) => (
-          <div key={label} className="bg-card p-4">
-            <div className="text-xs text-muted-foreground">{label}</div>
-            <div className="mt-1 text-2xl font-semibold">{value}</div>
-          </div>
-        ))}
-      </div>
-      <Toolbar
-        search={search}
-        setSearch={setSearch}
-        filter={filter}
-        setFilter={setFilter}
-        options={["全部", "商业", "信息"]}
-      />
-      <div className="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-10">
-                <Checkbox aria-label="选择全部" />
-              </TableHead>
-              <TableHead>关键词</TableHead>
-              <TableHead>意图</TableHead>
-              <TableHead className="text-right">搜索量</TableHead>
-              <TableHead className="text-right">排名</TableHead>
-              <TableHead className="text-right">变化</TableHead>
-              <TableHead>目标页面</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.keyword}>
-                <TableCell>
-                  <Checkbox aria-label={`选择 ${row.keyword}`} />
-                </TableCell>
-                <TableCell className="font-medium">{row.keyword}</TableCell>
-                <TableCell>
-                  <Badge variant="outline">{row.intent}</Badge>
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {row.volume}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {row.position}
-                </TableCell>
-                <TableCell className="text-right">
-                  <span
-                    className={`inline-flex items-center ${
-                      row.change.startsWith("+")
-                        ? "text-emerald-600"
-                        : row.change.startsWith("-")
-                          ? "text-destructive"
-                          : "text-muted-foreground"
-                    }`}
-                  >
-                    {row.change.startsWith("+") && (
-                      <ArrowUp className="size-3" />
-                    )}
-                    {row.change.startsWith("-") && (
-                      <ArrowDown className="size-3" />
-                    )}
-                    {row.change}
-                  </span>
-                </TableCell>
-                <TableCell className="max-w-60 truncate text-muted-foreground">
-                  {row.url}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
   )
 }
 
@@ -437,32 +347,6 @@ function SettingsContent({
     return <AIModelSettings projectId={project.id} />
   }
 
-  if (view === "sources") {
-    return (
-      <div className="grid gap-4 lg:grid-cols-2">
-        {[
-          ["Google Search Console", "已连接", true],
-          ["Google Analytics 4", "已连接", true],
-          ["WordPress", "等待授权", false],
-          ["DataForSEO", "已连接", true],
-        ].map(([name, status, connected]) => (
-          <Card key={String(name)}>
-            <CardContent className="flex items-center gap-4 p-5">
-              <div className="flex size-10 items-center justify-center rounded-md bg-muted font-semibold">
-                {String(name).slice(0, 2)}
-              </div>
-              <div className="flex-1">
-                <div className="font-medium">{name}</div>
-                <div className="text-xs text-muted-foreground">{status}</div>
-              </div>
-              <Switch defaultChecked={Boolean(connected)} />
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-    )
-  }
-
   if (view === "notifications") {
     return (
       <Card>
@@ -592,7 +476,19 @@ function ModuleBody({
         />
       </React.Suspense>
     )
-  if (moduleId === "keywords") return <KeywordsContent view={view} />
+  if (moduleId === "keywords")
+    return (
+      <React.Suspense
+        fallback={
+          <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">
+            <LoaderCircle className="mr-2 size-4 animate-spin" />
+            正在加载关键词库
+          </div>
+        }
+      >
+        <KeywordWorkspace key={project.id} projectId={project.id} />
+      </React.Suspense>
+    )
   if (moduleId === "content") return <ContentContent view={view} />
   if (moduleId === "backlinks") return <BacklinksContent view={view} />
   if (moduleId === "performance") return <PerformanceContent view={view} />
@@ -630,11 +526,16 @@ export function ModulePage() {
     targetRunId: string | null
     run: AuditRun | null
     error: string
-  }>({
-    projectId: project.id,
-    targetRunId: null,
-    run: null,
-    error: "",
+  }>(() => {
+    const cachedRun = targetAuditRunId
+      ? getCachedCompletedAuditRun(project.id, targetAuditRunId)
+      : null
+    return {
+      projectId: project.id,
+      targetRunId: cachedRun?.run_id ?? null,
+      run: cachedRun,
+      error: "",
+    }
   })
   const [actionCount, setActionCount] = React.useState(0)
   const auditSelectionVersion = React.useRef(0)
@@ -645,12 +546,15 @@ export function ModulePage() {
       activeProjectId.current = ""
     }
   }, [project.id])
+  const cachedTargetAuditRun = targetAuditRunId
+    ? getCachedCompletedAuditRun(project.id, targetAuditRunId)
+    : null
   const currentAuditRun =
     auditState.projectId === project.id &&
     auditState.targetRunId === targetAuditRunId &&
     auditState.run?.project_id === project.id
       ? auditState.run
-      : null
+      : cachedTargetAuditRun
   const currentAuditError =
     auditState.projectId === project.id &&
     auditState.targetRunId === targetAuditRunId
@@ -670,6 +574,7 @@ export function ModulePage() {
       ) {
         return
       }
+      if (run) rememberAuditRun(run)
       auditSelectionVersion.current += 1
       setAuditState({
         projectId: sourceProjectId,
@@ -702,6 +607,8 @@ export function ModulePage() {
 
   React.useEffect(() => {
     if (!project.id || !targetAuditRunId) return
+    const cachedRun = getCachedCompletedAuditRun(project.id, targetAuditRunId)
+    if (cachedRun) return
     const selectionVersion = auditSelectionVersion.current
     let active = true
     void getAuditRun(project.id, targetAuditRunId)
@@ -712,6 +619,7 @@ export function ModulePage() {
           run.project_id === activeProjectId.current &&
           run.run_id === targetAuditRunId
         ) {
+          rememberAuditRun(run)
           setAuditState({
             projectId: run.project_id,
             targetRunId: run.run_id,
@@ -810,7 +718,9 @@ export function ModulePage() {
       <PageHeader
         module={moduleConfig}
         actionLabel={
-          moduleConfig.id === "audit" || moduleConfig.id === "settings"
+          moduleConfig.id === "audit" ||
+          moduleConfig.id === "settings" ||
+          moduleConfig.id === "keywords"
             ? undefined
             : actionCount > 0
               ? `已添加 ${actionCount} 项`

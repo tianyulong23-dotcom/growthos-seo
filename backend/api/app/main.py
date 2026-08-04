@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.modules.audit.service import build_audit_service
+from app.modules.keywords.service import KeywordService, build_keyword_service
 from app.modules.projects.service import ProjectService, build_project_service
 from app.workflows.worker import get_crawler_worker_launcher
 
@@ -29,6 +30,38 @@ async def dispatch_site_understanding_workflows(
         await asyncio.sleep(max(interval_seconds, 0.1))
 
 
+async def dispatch_keyword_workflows(
+    service: KeywordService,
+    interval_seconds: float,
+) -> None:
+    while True:
+        try:
+            await service.dispatch_pending_workflows()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to dispatch pending keyword workflows")
+        await asyncio.sleep(max(interval_seconds, 0.1))
+
+
+async def reconcile_keyword_workflows(
+    service: KeywordService,
+    interval_seconds: float,
+    timeout_seconds: float,
+) -> None:
+    while True:
+        try:
+            await asyncio.wait_for(
+                service.reconcile_active_runs(),
+                timeout=max(timeout_seconds, 0.1),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to reconcile active keyword workflows")
+        await asyncio.sleep(max(interval_seconds, 1))
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = get_settings()
@@ -37,6 +70,20 @@ async def lifespan(_: FastAPI):
         dispatch_site_understanding_workflows(
             build_project_service(),
             settings.site_understanding_dispatch_interval_seconds,
+        )
+    )
+    keyword_service = build_keyword_service()
+    keyword_dispatch_task = asyncio.create_task(
+        dispatch_keyword_workflows(
+            keyword_service,
+            settings.keyword_dispatch_interval_seconds,
+        )
+    )
+    keyword_reconcile_task = asyncio.create_task(
+        reconcile_keyword_workflows(
+            keyword_service,
+            settings.keyword_reconcile_interval_seconds,
+            settings.keyword_reconcile_timeout_seconds,
         )
     )
     try:
@@ -51,8 +98,14 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         dispatch_task.cancel()
+        keyword_dispatch_task.cancel()
+        keyword_reconcile_task.cancel()
         with suppress(asyncio.CancelledError):
             await dispatch_task
+        with suppress(asyncio.CancelledError):
+            await keyword_dispatch_task
+        with suppress(asyncio.CancelledError):
+            await keyword_reconcile_task
         await worker_launcher.stop()
 
 

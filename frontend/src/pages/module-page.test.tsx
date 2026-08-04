@@ -10,6 +10,7 @@ import { MemoryRouter, Route, Routes } from "react-router"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { AuditRun } from "@/api/audits"
+import { clearAuditSessionCache } from "@/features/audit/audit-session-cache"
 import type { Project } from "@/features/projects/types"
 import { ModulePage } from "@/pages/module-page"
 
@@ -77,6 +78,7 @@ const project: Project = {
   domain: "example.com",
   country: "US",
   language: "en",
+  competitorDomain: null,
   understandingRunId: null,
   understandingStatus: "completed",
   understandingStage: "completed",
@@ -111,6 +113,7 @@ const latestRun = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  clearAuditSessionCache()
   projectApi.getProject.mockReturnValue(project)
   projectApi.refreshProject.mockResolvedValue(project)
   auditApi.getAuditRun.mockResolvedValue(latestRun)
@@ -121,6 +124,39 @@ afterEach(() => {
 })
 
 describe("ModulePage audit selection", () => {
+  it("restores a completed audit from cache without requesting its status again", async () => {
+    const firstRender = render(
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect((await screen.findByTestId("selected-run")).textContent).toBe(
+      "run-latest"
+    )
+    expect(auditApi.getAuditRun).toHaveBeenCalledTimes(1)
+    firstRender.unmount()
+
+    render(
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByTestId("selected-run").textContent).toBe("run-latest")
+    expect(auditApi.getAuditRun).toHaveBeenCalledTimes(1)
+  })
+
   it("restores a historical audit from the runId query parameter", async () => {
     const historicalRun = {
       ...latestRun,

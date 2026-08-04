@@ -50,3 +50,14 @@ Thumbs.db
 
 # Third-party research checkouts
 /LangExtract/
+/SerpBear/
+/OpenSEO/
+/BlogPilot/
+/ALwrity/
+/vendor-*/
+
+# Local keyword research output and screenshots
+/docs/*-live-test-*/
+/docs/elephtv-keyword-cache-test-*/
+/docs/dataforseo-*/
+/images/

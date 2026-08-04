@@ -7,6 +7,7 @@ from sqlalchemy.engine import Connection
 from app.core.config import get_settings
 from app.db.base import Base
 from app.modules.crawling import models as crawling_models  # noqa: F401
+from app.modules.keywords import models as keyword_models  # noqa: F401
 from app.modules.projects import models as project_models  # noqa: F401
 from app.modules.settings import models as settings_models  # noqa: F401
 

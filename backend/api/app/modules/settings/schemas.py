@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -72,3 +73,101 @@ class TestAIProviderSettingsResponse(BaseModel):
     success: bool
     model: str
     message: str
+
+
+SettingsSource = Literal["database", "environment", "none"]
+
+
+def clean_required_text(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("不能为空")
+    return value
+
+
+def clean_optional_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def clean_customer_id(value: str) -> str:
+    normalized = re.sub(r"[\s-]", "", value)
+    if not normalized.isdigit() or len(normalized) != 10:
+        raise ValueError("客户 ID 必须是 10 位数字")
+    return normalized
+
+
+def clean_optional_customer_id(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    return clean_customer_id(value)
+
+
+class GoogleAdsSettingsResponse(BaseModel):
+    client_id: str
+    customer_id: str
+    login_customer_id: str | None
+    configured: bool
+    developer_token_configured: bool
+    client_secret_configured: bool
+    refresh_token_configured: bool
+    source: SettingsSource
+    updated_at: datetime | None = None
+
+
+class UpdateGoogleAdsSettingsRequest(BaseModel):
+    developer_token: str | None = Field(default=None, max_length=4096)
+    client_id: str = Field(min_length=1, max_length=1024)
+    client_secret: str | None = Field(default=None, max_length=4096)
+    refresh_token: str | None = Field(default=None, max_length=8192)
+    customer_id: str = Field(min_length=1, max_length=64)
+    login_customer_id: str | None = Field(default=None, max_length=64)
+
+    _clean_client_id = field_validator("client_id")(clean_required_text)
+    _clean_customer_id = field_validator("customer_id")(clean_customer_id)
+    _clean_login_customer_id = field_validator("login_customer_id")(
+        clean_optional_customer_id
+    )
+    _clean_secrets = field_validator(
+        "developer_token",
+        "client_secret",
+        "refresh_token",
+    )(clean_optional_secret)
+
+
+class TestGoogleAdsSettingsRequest(UpdateGoogleAdsSettingsRequest):
+    pass
+
+
+class TestGoogleAdsSettingsResponse(BaseModel):
+    success: bool
+    customer_id: str
+    message: str
+
+
+class DataForSEOSettingsResponse(BaseModel):
+    login: str
+    configured: bool
+    password_configured: bool
+    source: SettingsSource
+    updated_at: datetime | None = None
+
+
+class UpdateDataForSEOSettingsRequest(BaseModel):
+    login: str = Field(min_length=1, max_length=320)
+    password: str | None = Field(default=None, max_length=4096)
+
+    _clean_login = field_validator("login")(clean_required_text)
+    _clean_password = field_validator("password")(clean_optional_secret)
+
+
+class TestDataForSEOSettingsRequest(UpdateDataForSEOSettingsRequest):
+    pass
+
+
+class TestDataForSEOSettingsResponse(BaseModel):
+    success: bool
+    message: str
+    balance: float | None = None

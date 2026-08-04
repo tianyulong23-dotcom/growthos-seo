@@ -17,6 +17,16 @@ class Settings(BaseSettings):
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     crawler_task_queue: str = "crawler-go"
+    keyword_task_queue: str = "keywords-python"
+    keyword_dispatch_interval_seconds: float = 2
+    keyword_reconcile_interval_seconds: float = 30
+    keyword_reconcile_timeout_seconds: float = 10
+    keyword_workflow_state_concurrency: int = 10
+    keyword_workflow_state_timeout_seconds: float = 3
+    keyword_workflow_orphan_recovery_limit: int = 3
+    keyword_worker_stale_seconds: int = 45
+    keyword_operational_cleanup_interval_seconds: int = 3600
+    keyword_operational_retention_days: int = 90
     crawler_worker_executable: str | None = None
     crawler_worker_idle_timeout_seconds: float = 120
     crawler_database_url: str | None = None
@@ -44,6 +54,15 @@ class Settings(BaseSettings):
     business_profile_ai_timeout: str = "90s"
     business_profile_ai_max_retries: int = 1
     ai_settings_encryption_key: str | None = None
+    google_ads_developer_token: str | None = None
+    google_ads_client_id: str | None = None
+    google_ads_client_secret: str | None = None
+    google_ads_refresh_token: str | None = None
+    google_ads_customer_id: str | None = None
+    google_ads_login_customer_id: str | None = None
+    google_ads_api_version: str = "v23"
+    dataforseo_login: str | None = None
+    dataforseo_password: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

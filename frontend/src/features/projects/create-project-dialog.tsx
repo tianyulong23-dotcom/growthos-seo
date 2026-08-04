@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Globe2, Languages, LoaderCircle, MapPin } from "lucide-react"
+import { Globe2, Languages, LoaderCircle, MapPin, Swords } from "lucide-react"
 import { useNavigate } from "react-router"
 
 import { Button } from "@/components/ui/button"
@@ -51,6 +51,7 @@ export function CreateProjectDialog({
   const navigate = useNavigate()
   const { projects, createProject } = useProjects()
   const [domain, setDomain] = React.useState("")
+  const [competitorDomain, setCompetitorDomain] = React.useState("")
   const [country, setCountry] = React.useState("US")
   const [language, setLanguage] = React.useState("en")
   const [error, setError] = React.useState("")
@@ -58,6 +59,7 @@ export function CreateProjectDialog({
 
   function resetForm() {
     setDomain("")
+    setCompetitorDomain("")
     setCountry("US")
     setLanguage("en")
     setError("")
@@ -77,6 +79,9 @@ export function CreateProjectDialog({
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
     const normalizedDomain = normalizeDomain(domain)
+    const normalizedCompetitor = competitorDomain.trim()
+      ? normalizeDomain(competitorDomain)
+      : null
 
     if (!normalizedDomain) {
       setError("请输入有效的主域名，例如 example.com")
@@ -90,6 +95,14 @@ export function CreateProjectDialog({
       setError("这个域名已经创建过项目")
       return
     }
+    if (competitorDomain.trim() && !normalizedCompetitor) {
+      setError("请输入有效的竞争对手域名")
+      return
+    }
+    if (normalizedCompetitor === normalizedDomain) {
+      setError("竞争对手不能与当前网站相同")
+      return
+    }
 
     setError("")
     setSubmitting(true)
@@ -99,6 +112,7 @@ export function CreateProjectDialog({
         domain: normalizedDomain,
         country,
         language,
+        competitorDomain: normalizedCompetitor ?? undefined,
       })
       markBusinessProfileOnboarding(project.id)
       onOpenChange(false)
@@ -179,6 +193,23 @@ export function CreateProjectDialog({
                 />
               </label>
             </div>
+
+            <label className="block space-y-2 text-sm">
+              <span className="flex items-center gap-2 font-medium">
+                <Swords className="size-4 text-muted-foreground" />
+                竞争对手
+                <span className="font-normal text-muted-foreground">可选</span>
+              </span>
+              <Input
+                value={competitorDomain}
+                onChange={(event) => {
+                  setCompetitorDomain(event.target.value)
+                  setError("")
+                }}
+                placeholder="competitor.com"
+                disabled={submitting}
+              />
+            </label>
           </div>
 
           <DialogFooter>
