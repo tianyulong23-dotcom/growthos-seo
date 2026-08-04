@@ -1,45 +1,28 @@
 import * as React from "react"
 import {
-  ArrowRight,
   Download,
-  ExternalLink,
   FilePlus2,
-  Filter,
   Link2,
   LoaderCircle,
   Plus,
-  Search,
 } from "lucide-react"
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router"
 
 import type { NavigationItem } from "@/app/module-contract"
 import { PageHeader } from "@/components/shared/page-header"
 import { createAuditRun, getAuditRun, type AuditRun } from "@/api/audits"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { ArticleWorkspace } from "@/features/content/article-workspace"
+import { ContentLibrary } from "@/features/content/content-library"
+import { ContentPlan } from "@/features/content/content-plan"
+import { CreateArticleDialog } from "@/features/content/create-article-dialog"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
 import { AIModelSettings } from "@/features/settings/ai-model-settings"
-import { contentRows, modules } from "@/data/mock-data"
+import { modules } from "@/data/mock-data"
 import type { AuditSettings } from "@/features/audit/audit-settings"
 import {
   getCachedCompletedAuditRun,
@@ -67,164 +50,52 @@ const OutreachWorkspace = React.lazy(() =>
   }))
 )
 
-function StatusBadge({ value }: { value: string }) {
-  const style =
-    value === "错误" || value === "待联系"
-      ? "destructive"
-      : value === "已发布" || value === "已获得" || value === "已回复"
-        ? "default"
-        : value === "警告" || value === "跟进中" || value === "待审核"
-          ? "secondary"
-          : "outline"
-  return <Badge variant={style}>{value}</Badge>
-}
-
-function Toolbar({
-  search,
-  setSearch,
-  filter,
-  setFilter,
-  options,
+function ContentContent({
+  view,
+  projectId,
+  articleId,
+  addRequestVersion,
+  onOpenArticle,
+  onCloseArticle,
 }: {
-  search: string
-  setSearch: (value: string) => void
-  filter: string
-  setFilter: (value: string) => void
-  options: string[]
+  view: string
+  projectId: string
+  articleId: string | null
+  addRequestVersion: number
+  onOpenArticle: (articleId: string) => void
+  onCloseArticle: () => void
 }) {
-  return (
-    <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center">
-      <div className="relative flex-1">
-        <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="搜索当前列表..."
-          className="w-full pl-9 sm:max-w-sm"
-        />
-      </div>
-      <Select
-        value={filter}
-        onValueChange={(value) => setFilter(value ?? "全部")}
-      >
-        <SelectTrigger className="w-full sm:w-36">
-          <Filter className="text-muted-foreground" />
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((option) => (
-            <SelectItem key={option} value={option}>
-              {option}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Button variant="outline" size="sm">
-        <Download />
-        导出
-      </Button>
-    </div>
-  )
-}
-
-function ContentContent({ view }: { view: string }) {
-  const [search, setSearch] = React.useState("")
-  const [filter, setFilter] = React.useState("全部")
-  const rows = contentRows.filter(
-    (row) =>
-      row.title.toLowerCase().includes(search.toLowerCase()) &&
-      (filter === "全部" || row.status === filter)
-  )
-
-  if (view === "opportunities") {
+  if (!projectId) {
     return (
-      <div className="grid gap-4 lg:grid-cols-2">
-        {[
-          ["solar tax credit 2026", "高", "6,600", "预计 +1,240 点击/月"],
-          ["solar battery payback", "高", "3,600", "预计 +680 点击/月"],
-          ["solaredge vs enphase", "中", "2,900", "预计 +420 点击/月"],
-          ["best solar companies florida", "中", "2,400", "预计 +350 点击/月"],
-        ].map(([keyword, priority, volume, impact]) => (
-          <Card key={keyword}>
-            <CardContent className="flex items-center gap-4 p-5">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <h3 className="truncate font-medium">{keyword}</h3>
-                  <Badge variant={priority === "高" ? "default" : "secondary"}>
-                    {priority}优先级
-                  </Badge>
-                </div>
-                <div className="mt-2 flex gap-4 text-xs text-muted-foreground">
-                  <span>搜索量 {volume}</span>
-                  <span>{impact}</span>
-                </div>
-              </div>
-              <Button variant="outline" size="sm">
-                创建简报
-                <ArrowRight />
-              </Button>
-            </CardContent>
-          </Card>
-        ))}
+      <div className="space-y-3" aria-label="正在读取项目">
+        <Skeleton className="h-16 rounded-md" />
+        <Skeleton className="h-64 rounded-md" />
       </div>
     )
   }
 
-  return (
-    <Card className="overflow-hidden">
-      <Toolbar
-        search={search}
-        setSearch={setSearch}
-        filter={filter}
-        setFilter={setFilter}
-        options={["全部", "草稿", "撰写中", "待审核", "已发布"]}
+  if (articleId) {
+    return (
+      <ArticleWorkspace
+        key={`${projectId}:${articleId}`}
+        projectId={projectId}
+        articleId={articleId}
+        onBack={onCloseArticle}
       />
-      <div className="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>内容</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>目标关键词</TableHead>
-              <TableHead className="text-right">SEO 评分</TableHead>
-              <TableHead>最后更新</TableHead>
-              <TableHead className="w-12" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.title}>
-                <TableCell className="max-w-80 font-medium">
-                  {row.title}
-                </TableCell>
-                <TableCell>
-                  <StatusBadge value={row.status} />
-                </TableCell>
-                <TableCell>{row.keyword}</TableCell>
-                <TableCell className="text-right">
-                  <span
-                    className={
-                      row.score >= 80 ? "text-emerald-600" : "text-amber-600"
-                    }
-                  >
-                    {row.score}
-                  </span>
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {row.updated}
-                </TableCell>
-                <TableCell>
-                  <Button variant="ghost" size="icon-sm" title="打开内容">
-                    <ExternalLink />
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
-  )
+    )
+  }
+
+  if (view === "plans") {
+    return (
+      <ContentPlan
+        key={projectId}
+        addRequestVersion={addRequestVersion}
+        onOpenArticle={onOpenArticle}
+      />
+    )
+  }
+
+  return <ContentLibrary projectId={projectId} onOpenArticle={onOpenArticle} />
 }
 
 function PerformanceContent({ view }: { view: string }) {
@@ -387,6 +258,10 @@ function ModuleBody({
   onProjectRefresh,
   onSaveBusinessProfile,
   onRefreshBusinessProfile,
+  articleId,
+  contentPlanAddRequestVersion,
+  onOpenArticle,
+  onCloseArticle,
 }: {
   moduleId: string
   view: string
@@ -398,6 +273,10 @@ function ModuleBody({
   onProjectRefresh: () => Promise<unknown>
   onSaveBusinessProfile: (input: BusinessProfileInput) => Promise<unknown>
   onRefreshBusinessProfile: () => Promise<unknown>
+  articleId: string | null
+  contentPlanAddRequestVersion: number
+  onOpenArticle: (articleId: string) => void
+  onCloseArticle: () => void
 }) {
   if (moduleId === "audit")
     return (
@@ -434,7 +313,17 @@ function ModuleBody({
         <KeywordWorkspace key={project.id} projectId={project.id} />
       </React.Suspense>
     )
-  if (moduleId === "content") return <ContentContent view={view} />
+  if (moduleId === "content")
+    return (
+      <ContentContent
+        view={view}
+        projectId={project.id}
+        articleId={articleId}
+        addRequestVersion={contentPlanAddRequestVersion}
+        onOpenArticle={onOpenArticle}
+        onCloseArticle={onCloseArticle}
+      />
+    )
   if (moduleId === "backlinks")
     return (
       <React.Suspense
@@ -585,6 +474,9 @@ function LegacyModulePage() {
     }
   })
   const [actionCount, setActionCount] = React.useState(0)
+  const [createArticleOpen, setCreateArticleOpen] = React.useState(false)
+  const [contentPlanAddRequestVersion, setContentPlanAddRequestVersion] =
+    React.useState(0)
   const auditSelectionVersion = React.useRef(0)
   const activeProjectId = React.useRef(project.id)
   React.useLayoutEffect(() => {
@@ -746,12 +638,37 @@ function LegacyModulePage() {
   }
 
   function handleAction() {
+    if (moduleConfig.id === "content") {
+      if (activeView === "plans") {
+        setContentPlanAddRequestVersion((version) => version + 1)
+        return
+      }
+      setCreateArticleOpen(true)
+      return
+    }
     setActionCount((count) => count + 1)
+  }
+
+  const selectedArticleId =
+    moduleConfig.id === "content" ? searchParams.get("articleId") : null
+
+  function openArticle(articleId: string) {
+    navigate(
+      `/projects/${project.id}/content/library?articleId=${encodeURIComponent(articleId)}`
+    )
+  }
+
+  function closeArticle() {
+    navigate(`/projects/${project.id}/content/library`)
   }
 
   const actionIcon =
     moduleConfig.id === "content" ? (
-      <FilePlus2 />
+      activeView === "plans" ? (
+        <Plus />
+      ) : (
+        <FilePlus2 />
+      )
     ) : moduleConfig.id === "backlinks" ? (
       <Link2 />
     ) : moduleConfig.id === "performance" ? (
@@ -769,13 +686,15 @@ function LegacyModulePage() {
           moduleConfig.id === "settings" ||
           moduleConfig.id === "keywords"
             ? undefined
-            : actionCount > 0
-              ? `已添加 ${actionCount} 项`
-              : moduleConfig.action
+            : moduleConfig.id === "content" && activeView === "library"
+              ? "创建文章"
+              : moduleConfig.id !== "content" && actionCount > 0
+                ? `已添加 ${actionCount} 项`
+                : moduleConfig.action
         }
         actionIcon={actionIcon}
         onAction={handleAction}
-        actionDisabled={running}
+        actionDisabled={moduleConfig.id === "audit" && running}
       />
       {moduleConfig.tabs.length > 0 && (
         <div className="border-b px-4 sm:px-6 lg:px-8">
@@ -827,8 +746,20 @@ function LegacyModulePage() {
             updateBusinessProfile(project.id, input)
           }
           onRefreshBusinessProfile={() => refreshBusinessProfile(project.id)}
+          articleId={selectedArticleId}
+          contentPlanAddRequestVersion={contentPlanAddRequestVersion}
+          onOpenArticle={openArticle}
+          onCloseArticle={closeArticle}
         />
       </div>
+      {moduleConfig.id === "content" && activeView === "library" && (
+        <CreateArticleDialog
+          projectId={project.id}
+          open={createArticleOpen}
+          onOpenChange={setCreateArticleOpen}
+          onCreated={(article) => openArticle(article.id)}
+        />
+      )}
     </div>
   )
 }

@@ -14,7 +14,7 @@
   },
   "heads": {
     "alembic": "20260724_0007",
-    "backlinks": "0029"
+    "backlinks": "0031"
   },
   "steps": [
     {
@@ -386,6 +386,30 @@
       "prerequisites": ["backlinks-0028"],
       "recovery": "forward-only",
       "recoveryNote": "Placement monitoring policies, runs, and immutable observations are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 52,
+      "migrationId": "backlinks-0030",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0030_backlink_metrics_reports.sql",
+      "sha256": "f0c3a2053b79d1e358f5737b3d530af25548c8bc40f37bcc415e87b55f0d648f",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0029"],
+      "recovery": "forward-only",
+      "recoveryNote": "Metric snapshots and report publication facts are append-only; repair requires a reviewed forward migration."
+    },
+    {
+      "order": 53,
+      "migrationId": "backlinks-0031",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0031_backlink_tasks_notifications.sql",
+      "sha256": "d7d0ddefab7667a3ec451ff6bf4825ba66d120da969b243b72be627fac27769a",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0030"],
+      "recovery": "forward-only",
+      "recoveryNote": "Task and notification projections are repaired from immutable source events with a reviewed forward migration."
     }
   ]
 }

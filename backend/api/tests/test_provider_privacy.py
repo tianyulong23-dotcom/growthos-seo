@@ -6,10 +6,18 @@ import pytest
 
 from app.modules.agent import model_gateway
 from app.modules.agent.model_gateway import ModelGateway
+from app.modules.content import research_gateway, writing_gateway
+from app.modules.content.research_gateway import (
+    ResearchGateway,
+    ResearchProviderConfig,
+    ResearchRequest,
+)
+from app.modules.content.writing_gateway import WritingGateway
 from app.modules.settings.provider_privacy import (
     apply_provider_privacy,
     is_openrouter_url,
 )
+from app.modules.settings.service import AIProviderSettingsRecord
 
 
 class FakeResponse:
@@ -113,3 +121,51 @@ def test_agent_streaming_request_sends_openrouter_zdr(
 
     assert captured["provider"] == {"zdr": True}
     assert events[-1] == ("done", None)
+
+
+def test_writing_request_sends_openrouter_zdr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def urlopen(request: Any, **_: Any) -> FakeResponse:
+        captured.update(json.loads(request.data))
+        return FakeResponse(b"{}")
+
+    monkeypatch.setattr(writing_gateway, "urlopen", urlopen)
+    record = AIProviderSettingsRecord(
+        base_url="https://openrouter.ai/api/v1",
+        api_key="secret",
+        model="model",
+    )
+
+    WritingGateway()._request(record, [])
+
+    assert captured["provider"] == {"zdr": True}
+
+
+def test_research_request_sends_openrouter_zdr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def urlopen(request: Any, **_: Any) -> FakeResponse:
+        captured.update(json.loads(request.data))
+        return FakeResponse(b'{"output_text":"supported evidence"}')
+
+    monkeypatch.setattr(research_gateway, "urlopen", urlopen)
+    gateway = ResearchGateway(
+        ResearchProviderConfig(
+            "responses", "https://openrouter.ai/api/v1", "secret", "model"
+        ),
+        ResearchProviderConfig("", "", "", ""),
+        10,
+    )
+
+    result = gateway._request(
+        gateway.primary,
+        ResearchRequest("keyword", "US", "en", ["question"]),
+    )
+
+    assert captured["provider"] == {"zdr": True}
+    assert result.answer == "supported evidence"

@@ -52,6 +52,11 @@ LIMITS = {
 
 def compose_environment() -> dict[str, str]:
     env_file = Path(__file__).parents[3] / "deploy" / "compose" / ".env"
+    if not env_file.is_file():
+        pytest.skip(
+            "Agent takeover integration requires explicit service environment variables "
+            "or deploy/compose/.env"
+        )
     values: dict[str, str] = {}
     for raw_line in env_file.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -63,8 +68,11 @@ def compose_environment() -> dict[str, str]:
 
 
 def integration_settings() -> tuple[str, str, str]:
-    compose = compose_environment()
     database_url = os.getenv("AGENT_TEST_DATABASE_URL", "")
+    temporal_address = os.getenv("AGENT_WORKFLOW_TEMPORAL_ADDRESS", "")
+    redis_url = os.getenv("AGENT_WORKFLOW_REDIS_URL", "")
+    if not database_url or not temporal_address or not redis_url:
+        compose = compose_environment()
     if not database_url:
         database_url = URL.create(
             "postgresql+asyncpg",
@@ -76,13 +84,10 @@ def integration_settings() -> tuple[str, str, str]:
         ).render_as_string(hide_password=False)
     if make_url(database_url).database != "seo_agent_v11_test":
         pytest.fail("Full Agent takeover tests may only use seo_agent_v11_test")
-    temporal_address = os.getenv(
-        "AGENT_WORKFLOW_TEMPORAL_ADDRESS",
-        f"127.0.0.1:{compose.get('TEMPORAL_HOST_PORT', '7233')}",
-    )
-    redis_url = (
-        f"redis://127.0.0.1:{compose.get('REDIS_HOST_PORT', '6379')}/0"
-    )
+    if not temporal_address:
+        temporal_address = f"127.0.0.1:{compose.get('TEMPORAL_HOST_PORT', '7233')}"
+    if not redis_url:
+        redis_url = f"redis://127.0.0.1:{compose.get('REDIS_HOST_PORT', '6379')}/0"
     return temporal_address, database_url, redis_url
 
 

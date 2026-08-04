@@ -195,8 +195,11 @@ export async function checkBacklinksMigrations(): Promise<void> {
     }
     const migrationSql = await readFile(
       resolve(migrationsDirectory, migrationName),
+      "utf8",
     );
-    const sha256 = createHash("sha256").update(migrationSql).digest("hex");
+    const sha256 = createHash("sha256")
+      .update(migrationSql.replace(/\r\n/gu, "\n"))
+      .digest("hex");
     if (manifestStep.sha256 !== sha256) {
       violations.push(
         `Deployment manifest checksum does not match ${migrationName}.`,

@@ -75,7 +75,10 @@ describe("BL-AI-ARCH-005 database ownership migration history", () => {
     for (const [name, expectedHash] of Object.entries(
       publishedMigrationHashes,
     )) {
-      const sql = await readFile(migrationUrl(name));
+      const sql = (await readFile(migrationUrl(name), "utf8")).replace(
+        /\r\n/gu,
+        "\n",
+      );
       expect(createHash("sha256").update(sql).digest("hex").toUpperCase()).toBe(
         expectedHash,
       );

@@ -48,6 +48,7 @@ def build_aggregate() -> dict[str, object]:
                     ("settings", "platform"),
                     ("agent", "agent"),
                     ("keywords", "keywords"),
+                    ("content", "content"),
                 ),
             ),
             ModuleOpenApi("backlinks", backlinks, frozenset({"/health"})),

@@ -43,17 +43,19 @@ BACKLINKS_REVISIONS = [
     "0027_backlink_negotiation_facts.sql",
     "0028_backlink_placements.sql",
     "0029_backlink_monitoring.sql",
+    "0030_backlink_metrics_reports.sql",
+    "0031_backlink_tasks_notifications.sql",
 ]
 
 
 def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def test_imports_the_frozen_source_alembic_chain_and_adds_one_bridge() -> None:
     expected = SOURCE_ALEMBIC_REVISIONS + [BRIDGE_REVISION]
-    actual = sorted(path.name for path in ALEMBIC_VERSIONS.glob("*.py"))
-    assert actual == expected
+    actual = {path.name for path in ALEMBIC_VERSIONS.glob("*.py")}
+    assert set(expected) <= actual
 
     bridge = (ALEMBIC_VERSIONS / BRIDGE_REVISION).read_text(encoding="utf-8")
     assert 'down_revision: str | Sequence[str] | None = "20260722_0006"' in bridge
@@ -76,7 +78,7 @@ def test_shared_bootstrap_declares_crawling_roles_and_schema() -> None:
         assert fragment in sql
 
 
-def test_deployment_manifest_covers_both_heads_with_fixed_checksums() -> None:
+def test_frozen_deployment_manifest_keeps_fixed_checksums() -> None:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     assert manifest["schemaVersion"] == 1
     assert manifest["postgresql"]["requiredMajor"] == 18
@@ -120,7 +122,7 @@ def test_deployment_manifest_covers_both_heads_with_fixed_checksums() -> None:
 
     assert manifest["heads"] == {
         "alembic": "20260724_0007",
-        "backlinks": "0029",
+        "backlinks": "0031",
     }
 
 

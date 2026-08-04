@@ -233,9 +233,25 @@ class FakeSiteIconReader:
         return self.icons.get(key)
 
 
+class FakeProjectObjectCleaner:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.project_calls: list[tuple[str, str]] = []
+
+    async def delete_project_objects(
+        self,
+        organization_id: str,
+        project_id: str,
+    ) -> None:
+        self.project_calls.append((organization_id, project_id))
+        if self.error is not None:
+            raise self.error
+
+
 def build_service(
     *,
     launch_error: Exception | None = None,
+    object_cleaner: FakeProjectObjectCleaner | None = None,
 ) -> tuple[
     ProjectService,
     FakeWorkflowLauncher,
@@ -251,6 +267,7 @@ def build_service(
             launcher=launcher,
             repository=repository,
             site_icon_reader=site_icon_reader,
+            object_cleaner=object_cleaner,
         ),
         launcher,
         repository,
@@ -343,7 +360,7 @@ def test_sql_repository_flushes_project_before_keyword_run() -> None:
             self.flush_count = 0
             self.committed = False
 
-        async def __aenter__(self) -> FlushOrderSession:
+        async def __aenter__(self) -> "FlushOrderSession":
             return self
 
         async def __aexit__(self, *args: object) -> None:
@@ -612,6 +629,7 @@ def test_delete_project_route_removes_project_and_cancels_active_workflow() -> N
         f"crawler:site_understanding:{created.id}:{created.understanding_run_id}",
         "keywords:build:run-1",
     ]
+    assert cleaner.project_calls == [("test-org", created.id)]
 
 
 def test_update_business_profile_preserves_crawler_fields() -> None:

@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "20260728_0012"
-down_revision: str | Sequence[str] | None = "20260727_0011"
+revision: str = "20260728_k012"
+down_revision: str | Sequence[str] | None = "20260727_k011"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
