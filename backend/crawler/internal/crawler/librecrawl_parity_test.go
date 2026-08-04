@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,6 +62,57 @@ func TestRequestLimiterSpacesRequestsAndHonorsCancellation(t *testing.T) {
 	defer cancel()
 	if err := cancelLimiter.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cancelled Wait() error = %v", err)
+	}
+}
+
+func TestRequestLimiterBacksOffAndRecovers(t *testing.T) {
+	limiter := NewRequestLimiter(100*time.Millisecond, 0)
+	limiter.Observe(http.StatusTooManyRequests, "2")
+
+	limiter.mu.Lock()
+	backoff := limiter.adaptiveDelay
+	blockedFor := time.Until(limiter.blockedUntil)
+	limiter.mu.Unlock()
+	if backoff != 200*time.Millisecond {
+		t.Fatalf("adaptive delay = %s, want 200ms", backoff)
+	}
+	if blockedFor < 1500*time.Millisecond {
+		t.Fatalf("Retry-After backoff = %s, want about 2s", blockedFor)
+	}
+
+	for range backoffRecoveryCount {
+		limiter.Observe(http.StatusOK, "")
+	}
+	limiter.mu.Lock()
+	recovered := limiter.adaptiveDelay
+	limiter.mu.Unlock()
+	if recovered != 0 {
+		t.Fatalf("adaptive delay after recovery = %s, want 0", recovered)
+	}
+}
+
+func TestRequestLimiterSupportsConcurrentWaiters(t *testing.T) {
+	limiter := NewRequestLimiter(50*time.Microsecond, 0)
+	start := make(chan struct{})
+	errors := make(chan error, 256)
+	var waiters sync.WaitGroup
+
+	for range 256 {
+		waiters.Add(1)
+		go func() {
+			defer waiters.Done()
+			<-start
+			errors <- limiter.Wait(context.Background())
+		}()
+	}
+
+	close(start)
+	waiters.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("concurrent Wait() error = %v", err)
+		}
 	}
 }
 
@@ -337,7 +389,7 @@ func TestTechnicalAuditUsesBreadthFirstOrderAndKeepsResultOrder(t *testing.T) {
 	}
 }
 
-func TestTechnicalAuditStopsAtDepthThreeAndSkipsFiles(t *testing.T) {
+func TestTechnicalAuditFollowsDeepLinksAndSkipsFiles(t *testing.T) {
 	now := time.Now().UTC()
 	httpFetcher := auditDiscoveryFetcher()
 	pageFetcher := &fakeFetcher{resources: map[string]Resource{
@@ -376,17 +428,19 @@ func TestTechnicalAuditStopsAtDepthThreeAndSkipsFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() returned an error: %v", err)
 	}
-	if len(result.Pages) != 4 || result.Pages[3].Depth != 3 {
+	if len(result.Pages) != 5 || result.Pages[4].Depth != 4 {
 		t.Fatalf("pages = %#v", result.Pages)
 	}
 	for _, rawURL := range []string{
-		"https://example.com/d4",
 		"https://example.com/guide.pdf",
 		"https://example.com/hero.jpg",
 	} {
 		if pageFetcher.callCount(rawURL) != 0 {
 			t.Fatalf("excluded URL was fetched: %s", rawURL)
 		}
+	}
+	if pageFetcher.callCount("https://example.com/d4") != 1 {
+		t.Fatal("deep HTML page was not fetched")
 	}
 }
 

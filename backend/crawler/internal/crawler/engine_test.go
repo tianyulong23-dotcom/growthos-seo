@@ -46,6 +46,53 @@ type delayedURLFetcher struct {
 	delay time.Duration
 }
 
+type blockingStatusFetcher struct {
+	*fakeFetcher
+	started chan string
+	release <-chan struct{}
+
+	mu        sync.Mutex
+	active    int
+	maxActive int
+}
+
+func (f *blockingStatusFetcher) CheckStatus(
+	ctx context.Context,
+	rawURL string,
+) (int, error) {
+	f.mu.Lock()
+	f.active++
+	f.maxActive = max(f.maxActive, f.active)
+	f.mu.Unlock()
+
+	select {
+	case f.started <- rawURL:
+	case <-ctx.Done():
+		f.finishStatusCheck()
+		return 0, ctx.Err()
+	}
+	select {
+	case <-f.release:
+		f.finishStatusCheck()
+		return 200, nil
+	case <-ctx.Done():
+		f.finishStatusCheck()
+		return 0, ctx.Err()
+	}
+}
+
+func (f *blockingStatusFetcher) finishStatusCheck() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.active--
+}
+
+func (f *blockingStatusFetcher) maximumConcurrency() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxActive
+}
+
 func (f delayedURLFetcher) Fetch(ctx context.Context, rawURL string) (Resource, error) {
 	if rawURL == f.url {
 		timer := time.NewTimer(f.delay)
@@ -552,6 +599,328 @@ func TestCheckpointIsSavedBeforeNetworkDiscovery(t *testing.T) {
 	}
 	if len(first.Candidates) != 1 || first.Candidates[0].URL != "https://example.com/" {
 		t.Fatalf("initial checkpoint candidates = %#v", first.Candidates)
+	}
+}
+
+func TestCheckpointCadenceMatchesLibreCrawlBatching(t *testing.T) {
+	now := time.Now()
+
+	if checkpointDue(0, checkpointAttemptBatchSize-1, now, now.Add(29*time.Second)) {
+		t.Fatal("checkpoint became due before the batch or interval threshold")
+	}
+	if !checkpointDue(0, checkpointAttemptBatchSize, now, now.Add(time.Second)) {
+		t.Fatal("checkpoint did not become due after 50 attempts")
+	}
+	if !checkpointDue(10, 11, now, now.Add(checkpointInterval)) {
+		t.Fatal("checkpoint did not become due after 30 seconds")
+	}
+}
+
+func TestTechnicalAuditCheckpointOmitsStoredInlineArtifacts(t *testing.T) {
+	pages := []Page{
+		{
+			URL:         "https://example.com/",
+			MainText:    "large extracted body",
+			MainHTML:    "<main>large extracted body</main>",
+			MainTextRef: "runs/run/pages/page/main.txt.gz",
+			MainHTMLRef: "runs/run/pages/page/main.html.gz",
+		},
+	}
+
+	checkpoint := checkpointPages(Task{Type: TaskTechnicalAudit}, pages)
+
+	if checkpoint[0].MainText != "" || checkpoint[0].MainHTML != "" {
+		t.Fatalf("checkpoint retained inline page artifacts: %#v", checkpoint[0])
+	}
+	if checkpoint[0].MainTextRef == "" || checkpoint[0].MainHTMLRef == "" {
+		t.Fatalf("checkpoint lost page artifact references: %#v", checkpoint[0])
+	}
+	if pages[0].MainText == "" || pages[0].MainHTML == "" {
+		t.Fatal("checkpoint copy mutated the live page")
+	}
+}
+
+func TestImageStatusChecksRespectResourceLimit(t *testing.T) {
+	fetcher := &fakeStatusFetcher{
+		fakeFetcher: &fakeFetcher{},
+		statuses: map[string]int{
+			"https://example.com/one.png": 200,
+			"https://example.com/two.png": 404,
+		},
+	}
+	engine := NewEngine(
+		Config{ResourceCheckLimit: 1, StatusConcurrency: 1},
+		fetcher,
+		fetcher,
+		nil,
+	)
+	page := Page{Links: []Link{
+		{URL: "https://example.com/one.png", Placement: "image"},
+		{URL: "https://example.com/two.png", Placement: "image"},
+	}}
+
+	engine.checkImageStatuses(context.Background(), &page, map[string]int{})
+
+	if fetcher.statusCalls != 1 {
+		t.Fatalf("status calls = %d, want 1", fetcher.statusCalls)
+	}
+	if !engine.resourceChecksTruncated {
+		t.Fatal("resource checks were not marked as truncated")
+	}
+}
+
+func TestImageStatusChecksRunAcrossPagesConcurrently(t *testing.T) {
+	release := make(chan struct{})
+	fetcher := &blockingStatusFetcher{
+		fakeFetcher: &fakeFetcher{},
+		started:     make(chan string, 2),
+		release:     release,
+	}
+	engine := NewEngine(
+		Config{ResourceCheckLimit: 10, StatusConcurrency: 5},
+		fetcher,
+		fetcher,
+		nil,
+	)
+	pages := []Page{
+		{Links: []Link{{URL: "https://example.com/one.png", Placement: "image"}}},
+		{Links: []Link{{URL: "https://example.com/two.png", Placement: "image"}}},
+	}
+	done := make(chan struct{})
+	go func() {
+		engine.checkImageStatusesForPages(context.Background(), pages, map[string]int{})
+		close(done)
+	}()
+
+	for range 2 {
+		select {
+		case <-fetcher.started:
+		case <-time.After(time.Second):
+			close(release)
+			<-done
+			t.Fatal("image checks from separate pages did not overlap")
+		}
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("parallel image checks did not finish")
+	}
+	if fetcher.maximumConcurrency() < 2 {
+		t.Fatalf("maximum image concurrency = %d, want at least 2", fetcher.maximumConcurrency())
+	}
+}
+
+func TestImageStatusChecksLimitConcurrencyWithinPage(t *testing.T) {
+	release := make(chan struct{})
+	fetcher := &blockingStatusFetcher{
+		fakeFetcher: &fakeFetcher{},
+		started:     make(chan string, 6),
+		release:     release,
+	}
+	engine := NewEngine(
+		Config{ResourceCheckLimit: 10, StatusConcurrency: 5},
+		fetcher,
+		fetcher,
+		nil,
+	)
+	links := make([]Link, 6)
+	for index := range links {
+		links[index] = Link{
+			URL:       fmt.Sprintf("https://example.com/%d.png", index),
+			Placement: "image",
+		}
+	}
+	pages := []Page{{Links: links}}
+	done := make(chan struct{})
+	go func() {
+		engine.checkImageStatusesForPages(context.Background(), pages, map[string]int{})
+		close(done)
+	}()
+
+	for range imageStatusPerPageConcurrency {
+		select {
+		case <-fetcher.started:
+		case <-time.After(time.Second):
+			close(release)
+			<-done
+			t.Fatal("five image checks did not start")
+		}
+	}
+	select {
+	case <-fetcher.started:
+		close(release)
+		<-done
+		t.Fatal("more than five image checks ran concurrently for one page")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("per-page image checks did not finish")
+	}
+	if maximum := fetcher.maximumConcurrency(); maximum != imageStatusPerPageConcurrency {
+		t.Fatalf(
+			"maximum per-page image concurrency = %d, want %d",
+			maximum,
+			imageStatusPerPageConcurrency,
+		)
+	}
+}
+
+func TestImageStatusChecksDeduplicateAcrossPages(t *testing.T) {
+	const imageURL = "https://example.com/shared.png"
+	fetcher := &fakeStatusFetcher{
+		fakeFetcher: &fakeFetcher{},
+		statuses:    map[string]int{imageURL: 404},
+	}
+	engine := NewEngine(
+		Config{ResourceCheckLimit: 10, StatusConcurrency: 5},
+		fetcher,
+		fetcher,
+		nil,
+	)
+	pages := []Page{
+		{Links: []Link{{URL: imageURL, Placement: "image"}}},
+		{Links: []Link{{URL: imageURL, Placement: "image"}}},
+	}
+
+	engine.checkImageStatusesForPages(context.Background(), pages, map[string]int{})
+
+	if calls := fetcher.statusCallCount(imageURL); calls != 1 {
+		t.Fatalf("shared image status calls = %d, want 1", calls)
+	}
+	for index, page := range pages {
+		if page.Links[0].TargetStatus == nil || *page.Links[0].TargetStatus != 404 {
+			t.Fatalf("page %d image status = %#v, want 404", index, page.Links[0].TargetStatus)
+		}
+		if len(page.BrokenImages) != 1 || page.BrokenImages[0].URL != imageURL {
+			t.Fatalf("page %d broken images = %#v", index, page.BrokenImages)
+		}
+	}
+}
+
+func TestImageStatusChecksCapNewImagesPerPage(t *testing.T) {
+	fetcher := &fakeStatusFetcher{
+		fakeFetcher: &fakeFetcher{},
+	}
+	engine := NewEngine(
+		Config{ResourceCheckLimit: 100, StatusConcurrency: 5},
+		fetcher,
+		fetcher,
+		nil,
+	)
+	links := make([]Link, imageStatusPerPageLimit+1)
+	for index := range links {
+		links[index] = Link{
+			URL:       fmt.Sprintf("https://example.com/%d.png", index),
+			Placement: "image",
+		}
+	}
+	pages := []Page{{Links: links}}
+
+	engine.checkImageStatusesForPages(context.Background(), pages, map[string]int{})
+
+	fetcher.statusMu.Lock()
+	statusCalls := fetcher.statusCalls
+	fetcher.statusMu.Unlock()
+	if statusCalls != imageStatusPerPageLimit {
+		t.Fatalf("image status calls = %d, want %d", statusCalls, imageStatusPerPageLimit)
+	}
+	if !engine.resourceChecksTruncated {
+		t.Fatal("per-page image limit was not reported as truncated")
+	}
+	if pages[0].Links[imageStatusPerPageLimit].TargetStatus != nil {
+		t.Fatal("image after the per-page limit unexpectedly received a status")
+	}
+}
+
+func TestImageStatusSchedulerDefersWaitingUntilClose(t *testing.T) {
+	const imageURL = "https://example.com/queued.png"
+	release := make(chan struct{})
+	fetcher := &blockingStatusFetcher{
+		fakeFetcher: &fakeFetcher{},
+		started:     make(chan string, 1),
+		release:     release,
+	}
+	scheduler := newImageStatusScheduler(
+		context.Background(),
+		fetcher,
+		Config{ResourceCheckLimit: 10, StatusConcurrency: 5},
+		map[string]int{"https://example.com/cached.png": 200},
+	)
+
+	enqueued := make(chan struct{})
+	go func() {
+		scheduler.EnqueuePage(Page{Links: []Link{{
+			URL:       imageURL,
+			Placement: "image",
+		}}})
+		close(enqueued)
+	}()
+	select {
+	case <-enqueued:
+	case <-time.After(time.Second):
+		close(release)
+		scheduler.CloseAndWait()
+		t.Fatal("enqueue waited for the image request")
+	}
+	select {
+	case startedURL := <-fetcher.started:
+		if startedURL != imageURL {
+			t.Fatalf("started image = %q, want %q", startedURL, imageURL)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		scheduler.CloseAndWait()
+		t.Fatal("queued image request did not start")
+	}
+
+	finished := make(chan struct{})
+	go func() {
+		scheduler.CloseAndWait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		close(release)
+		t.Fatal("scheduler finished before the image request")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("scheduler did not finish after the image request")
+	}
+
+	statuses := scheduler.Snapshot()
+	if statuses[imageURL] != 200 ||
+		statuses["https://example.com/cached.png"] != 200 {
+		t.Fatalf("image status snapshot = %#v", statuses)
+	}
+}
+
+func TestLimitedPendingResourcesUsesStableURLOrder(t *testing.T) {
+	limited, remaining := limitedPendingResources(
+		map[string]string{
+			"c": "https://example.com/c",
+			"a": "https://example.com/a",
+			"b": "https://example.com/b",
+		},
+		2,
+	)
+
+	if remaining != 0 || len(limited) != 2 {
+		t.Fatalf("limited resources = %#v, remaining = %d", limited, remaining)
+	}
+	if _, exists := limited["a"]; !exists {
+		t.Fatal("stable resource limit omitted a")
+	}
+	if _, exists := limited["b"]; !exists {
+		t.Fatal("stable resource limit omitted b")
 	}
 }
 

@@ -19,6 +19,20 @@ type contextCheckingStore struct {
 	progress []crawler.Progress
 }
 
+type aiSettingsStore struct {
+	contextCheckingStore
+	settings crawler.AIProviderSettings
+	found    bool
+	err      error
+}
+
+func (s *aiSettingsStore) LoadAIProviderSettings(
+	context.Context,
+	string,
+) (crawler.AIProviderSettings, bool, error) {
+	return s.settings, s.found, s.err
+}
+
 func (s *contextCheckingStore) SaveResult(
 	context.Context,
 	crawler.Task,
@@ -85,6 +99,65 @@ func TestRunStopsWhenContextIsCancelled(t *testing.T) {
 
 	if err := Run(ctx); err != nil {
 		t.Fatalf("Run returned an error: %v", err)
+	}
+}
+
+func TestAIProviderConfigUsesLatestStoredSettings(t *testing.T) {
+	store := &aiSettingsStore{
+		settings: crawler.AIProviderSettings{
+			BaseURL:        "https://stored.example/v1",
+			APIKey:         "stored-key",
+			Model:          "stored-model",
+			RequestTimeout: 75 * time.Second,
+			MaxRetries:     2,
+		},
+		found: true,
+	}
+	fallback := crawler.Config{
+		BusinessProfileAIBaseURL: "https://environment.example/v1",
+		BusinessProfileAIAPIKey:  "environment-key",
+		BusinessProfileAIModel:   "environment-model",
+	}
+
+	config, err := aiProviderConfig(
+		context.Background(),
+		store,
+		"organization",
+		fallback,
+	)
+
+	if err != nil {
+		t.Fatalf("aiProviderConfig() returned an error: %v", err)
+	}
+	if config.BusinessProfileAIBaseURL != store.settings.BaseURL ||
+		config.BusinessProfileAIAPIKey != store.settings.APIKey ||
+		config.BusinessProfileAIModel != store.settings.Model ||
+		config.BusinessProfileAITimeout != store.settings.RequestTimeout ||
+		config.BusinessProfileAIMaxRetries != store.settings.MaxRetries {
+		t.Fatalf("AI provider config = %#v", config)
+	}
+}
+
+func TestAIProviderConfigKeepsEnvironmentFallbackWithoutStoredSettings(t *testing.T) {
+	store := &aiSettingsStore{}
+	fallback := crawler.Config{
+		BusinessProfileAIBaseURL: "https://environment.example/v1",
+		BusinessProfileAIAPIKey:  "environment-key",
+		BusinessProfileAIModel:   "environment-model",
+	}
+
+	config, err := aiProviderConfig(
+		context.Background(),
+		store,
+		"organization",
+		fallback,
+	)
+
+	if err != nil {
+		t.Fatalf("aiProviderConfig() returned an error: %v", err)
+	}
+	if config != fallback {
+		t.Fatalf("AI provider config = %#v, want fallback", config)
 	}
 }
 
@@ -367,8 +440,11 @@ func TestApplySynthesizedProfileKeepsIncompleteProfilePartial(t *testing.T) {
 func TestSiteUnderstandingUsesBoundedActivityRetries(t *testing.T) {
 	options := activityOptions(crawler.Task{Type: crawler.TaskSiteUnderstanding})
 
-	if options.StartToCloseTimeout != 3*time.Minute {
+	if options.StartToCloseTimeout != 10*time.Minute {
 		t.Fatalf("StartToCloseTimeout = %s", options.StartToCloseTimeout)
+	}
+	if options.ScheduleToCloseTimeout != 30*time.Minute {
+		t.Fatalf("ScheduleToCloseTimeout = %s", options.ScheduleToCloseTimeout)
 	}
 	if options.RetryPolicy == nil || options.RetryPolicy.MaximumAttempts != 2 {
 		t.Fatalf("RetryPolicy = %#v", options.RetryPolicy)
@@ -378,8 +454,11 @@ func TestSiteUnderstandingUsesBoundedActivityRetries(t *testing.T) {
 func TestTechnicalAuditKeepsLongRunningActivityLimits(t *testing.T) {
 	options := activityOptions(crawler.Task{Type: crawler.TaskTechnicalAudit})
 
-	if options.StartToCloseTimeout != 2*time.Hour {
+	if options.StartToCloseTimeout != 6*time.Hour {
 		t.Fatalf("StartToCloseTimeout = %s", options.StartToCloseTimeout)
+	}
+	if options.ScheduleToCloseTimeout != 6*time.Hour {
+		t.Fatalf("ScheduleToCloseTimeout = %s", options.ScheduleToCloseTimeout)
 	}
 	if options.RetryPolicy == nil || options.RetryPolicy.MaximumAttempts != 3 {
 		t.Fatalf("RetryPolicy = %#v", options.RetryPolicy)

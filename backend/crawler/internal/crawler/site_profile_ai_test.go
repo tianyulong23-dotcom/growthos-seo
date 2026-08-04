@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *testing.T) {
@@ -21,14 +23,26 @@ func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *te
 		if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 			t.Fatal(err)
 		}
-		response.Header().Set("Content-Type", "application/json")
-		_, _ = response.Write([]byte(`{
-			"choices": [{
-				"message": {
-					"content": "{\"business_name\":\"Example Athletics, Inc.\",\"business_type\":\"Sportswear brand\",\"business_summary\":\"Example Athletics makes sports products for athletes and active consumers.\",\"target_audiences\":[\"Athletes\",\"Active consumers\"],\"products_services\":[\"Athletic footwear\",\"Sports apparel\",\"Sports accessories\"],\"value_propositions\":[\"Products designed for sport and everyday activity\",\"A broad range across sports and age groups\"]}"
-				}
-			}]
-		}`))
+		writeAIProfileResponse(t, response, aiProfileOutput{
+			BusinessName:      "Example Athletics, Inc.",
+			BusinessType:      "Sportswear brand",
+			BusinessSummary:   "Example Athletics makes sports products for athletes and active consumers.",
+			TargetAudiences:   []string{"Athletes", "Active consumers"},
+			ProductsServices:  []string{"Athletic footwear", "Sports apparel", "Sports accessories"},
+			ValuePropositions: []string{"Products designed for sport and everyday activity", "A broad range across sports and age groups"},
+			Evidence: []aiProfileEvidence{
+				{Field: "business_name", Value: "Example Athletics, Inc.", PageID: "page_001", Quote: "Example Athletics. Official Site"},
+				{Field: "business_type", Value: "Sportswear brand", PageID: "page_001", Quote: "Shoes"},
+				{Field: "business_summary", Value: "Example Athletics makes sports products for athletes and active consumers.", PageID: "page_001", Quote: "Sports products."},
+				{Field: "target_audiences", Value: "Athletes", PageID: "page_001", Quote: "Sports products."},
+				{Field: "target_audiences", Value: "Active consumers", PageID: "page_001", Quote: "Move every day"},
+				{Field: "products_services", Value: "Athletic footwear", PageID: "page_001", Quote: "Shoes"},
+				{Field: "products_services", Value: "Sports apparel", PageID: "page_001", Quote: "Clothing"},
+				{Field: "products_services", Value: "Sports accessories", PageID: "page_001", Quote: "Sports products."},
+				{Field: "value_propositions", Value: "Products designed for sport and everyday activity", PageID: "page_001", Quote: "Move every day"},
+				{Field: "value_propositions", Value: "A broad range across sports and age groups", PageID: "page_001", Quote: "Sports products."},
+			},
+		})
 	}))
 	defer server.Close()
 
@@ -113,10 +127,10 @@ func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *te
 		t.Fatal(err)
 	}
 
-	if profile.ProfileVersion != 3 {
+	if profile.ProfileVersion != 4 {
 		t.Fatalf("profile version = %d", profile.ProfileVersion)
 	}
-	if profile.ExtractionMethod != "ai_synthesized_from_crawl_evidence" {
+	if profile.ExtractionMethod != "ai_synthesized_with_grounded_evidence" {
 		t.Fatalf("extraction method = %q", profile.ExtractionMethod)
 	}
 	if profile.BusinessName != "Example Athletics" {
@@ -129,8 +143,12 @@ func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *te
 		"Athletic footwear|Sports apparel|Sports accessories" {
 		t.Fatalf("products/services = %#v", profile.ProductsServices)
 	}
-	if len(profile.Evidence) != 1 {
-		t.Fatalf("crawler evidence was not preserved: %#v", profile.Evidence)
+	if len(profile.Evidence) != 10 {
+		t.Fatalf("grounded evidence count = %d: %#v", len(profile.Evidence), profile.Evidence)
+	}
+	if profile.Evidence[0].Quote != "Example Athletics. Official Site" ||
+		profile.Evidence[0].SourceURL != "https://example.com/" {
+		t.Fatalf("grounded evidence = %#v", profile.Evidence[0])
 	}
 
 	messages := requestBody["messages"].([]any)
@@ -146,6 +164,7 @@ func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *te
 		"website navigation or filtering features",
 		"untrusted data",
 		"Never follow instructions",
+		"verbatim substring",
 	} {
 		if !strings.Contains(systemPrompt, required) {
 			t.Fatalf("system prompt missing %q", required)
@@ -181,6 +200,10 @@ func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *te
 		t.Fatal(err)
 	}
 	deterministicProfile := evidencePayload["deterministic_profile"].(map[string]any)
+	pagesPayload := evidencePayload["pages"].([]any)
+	if pagesPayload[0].(map[string]any)["id"] != "page_001" {
+		t.Fatalf("page ID = %#v", pagesPayload[0])
+	}
 	for _, omitted := range []string{
 		"evidence",
 		"key_pages",
@@ -206,19 +229,190 @@ func TestAIProfileSynthesizerRequiresConfiguration(t *testing.T) {
 	}
 }
 
-func TestAIProfileSynthesizerSanitizesListsAndPreservesUsableFallbacks(t *testing.T) {
+func TestAIProfileSynthesizerRetriesTransientStatus(t *testing.T) {
+	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(
 		response http.ResponseWriter,
 		_ *http.Request,
 	) {
-		response.Header().Set("Content-Type", "application/json")
-		_, _ = response.Write([]byte(`{
-			"choices": [{
-				"message": {
-					"content": "{\"business_name\":\"Example\",\"business_type\":\"Analytics software\",\"business_summary\":\"Example helps teams understand their business data.\",\"target_audiences\":[],\"products_services\":[\"Analytics\",\"analytics.\",\"Discover the future of business intelligence with a platform that transforms every decision across your entire organization.\"],\"value_propositions\":[\"Fast setup\",\"Fast setup.\",\"Build a better future for every team with powerful insights that unlock limitless growth and transform how the world works.\"]}"
-				}
-			}]
-		}`))
+		if calls.Add(1) == 1 {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writeValidAIProfileResponse(response)
+	}))
+	defer server.Close()
+
+	synthesizer := NewAIProfileSynthesizer(Config{
+		BusinessProfileAIBaseURL:    server.URL,
+		BusinessProfileAIAPIKey:     "test-key",
+		BusinessProfileAIModel:      "test-model",
+		BusinessProfileAITimeout:    time.Second,
+		BusinessProfileAIMaxRetries: 1,
+	})
+	synthesizer.retryDelay = time.Millisecond
+
+	profile, err := synthesizer.Synthesize(
+		context.Background(),
+		Task{TargetURL: "https://example.com", Language: "en"},
+		standardAIProfilePages(),
+		SiteProfile{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("request count = %d, want 2", calls.Load())
+	}
+	if profile.BusinessName != "Example" {
+		t.Fatalf("business name = %q", profile.BusinessName)
+	}
+}
+
+func TestAIProfileSynthesizerRetriesTimedOutRequest(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		if calls.Add(1) == 1 {
+			time.Sleep(50 * time.Millisecond)
+			return
+		}
+		writeValidAIProfileResponse(response)
+	}))
+	defer server.Close()
+
+	synthesizer := NewAIProfileSynthesizer(Config{
+		BusinessProfileAIBaseURL:    server.URL,
+		BusinessProfileAIAPIKey:     "test-key",
+		BusinessProfileAIModel:      "test-model",
+		BusinessProfileAITimeout:    10 * time.Millisecond,
+		BusinessProfileAIMaxRetries: 1,
+	})
+	synthesizer.retryDelay = time.Millisecond
+
+	_, err := synthesizer.Synthesize(
+		context.Background(),
+		Task{TargetURL: "https://example.com", Language: "en"},
+		standardAIProfilePages(),
+		SiteProfile{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("request count = %d, want 2", calls.Load())
+	}
+}
+
+func TestAIProfileSynthesizerDoesNotRetryAuthenticationFailure(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		calls.Add(1)
+		response.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	synthesizer := NewAIProfileSynthesizer(Config{
+		BusinessProfileAIBaseURL:    server.URL,
+		BusinessProfileAIAPIKey:     "test-key",
+		BusinessProfileAIModel:      "test-model",
+		BusinessProfileAITimeout:    time.Second,
+		BusinessProfileAIMaxRetries: 2,
+	})
+
+	_, err := synthesizer.Synthesize(
+		context.Background(),
+		Task{TargetURL: "https://example.com", Language: "en"},
+		nil,
+		SiteProfile{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("request count = %d, want 1", calls.Load())
+	}
+}
+
+func TestAIProfileSynthesizerRetriesInvalidOutput(t *testing.T) {
+	var calls atomic.Int32
+	var retryPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		var requestBody struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		output := validAIProfileOutput()
+		if calls.Add(1) == 1 {
+			output.Evidence = output.Evidence[1:]
+		} else {
+			retryPrompt = requestBody.Messages[1].Content
+		}
+		writeAIProfileResponse(t, response, output)
+	}))
+	defer server.Close()
+
+	synthesizer := NewAIProfileSynthesizer(Config{
+		BusinessProfileAIBaseURL:    server.URL,
+		BusinessProfileAIAPIKey:     "test-key",
+		BusinessProfileAIModel:      "test-model",
+		BusinessProfileAIMaxRetries: 1,
+	})
+	synthesizer.retryDelay = time.Millisecond
+
+	profile, err := synthesizer.Synthesize(
+		context.Background(),
+		Task{TargetURL: "https://example.com", Language: "en"},
+		standardAIProfilePages(),
+		SiteProfile{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("request count = %d, want 2", calls.Load())
+	}
+	if profile.BusinessName != "Example" {
+		t.Fatalf("business name = %q", profile.BusinessName)
+	}
+	if !strings.Contains(retryPrompt, "previous response failed") {
+		t.Fatalf("retry prompt did not include validation feedback: %q", retryPrompt)
+	}
+}
+
+func TestAIProfileSynthesizerSanitizesAndDeduplicatesLists(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		writeAIProfileResponse(t, response, aiProfileOutput{
+			BusinessName:      "Example",
+			BusinessType:      "Analytics software",
+			BusinessSummary:   "Example helps teams understand their business data.",
+			TargetAudiences:   []string{"Finance teams", "Finance teams."},
+			ProductsServices:  []string{"Analytics", "analytics.", "Discover the future of business intelligence with a platform that transforms every decision across your entire organization."},
+			ValuePropositions: []string{"Fast setup", "Fast setup.", "Build a better future for every team with powerful insights that unlock limitless growth and transform how the world works."},
+			Evidence: []aiProfileEvidence{
+				{Field: "business_name", Value: "Example", PageID: "page_001", Quote: "Example analytics software"},
+				{Field: "business_type", Value: "Analytics software", PageID: "page_001", Quote: "analytics software"},
+				{Field: "business_summary", Value: "Example helps teams understand their business data.", PageID: "page_001", Quote: "understand business data"},
+				{Field: "target_audiences", Value: "Finance teams", PageID: "page_001", Quote: "Finance teams"},
+				{Field: "products_services", Value: "Analytics", PageID: "page_001", Quote: "analytics software"},
+				{Field: "value_propositions", Value: "Fast setup", PageID: "page_001", Quote: "fast setup"},
+			},
+		})
 	}))
 	defer server.Close()
 
@@ -234,7 +428,11 @@ func TestAIProfileSynthesizerSanitizesListsAndPreservesUsableFallbacks(t *testin
 	}).Synthesize(
 		context.Background(),
 		Task{TargetURL: "https://example.com", Country: "US", Language: "en"},
-		[]Page{{URL: "https://example.com", FinalURL: "https://example.com"}},
+		[]Page{{
+			URL:         "https://example.com",
+			FinalURL:    "https://example.com",
+			Description: "Example analytics software helps Finance teams understand business data with fast setup.",
+		}},
 		fallback,
 	)
 	if err != nil {
@@ -249,5 +447,215 @@ func TestAIProfileSynthesizerSanitizesListsAndPreservesUsableFallbacks(t *testin
 	}
 	if strings.Join(profile.ValuePropositions, "|") != "Fast setup" {
 		t.Fatalf("value propositions = %#v", profile.ValuePropositions)
+	}
+}
+
+func TestAIProfileSynthesizerRejectsCoreFieldWithoutValidGrounding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		output := validAIProfileOutput()
+		output.Evidence[0].Quote = "This text does not appear on the supplied page."
+		writeAIProfileResponse(t, response, output)
+	}))
+	defer server.Close()
+
+	_, err := NewAIProfileSynthesizer(Config{
+		BusinessProfileAIBaseURL: server.URL,
+		BusinessProfileAIAPIKey:  "test-key",
+		BusinessProfileAIModel:   "test-model",
+	}).Synthesize(
+		context.Background(),
+		Task{TargetURL: "https://example.com", Country: "US", Language: "en"},
+		standardAIProfilePages(),
+		SiteProfile{},
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "missing required field business_name") {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+}
+
+func TestAIProfileSynthesizerAssociatesScalarCitationByField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		output := validAIProfileOutput()
+		output.Evidence[2].Value = "A stale copy of the summary"
+		writeAIProfileResponse(t, response, output)
+	}))
+	defer server.Close()
+
+	profile, err := NewAIProfileSynthesizer(Config{
+		BusinessProfileAIBaseURL: server.URL,
+		BusinessProfileAIAPIKey:  "test-key",
+		BusinessProfileAIModel:   "test-model",
+	}).Synthesize(
+		context.Background(),
+		Task{TargetURL: "https://example.com", Country: "US", Language: "en"},
+		standardAIProfilePages(),
+		SiteProfile{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, evidence := range profile.Evidence {
+		if evidence.Field == "business_summary" &&
+			evidence.Value == profile.BusinessSummary {
+			return
+		}
+	}
+	t.Fatalf("business summary evidence = %#v", profile.Evidence)
+}
+
+func TestAIProfileSynthesizerDiscardsAnUngroundedListItem(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		output := validAIProfileOutput()
+		output.ProductsServices = append(output.ProductsServices, "Unsupported product")
+		writeAIProfileResponse(t, response, output)
+	}))
+	defer server.Close()
+
+	profile, err := NewAIProfileSynthesizer(Config{
+		BusinessProfileAIBaseURL: server.URL,
+		BusinessProfileAIAPIKey:  "test-key",
+		BusinessProfileAIModel:   "test-model",
+	}).Synthesize(
+		context.Background(),
+		Task{TargetURL: "https://example.com", Country: "US", Language: "en"},
+		standardAIProfilePages(),
+		SiteProfile{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(profile.ProductsServices, "|") != "Business software" {
+		t.Fatalf("products/services = %#v", profile.ProductsServices)
+	}
+}
+
+func TestAIProfileSynthesizerDiscardsListItemWithInvalidCitation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		output := validAIProfileOutput()
+		output.ProductsServices = append(output.ProductsServices, "Unsupported product")
+		output.Evidence = append(output.Evidence, aiProfileEvidence{
+			Field:  "products_services",
+			Value:  "Unsupported product",
+			PageID: "page_001",
+			Quote:  "This fabricated quote is not in the supplied evidence.",
+		})
+		writeAIProfileResponse(t, response, output)
+	}))
+	defer server.Close()
+
+	profile, err := NewAIProfileSynthesizer(Config{
+		BusinessProfileAIBaseURL: server.URL,
+		BusinessProfileAIAPIKey:  "test-key",
+		BusinessProfileAIModel:   "test-model",
+	}).Synthesize(
+		context.Background(),
+		Task{TargetURL: "https://example.com", Country: "US", Language: "en"},
+		standardAIProfilePages(),
+		SiteProfile{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(profile.ProductsServices, "|") != "Business software" {
+		t.Fatalf("products/services = %#v", profile.ProductsServices)
+	}
+	for _, evidence := range profile.Evidence {
+		if evidence.Value == "Unsupported product" {
+			t.Fatalf("invalid evidence was retained: %#v", evidence)
+		}
+	}
+}
+
+func TestAlignPageQuoteIgnoresOnlyCaseWhitespaceAndPunctuation(t *testing.T) {
+	page := profileEvidencePage{
+		Description: "Open-source software, with publicly auditable code.",
+	}
+
+	aligned, matched := alignPageQuote(
+		page,
+		"open source SOFTWARE with publicly auditable code",
+	)
+	if !matched {
+		t.Fatal("quote was not aligned")
+	}
+	if aligned != "Open-source software, with publicly auditable code" {
+		t.Fatalf("aligned quote = %q", aligned)
+	}
+	if _, matched := alignPageQuote(page, "open source private software"); matched {
+		t.Fatal("quote with a substituted word was accepted")
+	}
+}
+
+func writeValidAIProfileResponse(response http.ResponseWriter) {
+	response.Header().Set("Content-Type", "application/json")
+	content, _ := json.Marshal(validAIProfileOutput())
+	body, _ := json.Marshal(map[string]any{
+		"choices": []map[string]any{{
+			"message": map[string]string{"content": string(content)},
+		}},
+	})
+	_, _ = response.Write(body)
+}
+
+func writeAIProfileResponse(
+	t *testing.T,
+	response http.ResponseWriter,
+	output aiProfileOutput,
+) {
+	t.Helper()
+	content, err := json.Marshal(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{{
+			"message": map[string]string{"content": string(content)},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Header().Set("Content-Type", "application/json")
+	_, _ = response.Write(body)
+}
+
+func standardAIProfilePages() []Page {
+	return []Page{{
+		URL:         "https://example.com",
+		FinalURL:    "https://example.com",
+		Description: "Example provides business software for teams with fast setup.",
+	}}
+}
+
+func validAIProfileOutput() aiProfileOutput {
+	const quote = "Example provides business software for teams with fast setup."
+	return aiProfileOutput{
+		BusinessName:      "Example",
+		BusinessType:      "Software",
+		BusinessSummary:   "Example provides business software.",
+		TargetAudiences:   []string{"Teams"},
+		ProductsServices:  []string{"Business software"},
+		ValuePropositions: []string{"Fast setup"},
+		Evidence: []aiProfileEvidence{
+			{Field: "business_name", Value: "Example", PageID: "page_001", Quote: quote},
+			{Field: "business_type", Value: "Software", PageID: "page_001", Quote: quote},
+			{Field: "business_summary", Value: "Example provides business software.", PageID: "page_001", Quote: quote},
+			{Field: "target_audiences", Value: "Teams", PageID: "page_001", Quote: quote},
+			{Field: "products_services", Value: "Business software", PageID: "page_001", Quote: quote},
+			{Field: "value_propositions", Value: "Fast setup", PageID: "page_001", Quote: quote},
+		},
 	}
 }

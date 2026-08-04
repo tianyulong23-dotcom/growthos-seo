@@ -34,6 +34,56 @@ func TestLoadRobotsEnforcesDisallow(t *testing.T) {
 	}
 }
 
+func TestEngineRobotsUsesCrawlerProductTokenWithMobileRequests(t *testing.T) {
+	fetcher := &fakeFetcher{resources: map[string]Resource{
+		"https://example.com/robots.txt": {
+			FinalURL:   "https://example.com/robots.txt",
+			StatusCode: 200,
+			Body: []byte(
+				"User-agent: SEOPlatformBot\nDisallow: /private\n" +
+					"User-agent: *\nAllow: /\n",
+			),
+		},
+		"https://example.com/": {
+			URL:         "https://example.com/",
+			FinalURL:    "https://example.com/",
+			StatusCode:  200,
+			ContentType: "text/html",
+			Body:        []byte(`<html><body><a href="/private">Private</a></body></html>`),
+		},
+		"https://example.com/private": {
+			URL:         "https://example.com/private",
+			FinalURL:    "https://example.com/private",
+			StatusCode:  200,
+			ContentType: "text/html",
+			Body:        []byte(`<html><body>Private</body></html>`),
+		},
+	}}
+	engine := NewEngine(
+		Config{UserAgent: defaultCrawlerUserAgent, DiscoveryLimit: 10},
+		fetcher,
+		fetcher,
+		nil,
+	)
+
+	_, err := engine.Run(context.Background(), Task{
+		OrganizationID: "org",
+		ProjectID:      "project",
+		RunID:          "mobile-robots-product-token",
+		Type:           TaskTechnicalAudit,
+		TargetURL:      "https://example.com",
+		Country:        "US",
+		Language:       "en",
+		MaxPages:       2,
+	})
+	if err != nil {
+		t.Fatalf("Run() returned an error: %v", err)
+	}
+	if fetcher.callCount("https://example.com/private") != 0 {
+		t.Fatal("mobile crawler ignored its product-specific robots rule")
+	}
+}
+
 func TestLoadRobotsAllowsWhenFetchFails(t *testing.T) {
 	fetcher := &fakeFetcher{
 		resources: map[string]Resource{

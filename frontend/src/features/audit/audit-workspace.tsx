@@ -190,6 +190,57 @@ function LoadingState() {
   )
 }
 
+function CrawlPendingState({ finalizing }: { finalizing: boolean }) {
+  return (
+    <section className="flex min-h-64 flex-col items-center justify-center border-y px-4 text-center">
+      <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
+      <h2 className="mt-3 text-sm font-semibold">
+        {finalizing ? "正在整理审计结果" : "网站仍在抓取中"}
+      </h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        审计完成后将自动显示当前页面的结果。
+      </p>
+    </section>
+  )
+}
+
+function FinalResultsState({
+  error,
+  onRetry,
+}: {
+  error: string
+  onRetry: () => void
+}) {
+  return (
+    <section className="flex min-h-64 flex-col items-center justify-center border-y px-4 text-center">
+      {error ? (
+        <>
+          <CircleAlert className="size-5 text-destructive" />
+          <h2 className="mt-3 text-sm font-semibold">审计结果加载失败</h2>
+          <p className="mt-1 max-w-xl text-sm text-muted-foreground">{error}</p>
+          <Button
+            className="mt-4"
+            variant="outline"
+            size="sm"
+            onClick={onRetry}
+          >
+            <RotateCcw />
+            重新加载
+          </Button>
+        </>
+      ) : (
+        <>
+          <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
+          <h2 className="mt-3 text-sm font-semibold">正在加载审计结果</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            数据读取完成后将自动显示本页。
+          </p>
+        </>
+      )}
+    </section>
+  )
+}
+
 function TableToolbar({
   search,
   onSearch,
@@ -283,6 +334,8 @@ function TablePagination({
 
 function AuditStatusPanel({
   run,
+  resultsReady,
+  resultsError,
   actionBusy,
   onPause,
   onResume,
@@ -294,6 +347,8 @@ function AuditStatusPanel({
   onExport,
 }: {
   run: AuditRun
+  resultsReady: boolean
+  resultsError: string
   actionBusy: boolean
   onPause: () => void
   onResume: () => void
@@ -304,32 +359,68 @@ function AuditStatusPanel({
   onNew: () => void
   onExport: (dataset: AuditExportDataset, format: AuditExportFormat) => void
 }) {
-  const active = ["queued", "running"].includes(run.status)
-  const locked = active || run.status === "recalculating"
+  const finalizing = run.status === "running" && run.stage === "completed"
+  const loadingResults = run.status === "completed" && !resultsReady
+  const active = ["queued", "running"].includes(run.status) && !finalizing
+  const locked =
+    active || finalizing || loadingResults || run.status === "recalculating"
   const stoppable = active || run.status === "paused"
   const archivable = ["paused", "stopped", "completed", "failed"].includes(
     run.status
   )
+  const displayLabel = loadingResults
+    ? resultsError
+      ? "结果加载失败"
+      : "加载结果中"
+    : finalizing
+      ? "整理结果中"
+      : statusLabels[run.status]
+  const displayMessage = loadingResults
+    ? resultsError
+      ? "审计已结束，但结果读取失败"
+      : "审计已结束，正在读取最终结果"
+    : finalizing
+      ? "页面抓取已结束，正在整理最终结果"
+      : run.message
+  const controlsDisabled = actionBusy || loadingResults || finalizing
 
   return (
     <section className="mb-6 border-y bg-muted/20">
       <div className="flex flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={statusVariant(run.status)}>
-              {statusLabels[run.status]}
+            <Badge
+              variant={
+                resultsError && loadingResults
+                  ? "destructive"
+                  : loadingResults || finalizing
+                    ? "secondary"
+                    : statusVariant(run.status)
+              }
+            >
+              {displayLabel}
             </Badge>
             {run.archived_at && <Badge variant="outline">已归档</Badge>}
-            <span className="text-sm font-medium">{run.message}</span>
+            <span className="text-sm font-medium">{displayMessage}</span>
           </div>
           <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
-            <span>阶段：{run.stage || "-"}</span>
+            <span>
+              阶段：
+              {loadingResults
+                ? "读取结果"
+                : finalizing
+                  ? "整理结果"
+                  : run.stage || "-"}
+            </span>
             <span>发现：{run.discovered}</span>
             <span>已处理：{run.processed}</span>
             <span>已选择：{run.selected}</span>
             <span>创建：{formatDate(run.created_at)}</span>
           </div>
-          <Progress value={run.progress} className="mt-3 h-1.5" />
+          <Progress
+            value={loadingResults || finalizing ? 99 : run.progress}
+            className="mt-3 h-1.5"
+          />
         </div>
         <div className="flex flex-wrap gap-2">
           {active && (
@@ -337,7 +428,7 @@ function AuditStatusPanel({
               variant="outline"
               size="sm"
               onClick={onPause}
-              disabled={actionBusy}
+              disabled={controlsDisabled}
             >
               <Pause />
               暂停
@@ -349,7 +440,7 @@ function AuditStatusPanel({
                 variant="outline"
                 size="sm"
                 onClick={onResume}
-                disabled={actionBusy}
+                disabled={controlsDisabled}
               >
                 <RotateCcw />
                 恢复
@@ -360,18 +451,18 @@ function AuditStatusPanel({
               variant="outline"
               size="sm"
               onClick={onStop}
-              disabled={actionBusy}
+              disabled={controlsDisabled}
             >
               <Square />
               停止
             </Button>
           )}
-          {run.status === "completed" && !run.archived_at && (
+          {run.status === "completed" && resultsReady && !run.archived_at && (
             <Button
               variant="outline"
               size="sm"
               onClick={onRecalculate}
-              disabled={actionBusy}
+              disabled={controlsDisabled}
             >
               <Settings2 />
               调整排除规则
@@ -380,7 +471,7 @@ function AuditStatusPanel({
           <DropdownMenu>
             <DropdownMenuTrigger
               render={<Button variant="outline" size="sm" />}
-              disabled={actionBusy}
+              disabled={controlsDisabled}
             >
               <Download />
               导出
@@ -1878,6 +1969,7 @@ export function AuditWorkspace({
   const [deleteTarget, setDeleteTarget] = React.useState<AuditRun | null>(null)
   const [historyVersion, setHistoryVersion] = React.useState(0)
   const [dataRefreshTick, setDataRefreshTick] = React.useState(0)
+  const [readyRunKey, setReadyRunKey] = React.useState<string | null>(null)
   const dataRequestKey = React.useRef<string | null>(null)
   const activeProjectId = React.useRef(project.id)
   React.useLayoutEffect(() => {
@@ -1899,19 +1991,37 @@ export function AuditWorkspace({
     run?.status === "running" ||
     run?.status === "stopping"
   const running = crawling || run?.status === "recalculating"
+  const finalizing = run?.status === "running" && run.stage === "completed"
+  const currentRunKey = runId ? `${project.id}:${runId}` : null
+  const completedRunKey = run?.status === "completed" ? currentRunKey : null
+  const finalResultsReady =
+    completedRunKey === null || readyRunKey === completedRunKey
+  const finalResultsPending = completedRunKey !== null && !finalResultsReady
   const activity = activityState.runId === runId ? activityState.items : []
   const activityError = activityState.runId === runId ? activityState.error : ""
 
   React.useEffect(() => {
-    if (!runId || !running || view === "history") return
+    if (run?.status === "completed" || !currentRunKey) return
+    setReadyRunKey((value) => (value === currentRunKey ? null : value))
+  }, [currentRunKey, run?.status])
+
+  React.useEffect(() => {
+    if (
+      !runId ||
+      !running ||
+      view === "history" ||
+      (crawling && view !== "overview")
+    ) {
+      return
+    }
     const interval = window.setInterval(() => {
       setDataRefreshTick((value) => value + 1)
     }, 1500)
     return () => window.clearInterval(interval)
-  }, [runId, running, view])
+  }, [crawling, runId, running, view])
 
   React.useEffect(() => {
-    if (!runId || !crawling) return
+    if (!runId || !crawling || view !== "overview") return
     let active = true
     let timeout = 0
     if (activityCursor.current.runId !== runId) {
@@ -1968,7 +2078,7 @@ export function AuditWorkspace({
       active = false
       window.clearTimeout(timeout)
     }
-  }, [crawling, project.id, runId])
+  }, [crawling, project.id, runId, view])
 
   React.useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -2019,7 +2129,9 @@ export function AuditWorkspace({
   }, [historySearch])
 
   React.useEffect(() => {
-    if (!runId || view === "history") return
+    if (!runId || view === "history" || (crawling && view !== "overview")) {
+      return
+    }
     let active = true
     const requestKey = [
       project.id,
@@ -2050,7 +2162,7 @@ export function AuditWorkspace({
     dataRequestKey.current = requestKey
     void Promise.resolve().then(async () => {
       if (!active) return
-      if (replacingData) {
+      if (replacingData || completedRunKey) {
         setLoading(true)
         setWorkspaceError("")
       }
@@ -2147,6 +2259,9 @@ export function AuditWorkspace({
           const result = await getAuditVisualization(project.id, runId)
           if (active) setGraph(result)
         }
+        if (active && completedRunKey) {
+          setReadyRunKey(completedRunKey)
+        }
       } catch (requestError) {
         if (active) {
           setWorkspaceError(
@@ -2163,6 +2278,8 @@ export function AuditWorkspace({
       active = false
     }
   }, [
+    completedRunKey,
+    crawling,
     externalLinkPage,
     externalLinkPageSize,
     externalLinkQuery,
@@ -2191,7 +2308,7 @@ export function AuditWorkspace({
   ])
 
   React.useEffect(() => {
-    if (view !== "history" || !project.id) return
+    if (view !== "history" || !project.id || crawling) return
     let active = true
     void Promise.resolve().then(async () => {
       if (!active) return
@@ -2208,6 +2325,9 @@ export function AuditWorkspace({
         if (active) {
           setHistory(result.items)
           setHistoryTotal(result.total)
+          if (completedRunKey) {
+            setReadyRunKey(completedRunKey)
+          }
         }
       } catch (requestError) {
         if (active) {
@@ -2225,6 +2345,8 @@ export function AuditWorkspace({
       active = false
     }
   }, [
+    completedRunKey,
+    crawling,
     historyPage,
     historyPageSize,
     historyQuery,
@@ -2436,6 +2558,15 @@ export function AuditWorkspace({
     )
   }
 
+  function retryFinalResults() {
+    setWorkspaceError("")
+    if (view === "history") {
+      setHistoryVersion((value) => value + 1)
+      return
+    }
+    setDataRefreshTick((value) => value + 1)
+  }
+
   if (!run && view !== "history") {
     return (
       <>
@@ -2455,6 +2586,8 @@ export function AuditWorkspace({
       {run && (
         <AuditStatusPanel
           run={run}
+          resultsReady={finalResultsReady}
+          resultsError={finalResultsPending ? workspaceError || error : ""}
           actionBusy={actionBusy}
           onPause={() => void performAction(pauseAuditRun)}
           onResume={() => void performAction(resumeAuditRun)}
@@ -2472,7 +2605,7 @@ export function AuditWorkspace({
         />
       )}
 
-      {run && (crawling || activity.length > 0) && (
+      {run && crawling && !finalizing && view === "overview" && (
         <CrawlActivityPanel
           items={activity}
           loading={activityLoading}
@@ -2480,14 +2613,21 @@ export function AuditWorkspace({
         />
       )}
 
-      {(error || workspaceError) && (
+      {(error || workspaceError) && !finalResultsPending && (
         <div className="mb-5 flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">
           <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
           <span>{workspaceError || error}</span>
         </div>
       )}
 
-      {view === "history" ? (
+      {crawling && view !== "overview" ? (
+        <CrawlPendingState finalizing={finalizing} />
+      ) : finalResultsPending ? (
+        <FinalResultsState
+          error={workspaceError || error}
+          onRetry={retryFinalResults}
+        />
+      ) : view === "history" ? (
         <HistoryView
           runs={history}
           total={historyTotal}

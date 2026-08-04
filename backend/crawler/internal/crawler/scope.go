@@ -16,6 +16,7 @@ import (
 type Scope struct {
 	targetHost      string
 	registrableHost string
+	privateSuffix   bool
 	mode            ScopeMode
 	directory       string
 	allowedPaths    []string
@@ -91,7 +92,7 @@ func NewScopeWithOptions(
 	target.Fragment = ""
 
 	host := strings.ToLower(strings.TrimSuffix(target.Hostname(), "."))
-	registrable, err := publicsuffix.EffectiveTLDPlusOne(host)
+	registrable, privateSuffix, err := registrableDomain(host)
 	if err != nil {
 		return Scope{}, nil, fmt.Errorf("target must use a public domain: %w", err)
 	}
@@ -114,7 +115,7 @@ func NewScopeWithOptions(
 	}
 
 	allowedHosts := map[string]struct{}{host: {}}
-	if host == registrable || host == "www."+registrable {
+	if !privateSuffix && (host == registrable || host == "www."+registrable) {
 		allowedHosts[registrable] = struct{}{}
 		allowedHosts["www."+registrable] = struct{}{}
 	}
@@ -123,8 +124,11 @@ func NewScopeWithOptions(
 		if err != nil {
 			return Scope{}, nil, err
 		}
-		additionalRegistrable, err := publicsuffix.EffectiveTLDPlusOne(additionalHost)
-		if err != nil || additionalRegistrable != registrable {
+		additionalRegistrable, additionalPrivateSuffix, err := registrableDomain(additionalHost)
+		if err != nil ||
+			privateSuffix ||
+			additionalPrivateSuffix ||
+			additionalRegistrable != registrable {
 			return Scope{}, nil, fmt.Errorf(
 				"additional host %q must be a subdomain of %s",
 				rawHost,
@@ -137,6 +141,7 @@ func NewScopeWithOptions(
 	return Scope{
 		targetHost:      host,
 		registrableHost: registrable,
+		privateSuffix:   privateSuffix,
 		mode:            mode,
 		directory:       directory,
 		allowedPaths:    normalizedPathPrefixes(allowedPaths),
@@ -206,7 +211,7 @@ func (s Scope) allowsHost(host string) bool {
 	if _, allowed := s.allowedHosts[host]; allowed {
 		return true
 	}
-	if s.mode != ScopeSubdomains {
+	if s.mode != ScopeSubdomains || s.privateSuffix {
 		return false
 	}
 
@@ -215,6 +220,19 @@ func (s Scope) allowsHost(host string) bool {
 		baseHost = s.registrableHost
 	}
 	return strings.HasSuffix(host, "."+baseHost)
+}
+
+func registrableDomain(host string) (string, bool, error) {
+	registrable, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err == nil {
+		return registrable, false, nil
+	}
+
+	suffix, icann := publicsuffix.PublicSuffix(host)
+	if !icann && suffix == host && strings.Contains(host, ".") {
+		return host, true, nil
+	}
+	return "", false, err
 }
 
 func (s Scope) ignoresParameter(value string) bool {

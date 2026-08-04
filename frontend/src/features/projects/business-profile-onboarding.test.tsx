@@ -36,6 +36,7 @@ const siteProfile: SiteProfile = {
   conversionActions: [],
   keyPages: [],
   evidence: [],
+  userOverriddenFields: [],
   confidence: 0.9,
   aiContentRules: "",
   confirmedAt: null,

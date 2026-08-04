@@ -181,7 +181,9 @@ $fallbackProxy = Get-ApiSetting "CRAWLER_FALLBACK_PROXY_URL" $env:CRAWLER_FALLBA
 $businessProfileAIBaseUrl = Get-ApiSetting "BUSINESS_PROFILE_AI_BASE_URL" $env:BUSINESS_PROFILE_AI_BASE_URL
 $businessProfileAIAPIKey = Get-ApiSetting "BUSINESS_PROFILE_AI_API_KEY" $env:BUSINESS_PROFILE_AI_API_KEY
 $businessProfileAIModel = Get-ApiSetting "BUSINESS_PROFILE_AI_MODEL" "gpt-5.4-mini"
-$businessProfileAITimeout = Get-ApiSetting "BUSINESS_PROFILE_AI_TIMEOUT" "20s"
+$businessProfileAITimeout = Get-ApiSetting "BUSINESS_PROFILE_AI_TIMEOUT" "90s"
+$businessProfileAIMaxRetries = Get-ApiSetting "BUSINESS_PROFILE_AI_MAX_RETRIES" "1"
+$aiSettingsEncryptionKey = Get-ApiSetting "AI_SETTINGS_ENCRYPTION_KEY" $env:AI_SETTINGS_ENCRYPTION_KEY
 
 if (-not (Test-ProxyEndpoint $primaryProxy)) {
     throw "Crawler primary proxy is not reachable."
@@ -209,6 +211,8 @@ $env:BUSINESS_PROFILE_AI_BASE_URL = $businessProfileAIBaseUrl
 $env:BUSINESS_PROFILE_AI_API_KEY = $businessProfileAIAPIKey
 $env:BUSINESS_PROFILE_AI_MODEL = $businessProfileAIModel
 $env:BUSINESS_PROFILE_AI_TIMEOUT = $businessProfileAITimeout
+$env:BUSINESS_PROFILE_AI_MAX_RETRIES = $businessProfileAIMaxRetries
+$env:AI_SETTINGS_ENCRYPTION_KEY = $aiSettingsEncryptionKey
 $env:CRAWLER_BROWSER_CACHE_DIR = Join-Path $runtimeDir "browser"
 
 $apiUrl = "http://127.0.0.1:8000/health"

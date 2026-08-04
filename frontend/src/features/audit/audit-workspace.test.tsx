@@ -222,7 +222,7 @@ describe("AuditWorkspace actions", () => {
     auditApi.recalculateAuditIssues.mockResolvedValue(recalculatingRun)
     const { onRunChange } = renderWorkspace(completedRun)
 
-    fireEvent.click(screen.getByRole("button", { name: "调整排除规则" }))
+    fireEvent.click(await screen.findByRole("button", { name: "调整排除规则" }))
     const textarea = screen.getByRole("textbox")
     expect((textarea as HTMLTextAreaElement).value).toBe("/old/*")
     fireEvent.change(textarea, {
@@ -322,7 +322,11 @@ describe("AuditWorkspace actions", () => {
 
     renderWorkspace(createRun({ status: "completed", progress: 100 }))
 
-    fireEvent.click(screen.getByRole("button", { name: /导出/ }))
+    const exportButton = screen.getByRole("button", { name: /导出/ })
+    await waitFor(() => {
+      expect((exportButton as HTMLButtonElement).disabled).toBe(false)
+    })
+    fireEvent.click(exportButton)
     fireEvent.click(await screen.findByText("问题清单"))
     fireEvent.click(await screen.findByText("CSV"))
 
@@ -391,6 +395,123 @@ describe("AuditWorkspace actions", () => {
 })
 
 describe("AuditWorkspace data loading", () => {
+  it("shows only a crawl message on non-overview views while running", async () => {
+    renderWorkspace(createRun(), { view: "issues" })
+
+    expect(screen.getByText("网站仍在抓取中")).toBeTruthy()
+    expect(
+      screen.getByText("审计完成后将自动显示当前页面的结果。")
+    ).toBeTruthy()
+    expect(screen.queryByText("实时抓取")).toBeNull()
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(auditApi.getAuditIssues).not.toHaveBeenCalled()
+    expect(auditApi.getAuditActivity).not.toHaveBeenCalled()
+  })
+
+  it("does not present the finalizing stage as completed", () => {
+    renderWorkspace(
+      createRun({
+        stage: "completed",
+        message: "技术审计处理完成",
+        progress: 99,
+      }),
+      { view: "external" }
+    )
+
+    expect(screen.getByText("整理结果中")).toBeTruthy()
+    expect(screen.getByText("正在整理审计结果")).toBeTruthy()
+    expect(screen.queryByText("技术审计处理完成")).toBeNull()
+    expect(screen.queryByText("已完成")).toBeNull()
+    expect(auditApi.getAuditExternalResources).not.toHaveBeenCalled()
+  })
+
+  it("loads the selected view immediately and reports completion only after success", async () => {
+    type PageResult = {
+      items: ReturnType<typeof createPage>[]
+      total: number
+      page: number
+      page_size: number
+    }
+    let resolvePages: ((result: PageResult) => void) | undefined
+    auditApi.getAuditPages.mockImplementationOnce(
+      () =>
+        new Promise<PageResult>((resolve) => {
+          resolvePages = resolve
+        })
+    )
+    const { rerenderRun } = renderWorkspace(createRun(), {
+      view: "internal",
+    })
+
+    expect(screen.getByText("网站仍在抓取中")).toBeTruthy()
+    expect(auditApi.getAuditPages).not.toHaveBeenCalled()
+
+    rerenderRun(
+      createRun({
+        status: "completed",
+        stage: "completed",
+        message: "技术审计已完成",
+        progress: 100,
+      })
+    )
+
+    await waitFor(() => {
+      expect(auditApi.getAuditPages).toHaveBeenCalledTimes(1)
+    })
+    expect(screen.getByText("加载结果中")).toBeTruthy()
+    expect(screen.getByText("正在加载审计结果")).toBeTruthy()
+    expect(screen.queryByText("已完成")).toBeNull()
+
+    await act(async () => {
+      resolvePages?.({
+        items: [createPage("https://example.com/ready")],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      })
+      await Promise.resolve()
+    })
+
+    expect(await screen.findByText("https://example.com/ready")).toBeTruthy()
+    expect(screen.getByText("已完成")).toBeTruthy()
+    expect(screen.queryByText("正在加载审计结果")).toBeNull()
+  })
+
+  it("keeps completion hidden when results fail and retries immediately", async () => {
+    auditApi.getAuditPages
+      .mockRejectedValueOnce(new Error("result unavailable"))
+      .mockResolvedValueOnce({
+        items: [createPage("https://example.com/retried")],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      })
+
+    renderWorkspace(
+      createRun({
+        status: "completed",
+        stage: "completed",
+        message: "技术审计已完成",
+        progress: 100,
+      }),
+      { view: "internal" }
+    )
+
+    expect(await screen.findByText("审计结果加载失败")).toBeTruthy()
+    expect(screen.getByText("result unavailable")).toBeTruthy()
+    expect(screen.queryByText("已完成")).toBeNull()
+
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }))
+
+    expect(await screen.findByText("https://example.com/retried")).toBeTruthy()
+    expect(auditApi.getAuditPages).toHaveBeenCalledTimes(2)
+    expect(screen.getByText("已完成")).toBeTruthy()
+  })
+
   it("shows checkpoint pages while an audit is running", async () => {
     auditApi.getAuditActivity.mockResolvedValueOnce({
       items: [

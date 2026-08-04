@@ -168,10 +168,11 @@ export const modules: ModuleConfig[] = [
   {
     id: "settings",
     label: "项目设置",
-    description: "管理项目资料、数据源与通知规则",
+    description: "管理项目资料、AI 模型、数据源与通知规则",
     icon: Settings2,
     tabs: [
       { id: "business", label: "业务资料" },
+      { id: "ai", label: "AI 模型" },
       { id: "sources", label: "数据连接" },
       { id: "notifications", label: "通知设置" },
     ],

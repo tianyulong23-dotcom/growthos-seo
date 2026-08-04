@@ -54,7 +54,9 @@ export type SiteProfile = {
     field: string
     value: string
     sourceUrl: string
+    quote: string
   }[]
+  userOverriddenFields: string[]
   confidence: number
   aiContentRules: string
   confirmedAt: string | null
@@ -62,6 +64,7 @@ export type SiteProfile = {
 
 export type BusinessProfileInput = {
   businessName: string
+  businessType: string
   businessSummary: string
   targetAudiences: string[]
   productsServices: string[]

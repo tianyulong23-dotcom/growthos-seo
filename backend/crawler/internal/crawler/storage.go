@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type StoredResult struct {
@@ -29,6 +30,28 @@ type IssueRecalculationResult struct {
 type ResultStore interface {
 	SaveResult(context.Context, Task, Result) (StoredResult, error)
 	SaveProgress(context.Context, Task, Progress) error
+}
+
+type AIProviderSettings struct {
+	BaseURL        string
+	APIKey         string
+	Model          string
+	RequestTimeout time.Duration
+	MaxRetries     int
+}
+
+type AIProviderSettingsStore interface {
+	LoadAIProviderSettings(
+		context.Context,
+		string,
+	) (AIProviderSettings, bool, error)
+}
+
+type AIProviderSettingsRepository interface {
+	LoadAIProviderSettings(
+		context.Context,
+		string,
+	) (AIProviderSettings, bool, error)
 }
 
 type IssueRecalculationStore interface {
@@ -86,6 +109,19 @@ func (s *ProductionStore) SaveProgress(
 	progress Progress,
 ) error {
 	return s.repository.SaveProgress(ctx, task, progress)
+}
+
+func (s *ProductionStore) LoadAIProviderSettings(
+	ctx context.Context,
+	organizationID string,
+) (AIProviderSettings, bool, error) {
+	repository, ok := s.repository.(AIProviderSettingsRepository)
+	if !ok {
+		return AIProviderSettings{}, false, errors.New(
+			"crawler repository does not support AI provider settings",
+		)
+	}
+	return repository.LoadAIProviderSettings(ctx, organizationID)
 }
 
 func (s *ProductionStore) SaveCheckpoint(

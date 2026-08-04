@@ -51,7 +51,9 @@ def test_local_launcher_builds_crawler_environment(tmp_path: Path) -> None:
     executable = tmp_path / "crawler-worker-docker.exe"
     settings = Settings(
         database_url="postgresql+asyncpg://postgres:postgres@localhost:5432/seo",
+        crawler_database_url=None,
         crawler_worker_idle_timeout_seconds=120,
+        ai_settings_encryption_key="encryption-key",
     )
     launcher = worker.LocalCrawlerWorkerLauncher(settings, executable)
 
@@ -62,6 +64,9 @@ def test_local_launcher_builds_crawler_environment(tmp_path: Path) -> None:
     )
     assert environment["CRAWLER_WORKER_IDLE_TIMEOUT"] == "120s"
     assert environment["CRAWLER_BROWSER_CACHE_DIR"] == str(tmp_path / "browser")
+    assert environment["AI_SETTINGS_ENCRYPTION_KEY"] == "encryption-key"
+    assert environment["BUSINESS_PROFILE_AI_TIMEOUT"] == "90s"
+    assert environment["BUSINESS_PROFILE_AI_MAX_RETRIES"] == "1"
 
 
 def test_production_uses_disabled_launcher(monkeypatch: Any) -> None:

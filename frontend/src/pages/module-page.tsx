@@ -42,6 +42,7 @@ import {
 } from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
+import { AIModelSettings } from "@/features/settings/ai-model-settings"
 import {
   backlinkRows,
   contentRows,
@@ -431,6 +432,10 @@ function SettingsContent({
     project.understandingStatus === "queued" ||
     project.understandingStatus === "running"
   const waitingForProfile = !project.siteProfile && understandingInProgress
+
+  if (view === "ai") {
+    return <AIModelSettings projectId={project.id} />
+  }
 
   if (view === "sources") {
     return (

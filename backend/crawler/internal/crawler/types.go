@@ -19,6 +19,7 @@ const (
 	siteUnderstandingMinimumPages = 3
 	siteUnderstandingDefaultPages = 5
 	siteUnderstandingHardLimit    = 10
+	technicalAuditHardLimit       = 5000
 )
 
 type ScopeMode string
@@ -105,6 +106,9 @@ func (t Task) Validate() error {
 			(*t.DuplicationLimit < 0 || *t.DuplicationLimit > 1) {
 			return errors.New("duplication_threshold must be between 0 and 1")
 		}
+		if t.Type == TaskTechnicalAudit && t.MaxPages > technicalAuditHardLimit {
+			return fmt.Errorf("max_pages cannot exceed %d", technicalAuditHardLimit)
+		}
 	case TaskBacklinkValidation:
 		if len(t.URLs) == 0 {
 			return errors.New("urls are required for backlink validation")
@@ -123,9 +127,6 @@ func (t Task) ScopeMode() ScopeMode {
 }
 
 func (t Task) RenderingMode() RenderingMode {
-	if t.Type == TaskSiteUnderstanding {
-		return RenderingOff
-	}
 	if t.Rendering == "" {
 		return RenderingAuto
 	}
@@ -155,7 +156,7 @@ func (t Task) PageLimit() int {
 		return siteUnderstandingDefaultPages
 	case TaskTechnicalAudit:
 		if t.MaxPages > 0 {
-			return t.MaxPages
+			return min(t.MaxPages, technicalAuditHardLimit)
 		}
 		return 1000
 	case TaskBacklinkValidation:
@@ -349,18 +350,19 @@ type ExternalResource struct {
 }
 
 type Result struct {
-	TaskType          TaskType           `json:"task_type"`
-	RunID             string             `json:"run_id"`
-	CompletionStatus  CompletionStatus   `json:"completion_status"`
-	CompletionNote    string             `json:"completion_note,omitempty"`
-	Pages             []Page             `json:"pages,omitempty"`
-	Issues            []Issue            `json:"issues,omitempty"`
-	ExternalResources []ExternalResource `json:"external_resources,omitempty"`
-	PageSpeed         []PageSpeedResult  `json:"pagespeed,omitempty"`
-	Backlinks         []BacklinkResult   `json:"backlinks,omitempty"`
-	SiteProfile       *SiteProfile       `json:"site_profile,omitempty"`
-	StartedAt         time.Time          `json:"started_at"`
-	FinishedAt        time.Time          `json:"finished_at"`
+	TaskType                TaskType           `json:"task_type"`
+	RunID                   string             `json:"run_id"`
+	CompletionStatus        CompletionStatus   `json:"completion_status"`
+	CompletionNote          string             `json:"completion_note,omitempty"`
+	Pages                   []Page             `json:"pages,omitempty"`
+	Issues                  []Issue            `json:"issues,omitempty"`
+	ExternalResources       []ExternalResource `json:"external_resources,omitempty"`
+	PageSpeed               []PageSpeedResult  `json:"pagespeed,omitempty"`
+	ResourceChecksTruncated bool               `json:"resource_checks_truncated,omitempty"`
+	Backlinks               []BacklinkResult   `json:"backlinks,omitempty"`
+	SiteProfile             *SiteProfile       `json:"site_profile,omitempty"`
+	StartedAt               time.Time          `json:"started_at"`
+	FinishedAt              time.Time          `json:"finished_at"`
 }
 
 type CandidateState struct {

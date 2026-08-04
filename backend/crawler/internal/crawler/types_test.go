@@ -28,6 +28,11 @@ func TestTaskPageLimit(t *testing.T) {
 			task: Task{Type: TaskTechnicalAudit, MaxPages: 2500},
 			want: 2500,
 		},
+		{
+			name: "audit cannot exceed the hard limit",
+			task: Task{Type: TaskTechnicalAudit, MaxPages: 6000},
+			want: 5000,
+		},
 	}
 
 	for _, test := range tests {
@@ -36,6 +41,23 @@ func TestTaskPageLimit(t *testing.T) {
 				t.Fatalf("PageLimit() = %d, want %d", got, test.want)
 			}
 		})
+	}
+}
+
+func TestTaskRejectsAuditLimitAboveHardLimit(t *testing.T) {
+	task := Task{
+		OrganizationID: "org",
+		ProjectID:      "project",
+		RunID:          "run",
+		Type:           TaskTechnicalAudit,
+		TargetURL:      "https://example.com",
+		Country:        "US",
+		Language:       "en",
+		MaxPages:       5001,
+	}
+
+	if err := task.Validate(); err == nil {
+		t.Fatal("Validate() accepted an audit limit above 5000")
 	}
 }
 
@@ -58,14 +80,14 @@ func TestSiteTaskRequiresCountryAndLanguage(t *testing.T) {
 	}
 }
 
-func TestSiteUnderstandingAlwaysDisablesRendering(t *testing.T) {
+func TestSiteUnderstandingUsesRequestedRenderingMode(t *testing.T) {
 	task := Task{
 		Type:      TaskSiteUnderstanding,
 		Rendering: RenderingAll,
 	}
 
-	if got := task.RenderingMode(); got != RenderingOff {
-		t.Fatalf("RenderingMode() = %q, want %q", got, RenderingOff)
+	if got := task.RenderingMode(); got != RenderingAll {
+		t.Fatalf("RenderingMode() = %q, want %q", got, RenderingAll)
 	}
 }
 

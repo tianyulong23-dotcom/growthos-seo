@@ -3,6 +3,7 @@ package crawler
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,83 @@ func BenchmarkResultEncodingAndStorage(b *testing.B) {
 	}
 }
 
+func BenchmarkPostgresAuditPersistence(b *testing.B) {
+	databaseURL := os.Getenv("CRAWLER_BENCHMARK_DATABASE_URL")
+	if databaseURL == "" {
+		b.Skip("set CRAWLER_BENCHMARK_DATABASE_URL to run the PostgreSQL benchmark")
+	}
+
+	ctx := context.Background()
+	repository, err := NewPostgresCrawlRepository(ctx, databaseURL, "")
+	if err != nil {
+		b.Fatalf("NewPostgresCrawlRepository() returned an error: %v", err)
+	}
+	defer repository.Close()
+
+	const projectID = "benchmark-persistence-project"
+	if _, err := repository.pool.Exec(
+		ctx,
+		`
+		INSERT INTO projects (
+			id, organization_id, name, domain, country, language
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (id) DO NOTHING
+		`,
+		projectID,
+		"benchmark-org",
+		"Audit persistence benchmark",
+		"benchmark.example",
+		"US",
+		"en",
+	); err != nil {
+		b.Fatalf("seed benchmark project: %v", err)
+	}
+	defer func() {
+		_, _ = repository.pool.Exec(
+			ctx,
+			"DELETE FROM crawl_runs WHERE project_id = $1",
+			projectID,
+		)
+		_, _ = repository.pool.Exec(
+			ctx,
+			"DELETE FROM pages WHERE project_id = $1",
+			projectID,
+		)
+		_, _ = repository.pool.Exec(
+			ctx,
+			"DELETE FROM projects WHERE id = $1",
+			projectID,
+		)
+	}()
+
+	for _, pageCount := range benchmarkPageCounts {
+		b.Run(fmt.Sprintf("pages_%d", pageCount), func(b *testing.B) {
+			task := syntheticAuditTask(pageCount)
+			task.ProjectID = projectID
+			task.RunID = fmt.Sprintf("benchmark-persistence-%d", pageCount)
+			result := syntheticPersistenceResult(pageCount)
+			result.RunID = task.RunID
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if err := repository.SaveResult(
+					ctx,
+					task,
+					result,
+					"s3://benchmark/result.json",
+				); err != nil {
+					b.Fatalf("SaveResult() returned an error: %v", err)
+				}
+			}
+			b.StopTimer()
+			elapsed := b.Elapsed()
+			b.ReportMetric(float64(pageCount*b.N)/elapsed.Seconds(), "pages/s")
+		})
+	}
+}
+
 func syntheticAuditTask(pageCount int) Task {
 	return Task{
 		OrganizationID: "benchmark-org",
@@ -75,6 +153,94 @@ func syntheticAuditTask(pageCount int) Task {
 		Language:       "en",
 		MaxPages:       pageCount,
 		Rendering:      RenderingOff,
+	}
+}
+
+func syntheticPersistenceResult(pageCount int) Result {
+	const issuesPerPage = 10
+	now := time.Now().UTC()
+	statusOK := 200
+	pages := make([]Page, pageCount)
+	issues := make([]Issue, 0, pageCount*issuesPerPage)
+	resources := make([]ExternalResource, pageCount)
+
+	for index := range pages {
+		rawURL := fmt.Sprintf("%spersist-%d", syntheticAuditRootURL, index)
+		nextURL := fmt.Sprintf("%spersist-%d", syntheticAuditRootURL, (index+1)%pageCount)
+		pages[index] = Page{
+			URL:               rawURL,
+			FinalURL:          rawURL,
+			StatusCode:        200,
+			ContentType:       "text/html; charset=utf-8",
+			Title:             fmt.Sprintf("Synthetic persistence page %d", index),
+			Description:       fmt.Sprintf("Synthetic persistence description %d", index),
+			Canonical:         rawURL,
+			Language:          "en",
+			H1:                []string{fmt.Sprintf("Synthetic heading %d", index)},
+			WordCount:         500,
+			ResponseTimeMS:    50,
+			SizeBytes:         32 * 1024,
+			InternalLinkCount: 1,
+			ExternalLinkCount: 1,
+			Links: []Link{
+				{
+					URL:          nextURL,
+					Text:         "Next",
+					IsInternal:   true,
+					TargetDomain: "example.com",
+					TargetStatus: &statusOK,
+					Placement:    "body",
+				},
+				{
+					URL:          fmt.Sprintf("https://cdn.example/asset-%d", index),
+					Text:         "Asset",
+					IsInternal:   false,
+					TargetDomain: "cdn.example",
+					TargetStatus: &statusOK,
+					Placement:    "body",
+				},
+			},
+			FetchedAt: now,
+		}
+		for issueIndex := 1; issueIndex <= issuesPerPage; issueIndex++ {
+			severity := "info"
+			switch {
+			case issueIndex <= 2:
+				severity = "error"
+			case issueIndex <= 7:
+				severity = "warning"
+			}
+			issues = append(issues, Issue{
+				Type:     severity,
+				Category: fmt.Sprintf("Category %d", issueIndex%4),
+				Code:     fmt.Sprintf("issue_%02d", issueIndex),
+				Issue:    fmt.Sprintf("Synthetic issue %02d", issueIndex),
+				Details: fmt.Sprintf(
+					"Synthetic detail %d for page %d",
+					issueIndex,
+					index,
+				),
+				URL: rawURL,
+			})
+		}
+		resources[index] = ExternalResource{
+			URL:         fmt.Sprintf("https://cdn.example/asset-%d", index),
+			FinalURL:    fmt.Sprintf("https://cdn.example/asset-%d", index),
+			StatusCode:  200,
+			ContentType: "text/css",
+			SizeBytes:   2048,
+			CheckedAt:   now,
+		}
+	}
+
+	return Result{
+		TaskType:          TaskTechnicalAudit,
+		CompletionStatus:  CompletionComplete,
+		Pages:             pages,
+		Issues:            issues,
+		ExternalResources: resources,
+		StartedAt:         now,
+		FinishedAt:        now,
 	}
 }
 
