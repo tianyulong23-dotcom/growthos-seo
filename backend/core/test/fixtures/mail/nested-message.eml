@@ -1,0 +1,23 @@
+From: Sender <sender@example.com>
+To: Recipient <recipient@example.com>
+Subject: Outer message
+Message-ID: <outer@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset=utf-8
+
+Outer body
+--outer
+Content-Type: message/rfc822
+Content-Disposition: attachment; filename="forwarded.eml"
+
+From: Nested <nested@example.com>
+To: Recipient <recipient@example.com>
+Subject: Nested message
+Message-ID: <nested@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Nested body
+--outer--

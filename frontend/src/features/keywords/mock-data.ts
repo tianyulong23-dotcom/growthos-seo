@@ -1,0 +1,42 @@
+export const keywordRows = [
+  {
+    keyword: "best solar panels",
+    intent: "商业",
+    volume: "12,100",
+    position: 4,
+    change: "+2",
+    url: "/best-solar-panels/",
+  },
+  {
+    keyword: "solar panel cost",
+    intent: "商业",
+    volume: "9,900",
+    position: 8,
+    change: "-1",
+    url: "/solar-panel-cost/",
+  },
+  {
+    keyword: "how do solar panels work",
+    intent: "信息",
+    volume: "8,100",
+    position: 12,
+    change: "+5",
+    url: "/blog/how-solar-panels-work/",
+  },
+  {
+    keyword: "solar tax credit 2026",
+    intent: "信息",
+    volume: "6,600",
+    position: 17,
+    change: "+9",
+    url: "/solar-incentives/federal-tax-credit/",
+  },
+  {
+    keyword: "tesla solar roof review",
+    intent: "商业",
+    volume: "4,400",
+    position: 21,
+    change: "0",
+    url: "/installers/tesla-energy-reviews/",
+  },
+] as const

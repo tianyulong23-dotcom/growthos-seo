@@ -37,7 +37,7 @@ type StatusChecker interface {
 
 type HTTPFetcher struct {
 	config        Config
-	resolver      *net.Resolver
+	resolver      IPResolver
 	jar           http.CookieJar
 	limiter       *RequestLimiter
 	statusLimiter *RequestLimiter
@@ -85,7 +85,8 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) (Resource, error
 	if err != nil {
 		return Resource{}, err
 	}
-	if err := ValidatePublicURL(ctx, f.resolver, target); err != nil {
+	resolvedIPs, err := resolvePublicURL(ctx, f.resolver, target)
+	if err != nil {
 		return Resource{}, err
 	}
 	if err := validateContextScope(ctx, target); err != nil {
@@ -107,7 +108,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) (Resource, error
 			return Resource{}, err
 		}
 		proxyURL := proxies[min(attempt, len(proxies)-1)]
-		resource, fetchErr := f.fetchOnce(ctx, target, proxyURL)
+		resource, fetchErr := f.fetchOnce(ctx, target, proxyURL, resolvedIPs)
 		f.limiter.Observe(
 			resource.StatusCode,
 			http.Header(resource.Header).Get("Retry-After"),
@@ -206,7 +207,12 @@ func (f *HTTPFetcher) CheckStatus(ctx context.Context, rawURL string) (int, erro
 	return lastStatus, nil
 }
 
-func (f *HTTPFetcher) fetchOnce(ctx context.Context, target *url.URL, proxyValue string) (Resource, error) {
+func (f *HTTPFetcher) fetchOnce(
+	ctx context.Context,
+	target *url.URL,
+	proxyValue string,
+	resolvedIPs []string,
+) (Resource, error) {
 	client, err := f.client(ctx, proxyValue, true)
 	if err != nil {
 		return Resource{}, err
@@ -227,9 +233,12 @@ func (f *HTTPFetcher) fetchOnce(ctx context.Context, target *url.URL, proxyValue
 	request.Header.Set("Cache-Control", "no-cache")
 
 	resource := Resource{
-		URL:       target.String(),
-		FinalURL:  target.String(),
-		FetchedAt: time.Now().UTC(),
+		URL:              target.String(),
+		FinalURL:         target.String(),
+		RenderMode:       "static",
+		ResolvedIPs:      append([]string(nil), resolvedIPs...),
+		SecurityDecision: "allowed",
+		FetchedAt:        time.Now().UTC(),
 	}
 	response, err := client.Do(request)
 	resource.Redirects = append(resource.Redirects, redirects...)
@@ -243,6 +252,11 @@ func (f *HTTPFetcher) fetchOnce(ctx context.Context, target *url.URL, proxyValue
 	resource.Header = response.Header.Clone()
 	if response.Request != nil && response.Request.URL != nil {
 		resource.FinalURL = response.Request.URL.String()
+	}
+	if !isAllowedCrawlContentType(resource.ContentType) {
+		resource.ErrorType = "unsupported_content_type"
+		resource.Error = fmt.Sprintf("unsupported content type %q", resource.ContentType)
+		return resource, errors.New(resource.Error)
 	}
 
 	var reader io.Reader = response.Body
@@ -300,18 +314,28 @@ func (f *HTTPFetcher) client(
 			if len(via) >= 10 {
 				return errors.New("too many redirects")
 			}
-			if redirects, ok := request.Context().Value(redirectRecorderContextKey{}).(*[]Redirect); ok {
-				redirect := Redirect{URL: request.URL.String()}
-				if len(via) > 0 && via[len(via)-1].URL != nil {
-					redirect.FromURL = via[len(via)-1].URL.String()
-				}
-				if request.Response != nil {
-					redirect.StatusCode = request.Response.StatusCode
-				}
-				*redirects = append(*redirects, redirect)
+			redirect := Redirect{
+				URL:              request.URL.String(),
+				SecurityDecision: "blocked",
 			}
-			if err := ValidatePublicURL(request.Context(), f.resolver, request.URL); err != nil {
+			if len(via) > 0 && via[len(via)-1].URL != nil {
+				redirect.FromURL = via[len(via)-1].URL.String()
+			}
+			if request.Response != nil {
+				redirect.StatusCode = request.Response.StatusCode
+			}
+			recordedIndex := -1
+			if redirects, ok := request.Context().Value(redirectRecorderContextKey{}).(*[]Redirect); ok {
+				*redirects = append(*redirects, redirect)
+				recordedIndex = len(*redirects) - 1
+			}
+			resolvedIPs, err := resolvePublicURL(request.Context(), f.resolver, request.URL)
+			if err != nil {
 				return err
+			}
+			if redirects, ok := request.Context().Value(redirectRecorderContextKey{}).(*[]Redirect); ok && recordedIndex >= 0 {
+				(*redirects)[recordedIndex].SecurityDecision = "allowed"
+				(*redirects)[recordedIndex].ResolvedIPs = resolvedIPs
 			}
 			if enforceScope {
 				if err := validateContextScope(request.Context(), request.URL); err != nil {
@@ -354,9 +378,11 @@ func (f *HTTPFetcher) safeDialer(trustedProxyHost string) func(context.Context, 
 
 func resourceFromColly(requestURL string, response *colly.Response) Resource {
 	resource := Resource{
-		URL:       requestURL,
-		FinalURL:  requestURL,
-		FetchedAt: time.Now().UTC(),
+		URL:              requestURL,
+		FinalURL:         requestURL,
+		RenderMode:       "static",
+		SecurityDecision: "allowed",
+		FetchedAt:        time.Now().UTC(),
 	}
 	if response == nil {
 		return resource
@@ -373,6 +399,28 @@ func resourceFromColly(requestURL string, response *colly.Response) Resource {
 		resource.ContentType = response.Headers.Get("Content-Type")
 	}
 	return resource
+}
+
+func isAllowedCrawlContentType(value string) bool {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(value, ";")[0]))
+	if mediaType == "" {
+		return true
+	}
+	if strings.HasPrefix(mediaType, "text/") ||
+		strings.HasPrefix(mediaType, "image/") {
+		return true
+	}
+	switch mediaType {
+	case "application/json",
+		"application/ld+json",
+		"application/xml",
+		"application/xhtml+xml",
+		"application/rss+xml",
+		"application/atom+xml":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldRetry(resource Resource, err error) bool {

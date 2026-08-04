@@ -6,11 +6,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
-from app.core.config import get_settings
+from app.core.authoritative_platform_context import (
+    AuthoritativePlatformContextResolver,
+)
+from app.core.backlinks_gateway import (
+    BacklinksGateway,
+    PlatformContextResolver,
+    RejectingPlatformContextResolver,
+)
+from app.core.config import Settings, get_settings
+from app.core.platform_auth import HmacPlatformAuthenticationAuthority
 from app.core.secure_logging import configure_sensitive_logging
+from app.db.session import session_factory
 from app.modules.audit.service import AuditService, build_audit_service
 from app.modules.agent.service import build_agent_service
 from app.modules.keywords.service import KeywordService, build_keyword_service
+from app.modules.projects.authority import SQLAlchemyWebsiteProjectAuthority
 from app.modules.projects.service import ProjectService, build_project_service
 from app.workflows.worker import get_crawler_worker_launcher
 
@@ -110,7 +121,7 @@ async def dispatch_agent_workflows() -> None:
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(application: FastAPI):
     settings = get_settings()
     configure_sensitive_logging(settings)
     worker_launcher = get_crawler_worker_launcher()
@@ -172,12 +183,52 @@ async def lifespan(_: FastAPI):
         with suppress(asyncio.CancelledError):
             await keyword_reconcile_task
         await worker_launcher.stop()
+        owned_gateway = getattr(application.state, "owned_backlinks_gateway", None)
+        if owned_gateway is not None:
+            await owned_gateway.aclose()
 
 
-def create_app() -> FastAPI:
+def create_platform_context_resolver(
+    settings: Settings,
+) -> PlatformContextResolver:
+    if (
+        settings.platform_auth_signing_key is None
+        or settings.platform_context_signing_key is None
+    ):
+        return RejectingPlatformContextResolver()
+    return AuthoritativePlatformContextResolver(
+        authentication=HmacPlatformAuthenticationAuthority(
+            issuer=settings.platform_auth_issuer,
+            signing_key=settings.platform_auth_signing_key.get_secret_value(),
+            max_token_ttl_seconds=settings.platform_auth_max_token_ttl_seconds,
+        ),
+        projects=SQLAlchemyWebsiteProjectAuthority(session_factory),
+    )
+
+
+def create_app(
+    *,
+    backlinks_gateway: BacklinksGateway | None = None,
+    platform_context_resolver: PlatformContextResolver | None = None,
+) -> FastAPI:
     settings = get_settings()
     configure_sensitive_logging(settings)
     application = FastAPI(title=settings.app_name, lifespan=lifespan)
+    owns_gateway = backlinks_gateway is None
+    gateway = backlinks_gateway or BacklinksGateway(
+        base_url=settings.backlinks_private_base_url,
+        signing_key=(
+            settings.platform_context_signing_key.get_secret_value()
+            if settings.platform_context_signing_key is not None
+            else None
+        ),
+        timeout_seconds=settings.backlinks_request_timeout_seconds,
+    )
+    application.state.backlinks_gateway = gateway
+    application.state.platform_context_resolver = (
+        platform_context_resolver or create_platform_context_resolver(settings)
+    )
+    application.state.owned_backlinks_gateway = gateway if owns_gateway else None
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

@@ -3,11 +3,16 @@ import { Link, useParams } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { type ModuleConfig } from "@/data/mock-data"
 import { useProjects } from "@/features/projects/project-context"
 
+type HeaderModule = {
+  id: string
+  label: string
+  description: string
+}
+
 type PageHeaderProps = {
-  module: ModuleConfig
+  module: HeaderModule
   actionLabel?: string
   actionIcon?: React.ReactNode
   onAction?: () => void

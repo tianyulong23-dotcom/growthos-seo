@@ -243,9 +243,11 @@ type SchemaMicrodata struct {
 }
 
 type Redirect struct {
-	FromURL    string `json:"from_url,omitempty"`
-	URL        string `json:"url"`
-	StatusCode int    `json:"status_code,omitempty"`
+	FromURL          string   `json:"from_url,omitempty"`
+	URL              string   `json:"url"`
+	StatusCode       int      `json:"status_code,omitempty"`
+	SecurityDecision string   `json:"security_decision,omitempty"`
+	ResolvedIPs      []string `json:"resolved_ips,omitempty"`
 }
 
 type Page struct {
@@ -293,6 +295,11 @@ type Page struct {
 	ResponseTimeMS     int               `json:"response_time_ms,omitempty"`
 	SizeBytes          int64             `json:"size_bytes,omitempty"`
 	Redirects          []Redirect        `json:"redirects,omitempty"`
+	ResolvedIPs        []string          `json:"resolved_ips,omitempty"`
+	SecurityDecision   string            `json:"security_decision,omitempty"`
+	RobotsDecision     string            `json:"robots_decision,omitempty"`
+	RenderMode         string            `json:"render_mode,omitempty"`
+	NoIndex            bool              `json:"noindex"`
 	Error              string            `json:"error,omitempty"`
 	ErrorType          string            `json:"error_type,omitempty"`
 	RawHTMLRef         string            `json:"raw_html_ref,omitempty"`
@@ -306,12 +313,19 @@ type Page struct {
 }
 
 type BacklinkResult struct {
-	URL        string    `json:"url"`
-	FinalURL   string    `json:"final_url,omitempty"`
-	StatusCode int       `json:"status_code,omitempty"`
-	FoundLinks []Link    `json:"found_links,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	CheckedAt  time.Time `json:"checked_at"`
+	URL              string     `json:"url"`
+	FinalURL         string     `json:"final_url,omitempty"`
+	StatusCode       int        `json:"status_code,omitempty"`
+	FoundLinks       []Link     `json:"found_links,omitempty"`
+	Redirects        []Redirect `json:"redirects,omitempty"`
+	ResolvedIPs      []string   `json:"resolved_ips,omitempty"`
+	SecurityDecision string     `json:"security_decision,omitempty"`
+	RobotsDecision   string     `json:"robots_decision,omitempty"`
+	RenderMode       string     `json:"render_mode,omitempty"`
+	NoIndex          bool       `json:"noindex"`
+	Error            string     `json:"error,omitempty"`
+	ErrorType        string     `json:"error_type,omitempty"`
+	CheckedAt        time.Time  `json:"checked_at"`
 }
 
 type Issue struct {
@@ -390,20 +404,24 @@ type CrawlCheckpoint struct {
 }
 
 type Resource struct {
-	URL            string
-	FinalURL       string
-	StatusCode     int
-	ContentType    string
-	Header         map[string][]string
-	Body           []byte
-	Rendered       bool
-	ProxyURL       string
-	ResponseTimeMS int
-	SizeBytes      int64
-	Redirects      []Redirect
-	Error          string
-	ErrorType      string
-	FetchedAt      time.Time
+	URL              string
+	FinalURL         string
+	StatusCode       int
+	ContentType      string
+	Header           map[string][]string
+	Body             []byte
+	Rendered         bool
+	RenderMode       string
+	ProxyURL         string
+	ResponseTimeMS   int
+	SizeBytes        int64
+	Redirects        []Redirect
+	ResolvedIPs      []string
+	SecurityDecision string
+	RobotsDecision   string
+	Error            string
+	ErrorType        string
+	FetchedAt        time.Time
 }
 
 func parsedURL(raw string) (*url.URL, error) {

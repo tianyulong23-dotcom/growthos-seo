@@ -8,12 +8,11 @@ import {
   Link2,
   LoaderCircle,
   Plus,
-  RefreshCw,
   Search,
-  Send,
 } from "lucide-react"
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router"
 
+import type { NavigationItem } from "@/app/module-contract"
 import { PageHeader } from "@/components/shared/page-header"
 import { createAuditRun, getAuditRun, type AuditRun } from "@/api/audits"
 import { Badge } from "@/components/ui/badge"
@@ -40,7 +39,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
 import { AIModelSettings } from "@/features/settings/ai-model-settings"
-import { backlinkRows, contentRows, modules } from "@/data/mock-data"
+import { contentRows, modules } from "@/data/mock-data"
 import type { AuditSettings } from "@/features/audit/audit-settings"
 import {
   getCachedCompletedAuditRun,
@@ -59,6 +58,12 @@ const AuditWorkspace = React.lazy(() =>
 const KeywordWorkspace = React.lazy(() =>
   import("@/features/keywords/keyword-workspace").then((module) => ({
     default: module.KeywordWorkspace,
+  }))
+)
+
+const OutreachWorkspace = React.lazy(() =>
+  import("@/features/outreach/outreach-workspace").then((module) => ({
+    default: module.OutreachWorkspace,
   }))
 )
 
@@ -211,66 +216,6 @@ function ContentContent({ view }: { view: string }) {
                 <TableCell>
                   <Button variant="ghost" size="icon-sm" title="打开内容">
                     <ExternalLink />
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
-  )
-}
-
-function BacklinksContent({ view }: { view: string }) {
-  const [search, setSearch] = React.useState("")
-  const [filter, setFilter] = React.useState("全部")
-  const rows = backlinkRows.filter(
-    (row) =>
-      row.domain.includes(search.toLowerCase()) &&
-      (filter === "全部" || row.status === filter)
-  )
-
-  return (
-    <Card className="overflow-hidden">
-      <Toolbar
-        search={search}
-        setSearch={setSearch}
-        filter={filter}
-        setFilter={setFilter}
-        options={["全部", "待联系", "跟进中", "已回复", "已获得"]}
-      />
-      <div className="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>目标域名</TableHead>
-              <TableHead className="text-right">权威度</TableHead>
-              <TableHead>相关性</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>联系人</TableHead>
-              <TableHead className="w-28" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.domain}>
-                <TableCell className="font-medium">
-                  <span className="flex items-center gap-2">
-                    <Link2 className="size-4 text-muted-foreground" />
-                    {row.domain}
-                  </span>
-                </TableCell>
-                <TableCell className="text-right">{row.authority}</TableCell>
-                <TableCell>{row.relevance}</TableCell>
-                <TableCell>
-                  <StatusBadge value={row.status} />
-                </TableCell>
-                <TableCell>{row.contact}</TableCell>
-                <TableCell>
-                  <Button variant="outline" size="sm">
-                    {view === "monitor" ? <RefreshCw /> : <Send />}
-                    {view === "monitor" ? "检查" : "联系"}
                   </Button>
                 </TableCell>
               </TableRow>
@@ -490,7 +435,19 @@ function ModuleBody({
       </React.Suspense>
     )
   if (moduleId === "content") return <ContentContent view={view} />
-  if (moduleId === "backlinks") return <BacklinksContent view={view} />
+  if (moduleId === "backlinks")
+    return (
+      <React.Suspense
+        fallback={
+          <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">
+            <LoaderCircle className="mr-2 size-4 animate-spin" />
+            正在加载外链模块
+          </div>
+        }
+      >
+        <OutreachWorkspace view={view} />
+      </React.Suspense>
+    )
   if (moduleId === "performance") return <PerformanceContent view={view} />
   if (moduleId === "settings")
     return (
@@ -505,7 +462,97 @@ function ModuleBody({
   return null
 }
 
-export function ModulePage() {
+type RegisteredModulePageProps = {
+  module: NavigationItem
+  children: (activeView: string) => React.ReactNode
+  actionLabel?: string
+  actionIcon?: React.ReactNode
+  onAction?: () => void
+  actionDisabled?: boolean
+  beforeContent?: React.ReactNode
+}
+
+function RegisteredModulePage({
+  module,
+  children,
+  actionLabel,
+  actionIcon,
+  onAction,
+  actionDisabled,
+  beforeContent,
+}: RegisteredModulePageProps) {
+  const navigate = useNavigate()
+  const { projects } = useProjects()
+  const { projectId = projects[0]?.id ?? "", view } = useParams<{
+    projectId: string
+    view?: string
+  }>()
+  const activeView = view ?? module.tabs[0]?.id
+
+  if (!activeView) {
+    return <Navigate to={`/projects/${projectId}/overview`} replace />
+  }
+  if (!module.tabs.some((tab) => tab.id === activeView)) {
+    return (
+      <Navigate
+        to={`/projects/${projectId}/${module.id}/${module.tabs[0].id}`}
+        replace
+      />
+    )
+  }
+
+  return (
+    <div className="min-w-0">
+      <PageHeader
+        module={module}
+        actionLabel={actionLabel}
+        actionIcon={actionIcon}
+        onAction={onAction}
+        actionDisabled={actionDisabled}
+      />
+      <div className="border-b px-4 sm:px-6 lg:px-8">
+        <Tabs
+          value={activeView}
+          onValueChange={(nextView) =>
+            navigate(`/projects/${projectId}/${module.id}/${nextView}`)
+          }
+        >
+          <TabsList
+            variant="line"
+            className="no-scrollbar h-11 max-w-full justify-start overflow-x-auto"
+          >
+            {module.tabs.map((tab) => (
+              <TabsTrigger key={tab.id} value={tab.id}>
+                {tab.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      </div>
+      <div className="min-w-0 p-4 sm:p-6 lg:p-8">
+        {beforeContent}
+        {children(activeView)}
+      </div>
+    </div>
+  )
+}
+
+type ModulePageProps = Partial<RegisteredModulePageProps>
+
+export function ModulePage(props: ModulePageProps) {
+  if (props.module && props.children) {
+    return (
+      <RegisteredModulePage
+        {...props}
+        module={props.module}
+        children={props.children}
+      />
+    )
+  }
+  return <LegacyModulePage />
+}
+
+function LegacyModulePage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const {

@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:growthos:contract:crawler-evidence-request:v1",
+  "title": "CrawlerEvidenceRequest.v1",
+  "description": "A deduplicated request for crawl evidence. Business modules remain responsible for final conclusions and state.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "crawler.evidence.request.v1"
+    },
+    "requestId": {
+      "$ref": "#/$defs/nonBlankIdentifier"
+    },
+    "taskType": {
+      "type": "string",
+      "enum": [
+        "site_understanding",
+        "technical_audit",
+        "backlink_validation"
+      ]
+    },
+    "tenant": {
+      "type": "object",
+      "properties": {
+        "organizationId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        }
+      },
+      "required": [
+        "organizationId",
+        "workspaceId"
+      ],
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "websiteProjectId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "websiteProjectKey": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        }
+      },
+      "required": [
+        "websiteProjectId",
+        "websiteProjectKey"
+      ],
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "targetUrl": {
+          "$ref": "#/$defs/httpUrl"
+        },
+        "urls": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/httpUrl"
+          }
+        },
+        "expectedLinks": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/httpUrl"
+          }
+        },
+        "country": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "options": {
+      "type": "object",
+      "properties": {
+        "maxPages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "domain",
+            "subdomains",
+            "directory"
+          ],
+          "default": "domain"
+        },
+        "directory": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/"
+        },
+        "rendering": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off",
+            "all"
+          ],
+          "default": "auto"
+        },
+        "allowedPaths": {
+          "$ref": "#/$defs/pathList"
+        },
+        "excludedPaths": {
+          "$ref": "#/$defs/pathList"
+        },
+        "ignoredParameters": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.-]+\\*?$"
+          }
+        },
+        "additionalHosts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9.-]+$"
+          }
+        },
+        "collectPageSpeedEvidence": {
+          "type": "boolean",
+          "default": false
+        },
+        "collectDuplicateContentEvidence": {
+          "type": "boolean",
+          "default": true
+        },
+        "duplicateSimilarityThreshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.85
+        }
+      },
+      "additionalProperties": false
+    },
+    "requestedBy": {
+      "type": "object",
+      "properties": {
+        "moduleId": {
+          "type": "string",
+          "enum": [
+            "platform",
+            "audit",
+            "backlinks"
+          ]
+        },
+        "actorId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "correlationId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        }
+      },
+      "required": [
+        "moduleId",
+        "actorId",
+        "correlationId"
+      ],
+      "additionalProperties": false
+    },
+    "requestedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "version",
+    "requestId",
+    "taskType",
+    "tenant",
+    "project",
+    "target",
+    "options",
+    "requestedBy",
+    "requestedAt"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "taskType": {
+            "enum": [
+              "site_understanding",
+              "technical_audit"
+            ]
+          }
+        },
+        "required": [
+          "taskType"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "required": [
+              "targetUrl",
+              "country",
+              "language"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "taskType": {
+            "const": "backlink_validation"
+          }
+        },
+        "required": [
+          "taskType"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "required": [
+              "urls"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "nonBlankIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": ".*\\S.*"
+    },
+    "httpUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://"
+    },
+    "pathList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^/"
+      }
+    }
+  }
+}

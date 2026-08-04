@@ -43,6 +43,7 @@ const project: Project = {
   domain: "example.com",
   country: "US",
   language: "en",
+  competitorDomain: null,
   understandingRunId: null,
   understandingStatus: "completed",
   understandingStage: "completed",

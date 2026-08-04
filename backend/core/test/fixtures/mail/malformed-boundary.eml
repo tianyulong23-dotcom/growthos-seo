@@ -1,0 +1,10 @@
+From: Sender <sender@example.com>
+To: Recipient <recipient@example.com>
+Subject: Malformed boundary
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="missing-close"
+
+--missing-close
+Content-Type: text/plain; charset=utf-8
+
+This fixture intentionally omits the closing MIME boundary.

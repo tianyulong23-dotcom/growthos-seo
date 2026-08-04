@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -114,8 +114,12 @@ class Settings(BaseSettings):
     google_ads_customer_id: str | None = None
     google_ads_login_customer_id: str | None = None
     google_ads_api_version: str = "v23"
-    dataforseo_login: str | None = None
-    dataforseo_password: str | None = None
+    backlinks_private_base_url: str = "http://127.0.0.1:7301"
+    backlinks_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    platform_auth_issuer: str = "growthos-platform-auth"
+    platform_auth_signing_key: SecretStr | None = None
+    platform_auth_max_token_ttl_seconds: int = Field(default=900, ge=1, le=3600)
+    platform_context_signing_key: SecretStr | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
