@@ -1515,43 +1515,41 @@ def assign_internal_links_to_sections(
     if not candidates or max_links <= 0:
         return [section.model_copy(update={"internal_urls": []}) for section in sections]
 
-    used: set[str] = set()
-    assigned: dict[str, str] = {}
-    for section in sections:
-        for url in section.internal_urls:
-            candidate = candidates.get(url)
-            if candidate is None or url in used:
+    eligible_types = {
+        "body_how_to",
+        "body_comparison",
+        "body_explanation",
+        "body_list",
+    }
+    ranked_pairs: list[tuple[int, int, int, int, str, str]] = []
+    for section_index, section in enumerate(sections):
+        preferred_urls = set(section.internal_urls)
+        for url, candidate in candidates.items():
+            if section.section_type not in eligible_types and url not in preferred_urls:
                 continue
-            if _internal_link_section_score(section, candidate) <= 0:
+            score = _internal_link_section_score(section, candidate)
+            if score < 2:
                 continue
-            assigned[section.section_id] = url
-            used.add(url)
-            break
-        if len(used) >= max_links:
-            break
+            ranked_pairs.append(
+                (
+                    score,
+                    1 if url in preferred_urls else 0,
+                    int(candidate.get("selection_score") or 0),
+                    -section_index,
+                    url,
+                    section.section_id,
+                )
+            )
 
-    for section in sections:
-        if len(used) >= max_links:
+    used_urls: set[str] = set()
+    assigned: dict[str, str] = {}
+    for _, _, _, _, url, section_id in sorted(ranked_pairs, reverse=True):
+        if section_id in assigned or url in used_urls:
+            continue
+        assigned[section_id] = url
+        used_urls.add(url)
+        if len(used_urls) >= max_links:
             break
-        if section.section_id in assigned or section.section_type not in {
-            "body_how_to",
-            "body_comparison",
-            "body_explanation",
-            "body_list",
-        }:
-            continue
-        ranked = sorted(
-            (
-                (_internal_link_section_score(section, candidate), url)
-                for url, candidate in candidates.items()
-                if url not in used
-            ),
-            reverse=True,
-        )
-        if not ranked or ranked[0][0] <= 0:
-            continue
-        assigned[section.section_id] = ranked[0][1]
-        used.add(ranked[0][1])
 
     return [
         section.model_copy(
@@ -1581,13 +1579,23 @@ def _internal_link_section_score(
     )
     candidate_text = " ".join(
         [
+            str(candidate.get("url") or ""),
             str(candidate.get("title") or ""),
             str(candidate.get("description") or ""),
-            *[str(item) for item in candidate.get("headings") or []],
             *[str(item) for item in candidate.get("anchor_texts") or []],
         ]
     )
-    return len(_internal_link_terms(section_text).intersection(_internal_link_terms(candidate_text)))
+    exact_overlap = len(
+        _internal_link_terms(section_text).intersection(
+            _internal_link_terms(candidate_text)
+        )
+    )
+    concept_overlap = len(
+        _semantic_concepts(section_text).intersection(
+            _semantic_concepts(candidate_text)
+        )
+    )
+    return exact_overlap + concept_overlap * 3
 
 
 def _internal_link_terms(value: str) -> set[str]:
@@ -1595,7 +1603,9 @@ def _internal_link_terms(value: str) -> set[str]:
     terms = {
         item
         for item in re.findall(r"[a-z0-9]+", normalized)
-        if len(item) > 2 and item not in _SOURCE_MAPPING_STOP_WORDS
+        if len(item) > 2
+        and not item.isdigit()
+        and item not in _SOURCE_MAPPING_STOP_WORDS
     }
     for block in re.findall(r"[\u4e00-\u9fff]+", normalized):
         terms.add(block)
@@ -2208,12 +2218,34 @@ _SEMANTIC_GROUPS = (
     {"price", "pricing", "cost", "costs", "fee", "fees", "价格", "成本", "费用"},
     {"use", "uses", "case", "cases", "scenario", "application", "用例", "场景", "适用"},
     {"install", "installation", "setup", "configure", "安装", "配置", "设置"},
+    {"guide", "guidance", "tutorial", "指南", "教程"},
+    {"implement", "implementation", "deployment", "rollout", "实施", "部署", "落地"},
+    {"migration", "migrate", "import", "迁移", "导入"},
+    {"adoption", "onboarding", "training", "采用", "上手", "培训"},
+    {"measure", "measurement", "monitor", "tracking", "衡量", "监控", "跟踪"},
     {"faq", "question", "questions", "asked", "常见问题", "问答", "问题"},
     {"conclusion", "summary", "final", "next", "结论", "总结", "下一步"},
     {"compare", "comparison", "versus", "difference", "区别", "比较", "对比"},
     {"risk", "risks", "drawback", "drawbacks", "disadvantage", "风险", "缺点"},
     {"benefit", "benefits", "advantage", "advantages", "价值", "优势", "好处"},
 )
+
+
+def _semantic_concepts(value: str) -> set[int]:
+    normalized = _normalize_requirement(value)
+    latin_tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    return {
+        index
+        for index, group in enumerate(_SEMANTIC_GROUPS)
+        if latin_tokens.intersection(
+            {item for item in group if not re.search(r"[\u4e00-\u9fff]", item)}
+        )
+        or any(
+            item in normalized
+            for item in group
+            if re.search(r"[\u4e00-\u9fff]", item)
+        )
+    }
 
 
 def _semantic_terms(value: str) -> set[str]:

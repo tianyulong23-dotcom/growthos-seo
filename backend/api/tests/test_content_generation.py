@@ -1571,6 +1571,92 @@ def test_internal_link_assignment_skips_unrelated_candidates() -> None:
     assert assigned[0].internal_urls == []
 
 
+def test_internal_link_assignment_matches_chinese_section_to_english_target() -> None:
+    section = OutlineSection(
+        section_id="section-1",
+        heading="CRM 实施步骤",
+        objective="说明如何落地 CRM",
+        section_type="body_how_to",
+    )
+    url = "https://project.example/crm-implementation"
+    pack = {
+        "internal_sources": [
+            {
+                "url": url,
+                "title": "CRM Implementation Guide",
+                "description": "A practical CRM rollout process",
+            }
+        ]
+    }
+
+    assigned = generation.assign_internal_links_to_sections([section], pack)
+
+    assert assigned[0].internal_urls == [url]
+
+
+def test_internal_link_assignment_uses_best_article_wide_match() -> None:
+    implementation_url = "https://project.example/crm-implementation"
+    generic_url = "https://project.example/crm-startups"
+    sections = [
+        OutlineSection(
+            section_id="implementation",
+            heading="CRM 实施步骤",
+            objective="说明 CRM 如何落地",
+            section_type="body_how_to",
+        ),
+        OutlineSection(
+            section_id="measurement",
+            heading="衡量 CRM 效果",
+            objective="说明上线后如何监控",
+            section_type="body_explanation",
+        ),
+    ]
+    pack = {
+        "internal_sources": [
+            {
+                "url": generic_url,
+                "title": "CRM for Startups",
+                "description": "A CRM product page",
+                "selection_score": 100,
+            },
+            {
+                "url": implementation_url,
+                "title": "CRM Implementation",
+                "description": "Implementation steps and rollout guidance",
+                "selection_score": 80,
+            },
+        ]
+    }
+
+    assigned = generation.assign_internal_links_to_sections(sections, pack)
+
+    assert assigned[0].internal_urls == [implementation_url]
+    assert assigned[1].internal_urls == []
+
+
+def test_internal_link_assignment_ignores_template_heading_noise() -> None:
+    section = OutlineSection(
+        section_id="measurement",
+        heading="衡量 CRM 实施效果",
+        objective="说明上线后如何监控效果",
+        section_type="body_explanation",
+    )
+    pack = {
+        "internal_sources": [
+            {
+                "url": "https://project.example/company/crm-award",
+                "title": "Company Wins CRM Award",
+                "description": "An announcement about an industry award",
+                "headings": ["CRM Implementation", "Monitor Your Systems"],
+            }
+        ]
+    }
+
+    assigned = generation.assign_internal_links_to_sections([section], pack)
+
+    assert assigned[0].internal_urls == []
+
+
 def test_finalizer_removes_cross_section_duplicate_and_sixth_internal_links() -> None:
     urls = [f"https://project.example/blog/topic-{index}" for index in range(1, 7)]
     plan = plan_with_sections(6).model_copy(

@@ -265,17 +265,15 @@ async def _collect_internal(
     candidates = await repo.list_internal_link_candidates(
         run_id, keyword, key_pages, limit=30
     )
+    sources: list[dict[str, Any]] = []
     for item in candidates:
         parsed = urlsplit(str(item["url"]))
-        await repo.upsert_source(
-            run_id,
-            source_type="internal",
-            url=str(item["url"]),
-            status="available",
-            title=item.get("title"),
-            domain=parsed.netloc,
-            content_ref=None,
-            summary={
+        sources.append(
+            {
+                "url": str(item["url"]),
+                "title": item.get("title"),
+                "domain": parsed.netloc,
+                "summary": {
                 "description": str(item.get("description") or ""),
                 "headings": list(item.get("headings") or [])[:20],
                 "anchor_texts": list(item.get("anchor_texts") or [])[:10],
@@ -283,8 +281,10 @@ async def _collect_internal(
                 "selection_score": int(item.get("selection_score") or 0),
                 "selection_reason": str(item.get("selection_reason") or ""),
                 "word_count": int(item.get("word_count") or 0),
+                },
             },
         )
+    await repo.replace_internal_sources(run_id, sources)
     available = len(candidates)
     return (None if available else "internal_sources_unavailable", available)
 

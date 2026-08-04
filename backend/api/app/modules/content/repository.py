@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Text, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -80,6 +80,21 @@ _ARTICLE_PATH_PARTS = {
     "resources",
 }
 _ARTICLE_SCHEMA_TYPES = {"article", "blogposting", "newsarticle"}
+_INTERNAL_LINK_SEMANTIC_GROUPS = {
+    "comparison": ("compare", "comparison", "versus", "vs", "比较", "对比", "区别"),
+    "cost": ("price", "pricing", "cost", "fee", "价格", "成本", "费用"),
+    "guide": ("guide", "guidance", "tutorial", "指南", "教程"),
+    "implementation": (
+        "implement",
+        "implementation",
+        "deployment",
+        "rollout",
+        "实施",
+        "部署",
+        "落地",
+    ),
+    "setup": ("setup", "configure", "configuration", "设置", "配置"),
+}
 
 
 def _usable_internal_url(url: str, project_domain: str) -> bool:
@@ -127,12 +142,90 @@ def _looks_like_published_article(page: dict[str, Any]) -> bool:
 
 def _internal_link_terms(value: str) -> set[str]:
     normalized = value.casefold()
-    terms = {item for item in re.findall(r"[a-z0-9]+", normalized) if len(item) > 1}
+    terms = {
+        item
+        for item in re.findall(r"[a-z0-9]+", normalized)
+        if len(item) > 1 and not item.isdigit()
+    }
     for block in re.findall(r"[\u4e00-\u9fff]+", normalized):
         terms.add(block)
         for size in (2, 3):
             terms.update(block[index : index + size] for index in range(len(block) - size + 1))
+    latin_tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    for concept, aliases in _INTERNAL_LINK_SEMANTIC_GROUPS.items():
+        if any(
+            alias in latin_tokens
+            if re.fullmatch(r"[a-z0-9]+", alias)
+            else alias in normalized
+            for alias in aliases
+        ):
+            terms.add(f"concept:{concept}")
     return terms
+
+
+def _internal_link_query_terms(value: str) -> list[str]:
+    normalized = value.casefold()
+    terms = [
+        item
+        for item in re.findall(r"[a-z0-9]+", normalized)
+        if len(item) > 1 and not item.isdigit()
+    ]
+    terms.extend(re.findall(r"[\u4e00-\u9fff]+", normalized))
+    latin_tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    for aliases in _INTERNAL_LINK_SEMANTIC_GROUPS.values():
+        if any(
+            alias in latin_tokens
+            if re.fullmatch(r"[a-z0-9]+", alias)
+            else alias in normalized
+            for alias in aliases
+        ):
+            terms.extend(aliases)
+    return list(dict.fromkeys(terms))[:12]
+
+
+def _internal_link_candidate_score(
+    candidate: dict[str, Any], keyword_terms: set[str]
+) -> tuple[int, dict[str, int]]:
+    overlaps = {
+        "title": len(
+            keyword_terms.intersection(
+                _internal_link_terms(str(candidate.get("title") or ""))
+            )
+        ),
+        "description": len(
+            keyword_terms.intersection(
+                _internal_link_terms(str(candidate.get("description") or ""))
+            )
+        ),
+        "url": len(
+            keyword_terms.intersection(
+                _internal_link_terms(str(candidate.get("url") or ""))
+            )
+        ),
+        "headings": len(
+            keyword_terms.intersection(
+                _internal_link_terms(" ".join(candidate.get("headings") or []))
+            )
+        ),
+        "anchors": len(
+            keyword_terms.intersection(
+                _internal_link_terms(" ".join(candidate.get("anchor_texts") or []))
+            )
+        ),
+    }
+    score = (
+        overlaps["title"] * 40
+        + overlaps["url"] * 30
+        + overlaps["description"] * 20
+        + overlaps["headings"] * 15
+        + overlaps["anchors"] * 10
+    )
+    contextual_overlap = (
+        overlaps["description"] + overlaps["headings"] + overlaps["anchors"]
+    )
+    if overlaps["title"] == 0 and overlaps["url"] == 0 and contextual_overlap < 2:
+        return 0, overlaps
+    return score, overlaps
 
 
 def _unique_text(values: list[Any]) -> list[str]:
@@ -483,6 +576,7 @@ class ContentRepository:
                 return []
             snapshot = dict(run.project_snapshot_json or {})
             project_domain = str(snapshot.get("domain") or "")
+            query_terms = _internal_link_query_terms(keyword)
             ranked = (
                 select(
                     PageSnapshot.page_id.label("page_id"),
@@ -516,14 +610,38 @@ class ContentRepository:
                 )
                 .subquery()
             )
+            relevance_filters = [
+                column.ilike(f"%{term}%")
+                for term in query_terms
+                for column in (
+                    ranked.c.url,
+                    ranked.c.title,
+                    ranked.c.description,
+                    ranked.c.h1.cast(Text),
+                    ranked.c.h2.cast(Text),
+                )
+            ]
             rows = [
                 dict(row)
                 for row in (
                     await session.execute(
-                        select(ranked).where(ranked.c.row_number == 1).limit(500)
+                        select(ranked)
+                        .where(
+                            ranked.c.row_number == 1,
+                            or_(*relevance_filters) if relevance_filters else False,
+                        )
+                        .limit(1000)
                     )
                 ).mappings()
             ]
+            row_urls = [str(row.get("url") or "") for row in rows if row.get("url")]
+            navigation_filters = [
+                column.ilike(f"%{term}%")
+                for term in query_terms
+                for column in (LinkEdge.target_url, LinkEdge.anchor_text)
+            ]
+            if row_urls:
+                navigation_filters.append(LinkEdge.target_url.in_(row_urls))
             navigation_rows = [
                 dict(row)
                 for row in (
@@ -531,7 +649,7 @@ class ContentRepository:
                         select(
                             LinkEdge.target_url.label("url"),
                             LinkEdge.anchor_text.label("anchor_text"),
-                            LinkEdge.target_status.label("status_code"),
+                            func.max(LinkEdge.target_status).label("status_code"),
                         )
                         .join(CrawlRun, CrawlRun.run_id == LinkEdge.run_id)
                         .where(
@@ -542,8 +660,10 @@ class ContentRepository:
                             ),
                             LinkEdge.is_internal.is_(True),
                             LinkEdge.in_navigation.is_(True),
+                            or_(*navigation_filters) if navigation_filters else False,
                         )
-                        .limit(1000)
+                        .group_by(LinkEdge.target_url, LinkEdge.anchor_text)
+                        .limit(5000)
                     )
                 ).mappings()
             ]
@@ -601,7 +721,7 @@ class ContentRepository:
                 "title": title,
                 "description": str(row.get("description") or "").strip(),
                 "headings": _unique_text(
-                    [*(row.get("h1") or []), *(row.get("h2") or []), *(row.get("headings") or [])]
+                    [*(row.get("h1") or []), *(row.get("h2") or [])]
                 )[:20],
                 "anchor_texts": _unique_text(navigation.get(key, []))[:10],
                 "candidate_kind": "published_article" if is_article else "navigation",
@@ -633,30 +753,28 @@ class ContentRepository:
             }
 
         keyword_terms = _internal_link_terms(keyword)
+        relevant: list[dict[str, Any]] = []
         for candidate in candidates.values():
-            candidate_terms = _internal_link_terms(
-                " ".join(
-                    [
-                        str(candidate.get("url") or ""),
-                        str(candidate.get("title") or ""),
-                        str(candidate.get("description") or ""),
-                        " ".join(candidate.get("headings") or []),
-                        " ".join(candidate.get("anchor_texts") or []),
-                    ]
-                )
+            relevance_score, overlaps = _internal_link_candidate_score(
+                candidate, keyword_terms
             )
-            overlap = len(keyword_terms.intersection(candidate_terms))
+            if relevance_score <= 0:
+                continue
             kind_weight = {
                 "business_page": 3,
                 "published_article": 2,
                 "navigation": 1,
             }[str(candidate["candidate_kind"])]
-            candidate["selection_score"] = overlap * 10 + kind_weight
+            candidate["selection_score"] = relevance_score + kind_weight
             candidate["selection_reason"] = (
-                f"关键词相关词命中 {overlap} 个；来源为 {candidate['candidate_kind']}"
+                "相关词命中："
+                f"标题 {overlaps['title']}、描述 {overlaps['description']}、"
+                f"URL {overlaps['url']}、H1/H2 {overlaps['headings']}、"
+                f"导航锚文本 {overlaps['anchors']}；来源为 {candidate['candidate_kind']}"
             )
+            relevant.append(candidate)
         ordered = sorted(
-            candidates.values(),
+            relevant,
             key=lambda item: (
                 int(item["selection_score"]),
                 int(item.get("word_count") or 0),
@@ -705,6 +823,59 @@ class ContentRepository:
             source.summary_json = summary or {}
             source.metadata_json = metadata or {}
             source.retrieved_at = datetime.now(UTC)
+            await session.commit()
+
+    async def replace_internal_sources(
+        self, run_id: str, sources: list[dict[str, Any]]
+    ) -> None:
+        normalized_sources = {
+            normalize_source_url(str(item["url"])): item
+            for item in sources
+            if item.get("url")
+        }
+        retrieved_at = datetime.now(UTC)
+        async with self.sessions() as session:
+            existing = list(
+                (
+                    await session.scalars(
+                        select(ArticleSource).where(
+                            ArticleSource.run_id == run_id,
+                            ArticleSource.source_type == "internal",
+                        )
+                    )
+                ).all()
+            )
+            existing_by_url = {item.normalized_url: item for item in existing}
+            for normalized_url, item in normalized_sources.items():
+                source = existing_by_url.get(normalized_url)
+                if source is None:
+                    source = ArticleSource(
+                        id=str(uuid4()),
+                        run_id=run_id,
+                        source_type="internal",
+                        url=str(item["url"]),
+                        normalized_url=normalized_url,
+                        status="available",
+                    )
+                    session.add(source)
+                source.url = str(item["url"])
+                source.status = "available"
+                source.title = str(item.get("title") or "") or None
+                source.domain = str(item.get("domain") or "") or None
+                source.content_ref = None
+                source.summary_json = dict(item.get("summary") or {})
+                source.metadata_json = {}
+                source.claims_json = []
+                source.section_ids_json = []
+                source.retrieved_at = retrieved_at
+            for normalized_url, source in existing_by_url.items():
+                if normalized_url in normalized_sources:
+                    continue
+                source.status = "unavailable"
+                source.content_ref = None
+                source.claims_json = []
+                source.section_ids_json = []
+                source.retrieved_at = retrieved_at
             await session.commit()
 
     async def list_sources(

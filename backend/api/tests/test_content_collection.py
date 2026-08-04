@@ -30,6 +30,9 @@ from app.modules.content.object_storage import (
     StoredTextTooLargeError,
 )
 from app.modules.content.repository import (
+    _internal_link_candidate_score,
+    _internal_link_query_terms,
+    _internal_link_terms,
     merge_project_profile,
     normalize_source_url,
     project_snapshot_warnings,
@@ -388,6 +391,22 @@ class FakeSourceRepository:
     async def upsert_source(self, _run_id: str, **source: Any) -> None:
         self.sources.append(source)
 
+    async def replace_internal_sources(
+        self, _run_id: str, sources: list[dict[str, Any]]
+    ) -> None:
+        self.sources = [
+            item for item in self.sources if item.get("source_type") != "internal"
+        ]
+        self.sources.extend(
+            {
+                **source,
+                "source_type": "internal",
+                "status": "available",
+                "content_ref": None,
+            }
+            for source in sources
+        )
+
     async def list_internal_link_candidates(
         self,
         _run_id: str,
@@ -601,6 +620,35 @@ def test_internal_collection_saves_lightweight_candidates_without_page_text() ->
     }
 
 
+def test_internal_link_relevance_maps_common_chinese_intent_to_english_pages() -> None:
+    keyword_terms = _internal_link_terms("CRM 实施指南 2026")
+    relevant_score, overlaps = _internal_link_candidate_score(
+        {
+            "url": "https://project.example/crm-implementation",
+            "title": "CRM Implementation Guide",
+            "description": "Plan and roll out a CRM.",
+            "headings": ["Implementation steps"],
+            "anchor_texts": [],
+        },
+        keyword_terms,
+    )
+    noisy_score, _ = _internal_link_candidate_score(
+        {
+            "url": "https://project.example/careers",
+            "title": "Careers",
+            "description": "Work with our CRM team.",
+            "headings": [],
+            "anchor_texts": [],
+        },
+        keyword_terms,
+    )
+
+    assert "implementation" in _internal_link_query_terms("CRM 实施指南 2026")
+    assert overlaps["title"] >= 2
+    assert relevant_score > 0
+    assert noisy_score == 0
+
+
 def test_internal_collection_passes_profile_key_pages_to_repository() -> None:
     repo = FakeSourceRepository()
     repo.internal_candidates = [
@@ -684,6 +732,50 @@ def test_internal_collection_degrades_when_no_page_exists() -> None:
 
     assert outcome == ("internal_sources_unavailable", 0)
     assert repo.sources == []
+
+
+def test_internal_collection_replaces_stale_candidates_on_retry() -> None:
+    repo = FakeSourceRepository()
+    repo.internal_candidates = [
+        {
+            "url": "https://project.example/old-guide",
+            "title": "Old guide",
+            "candidate_kind": "published_article",
+        }
+    ]
+    asyncio.run(
+        collection._collect_internal(
+            repo,  # type: ignore[arg-type]
+            Settings(app_env="test"),
+            "run",
+            "solar battery",
+            {"domain": "project.example"},
+        )
+    )
+
+    repo.internal_candidates = [
+        {
+            "url": "https://project.example/new-guide",
+            "title": "New guide",
+            "candidate_kind": "published_article",
+        }
+    ]
+    asyncio.run(
+        collection._collect_internal(
+            repo,  # type: ignore[arg-type]
+            Settings(app_env="test"),
+            "run",
+            "solar battery",
+            {"domain": "project.example"},
+        )
+    )
+
+    internal_urls = [
+        item["url"]
+        for item in repo.sources
+        if item.get("source_type") == "internal"
+    ]
+    assert internal_urls == ["https://project.example/new-guide"]
 
 
 @pytest.mark.parametrize("failure", ["not_configured", "request_failed", "empty_result"])

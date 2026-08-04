@@ -20,6 +20,8 @@ from app.modules.audit.service import (
     normalized_run_status,
     progress_percentage,
     run_response,
+    spreadsheet_cell,
+    spreadsheet_row_variants,
 )
 from app.modules.crawling.models import AuditIssue, CrawlRun, PageSpeedResult
 
@@ -103,6 +105,27 @@ def test_post_crawl_stages_have_distinct_progress() -> None:
     assert progress_percentage("generating_profile", 5, 5, "running", 5) == 96
     assert progress_percentage("pagespeed", 20, 20, "running", 20) == 97
     assert progress_percentage("completed", 20, 20, "running", 20) == 99
+
+
+def test_crawl_progress_uses_page_limit_without_regressing() -> None:
+    early = progress_percentage("extracting_pages", 203, 51, "running", 1000)
+    more_discovered = progress_percentage(
+        "extracting_pages",
+        459,
+        51,
+        "running",
+        1000,
+    )
+    more_processed = progress_percentage(
+        "extracting_pages",
+        459,
+        101,
+        "running",
+        1000,
+    )
+
+    assert more_discovered == early
+    assert more_processed > more_discovered
 
 
 def test_partial_technical_audit_response_is_exposed_as_completed() -> None:
@@ -1689,6 +1712,39 @@ def test_active_result_endpoints_fall_back_to_checkpoint() -> None:
     assert responses["visualization"][1]["truncated"] is False
 
 
+def test_checkpoint_results_can_be_exported_after_pause() -> None:
+    service, _, repository = build_service()
+    app.dependency_overrides[get_audit_service] = lambda: service
+    try:
+        _, created = asyncio.run(
+            api_request("POST", "/api/v1/projects/example/audit-runs", json={})
+        )
+        run_id = created["run_id"]
+        repository.runs[("test-org", "example", run_id)].status = "paused"
+        repository.checkpoints[run_id] = {
+            "pages": [
+                {
+                    "url": "https://example.com/partial",
+                    "final_url": "https://example.com/partial",
+                    "status_code": 200,
+                    "title": "Partial page",
+                    "content_type": "text/html",
+                }
+            ]
+        }
+        status_code, _, body = asyncio.run(
+            api_raw_request(
+                "GET",
+                f"/api/v1/projects/example/audit-runs/{run_id}/export?dataset=pages&format=json",
+            )
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_code == 200
+    assert json.loads(body)[0]["title"] == "Partial page"
+
+
 def test_visualization_does_not_mark_unrenderable_links_as_truncated() -> None:
     service, _, repository = build_service()
     app.dependency_overrides[get_audit_service] = lambda: service
@@ -1944,6 +2000,78 @@ def test_export_issues_keeps_groups_across_batch_boundaries() -> None:
     assert repository.issue_group_queries == [(1, 1000)]
 
 
+def test_issue_grouping_ignores_page_specific_details() -> None:
+    service, _, repository = build_service()
+    app.dependency_overrides[get_audit_service] = lambda: service
+    try:
+        _, created = asyncio.run(
+            api_request("POST", "/api/v1/projects/example/audit-runs", json={})
+        )
+        run_id = created["run_id"]
+        repository.issues[run_id] = [
+            AuditIssue(
+                id=index,
+                run_id=run_id,
+                page_id=index,
+                url=f"https://example.com/page-{index}",
+                severity="warning",
+                category="SEO",
+                code="title_too_long",
+                issue="Title Too Long",
+                details=f"Title is {70 + index} characters",
+            )
+            for index in (1, 2)
+        ]
+        status_code, body = asyncio.run(
+            api_request(
+                "GET",
+                f"/api/v1/projects/example/audit-runs/{run_id}/issues",
+            )
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_code == 200
+    assert body["total"] == 1
+    assert body["items"][0]["affected_count"] == 2
+    assert len(body["items"][0]["raw"]["detail_examples"]) == 2
+
+
+def test_spreadsheet_exports_neutralize_formula_cells() -> None:
+    assert spreadsheet_cell('=HYPERLINK("https://example.test")') == (
+        '\'=HYPERLINK("https://example.test")'
+    )
+    assert spreadsheet_cell("  +1+1") == "'  +1+1"
+    assert spreadsheet_cell("Normal title") == "Normal title"
+
+
+def test_spreadsheet_rows_split_oversized_issue_url_lists() -> None:
+    urls = [f"https://example.com/page-{index:04d}" for index in range(5000)]
+    related_urls = [f"https://example.com/related-{index:04d}" for index in range(5000)]
+    variants = spreadsheet_row_variants(
+        {
+            "id": "duplicate_content:warning",
+            "affected_count": len(urls),
+            "urls": urls,
+            "raw": {
+                "related_urls": related_urls,
+                "max_similarity": 0.9,
+                "detail_examples": ["Duplicate page"],
+            },
+        }
+    )
+
+    assert len(variants) > 1
+    assert [url for row in variants for url in row["urls"]] == urls
+    assert [
+        url for row in variants for url in row["raw"]["related_urls"]
+    ] == related_urls
+    assert sum(row["affected_count"] for row in variants) == len(urls)
+    for row in variants:
+        assert len(spreadsheet_cell(row["urls"])) <= 32_767
+        assert len(spreadsheet_cell(row["raw"])) <= 32_767
+
+
 def test_exports_real_xlsx_workbook() -> None:
     service, _, repository = build_service()
     app.dependency_overrides[get_audit_service] = lambda: service
@@ -2022,6 +2150,59 @@ def test_pagespeed_returns_persisted_scores_and_metrics() -> None:
     assert body["items"][0]["metrics"]["largest_contentful_paint"] == 2.4
 
 
+def test_pagespeed_all_errors_are_failed_in_list_and_detail() -> None:
+    service, _, repository = build_service()
+    app.dependency_overrides[get_audit_service] = lambda: service
+    try:
+        _, created = asyncio.run(
+            api_request(
+                "POST",
+                "/api/v1/projects/example/audit-runs",
+                json={"enable_pagespeed": True},
+            )
+        )
+        run_id = created["run_id"]
+        repository.complete(
+            run_id,
+            {
+                "page_count": 1,
+                "health_score": 100,
+                "errors": 0,
+                "warnings": 0,
+                "notices": 0,
+                "rendered_pages": 0,
+            },
+        )
+        repository.pagespeed[run_id] = [
+            PageSpeedResult(
+                id=index,
+                run_id=run_id,
+                url="https://example.com",
+                strategy=strategy,
+                metrics={},
+                error="quota exceeded",
+                analyzed_at=datetime.now(UTC),
+            )
+            for index, strategy in enumerate(("mobile", "desktop"), start=1)
+        ]
+        list_status, list_body = asyncio.run(
+            api_request("GET", "/api/v1/projects/example/audit-runs")
+        )
+        detail_status, detail_body = asyncio.run(
+            api_request(
+                "GET",
+                f"/api/v1/projects/example/audit-runs/{run_id}",
+            )
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert list_status == detail_status == 200
+    assert list_body["items"][0]["pagespeed"]["status"] == "failed"
+    assert detail_body["pagespeed"]["status"] == "failed"
+    assert detail_body["pagespeed"]["message"]
+
+
 def test_launch_failure_keeps_database_run_queued_for_retry() -> None:
     service, _, repository = build_service(launch_error=RuntimeError("offline"))
     app.dependency_overrides[get_audit_service] = lambda: service
@@ -2047,6 +2228,23 @@ def test_directory_scope_requires_directory() -> None:
                 "POST",
                 "/api/v1/projects/example/audit-runs",
                 json={"scope": "directory"},
+            )
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_code == 422
+
+
+def test_audit_page_limit_cannot_exceed_5000() -> None:
+    service, _, _ = build_service()
+    app.dependency_overrides[get_audit_service] = lambda: service
+    try:
+        status_code, _ = asyncio.run(
+            api_request(
+                "POST",
+                "/api/v1/projects/example/audit-runs",
+                json={"max_pages": 5001},
             )
         )
     finally:
