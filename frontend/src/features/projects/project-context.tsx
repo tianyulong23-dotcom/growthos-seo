@@ -15,6 +15,7 @@ type CreateProjectInput = {
   domain: string
   country: string
   language: string
+  competitorDomain?: string
 }
 
 type ProjectContextValue = {
@@ -44,6 +45,7 @@ const emptyProject: Project = {
   domain: "",
   country: "",
   language: "",
+  competitorDomain: null,
   understandingRunId: null,
   understandingStatus: null,
   understandingStage: null,
@@ -62,6 +64,7 @@ const emptyProject: Project = {
 
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [projects, setProjects] = React.useState<Project[]>([])
+  const deletedProjectIds = React.useRef(new Set<string>())
 
   React.useEffect(() => {
     let active = true
@@ -86,10 +89,16 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const deleteProject = React.useCallback(async (projectId: string) => {
-    await deleteProjectRequest(projectId)
-    setProjects((current) =>
-      current.filter((project) => project.id !== projectId)
-    )
+    deletedProjectIds.current.add(projectId)
+    try {
+      await deleteProjectRequest(projectId)
+      setProjects((current) =>
+        current.filter((project) => project.id !== projectId)
+      )
+    } catch (error) {
+      deletedProjectIds.current.delete(projectId)
+      throw error
+    }
   }, [])
 
   const getProject = React.useCallback(
@@ -102,6 +111,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const refreshProject = React.useCallback(async (projectId: string) => {
     const project = await getProjectRequest(projectId)
+    if (deletedProjectIds.current.has(projectId)) {
+      return project
+    }
     setProjects((current) => {
       const exists = current.some((item) => item.id === project.id)
       if (!exists) {

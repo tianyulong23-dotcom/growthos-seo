@@ -8,11 +8,18 @@ class CreateProjectRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=253)
     country: str = Field(min_length=1, max_length=100)
     language: str = Field(min_length=1, max_length=100)
+    competitor_domain: str | None = Field(default=None, max_length=253)
 
     @field_validator("domain", "country", "language")
     @classmethod
     def clean_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("competitor_domain")
+    @classmethod
+    def clean_optional_domain(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value is not None else ""
+        return cleaned or None
 
 
 class UpdateBusinessProfileRequest(BaseModel):
@@ -100,6 +107,7 @@ class ProjectResponse(BaseModel):
     domain: str
     country: str
     language: str
+    competitor_domain: str | None
     understanding_run_id: str | None
     understanding_status: (
         Literal[

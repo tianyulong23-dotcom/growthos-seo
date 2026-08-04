@@ -417,7 +417,7 @@ func TestSiteUnderstandingFollowsMatchingHreflangAndFiltersWrongLanguage(t *test
 	}
 }
 
-func TestSiteUnderstandingExplainsWhenAllPagesUseAnotherLanguage(t *testing.T) {
+func TestSiteUnderstandingUsesObservedLanguageWhenRequestedLocaleIsUnavailable(t *testing.T) {
 	now := time.Now().UTC()
 	httpFetcher := &fakeFetcher{resources: map[string]Resource{
 		"https://example.com/robots.txt": {
@@ -459,14 +459,20 @@ func TestSiteUnderstandingExplainsWhenAllPagesUseAnotherLanguage(t *testing.T) {
 		Language:       "pt-BR",
 		MaxPages:       1,
 	}
-	want := "未找到符合项目语言 pt-BR 的页面；网站返回的页面语言为 en-US"
 	for attempt := 1; attempt <= 2; attempt++ {
-		_, err := engine.Run(context.Background(), task)
-		if err == nil {
-			t.Fatalf("Run() attempt %d returned no error", attempt)
+		result, err := engine.Run(context.Background(), task)
+		if err != nil {
+			t.Fatalf("Run() attempt %d returned an error: %v", attempt, err)
 		}
-		if err.Error() != want {
-			t.Fatalf("Run() attempt %d error = %q, want %q", attempt, err, want)
+		if len(result.Pages) != 1 {
+			t.Fatalf("Run() attempt %d page count = %d, want 1", attempt, len(result.Pages))
+		}
+		if result.Pages[0].Language != "en-US" {
+			t.Fatalf(
+				"Run() attempt %d language = %q, want en-US",
+				attempt,
+				result.Pages[0].Language,
+			)
 		}
 	}
 }

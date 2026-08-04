@@ -28,6 +28,7 @@ const createdProject: Project = {
   domain: "example.com",
   country: "US",
   language: "en",
+  competitorDomain: null,
   understandingRunId: "understanding-run",
   understandingStatus: "queued",
   understandingStage: "queued",

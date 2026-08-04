@@ -45,6 +45,7 @@ type ProjectResponse = {
   domain: string
   country: string
   language: string
+  competitor_domain: string | null
   understanding_run_id: string | null
   understanding_status: Project["understandingStatus"]
   understanding_stage: string | null
@@ -78,6 +79,7 @@ type CreateProjectInput = {
   domain: string
   country: string
   language: string
+  competitorDomain?: string
 }
 
 function mapSiteProfile(profile: SiteProfileResponse): SiteProfile {
@@ -118,6 +120,7 @@ function mapProject(project: ProjectResponse): Project {
     domain: project.domain,
     country: project.country,
     language: project.language,
+    competitorDomain: project.competitor_domain,
     understandingRunId: project.understanding_run_id,
     understandingStatus: project.understanding_status,
     understandingStage: project.understanding_stage,
@@ -157,7 +160,12 @@ export async function createProject(
   const project = await apiRequest<ProjectResponse>("/api/v1/projects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify({
+      domain: input.domain,
+      country: input.country,
+      language: input.language,
+      competitor_domain: input.competitorDomain || null,
+    }),
   })
   return mapProject(project)
 }

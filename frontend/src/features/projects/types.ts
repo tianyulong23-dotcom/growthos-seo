@@ -4,6 +4,7 @@ export type Project = {
   domain: string
   country: string
   language: string
+  competitorDomain: string | null
   understandingRunId: string | null
   understandingStatus:
     "queued" | "running" | "partial" | "completed" | "failed" | null

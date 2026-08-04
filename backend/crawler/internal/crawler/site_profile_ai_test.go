@@ -26,6 +26,7 @@ func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *te
 		writeAIProfileResponse(t, response, aiProfileOutput{
 			BusinessName:      "Example Athletics, Inc.",
 			BusinessType:      "Sportswear brand",
+			BusinessModel:     "product",
 			BusinessSummary:   "Example Athletics makes sports products for athletes and active consumers.",
 			TargetAudiences:   []string{"Athletes", "Active consumers"},
 			ProductsServices:  []string{"Athletic footwear", "Sports apparel", "Sports accessories"},
@@ -139,6 +140,9 @@ func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *te
 	if profile.BusinessType != "Sportswear brand" {
 		t.Fatalf("business type = %q", profile.BusinessType)
 	}
+	if profile.BusinessModel != "product" {
+		t.Fatalf("business model = %q", profile.BusinessModel)
+	}
 	if strings.Join(profile.ProductsServices, "|") !=
 		"Athletic footwear|Sports apparel|Sports accessories" {
 		t.Fatalf("products/services = %#v", profile.ProductsServices)
@@ -155,6 +159,9 @@ func TestAIProfileSynthesizerTurnsNavigationEvidenceIntoBusinessCategories(t *te
 	systemPrompt := messages[0].(map[string]any)["content"].(string)
 	userPrompt := messages[1].(map[string]any)["content"].(string)
 	for _, required := range []string{
+		"business_model",
+		"product, service, software, content, or mixed",
+		"required English enum values",
 		"campaign names",
 		"colors",
 		"support articles",
@@ -356,7 +363,7 @@ func TestAIProfileSynthesizerRetriesInvalidOutput(t *testing.T) {
 		}
 		output := validAIProfileOutput()
 		if calls.Add(1) == 1 {
-			output.Evidence = output.Evidence[1:]
+			output.BusinessModel = "unknown"
 		} else {
 			retryPrompt = requestBody.Messages[1].Content
 		}
@@ -400,6 +407,7 @@ func TestAIProfileSynthesizerSanitizesAndDeduplicatesLists(t *testing.T) {
 		writeAIProfileResponse(t, response, aiProfileOutput{
 			BusinessName:      "Example",
 			BusinessType:      "Analytics software",
+			BusinessModel:     "software",
 			BusinessSummary:   "Example helps teams understand their business data.",
 			TargetAudiences:   []string{"Finance teams", "Finance teams."},
 			ProductsServices:  []string{"Analytics", "analytics.", "Discover the future of business intelligence with a platform that transforms every decision across your entire organization."},
@@ -645,6 +653,7 @@ func validAIProfileOutput() aiProfileOutput {
 	return aiProfileOutput{
 		BusinessName:      "Example",
 		BusinessType:      "Software",
+		BusinessModel:     "software",
 		BusinessSummary:   "Example provides business software.",
 		TargetAudiences:   []string{"Teams"},
 		ProductsServices:  []string{"Business software"},

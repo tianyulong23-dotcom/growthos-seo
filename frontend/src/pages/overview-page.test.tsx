@@ -11,6 +11,7 @@ const project: Project = {
   domain: "example.com",
   country: "US",
   language: "en",
+  competitorDomain: null,
   understandingRunId: "understanding-1",
   understandingStatus: "running",
   understandingStage: "discovering_pages",

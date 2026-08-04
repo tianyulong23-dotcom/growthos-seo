@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.core.secure_logging import configure_sensitive_logging
 from app.modules.audit.service import AuditService, build_audit_service
 from app.modules.agent.service import build_agent_service
+from app.modules.keywords.service import KeywordService, build_keyword_service
 from app.modules.projects.service import ProjectService, build_project_service
 from app.workflows.worker import get_crawler_worker_launcher
 
@@ -42,6 +43,38 @@ async def dispatch_audit_workflows(
         except Exception:
             logger.exception("Unable to dispatch pending technical audit workflows")
         await asyncio.sleep(max(interval_seconds, 0.1))
+
+
+async def dispatch_keyword_workflows(
+    service: KeywordService,
+    interval_seconds: float,
+) -> None:
+    while True:
+        try:
+            await service.dispatch_pending_workflows()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to dispatch pending keyword workflows")
+        await asyncio.sleep(max(interval_seconds, 0.1))
+
+
+async def reconcile_keyword_workflows(
+    service: KeywordService,
+    interval_seconds: float,
+    timeout_seconds: float,
+) -> None:
+    while True:
+        try:
+            await asyncio.wait_for(
+                service.reconcile_active_runs(),
+                timeout=max(timeout_seconds, 0.1),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to reconcile active keyword workflows")
+        await asyncio.sleep(max(interval_seconds, 1))
 
 
 async def dispatch_agent_workflows() -> None:
@@ -95,6 +128,20 @@ async def lifespan(_: FastAPI):
         )
     )
     agent_dispatch_task = asyncio.create_task(dispatch_agent_workflows())
+    keyword_service = build_keyword_service()
+    keyword_dispatch_task = asyncio.create_task(
+        dispatch_keyword_workflows(
+            keyword_service,
+            settings.keyword_dispatch_interval_seconds,
+        )
+    )
+    keyword_reconcile_task = asyncio.create_task(
+        reconcile_keyword_workflows(
+            keyword_service,
+            settings.keyword_reconcile_interval_seconds,
+            settings.keyword_reconcile_timeout_seconds,
+        )
+    )
     try:
         await asyncio.wait_for(
             audit_service.reconcile_active_runs(),
@@ -112,12 +159,18 @@ async def lifespan(_: FastAPI):
         dispatch_task.cancel()
         audit_dispatch_task.cancel()
         agent_dispatch_task.cancel()
+        keyword_dispatch_task.cancel()
+        keyword_reconcile_task.cancel()
         with suppress(asyncio.CancelledError):
             await dispatch_task
         with suppress(asyncio.CancelledError):
             await audit_dispatch_task
         with suppress(asyncio.CancelledError):
             await agent_dispatch_task
+        with suppress(asyncio.CancelledError):
+            await keyword_dispatch_task
+        with suppress(asyncio.CancelledError):
+            await keyword_reconcile_task
         await worker_launcher.stop()
 
 

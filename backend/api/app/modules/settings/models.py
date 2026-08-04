@@ -50,3 +50,45 @@ class AIProviderSetting(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class GoogleAdsProviderSetting(Base):
+    __tablename__ = "google_ads_provider_settings"
+
+    organization_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    developer_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_secret_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    login_customer_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class DataForSEOProviderSetting(Base):
+    __tablename__ = "dataforseo_provider_settings"
+
+    organization_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    login: Mapped[str] = mapped_column(Text, nullable=False)
+    password_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )

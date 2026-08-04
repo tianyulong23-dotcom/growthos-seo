@@ -16,6 +16,7 @@ type SiteProfile struct {
 	FaviconURL        string                `json:"favicon_url"`
 	BusinessName      string                `json:"business_name"`
 	BusinessType      string                `json:"business_type"`
+	BusinessModel     string                `json:"business_model,omitempty"`
 	BusinessSummary   string                `json:"business_summary"`
 	ProductsServices  []string              `json:"products_services"`
 	TargetAudiences   []string              `json:"target_audiences"`
