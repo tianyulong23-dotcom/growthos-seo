@@ -17,13 +17,19 @@ class CreateProjectRequest(BaseModel):
 
 class UpdateBusinessProfileRequest(BaseModel):
     business_name: str = Field(min_length=1, max_length=200)
+    business_type: str = Field(min_length=1, max_length=200)
     business_summary: str = Field(default="", max_length=10_000)
     target_audiences: list[str] = Field(default_factory=list, max_length=100)
     products_services: list[str] = Field(default_factory=list, max_length=100)
     value_propositions: list[str] = Field(default_factory=list, max_length=100)
     ai_content_rules: str = Field(default="", max_length=10_000)
 
-    @field_validator("business_name", "business_summary", "ai_content_rules")
+    @field_validator(
+        "business_name",
+        "business_type",
+        "business_summary",
+        "ai_content_rules",
+    )
     @classmethod
     def clean_profile_text(cls, value: str) -> str:
         return value.strip()
@@ -48,6 +54,7 @@ class SiteProfileEvidence(BaseModel):
     field: str
     value: str
     source_url: str
+    quote: str = ""
 
 
 class SiteProfileResponse(BaseModel):
@@ -68,6 +75,7 @@ class SiteProfileResponse(BaseModel):
     conversion_actions: list[str] = Field(default_factory=list)
     key_pages: list[SiteProfileKeyPage] = Field(default_factory=list)
     evidence: list[SiteProfileEvidence] = Field(default_factory=list)
+    user_overridden_fields: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
     ai_content_rules: str = ""
     confirmed_at: datetime | None = None

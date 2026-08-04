@@ -20,6 +20,7 @@ from app.modules.projects.service import (
     ProjectRecord,
     ProjectService,
     SiteProfileNotReadyError,
+    WorkflowDispatchRecord,
 )
 
 
@@ -44,14 +45,23 @@ class FakeProjectRepository:
     def __init__(self) -> None:
         self.projects: list[ProjectRecord] = []
         self.runs: dict[str, CrawlRun] = {}
+        self.dispatches: dict[str, WorkflowDispatchRecord] = {}
 
     async def create_with_understanding_run(
         self,
         project: ProjectRecord,
         run: CrawlRun,
+        dispatch: WorkflowDispatchRecord,
     ) -> None:
         self.projects.append(project)
         self.runs[run.run_id] = run
+        self.dispatches[dispatch.run_id] = dispatch
+
+    async def mark_dispatch_succeeded(self, run_id: str) -> None:
+        return None
+
+    async def record_dispatch_failure(self, run_id: str, message: str) -> None:
+        return None
 
     async def list(self, organization_id: str) -> list[ProjectRecord]:
         projects: list[ProjectRecord] = []
@@ -100,17 +110,12 @@ class FakeProjectRepository:
             None,
         )
 
-    async def mark_run_failed(self, run_id: str, message: str) -> None:
-        self.runs[run_id].status = "failed"
-        self.runs[run_id].stage = "failed"
-        self.runs[run_id].message = message
-        self.runs[run_id].finished_at = datetime.now(UTC)
-
     async def start_understanding_run(
         self,
         organization_id: str,
         project_id: str,
         run: CrawlRun,
+        dispatch: WorkflowDispatchRecord,
     ) -> ProjectRecord:
         for index, project in enumerate(self.projects):
             if project.id == project_id and project.organization_id == organization_id:
@@ -127,6 +132,7 @@ class FakeProjectRepository:
                 )
                 self.projects[index] = updated
                 self.runs[run.run_id] = run
+                self.dispatches[dispatch.run_id] = dispatch
                 return updated
         raise ProjectNotFoundError
 
@@ -262,7 +268,7 @@ def test_create_project_starts_site_understanding() -> None:
     assert launcher.task["country"] == "US"
     assert launcher.task["language"] == "en"
     assert launcher.task["max_pages"] == 5
-    assert launcher.task["rendering"] == "off"
+    assert launcher.task["rendering"] == "auto"
     assert launcher.workflow_id == (
         f"crawler:site_understanding:{response.id}:{response.understanding_run_id}"
     )
@@ -273,7 +279,7 @@ def test_create_project_starts_site_understanding() -> None:
     assert response.understanding_elapsed_seconds == 0
 
 
-def test_create_project_returns_failed_project_when_workflow_cannot_start() -> None:
+def test_create_project_remains_queued_when_workflow_cannot_start() -> None:
     service, _, repository, _ = build_service(
         launch_error=RuntimeError("temporal unavailable")
     )
@@ -288,10 +294,10 @@ def test_create_project_returns_failed_project_when_workflow_cannot_start() -> N
         )
     )
 
-    assert response.understanding_status == "failed"
-    assert response.understanding_stage == "failed"
-    assert response.understanding_message == "无法启动网站业务识别：任务服务暂时不可用"
-    assert repository.runs[response.understanding_run_id].finished_at is not None
+    assert response.understanding_status == "queued"
+    assert response.understanding_stage == "queued"
+    assert response.understanding_message == "网站业务识别任务已进入队列"
+    assert repository.runs[response.understanding_run_id].finished_at is None
 
 
 def test_project_response_reports_actual_understanding_elapsed_time() -> None:
@@ -550,6 +556,7 @@ def test_update_business_profile_preserves_crawler_fields() -> None:
             created.id,
             UpdateBusinessProfileRequest(
                 business_name="Example Inc.",
+                business_type="SaaS",
                 business_summary="Updated summary",
                 target_audiences=["Teams", "Teams", "  Agencies  "],
                 products_services=["Analytics"],
@@ -603,6 +610,7 @@ def test_update_business_profile_route_persists_changes() -> None:
                 f"/api/v1/projects/{created.id}/business-profile",
                 json={
                     "business_name": "Example Inc.",
+                    "business_type": "SaaS",
                     "business_summary": "Updated summary",
                     "target_audiences": ["Teams"],
                     "products_services": ["Analytics"],
@@ -644,6 +652,7 @@ def test_update_business_profile_returns_conflict_before_understanding_finishes(
                 f"/api/v1/projects/{created.id}/business-profile",
                 json={
                     "business_name": "Example",
+                    "business_type": "SaaS",
                     "business_summary": "",
                     "target_audiences": [],
                     "products_services": [],
@@ -685,7 +694,7 @@ def test_refresh_business_profile_starts_new_understanding_without_audit() -> No
     assert refreshed.audit_status == "never_started"
     assert launcher.task is not None
     assert launcher.task["type"] == "site_understanding"
-    assert launcher.task["rendering"] == "off"
+    assert launcher.task["rendering"] == "auto"
     assert launcher.workflow_id.endswith(refreshed.understanding_run_id)
 
 

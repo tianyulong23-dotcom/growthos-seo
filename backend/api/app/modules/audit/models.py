@@ -203,7 +203,7 @@ DEFAULT_ISSUE_EXCLUSION_PATTERNS = """
 
 
 class CreateAuditRunRequest(BaseModel):
-    max_pages: int = Field(default=1000, ge=1, le=10_000)
+    max_pages: int = Field(default=1000, ge=1, le=5_000)
     scope: AuditScope = AuditScope.DOMAIN
     directory: PathValue | None = None
     rendering: RenderingMode = RenderingMode.AUTO
@@ -270,6 +270,7 @@ class AuditSummary(BaseModel):
     warnings: int = 0
     notices: int = 0
     rendered_pages: int = 0
+    resource_checks_truncated: bool = False
 
 
 class AuditPageSpeedState(BaseModel):

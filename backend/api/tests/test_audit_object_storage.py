@@ -20,8 +20,9 @@ class FakeS3Client:
             "IsTruncated": False,
         }
 
-    def delete_objects(self, **request: Any) -> None:
+    def delete_objects(self, **request: Any) -> dict[str, Any]:
         self.delete_requests.append(request)
+        return {}
 
 
 def test_s3_cleaner_deletes_every_object_under_the_run_prefix(monkeypatch: Any) -> None:

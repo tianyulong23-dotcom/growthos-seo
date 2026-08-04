@@ -118,6 +118,31 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  agent-worker:
+    build:
+      context: ../../backend/api
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/seo
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: seo-crawler
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_USE_PATH_STYLE: "true"
+      AI_SETTINGS_ENCRYPTION_KEY: "${AI_SETTINGS_ENCRYPTION_KEY:-}"
+    command: ["python", "-m", "app.workflows.agent_worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_started
+    restart: unless-stopped
+
   crawler-worker:
     build:
       context: ../../backend/crawler
