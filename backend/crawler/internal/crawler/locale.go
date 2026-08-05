@@ -62,6 +62,18 @@ func pageMatchesRequestedLocale(task Task, page Page) bool {
 	return localeMatchQuality(task.Language, task.Country, page.Language) > 0
 }
 
+func pageHasRequestedLocaleAlternate(task Task, page Page) bool {
+	for _, alternate := range page.Hreflang {
+		if strings.EqualFold(strings.TrimSpace(alternate.Language), "x-default") {
+			continue
+		}
+		if localeMatchQuality(task.Language, task.Country, alternate.Language) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func localizedLanguageRoot(pageURL *url.URL, language string) bool {
 	if pageURL == nil || strings.TrimSpace(language) == "" {
 		return false

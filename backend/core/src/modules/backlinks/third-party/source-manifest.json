@@ -1,0 +1,550 @@
+{
+  "schemaVersion": "1.0",
+  "sources": [
+    {
+      "id": "OSS-RUNTIME-01",
+      "project": "Node.js",
+      "repository": "https://github.com/nodejs/node",
+      "license": "MIT",
+      "packageVersion": "v24.14.1",
+      "auditedCommit": "d89bb1b482fa09245c4f2cbb3b5b6a70bea6deaf",
+      "sourceFiles": ["lib/internal/modules/esm/loader.js", "lib/internal/url.js"],
+      "upstreamTests": ["test/es-module", "test/parallel"],
+      "targetFiles": ["backend/core/package.json", "backend/core/package-lock.json", "backend/core/tsconfig.json"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Fixed ESM, URL, and crypto runtime behavior"],
+      "forbiddenReuse": ["Floating runtime tags or unpinned container images"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-RUNTIME-02",
+      "project": "npm CLI",
+      "repository": "https://github.com/npm/cli",
+      "license": "Artistic-2.0",
+      "packageVersion": "11.11.0",
+      "auditedCommit": "1e7774ee4bc98e434339b0969e9caa98c583060c",
+      "sourceFiles": ["lib/commands/ci.js", "lib/commands/audit.js", "lib/commands/install.js"],
+      "upstreamTests": ["test/lib/commands/ci.js", "test/lib/commands/audit.js"],
+      "targetFiles": ["backend/core/package.json", "backend/core/package-lock.json"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Exact package manager and clean-install behavior"],
+      "forbiddenReuse": ["CI installs that rewrite the committed lockfile"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-INF-01",
+      "project": "Fastify",
+      "repository": "https://github.com/fastify/fastify",
+      "license": "MIT",
+      "packageVersion": "5.10.0",
+      "packageIntegrity": "sha512-A9L0ziuWGQHgEEVgF3davQ9vbD93IuX+lo2IsxapQmu5b/Y/ynn9m9K5JHt9dvyJXOFc5iN0Zk5GHEOqnzhWjg==",
+      "sourceFiles": ["fastify.js", "lib/route.js", "lib/content-type-parser.js"],
+      "upstreamTests": ["test/plugin.test.js", "docs/Guides/Testing.md"],
+      "targetFiles": ["backend/core/src/modules/backlinks/api/backlinks.plugin.ts"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Plugin lifecycle, route schemas, request IDs, and inject tests"],
+      "forbiddenReuse": ["Fastify memory as job, idempotency, session, or permission authority"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-INF-02",
+      "project": "Zod",
+      "repository": "https://github.com/colinhacks/zod",
+      "license": "MIT",
+      "packageVersion": "4.4.3",
+      "packageIntegrity": "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==",
+      "sourceFiles": ["packages/zod/src/v4/core/schemas.ts", "packages/zod/src/v4/core/parse.ts"],
+      "upstreamTests": [],
+      "targetFiles": ["backend/core/src/modules/backlinks/api/schemas", "backend/core/src/modules/backlinks/adapters"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Runtime validation and explicit error paths"],
+      "forbiddenReuse": ["Security defaults or passthrough schemas that accept unknown vendor fields"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-INF-01A",
+      "project": "@fastify/swagger",
+      "repository": "https://github.com/fastify/fastify-swagger",
+      "license": "MIT",
+      "packageVersion": "9.8.1",
+      "auditedCommit": "bdee6141030c54cdd51208c882513abebbf2b801",
+      "sourceFiles": ["index.js", "lib/mode/dynamic.js", "lib/spec/openapi/index.js", "lib/spec/openapi/utils.js"],
+      "upstreamTests": ["test/spec/openapi/route.test.js", "test/spec/openapi/schema.test.js", "test/transform.test.js"],
+      "targetFiles": ["backend/core/src/modules/backlinks/api/openapi.ts", "backend/contracts/openapi/backlinks.v1.json"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["OpenAPI 3 generation, references, and Fastify schema lifecycle"],
+      "forbiddenReuse": ["Interactive production documentation without internal authorization"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-INF-02A",
+      "project": "fastify-type-provider-zod",
+      "repository": "https://github.com/turkerdev/fastify-type-provider-zod",
+      "license": "MIT",
+      "packageVersion": "7.0.0",
+      "packageIntegrity": "sha512-yUEKMyy+kml+4fzUU9GxVtYVKmPKNFo8OVd2N/RH2I/7JZiKvOqF1BUj3f/JJU3DDQDM7pMv2bf/Y8COPaxUWg==",
+      "sourceFiles": ["src/core.ts", "src/registry.ts", "src/zod-to-json.ts", "src/errors.ts"],
+      "upstreamTests": [],
+      "targetFiles": ["backend/core/src/modules/backlinks/api/openapi.ts", "backend/core/src/modules/backlinks/api/schemas"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Validator, serializer, JSON Schema transform, and Zod type provider"],
+      "forbiddenReuse": ["A parallel hand-written JSON Schema contract"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-INF-03",
+      "project": "Drizzle ORM",
+      "repository": "https://github.com/drizzle-team/drizzle-orm",
+      "license": "Apache-2.0",
+      "packageVersion": "0.45.2",
+      "packageIntegrity": "sha512-kY0BSaTNYWnoDMVoyY8uxmyHjpJW1geOmBMdSSicKo9CIIWkSxMIj2rkeSR51b8KAPB7m+qysjuHme5nKP+E5Q==",
+      "sourceFiles": ["drizzle-orm/src/pg-core", "drizzle-orm/src/node-postgres"],
+      "upstreamTests": ["integration-tests/tests/pg"],
+      "targetFiles": ["backend/core/src/modules/backlinks/db/schema", "backend/core/src/modules/backlinks/db/repositories"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Typed PostgreSQL schemas, queries, and repository mappings"],
+      "forbiddenReuse": ["Schema push, startup auto-migration, or application-only tenant filtering"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-INF-04",
+      "project": "node-postgres",
+      "repository": "https://github.com/brianc/node-postgres",
+      "license": "MIT",
+      "packageVersion": "8.22.0",
+      "packageIntegrity": "sha512-8wih1vVIBMxoUM2oB4soJsD9tDnDpLv4OXBJ+EJzFsvycD+lfyIreC2gGHq78f8jbLLt+bvlPTFdFZfJkOuzAA==",
+      "sourceFiles": ["packages/pg/lib/client.js", "packages/pg/lib/query.js", "packages/pg/lib/result.js"],
+      "upstreamTests": ["packages/pg/test"],
+      "targetFiles": ["backend/core/src/modules/backlinks/db/client"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["PostgreSQL connections, pools, transactions, and reviewed timeout parameters"],
+      "forbiddenReuse": ["Superuser or BYPASSRLS roles, unreviewed SQL, or in-memory database substitutes"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-TEST-03",
+      "project": "Testcontainers for Node.js",
+      "repository": "https://github.com/testcontainers/testcontainers-node",
+      "license": "MIT",
+      "packageVersion": "12.0.4",
+      "packageIntegrity": "sha512-QIR/8xF1+F/26cIM+9B4yyxNTbKJxAv3hygZyhPRgZ8Q2AhlPZjDdpXRuk16V37X4bgJRI3hXFhoEICMBA7Adg==",
+      "sourceFiles": ["src/generic-container", "src/wait-strategies", "src/container-runtime"],
+      "upstreamTests": ["src/generic-container/generic-container.test.ts"],
+      "targetFiles": ["backend/core/test/backlinks/integration/harness"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Isolated PostgreSQL container lifecycle, mapped ports, and readiness waits"],
+      "forbiddenReuse": ["Production networks, production database URLs, floating image tags, or hidden test substitutes"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-TOOL-01",
+      "project": "TypeScript",
+      "repository": "https://github.com/microsoft/TypeScript",
+      "license": "Apache-2.0",
+      "packageVersion": "5.9.3",
+      "auditedCommit": "c63de15a992d37f0d6cec03ac7631872838602cb",
+      "sourceFiles": ["src/compiler/program.ts", "src/compiler/checker.ts", "lib/typescript.js", "lib/typescript.d.ts"],
+      "upstreamTests": ["tests/cases/compiler"],
+      "targetFiles": ["backend/core/tsconfig.json", "backend/core/src"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Strict compilation and generated-code type boundaries"],
+      "forbiddenReuse": ["Disabling strict checks to accept invalid boundaries"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-TOOL-02",
+      "project": "tsx",
+      "repository": "https://github.com/privatenumber/tsx",
+      "license": "MIT",
+      "packageVersion": "4.20.6",
+      "auditedCommit": "710a42473ebfdff362818bed4fd1f5c7a27837e2",
+      "sourceFiles": ["dist/cli.mjs", "dist/esm/index.mjs", "dist/cjs/index.cjs"],
+      "upstreamTests": [],
+      "targetFiles": ["backend/core/scripts"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Execution of repository governance scripts"],
+      "forbiddenReuse": ["Runtime transpilation of production application code"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-TOOL-03",
+      "project": "ESLint",
+      "repository": "https://github.com/eslint/eslint",
+      "license": "MIT",
+      "packageVersion": "10.7.0",
+      "auditedCommit": "fabd99bb74eedcb950df51ec3280414ff1d68d38",
+      "sourceFiles": ["lib/cli.js", "lib/config/flat-config-array.js", "lib/linter/index.js", "lib/rule-tester/index.js"],
+      "upstreamTests": [],
+      "targetFiles": ["backend/core/eslint.config.js", "backend/core/src", "backend/core/scripts"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Flat Config and static dependency-boundary rules"],
+      "forbiddenReuse": ["Treating lint as a substitute for security or contract tests"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-TOOL-04",
+      "project": "typescript-eslint",
+      "repository": "https://github.com/typescript-eslint/typescript-eslint",
+      "license": "MIT",
+      "packageVersion": "8.65.0",
+      "packageIntegrity": "sha512-/ggrHAwyjENDusvyxbuqxAC2dTnZg/Z8F+fgQtYIz+L6n/9HfSlEZcFGV/NsMNa6CkGk0xUjUAFwC0vHOflvIA==",
+      "sourceFiles": ["dist/index.js", "dist/config-helper.js"],
+      "upstreamTests": [],
+      "targetFiles": ["backend/core/eslint.config.js"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["TypeScript parser, plugin, and Flat Config helpers"],
+      "forbiddenReuse": ["Runtime imports from domain or application code"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-TOOL-05",
+      "project": "@types/node",
+      "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+      "license": "MIT",
+      "packageVersion": "24.13.3",
+      "packageIntegrity": "sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==",
+      "sourceFiles": ["types/node/index.d.ts", "types/node/test.d.ts", "types/node/ts5.7/index.d.ts"],
+      "upstreamTests": [],
+      "targetFiles": ["backend/core/tsconfig.json", "backend/core/src", "backend/core/scripts"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Node.js 24 compile-time type declarations"],
+      "forbiddenReuse": ["Treating declarations as runtime validation"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-MAIL-01",
+      "project": "Nodemailer MailComposer",
+      "repository": "https://github.com/nodemailer/nodemailer",
+      "license": "MIT-0",
+      "packageVersion": "9.0.3",
+      "packageIntegrity": "sha512-n+YP+NKwR5zRWa60k3GiQ6Q3B4KXCoAw40dAKeCtYn020iNN74aWK2liXIC3ZEATeGql7we3tE3t8QwhY0eskw==",
+      "sourceFiles": [
+        "lib/mail-composer/index.js",
+        "lib/mime-node/index.js",
+        "lib/mime-funcs/index.js",
+        "lib/addressparser/index.js"
+      ],
+      "upstreamTests": [],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/adapters/gmail/message-builder.ts"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["MailComposer RFC 5322 and MIME serialization only"],
+      "forbiddenReuse": [
+        "Nodemailer SMTP, sendmail, SES, stream, or JSON transports",
+        "OAuth, token handling, network delivery, DKIM signing, or provider retries"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-MAIL-02",
+      "project": "PostalMime",
+      "repository": "https://github.com/postalsys/postal-mime",
+      "license": "MIT-0",
+      "packageVersion": "2.7.5",
+      "packageIntegrity": "sha512-GNEXKvWFQnbgO5NlrGzVa0FmWzBZ24PersAWErttSg1Hjpf0ATxTwS5DOMGaOpTG6bUh5cTr7xi0jAD942wCJA==",
+      "auditedSourceCommit": "a70ee5ca7bdd1867574518f1ea8329782245f3f9",
+      "sourceFiles": [
+        "src/postal-mime.js",
+        "src/mime-node.js",
+        "src/decode-strings.js",
+        "src/address-parser.js"
+      ],
+      "upstreamTests": [],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/adapters/gmail/message-parser.ts"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": [
+        "Parsing raw RFC 5322 and MIME input inside the Gmail adapter boundary",
+        "Decoding headers, body parts, and attachment data for later Core-owned mapping"
+      ],
+      "forbiddenReuse": [
+        "MailMessage mapping, thread or reply matching, business-state writes, or provider calls",
+        "Trusting or rendering HTML, loading remote resources, executing attachments, or sending mail"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-MAIL-03",
+      "project": "isomorphic-dompurify",
+      "repository": "https://github.com/kkomelin/isomorphic-dompurify",
+      "license": "MIT",
+      "packageVersion": "3.18.0",
+      "packageIntegrity": "sha512-ajp0D8laIHeoYlhBTevpE2HUhqWaqLXFk6K/wV3Ok8kDraBZpZsifwVWaY8IfJntMRIo1VSksgKV+lXyet9Q7A==",
+      "auditedSourceCommit": "1d5745c69d4c7dd2ec76dc7fa2ab3ccfdf3fc0ee",
+      "resolvedRuntime": {
+        "package": "dompurify",
+        "version": "3.4.12",
+        "license": "(MPL-2.0 OR Apache-2.0)",
+        "packageIntegrity": "sha512-zQvGet8Z2sWbQhCmfFz/T5QWH2oBmjnqK3qvOjaqaNLrLEF912WamU+ohnTp0TCep/MFVHpdJuCZEdFOdTnEFg=="
+      },
+      "sourceFiles": ["src/index.ts", "src/browser.ts"],
+      "upstreamTests": [],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/adapters/gmail/sanitizer.ts"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": [
+        "Constructing the approved server-side DOMPurify runtime and invoking sanitize inside the Gmail sanitizer boundary",
+        "Returning only Core-owned sanitized HTML metadata after an explicit strict policy is applied"
+      ],
+      "forbiddenReuse": [
+        "Using DOMPurify default configuration as the GrowthOS email security policy",
+        "Rendering raw HTML, allowing active content or remote tracking resources, or appending untrusted HTML after sanitization"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-MAIL-04",
+      "project": "jsdom",
+      "repository": "https://github.com/jsdom/jsdom",
+      "license": "MIT",
+      "packageVersion": "29.1.1",
+      "packageIntegrity": "sha512-ECi4Fi2f7BdJtUKTflYRTiaMxIB0O6zfR1fX0GXpUrf6flp8QIYn1UT20YQqdSOfk2dfkCwS8LAFoJDEppNK5Q==",
+      "auditedSourceCommit": "9b9ea7e10b7842cd38c61458a38774cc3b60c24c",
+      "sourceFiles": [
+        "lib/api.js",
+        "lib/jsdom/browser/Window.js",
+        "lib/jsdom/living/nodes/Document-impl.js"
+      ],
+      "upstreamTests": [],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/adapters/gmail/sanitizer.ts"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": [
+        "Providing the server-side DOM environment required by the approved DOMPurify wrapper"
+      ],
+      "forbiddenReuse": [
+        "Loading remote resources, executing scripts, emulating a browser worker, or making jsdom a business-state authority"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-HTML-01",
+      "project": "cheerio",
+      "repository": "https://github.com/cheeriojs/cheerio",
+      "license": "MIT",
+      "packageVersion": "1.1.2",
+      "packageIntegrity": "sha512-IkxPpb5rS/d1IiLbHMgfPuS0FgiWTtFIm/Nj+2woXDLTZ7fOT2eqzgYbdMlLweqlHbsZjxEChoVK+7iph7jyQg==",
+      "sourceFiles": ["src/load-parse.ts", "src/load.ts", "src/api/attributes.ts"],
+      "upstreamTests": ["src/load.spec.ts", "src/api/attributes.spec.ts"],
+      "targetFiles": ["backend/core/src/modules/backlinks/adapters/html/contact-parser.adapter.ts"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Bounded HTML loading, selectors, text, and attribute extraction"],
+      "forbiddenReuse": ["Network access, JavaScript execution, or persisting a DOM"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-HTML-02",
+      "project": "robots-parser",
+      "repository": "https://github.com/samclarke/robots-parser",
+      "license": "MIT",
+      "packageVersion": "3.0.1",
+      "packageIntegrity": "sha512-s+pyvQeIKIZ0dx5iJiQk1tPLJAWln39+MI5jtM8wnyws+G5azk+dMnMX0qfbqNetKKNgcWWOdi0sfm+FbQbgdQ==",
+      "sourceFiles": ["Robots.js", "index.js", "index.d.ts"],
+      "upstreamTests": ["test/Robots.js"],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/adapters/html/robots-policy.adapter.ts"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": [
+        "User-agent matching, Allow/Disallow precedence, and Crawl-delay parsing"
+      ],
+      "forbiddenReuse": [
+        "Network access, legal permission inference, or bypassing SafeFetch policy"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-HTML-03",
+      "project": "validator",
+      "repository": "https://github.com/validatorjs/validator.js",
+      "license": "MIT",
+      "packageVersion": "13.15.35",
+      "packageIntegrity": "sha512-TQ5pAGhd5whStmqWvYF4OjQROlmv9SMFVt37qoCBdqRffuuklWYQlCNnEs2ZaIBD1kZRNnikiZOS1eqgkar0iw==",
+      "sourceFiles": ["lib/isEmail.js", "lib/isFQDN.js"],
+      "upstreamTests": [],
+      "targetFiles": ["backend/core/src/modules/backlinks/adapters/html/contact-parser.adapter.ts"],
+      "adoption": "direct-dependency",
+      "allowedReuse": ["Email syntax validation with locked conservative options"],
+      "forbiddenReuse": ["Identity, deliverability, consent, or sending-permission inference"],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-REC-01",
+      "project": "tldts",
+      "repository": "https://github.com/remusao/tldts",
+      "license": "MIT",
+      "packageVersion": "7.4.9",
+      "packageIntegrity": "sha512-3kZ8wQQ/k5DrChD4X4FVvr2D7E5uoRgAqkPyLpSCGUvqOvqu+JEdr3mwMUaVWb+vMHZaKhF5fp2PBigKsui7hA==",
+      "sourceFiles": [
+        "packages/tldts/index.ts",
+        "packages/tldts-core/src/factory.ts",
+        "packages/tldts-tests/src/tldts-tests.ts",
+        "packages/tldts/test/special-use.test.ts"
+      ],
+      "upstreamTests": [
+        "packages/tldts-tests/src/tldts-tests.ts",
+        "packages/tldts/test/special-use.test.ts"
+      ],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/domain/recommendations/domain-key.ts"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": [
+        "IDN, public suffix, registrable domain, private suffix, and subdomain boundaries"
+      ],
+      "forbiddenReuse": [
+        "Treating a shared registrable domain as URL equivalence, contact ownership, or placement health"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-SEO-02",
+      "project": "OpenSEO",
+      "repository": "https://github.com/every-app/open-seo",
+      "license": "MIT",
+      "auditedCommit": "927e931e51f6024323ada746816aaa6a51ce83ef",
+      "sourceFiles": [
+        "src/server/lib/dataforseo/core.ts",
+        "src/server/lib/dataforseo/envelope.ts",
+        "src/server/lib/dataforseo/backlinks.ts",
+        "src/server/lib/dataforseo/labs.ts",
+        "src/server/features/backlinks/services/backlinksServiceData.ts",
+        "src/server/features/domain/services/DomainService.ts",
+        "src/server/lib/r2-cache.ts",
+        "src/server/lib/dataforseo/envelope.test.ts",
+        "scripts/backlinks-cost-profile.ts"
+      ],
+      "sourceFileHashes": {
+        "src/server/lib/dataforseo/core.ts": "ba825d96a774f296f33b07debb2d54d418d6c03b14a215ee5c02c80c9e600670",
+        "src/server/lib/dataforseo/envelope.ts": "f919004730ebc6f7ccd2a8724f43eecd1825e6cd579485fb404f07720294688b",
+        "src/server/lib/dataforseo/backlinks.ts": "6716e8a70733e5c068b6595e1b5624e3e0f572a73301508e2db79b1e8201747b",
+        "src/server/lib/dataforseo/labs.ts": "24a07ee4d2b82db29d50b8f7ead54461d09b390c7bd917648e5c1fe9530dc934",
+        "src/server/features/backlinks/services/backlinksServiceData.ts": "75d4dbe91616256f02563cba11e1f93bf73427ff32cdc5e28048620accbe0330",
+        "src/server/features/domain/services/DomainService.ts": "b88a11c1d511e3da73b159d70d0744c291fd8f60b2c4b48e77a4b8b24ce5b5c9",
+        "src/server/lib/r2-cache.ts": "9874baeaae9013ae555138049b1190f04cdb3516aa164aecd46c89b06ba686f6",
+        "src/server/lib/dataforseo/envelope.test.ts": "b36701f5a4c2af3567531fc26701bea95716faaf1793e5733ee64df0d364eabd",
+        "scripts/backlinks-cost-profile.ts": "31c67259769eb1471e93f5d47857a5146bb2f05370ae7a590f351dfe66a188a6"
+      },
+      "upstreamTests": ["src/server/lib/dataforseo/envelope.test.ts"],
+      "targetFiles": ["backend/core/src/modules/backlinks/third-party/open-seo"],
+      "adoption": "conditional",
+      "defaultEnabled": false,
+      "allowedReuse": [
+        "Task envelope validation, empty-result handling, and field normalization",
+        "Deterministic cache keys, cost metadata, and registered test vectors"
+      ],
+      "forbiddenReuse": [
+        "OAuth, sessions, organizations, projects, subscriptions, Autumn billing, or R2 bindings",
+        "Routes, page state, hosted data, MCP routes, paid POST 5xx retries, configuration, or database models"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-SEO-03",
+      "project": "simple-statistics",
+      "repository": "https://github.com/simple-statistics/simple-statistics",
+      "license": "ISC",
+      "packageVersion": "7.9.3",
+      "packageIntegrity": "sha512-WXpxUfo7BJCRpyl4besiuMV7wNj9xiPIq7IKmUQO4upIaF8pK2AXwhjttHN5L8KXZrLkGMCHGHq4p+pJXiIahQ==",
+      "sourceFiles": ["src/sum.js", "src/sum.d.ts"],
+      "upstreamTests": ["test/sum.test.js"],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/domain/recommendations/scoring.ts"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": [
+        "Deterministic summation of Core-owned score components"
+      ],
+      "forbiddenReuse": [
+        "Selecting thresholds, gates, recommendation status, evidence, or business conclusions"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-PLC-01",
+      "project": "Cybokron Backlink Checker",
+      "repository": "https://github.com/ercanatay/cybokron-backlink-checker",
+      "license": "MIT",
+      "packageVersion": "v2.1.7",
+      "auditedCommit": "f71c66d5b8520ecba3e61ca96a8d1d0383f91c23",
+      "sourceFiles": [
+        "src/Services/BacklinkAnalyzerService.php",
+        "src/Services/HttpClient.php",
+        "src/Domain/Url/LinkClassifier.php",
+        "src/Domain/Url/UrlNormalizer.php"
+      ],
+      "sourceFileHashes": {
+        "src/Services/BacklinkAnalyzerService.php": "a9e374f8571d53893db6d8b89ac6fb3a167fba5470d4e6ea8728829b1eb18c5e",
+        "src/Services/HttpClient.php": "c72b180dda03aa95d7b5e94ae3140ff71595323b6d08edcbd4dc8bd448911fad",
+        "src/Domain/Url/LinkClassifier.php": "5bd7437b17559819fa1d343942390233fce7c090d7bb9280edef75b21331765f",
+        "src/Domain/Url/UrlNormalizer.php": "8055731e8600cfc90dc7929fed07f91527e1ef6b4dfb260d27615b357413fecf"
+      },
+      "upstreamTests": [
+        "tests/Unit/LinkClassifierTest.php",
+        "tests/Unit/UrlNormalizerTest.php",
+        "tests/Unit/BacklinkAnalyzerSsrfTest.php"
+      ],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/third-party/cybokron/link-classifier.ts",
+        "backend/core/src/modules/backlinks/third-party/cybokron/url-normalizer-vectors.ts",
+        "backend/core/src/modules/backlinks/third-party/cybokron/ssrf-vectors.ts"
+      ],
+      "adoption": "ported-source",
+      "allowedReuse": [
+        "rel classification and strongest-link selection semantics",
+        "host equivalence, redirect evidence, and SSRF test vectors"
+      ],
+      "forbiddenReuse": [
+        "Upstream HTTP client as a replacement for GrowthOS SafeFetch",
+        "Upstream application, database, scheduler, tasks, pages, or business-state writes"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-PLC-02",
+      "project": "SEOnaut",
+      "repository": "https://github.com/StJudeWasHere/seonaut",
+      "license": "MIT",
+      "auditedCommit": "880b312c28fab8b0bf7fe4f9449dc4746dbb82ff",
+      "sourceFiles": [
+        "internal/services/parser.go",
+        "internal/services/html_parser.go",
+        "internal/issues/page/canonical.go",
+        "internal/issues/errors/errors.go",
+        "internal/repository/pagereport.go",
+        "internal/urlutils/absoluteurl.go"
+      ],
+      "sourceFileHashes": {
+        "internal/services/parser.go": "dfa5aff937932de14cc7648ee37ceaa977fb28847def630a834035df180ee3ab",
+        "internal/services/html_parser.go": "5b7184862cd6f03011f8b02b2665497c677c45ce06916dc78d211d18e6527c39",
+        "internal/issues/page/canonical.go": "ca9d9fc924ba5d09801b9daed1e78d47273355706ae568051a0ef292a9445a3e",
+        "internal/issues/errors/errors.go": "5885a29254b8362c9db5c82c18237d1d4c3d51d8fecfc56035472b5f6d805ee5",
+        "internal/repository/pagereport.go": "eb700da3de24940f94a050e75ebd44c963e5cfc4d5ff0eb5825a326dede93cbf",
+        "internal/urlutils/absoluteurl.go": "cf6206c4ca8fb78f72c2b3ec0f1e18f52b7cbda46f2950d2c1415a9871d47f70"
+      },
+      "upstreamTests": [
+        "internal/services/html_parser_test.go",
+        "internal/issues/page/canonical_test.go"
+      ],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/third-party/seonaut/canonical-parser.ts",
+        "backend/core/src/modules/backlinks/third-party/seonaut/robots-directive-parser.ts",
+        "backend/core/src/modules/backlinks/third-party/seonaut/fixtures"
+      ],
+      "adoption": "ported-source",
+      "allowedReuse": [
+        "HTML and HTTP canonical parsing semantics, including relative and multiple canonicals",
+        "Meta and X-Robots-Tag directives plus page-level nofollow test semantics"
+      ],
+      "forbiddenReuse": [
+        "Upstream crawler, repository, issue state, data models, or URL business decisions",
+        "Unverified upstream branches or direct placement-state writes"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    }
+  ]
+}

@@ -19,6 +19,7 @@ const (
 	siteUnderstandingMinimumPages = 3
 	siteUnderstandingDefaultPages = 5
 	siteUnderstandingHardLimit    = 10
+	technicalAuditHardLimit       = 5000
 )
 
 type ScopeMode string
@@ -105,6 +106,9 @@ func (t Task) Validate() error {
 			(*t.DuplicationLimit < 0 || *t.DuplicationLimit > 1) {
 			return errors.New("duplication_threshold must be between 0 and 1")
 		}
+		if t.Type == TaskTechnicalAudit && t.MaxPages > technicalAuditHardLimit {
+			return fmt.Errorf("max_pages cannot exceed %d", technicalAuditHardLimit)
+		}
 	case TaskBacklinkValidation:
 		if len(t.URLs) == 0 {
 			return errors.New("urls are required for backlink validation")
@@ -123,9 +127,6 @@ func (t Task) ScopeMode() ScopeMode {
 }
 
 func (t Task) RenderingMode() RenderingMode {
-	if t.Type == TaskSiteUnderstanding {
-		return RenderingOff
-	}
 	if t.Rendering == "" {
 		return RenderingAuto
 	}
@@ -155,7 +156,7 @@ func (t Task) PageLimit() int {
 		return siteUnderstandingDefaultPages
 	case TaskTechnicalAudit:
 		if t.MaxPages > 0 {
-			return t.MaxPages
+			return min(t.MaxPages, technicalAuditHardLimit)
 		}
 		return 1000
 	case TaskBacklinkValidation:
@@ -242,9 +243,11 @@ type SchemaMicrodata struct {
 }
 
 type Redirect struct {
-	FromURL    string `json:"from_url,omitempty"`
-	URL        string `json:"url"`
-	StatusCode int    `json:"status_code,omitempty"`
+	FromURL          string   `json:"from_url,omitempty"`
+	URL              string   `json:"url"`
+	StatusCode       int      `json:"status_code,omitempty"`
+	SecurityDecision string   `json:"security_decision,omitempty"`
+	ResolvedIPs      []string `json:"resolved_ips,omitempty"`
 }
 
 type Page struct {
@@ -292,6 +295,11 @@ type Page struct {
 	ResponseTimeMS     int               `json:"response_time_ms,omitempty"`
 	SizeBytes          int64             `json:"size_bytes,omitempty"`
 	Redirects          []Redirect        `json:"redirects,omitempty"`
+	ResolvedIPs        []string          `json:"resolved_ips,omitempty"`
+	SecurityDecision   string            `json:"security_decision,omitempty"`
+	RobotsDecision     string            `json:"robots_decision,omitempty"`
+	RenderMode         string            `json:"render_mode,omitempty"`
+	NoIndex            bool              `json:"noindex"`
 	Error              string            `json:"error,omitempty"`
 	ErrorType          string            `json:"error_type,omitempty"`
 	RawHTMLRef         string            `json:"raw_html_ref,omitempty"`
@@ -305,12 +313,19 @@ type Page struct {
 }
 
 type BacklinkResult struct {
-	URL        string    `json:"url"`
-	FinalURL   string    `json:"final_url,omitempty"`
-	StatusCode int       `json:"status_code,omitempty"`
-	FoundLinks []Link    `json:"found_links,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	CheckedAt  time.Time `json:"checked_at"`
+	URL              string     `json:"url"`
+	FinalURL         string     `json:"final_url,omitempty"`
+	StatusCode       int        `json:"status_code,omitempty"`
+	FoundLinks       []Link     `json:"found_links,omitempty"`
+	Redirects        []Redirect `json:"redirects,omitempty"`
+	ResolvedIPs      []string   `json:"resolved_ips,omitempty"`
+	SecurityDecision string     `json:"security_decision,omitempty"`
+	RobotsDecision   string     `json:"robots_decision,omitempty"`
+	RenderMode       string     `json:"render_mode,omitempty"`
+	NoIndex          bool       `json:"noindex"`
+	Error            string     `json:"error,omitempty"`
+	ErrorType        string     `json:"error_type,omitempty"`
+	CheckedAt        time.Time  `json:"checked_at"`
 }
 
 type Issue struct {
@@ -349,18 +364,19 @@ type ExternalResource struct {
 }
 
 type Result struct {
-	TaskType          TaskType           `json:"task_type"`
-	RunID             string             `json:"run_id"`
-	CompletionStatus  CompletionStatus   `json:"completion_status"`
-	CompletionNote    string             `json:"completion_note,omitempty"`
-	Pages             []Page             `json:"pages,omitempty"`
-	Issues            []Issue            `json:"issues,omitempty"`
-	ExternalResources []ExternalResource `json:"external_resources,omitempty"`
-	PageSpeed         []PageSpeedResult  `json:"pagespeed,omitempty"`
-	Backlinks         []BacklinkResult   `json:"backlinks,omitempty"`
-	SiteProfile       *SiteProfile       `json:"site_profile,omitempty"`
-	StartedAt         time.Time          `json:"started_at"`
-	FinishedAt        time.Time          `json:"finished_at"`
+	TaskType                TaskType           `json:"task_type"`
+	RunID                   string             `json:"run_id"`
+	CompletionStatus        CompletionStatus   `json:"completion_status"`
+	CompletionNote          string             `json:"completion_note,omitempty"`
+	Pages                   []Page             `json:"pages,omitempty"`
+	Issues                  []Issue            `json:"issues,omitempty"`
+	ExternalResources       []ExternalResource `json:"external_resources,omitempty"`
+	PageSpeed               []PageSpeedResult  `json:"pagespeed,omitempty"`
+	ResourceChecksTruncated bool               `json:"resource_checks_truncated,omitempty"`
+	Backlinks               []BacklinkResult   `json:"backlinks,omitempty"`
+	SiteProfile             *SiteProfile       `json:"site_profile,omitempty"`
+	StartedAt               time.Time          `json:"started_at"`
+	FinishedAt              time.Time          `json:"finished_at"`
 }
 
 type CandidateState struct {
@@ -388,20 +404,24 @@ type CrawlCheckpoint struct {
 }
 
 type Resource struct {
-	URL            string
-	FinalURL       string
-	StatusCode     int
-	ContentType    string
-	Header         map[string][]string
-	Body           []byte
-	Rendered       bool
-	ProxyURL       string
-	ResponseTimeMS int
-	SizeBytes      int64
-	Redirects      []Redirect
-	Error          string
-	ErrorType      string
-	FetchedAt      time.Time
+	URL              string
+	FinalURL         string
+	StatusCode       int
+	ContentType      string
+	Header           map[string][]string
+	Body             []byte
+	Rendered         bool
+	RenderMode       string
+	ProxyURL         string
+	ResponseTimeMS   int
+	SizeBytes        int64
+	Redirects        []Redirect
+	ResolvedIPs      []string
+	SecurityDecision string
+	RobotsDecision   string
+	Error            string
+	ErrorType        string
+	FetchedAt        time.Time
 }
 
 func parsedURL(raw string) (*url.URL, error) {

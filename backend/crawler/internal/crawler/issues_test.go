@@ -110,6 +110,87 @@ func TestIssueDetectorDoesNotAddNonLibreCrawlRules(t *testing.T) {
 	}
 }
 
+func TestIssueDetectorDoesNotStackContentIssuesOnNonAuditablePages(t *testing.T) {
+	tests := []struct {
+		name         string
+		page         Page
+		responseCode string
+	}{
+		{
+			name:         "client error",
+			page:         Page{URL: "https://example.com/missing", StatusCode: 404},
+			responseCode: "client_error",
+		},
+		{
+			name:         "server error",
+			page:         Page{URL: "https://example.com/error", StatusCode: 503},
+			responseCode: "server_error",
+		},
+		{
+			name:         "redirect",
+			page:         Page{URL: "https://example.com/old", StatusCode: 301},
+			responseCode: "redirect",
+		},
+		{
+			name: "crawl error",
+			page: Page{
+				URL:        "https://example.com/timeout",
+				StatusCode: 0,
+				Error:      "request timed out",
+				ErrorType:  "timeout",
+			},
+			responseCode: "crawl_error",
+		},
+		{
+			name: "non html",
+			page: Page{
+				URL:         "https://example.com/report.pdf",
+				StatusCode:  200,
+				ContentType: "application/pdf",
+			},
+		},
+	}
+	contentCodes := []string{
+		"missing_title",
+		"missing_meta_description",
+		"missing_h1",
+		"thin_content",
+		"missing_canonical",
+		"missing_viewport",
+		"no_structured_data",
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			issues := (IssueDetector{}).Detect([]Page{test.page})
+			if test.responseCode != "" && !hasIssueCode(issues, test.responseCode) {
+				t.Fatalf("issues = %#v, want response issue %q", issues, test.responseCode)
+			}
+			for _, code := range contentCodes {
+				if hasIssueCode(issues, code) {
+					t.Fatalf("non-auditable page emitted content issue %q: %#v", code, issues)
+				}
+			}
+		})
+	}
+}
+
+func TestIssueDetectorTreatsOptionalIndexingSignalsAsNotices(t *testing.T) {
+	page := Page{
+		URL:        "https://example.com/page",
+		StatusCode: 200,
+		Robots:     "noindex,nofollow",
+	}
+	issues := (IssueDetector{}).Detect([]Page{page})
+
+	for _, code := range []string{"no_structured_data", "noindex", "nofollow"} {
+		matches := issuesWithCode(issues, code)
+		if len(matches) != 1 || matches[0].Type != "info" {
+			t.Fatalf("issue %q = %#v, want one info issue", code, matches)
+		}
+	}
+}
+
 func TestIssueDetectorDuplicateSimilarityWeights(t *testing.T) {
 	base := Page{
 		URL:         "https://example.com/one",
@@ -152,6 +233,7 @@ func TestIssueDetectorKeepsBestDuplicatePerPage(t *testing.T) {
 	pages := []Page{
 		{
 			URL:         "https://example.com/one",
+			StatusCode:  200,
 			Title:       "Shared title",
 			Description: "Shared description",
 			H1:          []string{"Shared heading"},
@@ -159,6 +241,7 @@ func TestIssueDetectorKeepsBestDuplicatePerPage(t *testing.T) {
 		},
 		{
 			URL:         "https://example.com/two",
+			StatusCode:  200,
 			Title:       "Shared title",
 			Description: "Shared description",
 			H1:          []string{"Shared heading"},
@@ -166,6 +249,7 @@ func TestIssueDetectorKeepsBestDuplicatePerPage(t *testing.T) {
 		},
 		{
 			URL:         "https://example.com/three",
+			StatusCode:  200,
 			Title:       "Shared title",
 			Description: "Shared description",
 			H1:          []string{"Shared heading"},
@@ -184,6 +268,26 @@ func TestIssueDetectorKeepsBestDuplicatePerPage(t *testing.T) {
 		if math.Abs(issue.Similarity-1) > 1e-9 {
 			t.Fatalf("similarity = %f, want 1", issue.Similarity)
 		}
+	}
+}
+
+func TestIssueDetectorIndexesLargeTemplateSets(t *testing.T) {
+	pageCount := exhaustiveDuplicatePageLimit + 50
+	pages := make([]Page, pageCount)
+	for index := range pages {
+		pages[index] = Page{
+			URL:         fmt.Sprintf("https://example.com/products/%d", index),
+			StatusCode:  200,
+			Title:       fmt.Sprintf("Product %d | Example Store", index),
+			Description: fmt.Sprintf("Buy product %d from the Example Store catalog.", index),
+			H1:          []string{fmt.Sprintf("Product %d", index)},
+			WordCount:   250,
+		}
+	}
+
+	duplicates := issuesWithCode((IssueDetector{}).Detect(pages), "duplicate_content")
+	if len(duplicates) != pageCount {
+		t.Fatalf("duplicate issues = %d, want %d", len(duplicates), pageCount)
 	}
 }
 
@@ -223,6 +327,7 @@ func TestIssueDetectorMatchesLibreCrawlConfiguration(t *testing.T) {
 func TestIssueDetectorUsesUnroundedDuplicateScore(t *testing.T) {
 	left := Page{
 		URL:         "https://example.com/one",
+		StatusCode:  200,
 		Title:       "Same title",
 		Description: "Same description",
 		H1:          []string{"Same heading"},
@@ -243,15 +348,15 @@ func TestIssueDetectorUsesUnroundedDuplicateScore(t *testing.T) {
 	}
 }
 
-func TestIssueDetectorComparesEmptyPagesAtZeroThreshold(t *testing.T) {
-	left := Page{URL: "https://example.com/one"}
-	right := Page{URL: "https://example.com/two"}
+func TestIssueDetectorDoesNotCompareEmptyPagesAtZeroThreshold(t *testing.T) {
+	left := Page{URL: "https://example.com/one", StatusCode: 200}
+	right := Page{URL: "https://example.com/two", StatusCode: 200}
 	threshold := 0.0
 
 	issues := (IssueDetector{DuplicationLimit: &threshold}).Detect([]Page{left, right})
 	duplicates := issuesWithCode(issues, "duplicate_content")
-	if len(duplicates) != 2 {
-		t.Fatalf("duplicate issues = %#v, want one for each URL", duplicates)
+	if len(duplicates) != 0 {
+		t.Fatalf("empty pages emitted duplicate issues: %#v", duplicates)
 	}
 }
 
@@ -304,8 +409,9 @@ func BenchmarkIssueDetectorDuplicatePairTraversal(b *testing.B) {
 			pages := make([]Page, pageCount)
 			for index := range pages {
 				pages[index] = Page{
-					URL:       fmt.Sprintf("https://example.com/page-%d", index),
-					WordCount: 300,
+					URL:        fmt.Sprintf("https://example.com/page-%d", index),
+					StatusCode: 200,
+					WordCount:  300,
 				}
 			}
 			b.ReportMetric(

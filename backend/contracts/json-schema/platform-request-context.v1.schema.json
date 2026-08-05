@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:growthos:contract:platform-request-context:v1",
+  "title": "PlatformRequestContext.v1",
+  "description": "Integrity-protected context issued by the GrowthOS Platform Gateway for a private module request.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "PlatformRequestContext.v1"
+    },
+    "issuer": {
+      "const": "growthos-platform-gateway"
+    },
+    "audience": {
+      "const": "growthos-backlinks-core"
+    },
+    "issuedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "correlationId": {
+      "$ref": "#/$defs/nonBlankIdentifier"
+    },
+    "actor": {
+      "type": "object",
+      "properties": {
+        "userId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonBlankIdentifier"
+          }
+        }
+      },
+      "required": [
+        "userId",
+        "sessionId",
+        "roles"
+      ],
+      "additionalProperties": false
+    },
+    "tenant": {
+      "type": "object",
+      "properties": {
+        "organizationId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        }
+      },
+      "required": [
+        "organizationId",
+        "workspaceId"
+      ],
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "websiteProjectId": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        },
+        "websiteProjectKey": {
+          "$ref": "#/$defs/nonBlankIdentifier"
+        }
+      },
+      "required": [
+        "websiteProjectId",
+        "websiteProjectKey"
+      ],
+      "additionalProperties": false
+    },
+    "permissions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 200,
+        "pattern": "^[a-z][a-z0-9_.-]*:[a-z][a-z0-9_.-]*$"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "issuer",
+    "audience",
+    "issuedAt",
+    "expiresAt",
+    "correlationId",
+    "actor",
+    "tenant",
+    "project",
+    "permissions"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "nonBlankIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^\\S(?:.*\\S)?$"
+    }
+  }
+}

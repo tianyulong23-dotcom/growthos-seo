@@ -140,6 +140,35 @@ func TestDomainScopeSupportsAProjectSubdomain(t *testing.T) {
 	}
 }
 
+func TestScopeSupportsARealSiteAtPrivateSuffixRoot(t *testing.T) {
+	scope, _, err := NewScopeWithOptions(
+		"https://httpbin.org",
+		nil,
+		ScopeSubdomains,
+		"",
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewScopeWithOptions() returned an error: %v", err)
+	}
+	root, _ := url.Parse("https://httpbin.org/get")
+	child, _ := url.Parse("https://tenant.httpbin.org/get")
+	if !scope.Allows(root) {
+		t.Fatal("scope rejected the configured private-suffix root")
+	}
+	if scope.Allows(child) {
+		t.Fatal("scope expanded a private-suffix root to another tenant")
+	}
+}
+
+func TestScopeRejectsBareICANNPublicSuffix(t *testing.T) {
+	if _, _, err := NewScope("https://co.uk"); err == nil {
+		t.Fatal("NewScope() accepted a bare ICANN public suffix")
+	}
+}
+
 func TestValidatePublicURLRejectsPrivateAddresses(t *testing.T) {
 	for _, rawURL := range []string{
 		"http://127.0.0.1",

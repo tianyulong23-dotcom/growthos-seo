@@ -99,6 +99,21 @@ func (f *BrowserFetcher) Fetch(ctx context.Context, rawURL string) (Resource, er
 		return Resource{}, err
 	}
 	defer page.Close()
+	if err := page.SetUserAgent(&proto.NetworkSetUserAgentOverride{
+		UserAgent:      defaultString(f.config.UserAgent, defaultCrawlerUserAgent),
+		AcceptLanguage: acceptLanguageFromContext(ctx),
+		Platform:       "Android",
+	}); err != nil {
+		return Resource{}, fmt.Errorf("configure mobile user agent: %w", err)
+	}
+	if err := page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+		Width:             390,
+		Height:            844,
+		DeviceScaleFactor: 3,
+		Mobile:            true,
+	}); err != nil {
+		return Resource{}, fmt.Errorf("configure mobile viewport: %w", err)
+	}
 
 	page = page.Timeout(f.config.BrowserTimeout)
 	router, blocked := f.safeRequestRouter(ctx, page)
@@ -162,6 +177,7 @@ func (f *BrowserFetcher) Fetch(ctx context.Context, rawURL string) (Resource, er
 			contentType = navigationResponse.MIMEType
 		}
 	}
+	f.limiter.Observe(statusCode, "")
 	return Resource{
 		URL:         rawURL,
 		FinalURL:    info.URL,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"path"
 	"sort"
@@ -16,6 +17,7 @@ import (
 type Scope struct {
 	targetHost      string
 	registrableHost string
+	privateSuffix   bool
 	mode            ScopeMode
 	directory       string
 	allowedPaths    []string
@@ -91,7 +93,7 @@ func NewScopeWithOptions(
 	target.Fragment = ""
 
 	host := strings.ToLower(strings.TrimSuffix(target.Hostname(), "."))
-	registrable, err := publicsuffix.EffectiveTLDPlusOne(host)
+	registrable, privateSuffix, err := registrableDomain(host)
 	if err != nil {
 		return Scope{}, nil, fmt.Errorf("target must use a public domain: %w", err)
 	}
@@ -114,7 +116,7 @@ func NewScopeWithOptions(
 	}
 
 	allowedHosts := map[string]struct{}{host: {}}
-	if host == registrable || host == "www."+registrable {
+	if !privateSuffix && (host == registrable || host == "www."+registrable) {
 		allowedHosts[registrable] = struct{}{}
 		allowedHosts["www."+registrable] = struct{}{}
 	}
@@ -123,8 +125,11 @@ func NewScopeWithOptions(
 		if err != nil {
 			return Scope{}, nil, err
 		}
-		additionalRegistrable, err := publicsuffix.EffectiveTLDPlusOne(additionalHost)
-		if err != nil || additionalRegistrable != registrable {
+		additionalRegistrable, additionalPrivateSuffix, err := registrableDomain(additionalHost)
+		if err != nil ||
+			privateSuffix ||
+			additionalPrivateSuffix ||
+			additionalRegistrable != registrable {
 			return Scope{}, nil, fmt.Errorf(
 				"additional host %q must be a subdomain of %s",
 				rawHost,
@@ -137,6 +142,7 @@ func NewScopeWithOptions(
 	return Scope{
 		targetHost:      host,
 		registrableHost: registrable,
+		privateSuffix:   privateSuffix,
 		mode:            mode,
 		directory:       directory,
 		allowedPaths:    normalizedPathPrefixes(allowedPaths),
@@ -206,7 +212,7 @@ func (s Scope) allowsHost(host string) bool {
 	if _, allowed := s.allowedHosts[host]; allowed {
 		return true
 	}
-	if s.mode != ScopeSubdomains {
+	if s.mode != ScopeSubdomains || s.privateSuffix {
 		return false
 	}
 
@@ -215,6 +221,19 @@ func (s Scope) allowsHost(host string) bool {
 		baseHost = s.registrableHost
 	}
 	return strings.HasSuffix(host, "."+baseHost)
+}
+
+func registrableDomain(host string) (string, bool, error) {
+	registrable, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err == nil {
+		return registrable, false, nil
+	}
+
+	suffix, icann := publicsuffix.PublicSuffix(host)
+	if !icann && suffix == host && strings.Contains(host, ".") {
+		return host, true, nil
+	}
+	return "", false, err
 }
 
 func (s Scope) ignoresParameter(value string) bool {
@@ -312,43 +331,122 @@ func pathMatches(value, prefix string) bool {
 	return value == prefix || strings.HasPrefix(value, prefix+"/")
 }
 
-func ValidatePublicURL(ctx context.Context, resolver *net.Resolver, u *url.URL) error {
+type IPResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+func ValidatePublicURL(ctx context.Context, resolver IPResolver, u *url.URL) error {
+	_, err := resolvePublicURL(ctx, resolver, u)
+	return err
+}
+
+func resolvePublicURL(
+	ctx context.Context,
+	resolver IPResolver,
+	u *url.URL,
+) ([]string, error) {
 	if u == nil {
-		return errors.New("URL is nil")
+		return nil, errors.New("URL is nil")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("unsupported URL scheme %q", u.Scheme)
+		return nil, fmt.Errorf("unsupported URL scheme %q", u.Scheme)
+	}
+	if u.User != nil {
+		return nil, errors.New("URL userinfo is not allowed")
 	}
 	port := u.Port()
 	if port != "" && port != "80" && port != "443" {
-		return fmt.Errorf("port %s is not allowed", port)
+		return nil, fmt.Errorf("port %s is not allowed", port)
+	}
+	host := strings.TrimSpace(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "" {
+		return nil, errors.New("URL hostname is empty")
+	}
+	if ambiguousNumericHost(host) {
+		return nil, errors.New("ambiguous numeric hostname is not allowed")
 	}
 
-	addresses, err := resolver.LookupIPAddr(ctx, u.Hostname())
+	addresses, err := resolver.LookupIPAddr(ctx, host)
 	if err != nil {
-		return fmt.Errorf("resolve target: %w", err)
+		return nil, fmt.Errorf("resolve target: %w", err)
 	}
 	if len(addresses) == 0 {
-		return errors.New("target has no IP addresses")
+		return nil, errors.New("target has no IP addresses")
 	}
+	resolved := make([]string, 0, len(addresses))
 	for _, address := range addresses {
 		if !isPublicIP(address.IP) {
-			return fmt.Errorf("target resolves to a blocked address: %s", address.IP)
+			return nil, fmt.Errorf("target resolves to a blocked address: %s", address.IP)
 		}
+		resolved = append(resolved, address.IP.String())
 	}
-	return nil
+	sort.Strings(resolved)
+	return resolved, nil
 }
 
 func isPublicIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	return !ip.IsLoopback() &&
-		!ip.IsPrivate() &&
-		!ip.IsLinkLocalUnicast() &&
-		!ip.IsLinkLocalMulticast() &&
-		!ip.IsMulticast() &&
-		!ip.IsUnspecified()
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() ||
+		address.IsLoopback() ||
+		address.IsPrivate() ||
+		address.IsLinkLocalUnicast() ||
+		address.IsMulticast() ||
+		address.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range blockedPublicPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+var blockedPublicPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+func ambiguousNumericHost(host string) bool {
+	lower := strings.ToLower(host)
+	if strings.HasPrefix(lower, "0x") {
+		return true
+	}
+	allDigits := true
+	for _, character := range lower {
+		if character < '0' || character > '9' {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits {
+		return true
+	}
+	parts := strings.Split(lower, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if strings.HasPrefix(part, "0x") ||
+			len(part) > 1 && strings.HasPrefix(part, "0") {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueSortedURLs(urls []*url.URL) []*url.URL {

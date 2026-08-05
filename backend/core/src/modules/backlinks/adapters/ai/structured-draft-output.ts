@@ -1,0 +1,103 @@
+import {
+  AiDraftError,
+  aiDraftOutputSchema,
+  type AiDraftOutput,
+  type AiDraftResult,
+} from "../../ports/ai-draft.port.js";
+
+export type RawAiDraftAttempt = Readonly<{
+  content: string;
+  usage: Readonly<{ inputTokens: number; outputTokens: number }>;
+  model: AiDraftResult["model"];
+  latencyMs: number;
+}>;
+
+export type AiDraftRepairRequest = Readonly<{
+  outputSchemaVersion: "draft-output.v1";
+  validationIssues: readonly string[];
+}>;
+
+type GenerateAttempt = (
+  input: Readonly<{ repair: AiDraftRepairRequest | null }>,
+) => Promise<RawAiDraftAttempt>;
+
+type ParsedAttempt =
+  | Readonly<{ success: true; output: AiDraftOutput }>
+  | Readonly<{ success: false; issues: readonly string[] }>;
+
+function parseAttempt(content: string): ParsedAttempt {
+  let value: unknown;
+  try {
+    value = JSON.parse(content);
+  } catch {
+    return { success: false, issues: ["invalid_json"] };
+  }
+  if (
+    typeof value === "object"
+    && value !== null
+    && (
+      (value as { canAutoSend?: unknown }).canAutoSend === true
+      || (value as { requiresUserConfirmation?: unknown })
+        .requiresUserConfirmation === false
+    )
+  ) {
+    throw new AiDraftError({
+      code: "POLICY_VIOLATION",
+      message: "AI Draft output attempted to bypass human confirmation.",
+      retryable: false,
+    });
+  }
+  const parsed = aiDraftOutputSchema.safeParse(value);
+  if (parsed.success) {
+    return { success: true, output: parsed.data };
+  }
+  return {
+    success: false,
+    issues: parsed.error.issues.map((issue) =>
+      `${issue.path.join(".") || "output"}:${issue.code}`
+    ),
+  };
+}
+
+const malformed = () => new AiDraftError({
+  code: "MALFORMED_OUTPUT",
+  message: "AI Draft output failed schema validation after one repair.",
+  retryable: false,
+});
+
+export async function generateStructuredDraftWithRepair(
+  generate: GenerateAttempt,
+): Promise<AiDraftResult> {
+  const first = await generate({ repair: null });
+  const parsedFirst = parseAttempt(first.content);
+  if (parsedFirst.success) {
+    return {
+      output: parsedFirst.output,
+      usage: first.usage,
+      model: first.model,
+      latencyMs: first.latencyMs,
+      repairCount: 0,
+    };
+  }
+
+  const second = await generate({
+    repair: {
+      outputSchemaVersion: "draft-output.v1",
+      validationIssues: parsedFirst.issues,
+    },
+  });
+  const parsedSecond = parseAttempt(second.content);
+  if (!parsedSecond.success) {
+    throw malformed();
+  }
+  return {
+    output: parsedSecond.output,
+    usage: {
+      inputTokens: first.usage.inputTokens + second.usage.inputTokens,
+      outputTokens: first.usage.outputTokens + second.usage.outputTokens,
+    },
+    model: second.model,
+    latencyMs: first.latencyMs + second.latencyMs,
+    repairCount: 1,
+  };
+}

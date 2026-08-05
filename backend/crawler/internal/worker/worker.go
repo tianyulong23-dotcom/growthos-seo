@@ -18,12 +18,112 @@ import (
 )
 
 const (
-	runTaskActivityName          = "Activities.RunTask"
-	recalculateActivityName      = "Activities.RecalculateIssues"
-	activityHeartbeatInterval    = 10 * time.Second
-	failurePersistenceTimeout    = 10 * time.Second
-	recalculationActivityTimeout = 30 * time.Minute
+	runTaskActivityName           = "Activities.RunTask"
+	recalculateActivityName       = "Activities.RecalculateIssues"
+	activityHeartbeatInterval     = 10 * time.Second
+	failurePersistenceTimeout     = 10 * time.Second
+	recalculationActivityTimeout  = 30 * time.Minute
+	technicalAuditActivityTimeout = 6 * time.Hour
+	siteUnderstandingTotalTimeout = 30 * time.Minute
 )
+
+const (
+	TaskQueue         = "growthos.crawling.v1"
+	WorkflowName      = "crawlingEvidenceV1Workflow"
+	ActivityName      = "crawlingCollectEvidenceV1"
+	PauseSignalName   = "crawlingPauseV1"
+	StopSignalName    = "crawlingStopV1"
+	ProgressQueryName = "crawlingProgressV1"
+)
+
+type EvidenceActivities struct {
+	Config  crawler.Config
+	Store   *crawler.EvidenceStore
+	tracker *activityTracker
+}
+
+func (a *EvidenceActivities) CollectEvidence(
+	ctx context.Context,
+	request crawler.EvidenceRequestV1,
+) (crawler.EvidenceV1, error) {
+	finishActivity := func() {}
+	if a.tracker != nil {
+		finishActivity = a.tracker.start()
+	}
+	defer finishActivity()
+	reporter := crawler.ProgressReporterFunc(func(progress crawler.Progress) {
+		activity.RecordHeartbeat(ctx, progress)
+	})
+	return crawler.CollectEvidence(ctx, a.Config, a.Store, request, reporter)
+}
+
+func EvidenceWorkflow(
+	ctx workflow.Context,
+	request crawler.EvidenceRequestV1,
+) (crawler.EvidenceV1, error) {
+	progress := crawler.Progress{
+		Stage:      crawler.StageAnalyzing,
+		Message:    "crawler evidence activity scheduled",
+		OccurredAt: workflow.Now(ctx),
+	}
+	if err := workflow.SetQueryHandler(ctx, ProgressQueryName, func() (crawler.Progress, error) {
+		return progress, nil
+	}); err != nil {
+		return crawler.EvidenceV1{}, err
+	}
+
+	activityCtx, cancelActivity := workflow.WithCancel(workflow.WithActivityOptions(
+		ctx,
+		workflow.ActivityOptions{
+			StartToCloseTimeout: 2 * time.Hour,
+			HeartbeatTimeout:    30 * time.Second,
+			RetryPolicy: &temporal.RetryPolicy{
+				InitialInterval:    5 * time.Second,
+				BackoffCoefficient: 2,
+				MaximumInterval:    2 * time.Minute,
+				MaximumAttempts:    3,
+			},
+		},
+	))
+	future := workflow.ExecuteActivity(activityCtx, ActivityName, request)
+
+	var evidence crawler.EvidenceV1
+	var activityErr error
+	interrupted := false
+	selector := workflow.NewSelector(ctx)
+	selector.AddFuture(future, func(completed workflow.Future) {
+		activityErr = completed.Get(ctx, &evidence)
+	})
+	for _, signalName := range []string{PauseSignalName, StopSignalName} {
+		signal := workflow.GetSignalChannel(ctx, signalName)
+		selector.AddReceive(signal, func(channel workflow.ReceiveChannel, _ bool) {
+			var payload any
+			channel.Receive(ctx, &payload)
+			interrupted = true
+			cancelActivity()
+		})
+	}
+	selector.Select(ctx)
+
+	if !interrupted {
+		return evidence, activityErr
+	}
+	task, err := request.ToTask()
+	if err != nil {
+		return crawler.EvidenceV1{}, err
+	}
+	now := workflow.Now(ctx)
+	return crawler.BuildEvidence(
+		request,
+		crawler.Result{
+			TaskType:   task.Type,
+			RunID:      task.RunID,
+			FinishedAt: now,
+		},
+		nil,
+		context.Canceled,
+	), nil
+}
 
 func Run(ctx context.Context) error {
 	if ctx.Err() != nil {
@@ -51,6 +151,10 @@ func Run(ctx context.Context) error {
 		return err
 	}
 	defer store.Close()
+	evidenceStore, err := crawler.NewEvidenceStore(ctx, config)
+	if err != nil {
+		return err
+	}
 	temporalClient, err := client.Dial(client.Options{
 		HostPort:  config.TemporalAddress,
 		Namespace: config.TemporalNamespace,
@@ -60,27 +164,49 @@ func Run(ctx context.Context) error {
 	}
 	defer temporalClient.Close()
 
-	temporalWorker := worker.New(temporalClient, config.TaskQueue, worker.Options{})
-	temporalWorker.RegisterWorkflow(CrawlWorkflow)
-	temporalWorker.RegisterWorkflow(RecalculateIssuesWorkflow)
+	productionWorker := worker.New(temporalClient, config.TaskQueue, worker.Options{})
+	productionWorker.RegisterWorkflow(CrawlWorkflow)
+	productionWorker.RegisterWorkflow(RecalculateIssuesWorkflow)
 	tracker := newActivityTracker()
 	activities := &Activities{Config: config, Store: store, tracker: tracker}
-	temporalWorker.RegisterActivityWithOptions(
+	productionWorker.RegisterActivityWithOptions(
 		activities.RunTask,
 		activity.RegisterOptions{Name: runTaskActivityName},
 	)
-	temporalWorker.RegisterActivityWithOptions(
+	productionWorker.RegisterActivityWithOptions(
 		activities.RecalculateIssues,
 		activity.RegisterOptions{Name: recalculateActivityName},
 	)
-	if err := temporalWorker.Start(); err != nil {
+	if err := productionWorker.Start(); err != nil {
+		return err
+	}
+	evidenceWorker := worker.New(temporalClient, TaskQueue, worker.Options{})
+	evidenceWorker.RegisterWorkflowWithOptions(
+		EvidenceWorkflow,
+		workflow.RegisterOptions{Name: WorkflowName},
+	)
+	evidenceWorker.RegisterActivityWithOptions(
+		(&EvidenceActivities{
+			Config:  config,
+			Store:   evidenceStore,
+			tracker: tracker,
+		}).CollectEvidence,
+		activity.RegisterOptions{Name: ActivityName},
+	)
+	if err := evidenceWorker.Start(); err != nil {
+		productionWorker.Stop()
 		return err
 	}
 
-	slog.Info("crawler worker started", "task_queue", config.TaskQueue)
+	slog.Info(
+		"crawler workers started",
+		"production_task_queue", config.TaskQueue,
+		"evidence_task_queue", TaskQueue,
+	)
 	waitForWorkerExit(ctx, config.WorkerIdleTimeout, tracker)
-	temporalWorker.Stop()
-	slog.Info("crawler worker stopped")
+	evidenceWorker.Stop()
+	productionWorker.Stop()
+	slog.Info("crawler workers stopped")
 	return nil
 }
 
@@ -225,7 +351,22 @@ func (a *Activities) RunTask(ctx context.Context, task crawler.Task) (crawler.St
 		reporter.Report(generatingProgress)
 		fallback := crawler.BuildSiteProfile(task, result.Pages)
 		result.SiteProfile = &fallback
-		synthesizer := crawler.NewAIProfileSynthesizer(taskConfig)
+		aiConfig, settingsErr := aiProviderConfig(
+			ctx,
+			a.Store,
+			task.OrganizationID,
+			taskConfig,
+		)
+		if settingsErr != nil {
+			slog.Warn(
+				"load AI provider settings; using environment configuration",
+				"run_id",
+				task.RunID,
+				"error",
+				settingsErr,
+			)
+		}
+		synthesizer := crawler.NewAIProfileSynthesizer(aiConfig)
 		if synthesizer.Configured() {
 			profile, synthErr := synthesizer.Synthesize(
 				ctx,
@@ -264,6 +405,31 @@ func (a *Activities) RunTask(ctx context.Context, task crawler.Task) (crawler.St
 		return crawler.StoredResult{}, err
 	}
 	return stored, nil
+}
+
+func aiProviderConfig(
+	ctx context.Context,
+	store crawler.ResultStore,
+	organizationID string,
+	fallback crawler.Config,
+) (crawler.Config, error) {
+	settingsStore, ok := store.(crawler.AIProviderSettingsStore)
+	if !ok {
+		return fallback, nil
+	}
+	settings, found, err := settingsStore.LoadAIProviderSettings(
+		ctx,
+		organizationID,
+	)
+	if err != nil || !found {
+		return fallback, err
+	}
+	fallback.BusinessProfileAIBaseURL = settings.BaseURL
+	fallback.BusinessProfileAIAPIKey = settings.APIKey
+	fallback.BusinessProfileAIModel = settings.Model
+	fallback.BusinessProfileAITimeout = settings.RequestTimeout
+	fallback.BusinessProfileAIMaxRetries = settings.MaxRetries
+	return fallback, nil
 }
 
 func (a *Activities) startActivity() func() {
@@ -367,6 +533,8 @@ func aiSynthesisFailureReason(err error) string {
 		strings.Contains(reason, "no choices"),
 		strings.Contains(reason, "omitted"):
 		return "模型返回格式无效"
+	case strings.Contains(reason, "grounding"):
+		return "模型引用证据无效"
 	default:
 		return "模型服务暂时不可用"
 	}
@@ -543,8 +711,9 @@ func RecalculateIssuesWorkflow(
 
 func activityOptions(task crawler.Task) workflow.ActivityOptions {
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Hour,
-		HeartbeatTimeout:    30 * time.Second,
+		ScheduleToCloseTimeout: technicalAuditActivityTimeout,
+		StartToCloseTimeout:    technicalAuditActivityTimeout,
+		HeartbeatTimeout:       30 * time.Second,
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval:    2 * time.Second,
 			BackoffCoefficient: 2,
@@ -553,7 +722,8 @@ func activityOptions(task crawler.Task) workflow.ActivityOptions {
 		},
 	}
 	if task.Type == crawler.TaskSiteUnderstanding {
-		options.StartToCloseTimeout = 3 * time.Minute
+		options.ScheduleToCloseTimeout = siteUnderstandingTotalTimeout
+		options.StartToCloseTimeout = 10 * time.Minute
 		options.RetryPolicy.MaximumAttempts = 2
 	}
 	return options

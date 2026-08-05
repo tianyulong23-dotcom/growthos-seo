@@ -52,6 +52,7 @@ type AuditSetupProps = {
 
 const pathPattern = /^\//
 const parameterPattern = /^[A-Za-z0-9_.-]+\*?$/
+const maxAuditPages = 5000
 
 export function AuditSetup({
   project,
@@ -85,7 +86,7 @@ export function AuditSetup({
   const pageLimitInvalid =
     !Number.isInteger(parsedPageLimit) ||
     parsedPageLimit < 1 ||
-    parsedPageLimit > 10000
+    parsedPageLimit > maxAuditPages
   const lines = (value: string) =>
     Array.from(
       new Set(
@@ -208,7 +209,7 @@ export function AuditSetup({
               <Input
                 type="number"
                 min={1}
-                max={10000}
+                max={maxAuditPages}
                 step={1}
                 value={pageLimit}
                 onChange={(event) => setPageLimit(event.target.value)}
@@ -222,7 +223,7 @@ export function AuditSetup({
             </div>
             {pageLimitInvalid && (
               <span className="mt-1.5 block text-xs text-destructive">
-                请输入 1 到 10,000 之间的整数
+                请输入 1 到 5,000 之间的整数
               </span>
             )}
           </label>

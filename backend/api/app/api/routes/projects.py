@@ -10,7 +10,7 @@ from app.modules.projects.schemas import (
 )
 from app.modules.projects.service import (
     ProjectAlreadyExistsError,
-    ProjectLaunchError,
+    ProjectDeleteError,
     ProjectNotFoundError,
     ProjectService,
     SiteIconNotFoundError,
@@ -58,6 +58,11 @@ async def delete_project(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="项目不存在",
+        ) from exc
+    except ProjectDeleteError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
         ) from exc
 
 
@@ -138,11 +143,6 @@ async def refresh_business_profile(
             status_code=status.HTTP_409_CONFLICT,
             detail="网站业务识别正在进行中",
         ) from exc
-    except ProjectLaunchError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="重新识别任务已保存，但网站业务识别服务暂时不可用",
-        ) from exc
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -161,9 +161,4 @@ async def create_project(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="这个域名已经创建过项目",
-        ) from exc
-    except ProjectLaunchError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="项目已保存，但网站业务识别服务暂时不可用",
         ) from exc

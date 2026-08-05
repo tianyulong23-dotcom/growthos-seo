@@ -1,54 +1,33 @@
 import * as React from "react"
 import {
-  ArrowDown,
-  ArrowRight,
-  ArrowUp,
   Download,
-  ExternalLink,
   FilePlus2,
-  Filter,
   Link2,
   LoaderCircle,
   Plus,
-  RefreshCw,
-  Search,
-  Send,
 } from "lucide-react"
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router"
 
+import type { NavigationItem } from "@/app/module-contract"
 import { PageHeader } from "@/components/shared/page-header"
 import { createAuditRun, getAuditRun, type AuditRun } from "@/api/audits"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { ArticleWorkspace } from "@/features/content/article-workspace"
+import { ContentLibrary } from "@/features/content/content-library"
+import { ContentPlan } from "@/features/content/content-plan"
+import { CreateArticleDialog } from "@/features/content/create-article-dialog"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
-import {
-  backlinkRows,
-  contentRows,
-  keywordRows,
-  modules,
-} from "@/data/mock-data"
+import { AIModelSettings } from "@/features/settings/ai-model-settings"
+import { modules } from "@/data/mock-data"
 import type { AuditSettings } from "@/features/audit/audit-settings"
+import {
+  getCachedCompletedAuditRun,
+  rememberAuditRun,
+} from "@/features/audit/audit-session-cache"
 import { useAuditRunPolling } from "@/features/audit/use-audit-run-polling"
 import { useProjects } from "@/features/projects/project-context"
 import type { BusinessProfileInput, Project } from "@/features/projects/types"
@@ -59,316 +38,64 @@ const AuditWorkspace = React.lazy(() =>
   }))
 )
 
-function StatusBadge({ value }: { value: string }) {
-  const style =
-    value === "错误" || value === "待联系"
-      ? "destructive"
-      : value === "已发布" || value === "已获得" || value === "已回复"
-        ? "default"
-        : value === "警告" || value === "跟进中" || value === "待审核"
-          ? "secondary"
-          : "outline"
-  return <Badge variant={style}>{value}</Badge>
-}
+const KeywordWorkspace = React.lazy(() =>
+  import("@/features/keywords/keyword-workspace").then((module) => ({
+    default: module.KeywordWorkspace,
+  }))
+)
 
-function Toolbar({
-  search,
-  setSearch,
-  filter,
-  setFilter,
-  options,
+const OutreachWorkspace = React.lazy(() =>
+  import("@/features/outreach/outreach-workspace").then((module) => ({
+    default: module.OutreachWorkspace,
+  }))
+)
+
+function ContentContent({
+  view,
+  projectId,
+  articleId,
+  addRequestVersion,
+  onOpenArticle,
+  onCloseArticle,
 }: {
-  search: string
-  setSearch: (value: string) => void
-  filter: string
-  setFilter: (value: string) => void
-  options: string[]
+  view: string
+  projectId: string
+  articleId: string | null
+  addRequestVersion: number
+  onOpenArticle: (articleId: string) => void
+  onCloseArticle: () => void
 }) {
-  return (
-    <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center">
-      <div className="relative flex-1">
-        <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="搜索当前列表..."
-          className="w-full pl-9 sm:max-w-sm"
-        />
-      </div>
-      <Select
-        value={filter}
-        onValueChange={(value) => setFilter(value ?? "全部")}
-      >
-        <SelectTrigger className="w-full sm:w-36">
-          <Filter className="text-muted-foreground" />
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((option) => (
-            <SelectItem key={option} value={option}>
-              {option}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Button variant="outline" size="sm">
-        <Download />
-        导出
-      </Button>
-    </div>
-  )
-}
-
-function KeywordsContent({ view }: { view: string }) {
-  const [search, setSearch] = React.useState("")
-  const [filter, setFilter] = React.useState("全部")
-  const rows = keywordRows.filter(
-    (row) =>
-      row.keyword.includes(search.toLowerCase()) &&
-      (filter === "全部" || row.intent === filter)
-  )
-
-  return (
-    <Card className="overflow-hidden">
-      <div className="grid gap-px border-b bg-border sm:grid-cols-3">
-        {[
-          [view === "opportunities" ? "可争取机会" : "跟踪关键词", "420"],
-          ["前 10 名", "286"],
-          ["本周上升", "78"],
-        ].map(([label, value]) => (
-          <div key={label} className="bg-card p-4">
-            <div className="text-xs text-muted-foreground">{label}</div>
-            <div className="mt-1 text-2xl font-semibold">{value}</div>
-          </div>
-        ))}
-      </div>
-      <Toolbar
-        search={search}
-        setSearch={setSearch}
-        filter={filter}
-        setFilter={setFilter}
-        options={["全部", "商业", "信息"]}
-      />
-      <div className="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-10">
-                <Checkbox aria-label="选择全部" />
-              </TableHead>
-              <TableHead>关键词</TableHead>
-              <TableHead>意图</TableHead>
-              <TableHead className="text-right">搜索量</TableHead>
-              <TableHead className="text-right">排名</TableHead>
-              <TableHead className="text-right">变化</TableHead>
-              <TableHead>目标页面</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.keyword}>
-                <TableCell>
-                  <Checkbox aria-label={`选择 ${row.keyword}`} />
-                </TableCell>
-                <TableCell className="font-medium">{row.keyword}</TableCell>
-                <TableCell>
-                  <Badge variant="outline">{row.intent}</Badge>
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {row.volume}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {row.position}
-                </TableCell>
-                <TableCell className="text-right">
-                  <span
-                    className={`inline-flex items-center ${
-                      row.change.startsWith("+")
-                        ? "text-emerald-600"
-                        : row.change.startsWith("-")
-                          ? "text-destructive"
-                          : "text-muted-foreground"
-                    }`}
-                  >
-                    {row.change.startsWith("+") && (
-                      <ArrowUp className="size-3" />
-                    )}
-                    {row.change.startsWith("-") && (
-                      <ArrowDown className="size-3" />
-                    )}
-                    {row.change}
-                  </span>
-                </TableCell>
-                <TableCell className="max-w-60 truncate text-muted-foreground">
-                  {row.url}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
-  )
-}
-
-function ContentContent({ view }: { view: string }) {
-  const [search, setSearch] = React.useState("")
-  const [filter, setFilter] = React.useState("全部")
-  const rows = contentRows.filter(
-    (row) =>
-      row.title.toLowerCase().includes(search.toLowerCase()) &&
-      (filter === "全部" || row.status === filter)
-  )
-
-  if (view === "opportunities") {
+  if (!projectId) {
     return (
-      <div className="grid gap-4 lg:grid-cols-2">
-        {[
-          ["solar tax credit 2026", "高", "6,600", "预计 +1,240 点击/月"],
-          ["solar battery payback", "高", "3,600", "预计 +680 点击/月"],
-          ["solaredge vs enphase", "中", "2,900", "预计 +420 点击/月"],
-          ["best solar companies florida", "中", "2,400", "预计 +350 点击/月"],
-        ].map(([keyword, priority, volume, impact]) => (
-          <Card key={keyword}>
-            <CardContent className="flex items-center gap-4 p-5">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <h3 className="truncate font-medium">{keyword}</h3>
-                  <Badge variant={priority === "高" ? "default" : "secondary"}>
-                    {priority}优先级
-                  </Badge>
-                </div>
-                <div className="mt-2 flex gap-4 text-xs text-muted-foreground">
-                  <span>搜索量 {volume}</span>
-                  <span>{impact}</span>
-                </div>
-              </div>
-              <Button variant="outline" size="sm">
-                创建简报
-                <ArrowRight />
-              </Button>
-            </CardContent>
-          </Card>
-        ))}
+      <div className="space-y-3" aria-label="正在读取项目">
+        <Skeleton className="h-16 rounded-md" />
+        <Skeleton className="h-64 rounded-md" />
       </div>
     )
   }
 
-  return (
-    <Card className="overflow-hidden">
-      <Toolbar
-        search={search}
-        setSearch={setSearch}
-        filter={filter}
-        setFilter={setFilter}
-        options={["全部", "草稿", "撰写中", "待审核", "已发布"]}
+  if (articleId) {
+    return (
+      <ArticleWorkspace
+        key={`${projectId}:${articleId}`}
+        projectId={projectId}
+        articleId={articleId}
+        onBack={onCloseArticle}
       />
-      <div className="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>内容</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>目标关键词</TableHead>
-              <TableHead className="text-right">SEO 评分</TableHead>
-              <TableHead>最后更新</TableHead>
-              <TableHead className="w-12" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.title}>
-                <TableCell className="max-w-80 font-medium">
-                  {row.title}
-                </TableCell>
-                <TableCell>
-                  <StatusBadge value={row.status} />
-                </TableCell>
-                <TableCell>{row.keyword}</TableCell>
-                <TableCell className="text-right">
-                  <span
-                    className={
-                      row.score >= 80 ? "text-emerald-600" : "text-amber-600"
-                    }
-                  >
-                    {row.score}
-                  </span>
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {row.updated}
-                </TableCell>
-                <TableCell>
-                  <Button variant="ghost" size="icon-sm" title="打开内容">
-                    <ExternalLink />
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
-  )
-}
+    )
+  }
 
-function BacklinksContent({ view }: { view: string }) {
-  const [search, setSearch] = React.useState("")
-  const [filter, setFilter] = React.useState("全部")
-  const rows = backlinkRows.filter(
-    (row) =>
-      row.domain.includes(search.toLowerCase()) &&
-      (filter === "全部" || row.status === filter)
-  )
-
-  return (
-    <Card className="overflow-hidden">
-      <Toolbar
-        search={search}
-        setSearch={setSearch}
-        filter={filter}
-        setFilter={setFilter}
-        options={["全部", "待联系", "跟进中", "已回复", "已获得"]}
+  if (view === "plans") {
+    return (
+      <ContentPlan
+        key={projectId}
+        addRequestVersion={addRequestVersion}
+        onOpenArticle={onOpenArticle}
       />
-      <div className="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>目标域名</TableHead>
-              <TableHead className="text-right">权威度</TableHead>
-              <TableHead>相关性</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>联系人</TableHead>
-              <TableHead className="w-28" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.domain}>
-                <TableCell className="font-medium">
-                  <span className="flex items-center gap-2">
-                    <Link2 className="size-4 text-muted-foreground" />
-                    {row.domain}
-                  </span>
-                </TableCell>
-                <TableCell className="text-right">{row.authority}</TableCell>
-                <TableCell>{row.relevance}</TableCell>
-                <TableCell>
-                  <StatusBadge value={row.status} />
-                </TableCell>
-                <TableCell>{row.contact}</TableCell>
-                <TableCell>
-                  <Button variant="outline" size="sm">
-                    {view === "monitor" ? <RefreshCw /> : <Send />}
-                    {view === "monitor" ? "检查" : "联系"}
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
-  )
+    )
+  }
+
+  return <ContentLibrary projectId={projectId} onOpenArticle={onOpenArticle} />
 }
 
 function PerformanceContent({ view }: { view: string }) {
@@ -432,30 +159,8 @@ function SettingsContent({
     project.understandingStatus === "running"
   const waitingForProfile = !project.siteProfile && understandingInProgress
 
-  if (view === "sources") {
-    return (
-      <div className="grid gap-4 lg:grid-cols-2">
-        {[
-          ["Google Search Console", "已连接", true],
-          ["Google Analytics 4", "已连接", true],
-          ["WordPress", "等待授权", false],
-          ["DataForSEO", "已连接", true],
-        ].map(([name, status, connected]) => (
-          <Card key={String(name)}>
-            <CardContent className="flex items-center gap-4 p-5">
-              <div className="flex size-10 items-center justify-center rounded-md bg-muted font-semibold">
-                {String(name).slice(0, 2)}
-              </div>
-              <div className="flex-1">
-                <div className="font-medium">{name}</div>
-                <div className="text-xs text-muted-foreground">{status}</div>
-              </div>
-              <Switch defaultChecked={Boolean(connected)} />
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-    )
+  if (view === "ai") {
+    return <AIModelSettings projectId={project.id} />
   }
 
   if (view === "notifications") {
@@ -553,6 +258,10 @@ function ModuleBody({
   onProjectRefresh,
   onSaveBusinessProfile,
   onRefreshBusinessProfile,
+  articleId,
+  contentPlanAddRequestVersion,
+  onOpenArticle,
+  onCloseArticle,
 }: {
   moduleId: string
   view: string
@@ -564,6 +273,10 @@ function ModuleBody({
   onProjectRefresh: () => Promise<unknown>
   onSaveBusinessProfile: (input: BusinessProfileInput) => Promise<unknown>
   onRefreshBusinessProfile: () => Promise<unknown>
+  articleId: string | null
+  contentPlanAddRequestVersion: number
+  onOpenArticle: (articleId: string) => void
+  onCloseArticle: () => void
 }) {
   if (moduleId === "audit")
     return (
@@ -587,9 +300,43 @@ function ModuleBody({
         />
       </React.Suspense>
     )
-  if (moduleId === "keywords") return <KeywordsContent view={view} />
-  if (moduleId === "content") return <ContentContent view={view} />
-  if (moduleId === "backlinks") return <BacklinksContent view={view} />
+  if (moduleId === "keywords")
+    return (
+      <React.Suspense
+        fallback={
+          <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">
+            <LoaderCircle className="mr-2 size-4 animate-spin" />
+            正在加载关键词库
+          </div>
+        }
+      >
+        <KeywordWorkspace key={project.id} projectId={project.id} />
+      </React.Suspense>
+    )
+  if (moduleId === "content")
+    return (
+      <ContentContent
+        view={view}
+        projectId={project.id}
+        articleId={articleId}
+        addRequestVersion={contentPlanAddRequestVersion}
+        onOpenArticle={onOpenArticle}
+        onCloseArticle={onCloseArticle}
+      />
+    )
+  if (moduleId === "backlinks")
+    return (
+      <React.Suspense
+        fallback={
+          <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">
+            <LoaderCircle className="mr-2 size-4 animate-spin" />
+            正在加载外链模块
+          </div>
+        }
+      >
+        <OutreachWorkspace view={view} />
+      </React.Suspense>
+    )
   if (moduleId === "performance") return <PerformanceContent view={view} />
   if (moduleId === "settings")
     return (
@@ -604,7 +351,97 @@ function ModuleBody({
   return null
 }
 
-export function ModulePage() {
+type RegisteredModulePageProps = {
+  module: NavigationItem
+  children: (activeView: string) => React.ReactNode
+  actionLabel?: string
+  actionIcon?: React.ReactNode
+  onAction?: () => void
+  actionDisabled?: boolean
+  beforeContent?: React.ReactNode
+}
+
+function RegisteredModulePage({
+  module,
+  children,
+  actionLabel,
+  actionIcon,
+  onAction,
+  actionDisabled,
+  beforeContent,
+}: RegisteredModulePageProps) {
+  const navigate = useNavigate()
+  const { projects } = useProjects()
+  const { projectId = projects[0]?.id ?? "", view } = useParams<{
+    projectId: string
+    view?: string
+  }>()
+  const activeView = view ?? module.tabs[0]?.id
+
+  if (!activeView) {
+    return <Navigate to={`/projects/${projectId}/overview`} replace />
+  }
+  if (!module.tabs.some((tab) => tab.id === activeView)) {
+    return (
+      <Navigate
+        to={`/projects/${projectId}/${module.id}/${module.tabs[0].id}`}
+        replace
+      />
+    )
+  }
+
+  return (
+    <div className="min-w-0">
+      <PageHeader
+        module={module}
+        actionLabel={actionLabel}
+        actionIcon={actionIcon}
+        onAction={onAction}
+        actionDisabled={actionDisabled}
+      />
+      <div className="border-b px-4 sm:px-6 lg:px-8">
+        <Tabs
+          value={activeView}
+          onValueChange={(nextView) =>
+            navigate(`/projects/${projectId}/${module.id}/${nextView}`)
+          }
+        >
+          <TabsList
+            variant="line"
+            className="no-scrollbar h-11 max-w-full justify-start overflow-x-auto"
+          >
+            {module.tabs.map((tab) => (
+              <TabsTrigger key={tab.id} value={tab.id}>
+                {tab.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      </div>
+      <div className="min-w-0 p-4 sm:p-6 lg:p-8">
+        {beforeContent}
+        {children(activeView)}
+      </div>
+    </div>
+  )
+}
+
+type ModulePageProps = Partial<RegisteredModulePageProps>
+
+export function ModulePage(props: ModulePageProps) {
+  if (props.module && props.children) {
+    return (
+      <RegisteredModulePage
+        {...props}
+        module={props.module}
+        children={props.children}
+      />
+    )
+  }
+  return <LegacyModulePage />
+}
+
+function LegacyModulePage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const {
@@ -625,13 +462,21 @@ export function ModulePage() {
     targetRunId: string | null
     run: AuditRun | null
     error: string
-  }>({
-    projectId: project.id,
-    targetRunId: null,
-    run: null,
-    error: "",
+  }>(() => {
+    const cachedRun = targetAuditRunId
+      ? getCachedCompletedAuditRun(project.id, targetAuditRunId)
+      : null
+    return {
+      projectId: project.id,
+      targetRunId: cachedRun?.run_id ?? null,
+      run: cachedRun,
+      error: "",
+    }
   })
   const [actionCount, setActionCount] = React.useState(0)
+  const [createArticleOpen, setCreateArticleOpen] = React.useState(false)
+  const [contentPlanAddRequestVersion, setContentPlanAddRequestVersion] =
+    React.useState(0)
   const auditSelectionVersion = React.useRef(0)
   const activeProjectId = React.useRef(project.id)
   React.useLayoutEffect(() => {
@@ -640,12 +485,15 @@ export function ModulePage() {
       activeProjectId.current = ""
     }
   }, [project.id])
+  const cachedTargetAuditRun = targetAuditRunId
+    ? getCachedCompletedAuditRun(project.id, targetAuditRunId)
+    : null
   const currentAuditRun =
     auditState.projectId === project.id &&
     auditState.targetRunId === targetAuditRunId &&
     auditState.run?.project_id === project.id
       ? auditState.run
-      : null
+      : cachedTargetAuditRun
   const currentAuditError =
     auditState.projectId === project.id &&
     auditState.targetRunId === targetAuditRunId
@@ -665,6 +513,7 @@ export function ModulePage() {
       ) {
         return
       }
+      if (run) rememberAuditRun(run)
       auditSelectionVersion.current += 1
       setAuditState({
         projectId: sourceProjectId,
@@ -697,6 +546,8 @@ export function ModulePage() {
 
   React.useEffect(() => {
     if (!project.id || !targetAuditRunId) return
+    const cachedRun = getCachedCompletedAuditRun(project.id, targetAuditRunId)
+    if (cachedRun) return
     const selectionVersion = auditSelectionVersion.current
     let active = true
     void getAuditRun(project.id, targetAuditRunId)
@@ -707,6 +558,7 @@ export function ModulePage() {
           run.project_id === activeProjectId.current &&
           run.run_id === targetAuditRunId
         ) {
+          rememberAuditRun(run)
           setAuditState({
             projectId: run.project_id,
             targetRunId: run.run_id,
@@ -786,12 +638,37 @@ export function ModulePage() {
   }
 
   function handleAction() {
+    if (moduleConfig.id === "content") {
+      if (activeView === "plans") {
+        setContentPlanAddRequestVersion((version) => version + 1)
+        return
+      }
+      setCreateArticleOpen(true)
+      return
+    }
     setActionCount((count) => count + 1)
+  }
+
+  const selectedArticleId =
+    moduleConfig.id === "content" ? searchParams.get("articleId") : null
+
+  function openArticle(articleId: string) {
+    navigate(
+      `/projects/${project.id}/content/library?articleId=${encodeURIComponent(articleId)}`
+    )
+  }
+
+  function closeArticle() {
+    navigate(`/projects/${project.id}/content/library`)
   }
 
   const actionIcon =
     moduleConfig.id === "content" ? (
-      <FilePlus2 />
+      activeView === "plans" ? (
+        <Plus />
+      ) : (
+        <FilePlus2 />
+      )
     ) : moduleConfig.id === "backlinks" ? (
       <Link2 />
     ) : moduleConfig.id === "performance" ? (
@@ -805,15 +682,19 @@ export function ModulePage() {
       <PageHeader
         module={moduleConfig}
         actionLabel={
-          moduleConfig.id === "audit" || moduleConfig.id === "settings"
+          moduleConfig.id === "audit" ||
+          moduleConfig.id === "settings" ||
+          moduleConfig.id === "keywords"
             ? undefined
-            : actionCount > 0
-              ? `已添加 ${actionCount} 项`
-              : moduleConfig.action
+            : moduleConfig.id === "content" && activeView === "library"
+              ? "创建文章"
+              : moduleConfig.id !== "content" && actionCount > 0
+                ? `已添加 ${actionCount} 项`
+                : moduleConfig.action
         }
         actionIcon={actionIcon}
         onAction={handleAction}
-        actionDisabled={running}
+        actionDisabled={moduleConfig.id === "audit" && running}
       />
       {moduleConfig.tabs.length > 0 && (
         <div className="border-b px-4 sm:px-6 lg:px-8">
@@ -865,8 +746,20 @@ export function ModulePage() {
             updateBusinessProfile(project.id, input)
           }
           onRefreshBusinessProfile={() => refreshBusinessProfile(project.id)}
+          articleId={selectedArticleId}
+          contentPlanAddRequestVersion={contentPlanAddRequestVersion}
+          onOpenArticle={openArticle}
+          onCloseArticle={closeArticle}
         />
       </div>
+      {moduleConfig.id === "content" && activeView === "library" && (
+        <CreateArticleDialog
+          projectId={project.id}
+          open={createArticleOpen}
+          onOpenChange={setCreateArticleOpen}
+          onCreated={(article) => openArticle(article.id)}
+        />
+      )}
     </div>
   )
 }

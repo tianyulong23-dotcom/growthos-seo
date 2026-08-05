@@ -7,18 +7,21 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type PostgresCrawlRepository struct {
-	pool *pgxpool.Pool
+	pool                    *pgxpool.Pool
+	aiSettingsEncryptionKey string
 }
 
 func NewPostgresCrawlRepository(
 	ctx context.Context,
 	databaseURL string,
+	aiSettingsEncryptionKey string,
 ) (*PostgresCrawlRepository, error) {
 	databaseURL = normalizePostgresURL(databaseURL)
 	if databaseURL == "" {
@@ -48,6 +51,8 @@ func NewPostgresCrawlRepository(
 			AND to_regclass('public.crawl_checkpoints') IS NOT NULL
 			AND to_regclass('public.pagespeed_results') IS NOT NULL
 			AND to_regclass('public.external_resources') IS NOT NULL
+			AND to_regclass('public.ai_provider_settings') IS NOT NULL
+			AND to_regclass('public.site_profile_versions') IS NOT NULL
 		`,
 	).Scan(&schemaReady); err != nil {
 		pool.Close()
@@ -59,11 +64,18 @@ func NewPostgresCrawlRepository(
 			"PostgreSQL crawler tables are missing; run the API Alembic migrations",
 		)
 	}
-	return &PostgresCrawlRepository{pool: pool}, nil
+	return &PostgresCrawlRepository{
+		pool:                    pool,
+		aiSettingsEncryptionKey: aiSettingsEncryptionKey,
+	}, nil
 }
 
 func NewProductionStore(ctx context.Context, config Config) (*ProductionStore, error) {
-	repository, err := NewPostgresCrawlRepository(ctx, config.DatabaseURL)
+	repository, err := NewPostgresCrawlRepository(
+		ctx,
+		config.DatabaseURL,
+		config.AISettingsEncryptionKey,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +89,66 @@ func NewProductionStore(ctx context.Context, config Config) (*ProductionStore, e
 
 func (r *PostgresCrawlRepository) Close() {
 	r.pool.Close()
+}
+
+func (r *PostgresCrawlRepository) LoadAIProviderSettings(
+	ctx context.Context,
+	organizationID string,
+) (AIProviderSettings, bool, error) {
+	if strings.TrimSpace(r.aiSettingsEncryptionKey) == "" {
+		var exists bool
+		if err := r.pool.QueryRow(
+			ctx,
+			"SELECT EXISTS (SELECT 1 FROM ai_provider_settings WHERE organization_id = $1)",
+			organizationID,
+		).Scan(&exists); err != nil {
+			return AIProviderSettings{}, false, fmt.Errorf(
+				"check AI provider settings: %w",
+				err,
+			)
+		}
+		if !exists {
+			return AIProviderSettings{}, false, nil
+		}
+		return AIProviderSettings{}, false, errors.New(
+			"AI_SETTINGS_ENCRYPTION_KEY is required to load AI provider settings",
+		)
+	}
+
+	var settings AIProviderSettings
+	var requestTimeoutSeconds int
+	err := r.pool.QueryRow(
+		ctx,
+		`
+		SELECT
+				base_url,
+				pgp_sym_decrypt(api_key_encrypted, $2),
+				model,
+				request_timeout_seconds,
+				max_retries
+		FROM ai_provider_settings
+		WHERE organization_id = $1
+		`,
+		organizationID,
+		r.aiSettingsEncryptionKey,
+	).Scan(
+		&settings.BaseURL,
+		&settings.APIKey,
+		&settings.Model,
+		&requestTimeoutSeconds,
+		&settings.MaxRetries,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AIProviderSettings{}, false, nil
+	}
+	if err != nil {
+		return AIProviderSettings{}, false, fmt.Errorf(
+			"load AI provider settings: %w",
+			err,
+		)
+	}
+	settings.RequestTimeout = time.Duration(requestTimeoutSeconds) * time.Second
+	return settings, true, nil
 }
 
 func (r *PostgresCrawlRepository) SaveProgress(
@@ -234,17 +306,18 @@ func (r *PostgresCrawlRepository) SaveResult(
 	}()
 
 	var lockedProjectID string
+	var understandingRunID string
 	if err := tx.QueryRow(
 		ctx,
 		`
-		SELECT id
+		SELECT id, COALESCE(understanding_run_id, '')
 		FROM projects
 		WHERE id = $1 AND organization_id = $2
-		FOR KEY SHARE
+		FOR UPDATE
 		`,
 		task.ProjectID,
 		task.OrganizationID,
-	).Scan(&lockedProjectID); errors.Is(err, pgx.ErrNoRows) {
+	).Scan(&lockedProjectID, &understandingRunID); errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("lock crawl project: %w", err)
@@ -461,19 +534,31 @@ func (r *PostgresCrawlRepository) SaveResult(
 		if _, err := tx.Exec(
 			ctx,
 			`
+			INSERT INTO site_profile_versions (
+				source_run_id, project_id, profile_json, confidence
+			)
+			VALUES ($1, $2, $3::jsonb, $4)
+			ON CONFLICT (source_run_id) DO NOTHING
+			`,
+			task.RunID,
+			task.ProjectID,
+			profileJSON,
+			profile.Confidence,
+		); err != nil {
+			return fmt.Errorf("insert site profile version: %w", err)
+		}
+		if _, err := tx.Exec(
+			ctx,
+			`
 			INSERT INTO site_profiles (
 				project_id, source_run_id, profile_json, confidence, updated_at
 			)
-			VALUES ($1, $2, $3::jsonb, $4, now())
+			SELECT $1, $2, $3::jsonb, $4, now()
+			WHERE $5
 			ON CONFLICT (project_id) DO UPDATE SET
 				source_run_id = EXCLUDED.source_run_id,
-				profile_json = EXCLUDED.profile_json || jsonb_build_object(
-					'ai_content_rules',
-					COALESCE(
-						site_profiles.profile_json->'ai_content_rules',
-						'""'::jsonb
-					)
-				),
+				profile_json = EXCLUDED.profile_json
+					|| COALESCE(site_profiles.user_overrides, '{}'::jsonb),
 				confidence = EXCLUDED.confidence,
 				updated_at = now()
 			`,
@@ -481,6 +566,7 @@ func (r *PostgresCrawlRepository) SaveResult(
 			task.RunID,
 			profileJSON,
 			profile.Confidence,
+			understandingRunID == task.RunID,
 		); err != nil {
 			return fmt.Errorf("upsert site profile: %w", err)
 		}
@@ -582,7 +668,7 @@ func (r *PostgresCrawlRepository) RecalculateIssues(
 			stage = 'completed',
 			message = 'Technical audit issues recalculated',
 			config_snapshot = $2::jsonb,
-			summary = $3::jsonb,
+			summary = COALESCE(summary, '{}'::jsonb) || $3::jsonb,
 			temporal_workflow_id = NULL,
 			updated_at = now()
 		WHERE run_id = $1
@@ -781,6 +867,9 @@ func completionMessageForResult(task Task, result Result) string {
 			return result.CompletionNote
 		}
 		return "网站业务识别已部分完成"
+	}
+	if strings.TrimSpace(result.CompletionNote) != "" {
+		return result.CompletionNote
 	}
 	return completionMessage(task.Type)
 }
@@ -1041,7 +1130,7 @@ func buildStoredAuditSummary(result Result) map[string]int {
 	if pageCount > 0 {
 		penalty = int(float64(errorsCount*5+warnings*2+notices)/float64(pageCount) + 0.5)
 	}
-	return map[string]int{
+	summary := map[string]int{
 		"page_count":     pageCount,
 		"health_score":   max(1, 100-penalty),
 		"errors":         errorsCount,
@@ -1049,6 +1138,10 @@ func buildStoredAuditSummary(result Result) map[string]int {
 		"notices":        notices,
 		"rendered_pages": renderedPages,
 	}
+	if result.ResourceChecksTruncated {
+		summary["resource_checks_truncated"] = 1
+	}
+	return summary
 }
 
 func appendUniqueString(values []string, value string) []string {

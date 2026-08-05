@@ -1,0 +1,58 @@
+{
+  "name": "@growthos/backlinks-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.11.0",
+  "engines": {
+    "node": "24.14.1"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "source:manifest:check": "tsx scripts/check-source-manifest.ts",
+    "dependencies:allowlist": "tsx scripts/check-dependency-allowlist.ts",
+    "licenses:check": "tsx scripts/check-third-party-licenses.ts",
+    "sbom:backlinks": "tsx scripts/build-backlinks-sbom.ts",
+    "openapi:backlinks:check": "tsx scripts/check-backlinks-openapi.ts",
+    "migration:backlinks:check": "tsx scripts/check-backlinks-migrations.ts",
+    "test:backlinks:unit": "vitest run test/unit",
+    "test:backlinks:api": "vitest run test/backlinks/api",
+    "test:backlinks:contract": "vitest run test/contract",
+    "test:backlinks:integration": "vitest run test/backlinks/integration",
+    "test:backlinks:security": "vitest run test/security",
+    "test:backlinks:resilience": "vitest run test/resilience",
+    "test:backlinks:e2e": "playwright test --project=backlinks",
+    "verify:backlinks": "npm run typecheck && npm run lint && npm run source:manifest:check && npm run dependencies:allowlist && npm run licenses:check && npm run openapi:backlinks:check && npm run migration:backlinks:check && npm run test:backlinks:unit && npm run test:backlinks:api && npm run test:backlinks:contract && npm run test:backlinks:integration && npm run test:backlinks:security && npm run test:backlinks:resilience"
+  },
+  "dependencies": {
+    "@fastify/swagger": "9.8.1",
+    "@opentelemetry/api": "1.9.1",
+    "@temporalio/client": "1.20.2",
+    "@temporalio/worker": "1.20.2",
+    "cheerio": "1.1.2",
+    "drizzle-orm": "0.45.2",
+    "fastify": "5.10.0",
+    "fastify-type-provider-zod": "7.0.0",
+    "isomorphic-dompurify": "3.18.0",
+    "jsdom": "29.1.1",
+    "nodemailer": "9.0.3",
+    "pg": "8.22.0",
+    "postal-mime": "2.7.5",
+    "robots-parser": "3.0.1",
+    "simple-statistics": "7.9.3",
+    "tldts": "7.4.9",
+    "validator": "13.15.35",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "eslint": "10.7.0",
+    "msw": "2.15.0",
+    "testcontainers": "12.0.4",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "4.1.10"
+  }
+}

@@ -4,6 +4,7 @@ export type Project = {
   domain: string
   country: string
   language: string
+  competitorDomain: string | null
   understandingRunId: string | null
   understandingStatus:
     "queued" | "running" | "partial" | "completed" | "failed" | null
@@ -54,7 +55,9 @@ export type SiteProfile = {
     field: string
     value: string
     sourceUrl: string
+    quote: string
   }[]
+  userOverriddenFields: string[]
   confidence: number
   aiContentRules: string
   confirmedAt: string | null
@@ -62,6 +65,7 @@ export type SiteProfile = {
 
 export type BusinessProfileInput = {
   businessName: string
+  businessType: string
   businessSummary: string
   targetAudiences: string[]
   productsServices: string[]
