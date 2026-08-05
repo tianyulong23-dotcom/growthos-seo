@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   BacklinkError,
   backlinkErrorCodes,
+  isBacklinkError,
   type BacklinkErrorCode,
 } from "../domain/errors/backlink-error.js";
 
@@ -82,7 +83,7 @@ export function toBacklinkProblemDetails(
   requestId: string,
 ): BacklinkProblemDetails {
   const normalized =
-    error instanceof BacklinkError
+    isBacklinkError(error)
       ? error
       : new BacklinkError({
           code: backlinkErrorCodes.internal,

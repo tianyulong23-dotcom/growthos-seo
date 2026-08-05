@@ -30,6 +30,7 @@ export function createPlacementTemporalActivities(
   options: Readonly<{
     validationRepository: PlacementInitialValidationRepository;
     safeFetch: SafeFetchPort;
+    browserFetch?: SafeFetchPort;
     monitorRepository: PlacementMonitorRepository;
     staticMonitorActivity: PlacementStaticMonitorActivity;
   }>,
@@ -40,6 +41,7 @@ export function createPlacementTemporalActivities(
         input,
         options.validationRepository,
         options.safeFetch,
+        options.browserFetch,
       ),
     backlinksRunPlacementMonitoringV1: (input) =>
       runPlacementMonitorWorkflow(

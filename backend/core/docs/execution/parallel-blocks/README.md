@@ -13,6 +13,23 @@
 - It writes one result file named `<block-id>-result.md`.
 - `HANDOFF_READY` means the block-local implementation and tests are ready for integration; it is not product acceptance.
 
+## PB-LIVE-ACTIVATION Exception
+
+`PB-LIVE-ACTIVATION` is a post-RC block, not an original `BL-AI-*` development
+block. It follows these stricter rules:
+
+- It starts only after `BL-AI-197 = DONE`.
+- It runs in the controlled integration/Canary environment, one `LIVE-*` task
+  at a time, strictly as `LIVE-001 -> LIVE-002 -> LIVE-003 -> LIVE-004 ->
+  LIVE-005 -> LIVE-006 -> LIVE-GATE`, as defined by
+  `10-PB-LIVE-ACTIVATION.md`.
+- Every task requires separate explicit user authorization.
+- It may update Canonical State only with exact live evidence and must never
+  treat task registration as Provider, credential, budget, or production
+  authorization.
+- Its result file is `PB-LIVE-ACTIVATION-result.md`; the final Gate is
+  `PASS_CONTROLLED_LIVE_CANARY` or `NO_GO`, not generic product acceptance.
+
 ## Result Template
 
 ```markdown

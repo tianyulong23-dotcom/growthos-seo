@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { projectIdentityColumns } from "./common.js";
+import { backlinkContacts } from "./contacts.js";
 import { backlinkOpportunities } from "./opportunities.js";
 
 type Builder = {
@@ -89,6 +90,8 @@ export const backlinkEmailDrafts = pg.pgTable(
     id: pg.uuid("id").primaryKey(),
     ...projectIdentityColumns(),
     opportunityId: pg.uuid("opportunity_id").notNull(),
+    contactId: pg.uuid("contact_id"),
+    contactVersion: pg.integer("contact_version"),
     logicalDraftKey: pg.text("logical_draft_key").notNull(),
     status: pg.text("status").notNull().default("generating"),
     version: pg.integer("version").notNull().default(1),
@@ -117,6 +120,11 @@ export const backlinkEmailDrafts = pg.pgTable(
         ...identity(backlinkOpportunities),
         backlinkOpportunities.id,
       ],
+    }),
+    pg.foreignKey({
+      name: "backlink_email_draft_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
     }),
     pg.foreignKey({
       name: "backlink_email_draft_current_version_fk",
@@ -173,6 +181,8 @@ export const backlinkModelRuns = pg.pgTable(
     ...projectIdentityColumns(),
     draftId: pg.uuid("draft_id").notNull(),
     opportunityId: pg.uuid("opportunity_id").notNull(),
+    contactId: pg.uuid("contact_id"),
+    contactVersion: pg.integer("contact_version"),
     evidenceSnapshotId: pg.uuid("evidence_snapshot_id").notNull(),
     idempotencyKey: pg.text("idempotency_key").notNull(),
     requestHash: pg.text("request_hash").notNull(),
@@ -228,6 +238,11 @@ export const backlinkModelRuns = pg.pgTable(
       ],
     }),
     pg.foreignKey({
+      name: "backlink_model_run_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
+    }),
+    pg.foreignKey({
       name: "backlink_model_run_evidence_snapshot_fk",
       columns: [
         ...identity(table),
@@ -250,6 +265,8 @@ export const backlinkDraftVersions = pg.pgTable(
     ...projectIdentityColumns(),
     draftId: pg.uuid("draft_id").notNull(),
     opportunityId: pg.uuid("opportunity_id").notNull(),
+    contactId: pg.uuid("contact_id"),
+    contactVersion: pg.integer("contact_version"),
     versionNo: pg.integer("version_no").notNull(),
     parentVersionId: pg.uuid("parent_version_id"),
     source: pg.text("source").notNull(),
@@ -296,6 +313,11 @@ export const backlinkDraftVersions = pg.pgTable(
         backlinkEmailDrafts.id,
         backlinkEmailDrafts.opportunityId,
       ],
+    }),
+    pg.foreignKey({
+      name: "backlink_draft_version_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
     }),
     pg.foreignKey({
       name: "backlink_draft_version_parent_fk",

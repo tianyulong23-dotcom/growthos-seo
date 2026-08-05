@@ -149,7 +149,10 @@ function refillCandidates(): readonly RecommendationEvidenceCandidate[] {
 
 function fakeActivities(
   readyIds: readonly string[],
-  options: Readonly<{ fail?: boolean }> = {},
+  options: Readonly<{
+    fail?: boolean;
+    candidates?: readonly RecommendationEvidenceCandidate[];
+  }> = {},
 ) {
   const inventory = new Set(readyIds);
   const windows = new Map<string, string>();
@@ -182,7 +185,15 @@ function fakeActivities(
     if (options.fail === true) {
       throw new Error("FAKE_PROVIDER_UNAVAILABLE");
     }
-    return { candidates: refillCandidates() };
+    return {
+      candidates: options.candidates ?? refillCandidates(),
+      provider: {
+        source: "provider" as const,
+        acquiredAt: "2026-08-04T00:00:00.000Z",
+        costMicros: 12_000,
+        requestFingerprint: "request-fingerprint",
+      },
+    };
   });
   const storeReadyRecommendations = vi.fn(async (
     request: Parameters<
@@ -263,6 +274,33 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
     });
     expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
     expect(fake.storeReadyRecommendations).not.toHaveBeenCalled();
+  });
+
+  it("stores an empty result so the durable job can finish", async () => {
+    const fake = fakeActivities([], { candidates: [] });
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input, fake.activities,
+    )).resolves.toEqual({
+      status: "completed",
+      readyCount: 0,
+      jobId: input.jobId,
+      addedCount: 0,
+      evaluatedCount: 0,
+      excludedCount: 0,
+      insufficientDataCount: 0,
+    });
+    expect(fake.storeReadyRecommendations).toHaveBeenCalledOnce();
+    expect(fake.storeReadyRecommendations).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recommendations: [],
+        evaluationSummary: {
+          evaluated: 0,
+          ready: 0,
+          excluded: 0,
+          insufficientData: 0,
+        },
+      }),
+    );
   });
 
   it("records failure without clearing existing Ready inventory", async () => {

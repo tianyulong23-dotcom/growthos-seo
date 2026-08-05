@@ -1,3 +1,5 @@
+import { proxyActivities } from "@temporalio/workflow";
+
 import type {
   BacklinkRecommendationRefillActivities,
   BacklinkRecommendationRefillInput,
@@ -7,14 +9,6 @@ import {
   runBacklinkRecommendationRefillWorkflow,
 } from "./backlink-recommendation-refill.orchestration.js";
 
-type ProxyActivities = <T>(options: Readonly<{
-  startToCloseTimeout: string;
-  retry: Readonly<{ maximumAttempts: number }>;
-}>) => T;
-declare const require: (
-  id: "@temporalio/workflow",
-) => Readonly<{ proxyActivities: ProxyActivities }>;
-const { proxyActivities } = require("@temporalio/workflow");
 type DurableWorkflowActivities = Readonly<{
   backlinksReserveRecommendationRefillV1:
     BacklinkRecommendationRefillActivities["reserveRecommendationRefill"];
@@ -32,7 +26,7 @@ const durableActivities = proxyActivities<DurableWorkflowActivities>({
   retry: { maximumAttempts: 3 },
 });
 const providerActivities = proxyActivities<ProviderWorkflowActivities>({
-  startToCloseTimeout: "30 seconds",
+  startToCloseTimeout: "4 minutes",
   retry: { maximumAttempts: 1 },
 });
 

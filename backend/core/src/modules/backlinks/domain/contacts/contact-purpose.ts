@@ -27,7 +27,7 @@ export type ContactPurposeDecision = Readonly<{
 }>;
 export type ContactPurposeInput = Readonly<{
   email: string;
-  source: "mailto" | "visible_text";
+  source: "mailto" | "visible_text" | "obfuscated_text" | "json_ld";
   mailtoLabel?: string;
   nearbyText?: string;
   pageTitle?: string;

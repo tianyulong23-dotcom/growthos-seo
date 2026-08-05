@@ -106,6 +106,25 @@ export type ConfirmReplyMatchOutput =
   }>
   | Readonly<{ state: "not_found" | "conflict" }>;
 
+export type UnbindReplyMatchInput = ReplyMatchTenantScope & Readonly<{
+  inboundMessageId: string;
+  expectedMatchStatus: "MATCH_CONFIRMED";
+  actorId: string;
+  requestId: string;
+  reason: string;
+}>;
+
+export type UnbindReplyMatchOutput =
+  | Readonly<{
+    state: "unbound";
+    candidateId: string;
+    inboundMessageId: string;
+    opportunityId: string;
+    matchStatus: "CANDIDATES_READY" | "UNMATCHED";
+    auditEventId: string;
+  }>
+  | Readonly<{ state: "not_found" | "conflict" }>;
+
 export interface ReplyMatchRepository {
   saveMatchResult(
     input: SaveReplyMatchResultInput,
@@ -116,6 +135,9 @@ export interface ReplyMatchRepository {
   confirmCandidate(
     input: ConfirmReplyMatchInput,
   ): Promise<ConfirmReplyMatchOutput>;
+  unbindCandidate(
+    input: UnbindReplyMatchInput,
+  ): Promise<UnbindReplyMatchOutput>;
 }
 
 type PostgresqlReplyMatchRepositoryDependencies = Readonly<{
@@ -257,7 +279,7 @@ const ruleVersionFromReasonCodes = (
 
 const auditIntegrityHash = (
   previousIntegrityHash: string | null,
-  fact: ReplyAssignmentFact,
+  fact: Readonly<{ inboundMessageId: string; actorId: string }>,
   requestId: string,
   action: string,
   reason: string,
@@ -270,7 +292,9 @@ const auditIntegrityHash = (
 })).digest("hex");
 
 type AppendReplyAssignmentFactInput = ReplyMatchTenantScope & Readonly<{
-  fact: ReplyAssignmentFact;
+  fact: Readonly<{ inboundMessageId: string; actorId: string }>;
+  lifecycleEventType: string;
+  lifecycleIdempotencyKey: string;
   actorKind: "system" | "user";
   auditAction: string;
   auditTargetType: string;
@@ -318,16 +342,25 @@ implements ReplyMatchRepository {
     const lifecycleEventId = this.#newId();
     const auditEventId = this.#newId();
     const result = await transaction.query(
-      `WITH lifecycle AS (
+      `WITH next_sequence AS (
+         SELECT COALESCE(max(event.sequence), 0)::integer + 1 AS value
+           FROM backlinks.backlink_lifecycle_events AS event
+          WHERE event.organization_id = $2
+            AND event.workspace_id = $3
+            AND event.website_project_id = $4
+            AND event.aggregate_type = 'reply_assignment'
+            AND event.aggregate_id = $5::uuid
+       ), lifecycle AS (
          INSERT INTO backlinks.backlink_lifecycle_events (
            id, organization_id, workspace_id, website_project_id,
            aggregate_type, aggregate_id, sequence, aggregate_version,
            event_type, actor_type, actor_id, after_state, reason,
            correlation_id, idempotency_key, event_schema_version
          ) VALUES (
-           $1, $2, $3, $4, 'reply_assignment', $5::uuid, 1, 1,
-           'reply.assignment.recorded', $6, $7, $8::jsonb, $9, $10,
-           'reply.assignment:' || $5::uuid::text, 1
+           $1, $2, $3, $4, 'reply_assignment', $5::uuid,
+           (SELECT value FROM next_sequence),
+           (SELECT value FROM next_sequence),
+           $19, $6, $7, $8::jsonb, $9, $10, $20, 1
          )
          RETURNING id
        ), audit AS (
@@ -370,6 +403,8 @@ implements ReplyMatchRepository {
           input.auditAction,
           input.reason,
         ),
+        input.lifecycleEventType,
+        input.lifecycleIdempotencyKey,
       ],
     );
     const row = result.rows[0];
@@ -543,6 +578,9 @@ implements ReplyMatchRepository {
           workspaceId: input.workspaceId,
           websiteProjectId: input.websiteProjectId,
           fact,
+          lifecycleEventType: "reply.assignment.recorded",
+          lifecycleIdempotencyKey:
+            `reply.assignment.auto:${input.inboundMessageId}`,
           actorKind: "system",
           auditAction: "reply.assignment.recorded",
           auditTargetType: "inbound_message",
@@ -714,6 +752,9 @@ implements ReplyMatchRepository {
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
         fact,
+        lifecycleEventType: "reply.assignment.recorded",
+        lifecycleIdempotencyKey:
+          `reply.assignment.manual:${input.requestId}`,
         actorKind: "user",
         auditAction: "reply_match_candidate.confirmed",
         auditTargetType: "reply_match_candidate",
@@ -737,6 +778,142 @@ implements ReplyMatchRepository {
         inboundMessageId: input.inboundMessageId,
         opportunityId,
         matchStatus: "MATCH_CONFIRMED",
+        auditEventId,
+      });
+    });
+  }
+
+  async unbindCandidate(
+    input: UnbindReplyMatchInput,
+  ): Promise<UnbindReplyMatchOutput> {
+    assertScope(input);
+    assertNonBlank(input.inboundMessageId, "Reply match inboundMessageId");
+    assertNonBlank(input.actorId, "Reply match actorId");
+    assertNonBlank(input.requestId, "Reply match requestId");
+    assertNonBlank(input.reason, "Reply match reason");
+
+    return withGmailTenantTransaction(this.#pool, input, async (transaction) => {
+      const selected = await transaction.query(
+        `SELECT candidate.id,
+                candidate.opportunity_id AS "opportunityId",
+                message.match_status AS "matchStatus"
+           FROM backlinks.backlink_inbound_messages AS message
+           LEFT JOIN backlinks.backlink_reply_match_candidates AS candidate
+             ON candidate.organization_id = message.organization_id
+            AND candidate.workspace_id = message.workspace_id
+            AND candidate.website_project_id = message.website_project_id
+            AND candidate.inbound_message_id = message.id
+            AND candidate.requires_manual_confirmation = false
+          WHERE message.organization_id = $1
+            AND message.workspace_id = $2
+            AND message.website_project_id = $3
+            AND message.id = $4
+          FOR UPDATE OF message`,
+        [
+          input.organizationId,
+          input.workspaceId,
+          input.websiteProjectId,
+          input.inboundMessageId,
+        ],
+      );
+      const selectedRow = selected.rows[0];
+      if (selectedRow === undefined) return { state: "not_found" };
+      if (
+        selectedRow.matchStatus !== input.expectedMatchStatus
+        || selectedRow.id === null
+        || selectedRow.id === undefined
+      ) {
+        return { state: "conflict" };
+      }
+      const candidateId = String(selectedRow.id);
+      const opportunityId = String(selectedRow.opportunityId);
+      await transaction.query(
+        `UPDATE backlinks.backlink_reply_match_candidates
+            SET requires_manual_confirmation = true
+          WHERE organization_id = $1
+            AND workspace_id = $2
+            AND website_project_id = $3
+            AND inbound_message_id = $4`,
+        [
+          input.organizationId,
+          input.workspaceId,
+          input.websiteProjectId,
+          input.inboundMessageId,
+        ],
+      );
+      const count = await transaction.query(
+        `SELECT count(*)::integer AS count
+           FROM backlinks.backlink_reply_match_candidates
+          WHERE organization_id = $1
+            AND workspace_id = $2
+            AND website_project_id = $3
+            AND inbound_message_id = $4`,
+        [
+          input.organizationId,
+          input.workspaceId,
+          input.websiteProjectId,
+          input.inboundMessageId,
+        ],
+      );
+      const matchStatus = Number(count.rows[0]?.count ?? 0) > 0
+        ? "CANDIDATES_READY" as const
+        : "UNMATCHED" as const;
+      await transaction.query(
+        `UPDATE backlinks.backlink_inbound_messages
+            SET match_status = $5,
+                updated_at = statement_timestamp(),
+                updated_by = $6
+          WHERE organization_id = $1
+            AND workspace_id = $2
+            AND website_project_id = $3
+            AND id = $4`,
+        [
+          input.organizationId,
+          input.workspaceId,
+          input.websiteProjectId,
+          input.inboundMessageId,
+          matchStatus,
+          input.actorId,
+        ],
+      );
+      const fact = Object.freeze({
+        inboundMessageId: input.inboundMessageId,
+        matchCandidateId: candidateId,
+        opportunityId,
+        actorId: input.actorId,
+        occurredAt: this.#now().toISOString(),
+        contractVersion: "reply-assignment-revocation-fact.v1",
+      });
+      const auditEventId = await this.#appendAssignmentFact(transaction, {
+        organizationId: input.organizationId,
+        workspaceId: input.workspaceId,
+        websiteProjectId: input.websiteProjectId,
+        fact,
+        lifecycleEventType: "reply.assignment.revoked",
+        lifecycleIdempotencyKey:
+          `reply.assignment.revoked:${input.requestId}`,
+        actorKind: "user",
+        auditAction: "reply_match_candidate.unbound",
+        auditTargetType: "reply_match_candidate",
+        auditTargetId: candidateId,
+        reason: input.reason,
+        beforeRedacted: {
+          matchStatus: input.expectedMatchStatus,
+          opportunityId,
+          requiresManualConfirmation: false,
+        },
+        afterRedacted: {
+          matchStatus,
+          requiresManualConfirmation: true,
+        },
+        requestId: input.requestId,
+      });
+      return Object.freeze({
+        state: "unbound",
+        candidateId,
+        inboundMessageId: input.inboundMessageId,
+        opportunityId,
+        matchStatus,
         auditEventId,
       });
     });

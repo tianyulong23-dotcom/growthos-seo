@@ -42,8 +42,9 @@ const metaSchema = z.object({
 }).strict();
 const responseSchema = z.object({
   candidateId: z.uuid(),
-  status: z.literal("PENDING_MATCH"),
-  matchStatus: z.literal("UNMATCHED"),
+  opportunityId: z.uuid().optional(),
+  status: z.enum(["PENDING_MATCH", "PENDING_VALIDATION"]),
+  matchStatus: z.enum(["UNMATCHED", "AUTO_MATCHED"]),
   initialValidationStatus: z.literal("PENDING"),
   version: z.number().int().positive(),
   countsTowardKpi: z.literal(false),
@@ -110,9 +111,14 @@ export function registerBacklinksPlacementCandidateRoutes(
         idempotencyKey: request.headers["idempotency-key"],
         ...request.body,
       });
+      const {
+        initialValidationRequest,
+        ...response
+      } = result;
+      void initialValidationRequest;
 
       return reply.code(201).send({
-        ...result,
+        ...response,
         meta: {
           organizationId: context.tenant.organizationId,
           workspaceId: context.tenant.workspaceId,

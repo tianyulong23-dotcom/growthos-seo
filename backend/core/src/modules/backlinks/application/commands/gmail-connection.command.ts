@@ -140,7 +140,8 @@ function assertUsableGrant(
     && gmailOAuthScopes.every((scope) => requestedScopeSet.has(scope));
   const grantedScopeSet = new Set(grantedScopes);
   const completeGrant =
-    gmailOAuthScopes.every((scope) => grantedScopeSet.has(scope));
+    grantedScopeSet.size === gmailOAuthScopes.length
+    && gmailOAuthScopes.every((scope) => grantedScopeSet.has(scope));
   if (!emailVerified || !canonicalAttempt || !completeGrant) {
     throw new BacklinkError({
       code: backlinkErrorCodes.invalidRequest,

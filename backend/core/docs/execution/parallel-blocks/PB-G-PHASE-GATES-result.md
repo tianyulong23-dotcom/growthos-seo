@@ -2,8 +2,9 @@
 
 Status: PASS_DEVELOPMENT_ONLY
 Baseline date: 2026-07-29
-Latest task: BL-AI-160
-Recorded tasks: BL-AI-085, BL-AI-098, BL-AI-123, BL-AI-142, BL-AI-160
+Latest task: BL-AI-179
+Recorded tasks: BL-AI-085, BL-AI-098, BL-AI-123, BL-AI-142, BL-AI-160,
+BL-AI-179
 
 ## Scope
 
@@ -474,3 +475,140 @@ Evidence:
 - UI verification used deterministic local fixtures, not a production E2E.
 - No migration was created; reserved `0030/0031` remain unused.
 - No production resource mutation, Git commit, or push occurred.
+
+---
+
+## 2026-07-30 Phase 08 Reacceptance After BL-AI-161..176 Integration
+
+Status: PASS_DEVELOPMENT_ONLY
+
+The integration controller re-executed the Phase 08 development gate after
+integrating PB-F. The original Placement/Monitoring behavior and immutable-fact
+acceptance remain frozen; PB-F adds Metrics/Reports/Export/Settings composition
+and the registered `0030/0031` migrations without changing the Browser,
+Provider, Temporal, Event Registry, or DataForSEO boundaries.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Full Core gate | `npm run verify:backlinks` exited 0 |
+| Unit | 70 files and 389 tests passed |
+| API | 30 files and 86 tests passed |
+| Contract | 20 files and 144 tests passed |
+| Integration | 46 files passed and 4 environment-gated files skipped; 165 tests passed and 13 skipped |
+| Security and resilience | 102 security tests and 8 resilience tests passed |
+| PB-D/PB-E/PB-F PostgreSQL acceptance | 6 files and 35 tests passed |
+| FastAPI | Full pytest passed 34 with 1 environment-gated skip; full Ruff passed |
+| Shared contracts | Backlinks OpenAPI passed at 45 paths/46 operations; aggregate passed at 67 paths/72 operations |
+| PostgreSQL 18.4 | Clean install and historical upgrade through `0031`, DataForSEO write compatibility, backup/restore, database contracts, and RLS passed |
+| Frontend | Typecheck, production build, Links source contracts 5/5, and lint with one existing non-blocking Reports Hook warning passed |
+| Shared Crawler | Pinned Go `1.25.4` test, race, and vet exited 0 |
+
+### Fact Acceptance
+
+- Draft approval remains fully reconstructible from immutable facts.
+- AUTO and MANUAL Reply assignment still use the same fact contract.
+- Every completed Monitoring Observation still produces exactly one immutable
+  `placement.monitoring.status_decided` fact.
+- Historical `suspected_lost` replay still uses captured policy thresholds;
+  inaccessible/error and a single failure do not project confirmed `lost`.
+- Candidate remains excluded from confirmed Placement KPI.
+
+### Gate Decision
+
+- `BL-AI-161..176 = INTEGRATED`.
+- Backlinks migration head is `0031`.
+- Metrics, Reports, Export, and Settings are registered in Fastify, FastAPI, and
+  the shared OpenAPI.
+- Phase 08 Gate remains `PASS_DEVELOPMENT_ONLY`.
+- `BL-AI-142` remains `DONE` under Phase 07.
+- Browser remains default-off. No second Browser Worker, Queue, Launcher, or
+  network stack was created; DataForSEO remains unchanged.
+- No real Browser, Provider, DataForSEO, production database, commit, or push
+  occurred. `BL-AI-179` was not started.
+
+---
+
+## BL-AI-179 Phase 09 Gate
+
+Status: PASS_DEVELOPMENT_ONLY
+Task: BL-AI-179
+Date: 2026-07-30
+Prerequisites: `BL-AI-160 = DONE`, `BL-AI-161..176 = INTEGRATED`,
+`BL-AI-177 = INTEGRATED`, and `BL-AI-178 = INTEGRATED`.
+
+### Scope
+
+- Regressed `DFS-COST-001..006`, Migration `0032`, DataForSEO compatibility,
+  Provider Budget, global Lease, public Artifact and tenant Projection/Usage
+  RLS, unknown-charge handling, Workspace-local Bulk, and SWR.
+- Reaccepted the frozen Phase 08 Placement/Monitoring, Browser-default,
+  shared Crawler, Temporal, Event, OpenAPI, Reports, and Settings boundaries.
+- Used injected Provider functions, deterministic test fixtures, and
+  disposable PostgreSQL/Docker resources only.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Preconditions | `BL-AI-160 = DONE`; `BL-AI-161..176`, `BL-AI-177`, and `BL-AI-178` are `INTEGRATED` |
+| DFS cost-control acceptance | `DFS-COST-001..006 = INTEGRATED`; focused Unit passed 2 files/16 tests, PostgreSQL passed 1 file/6 tests, and established project-analysis workflow passed 1 file/3 tests |
+| Full Core gate | `npm run verify:backlinks` exited 0 |
+| Core governance | Typecheck, ESLint, 26-record source manifest, dependency allowlist, 642-package license check, 45-path Backlinks OpenAPI, and 25 migrations through `0032` passed |
+| Core suites | Unit 71 files/397 tests; API 30/86; Contract 20/144; Integration 47 passed files plus 4 skipped with 171 passed and 13 skipped; Security 9/102; Resilience 3/8 |
+| FastAPI | Locked Python 3.13 verification passed 34 tests with 1 environment-gated skip; full Ruff passed |
+| Shared contracts | Aggregate OpenAPI validated 67 public paths and 72 operations, 1 cross-module command, 1 cross-module event, and 4 module Task Queues |
+| Migration `0032` | Deployment head `0032`, prerequisite `backlinks-0031`, and SHA-256 `66dd40d4120b8899fb1eaac8e40f1166f10f79a902461772395841bf8d7d656c` passed |
+| PostgreSQL 18.4 | Clean install, supported historical upgrade through `0032`, DataForSEO write compatibility, backup/restore, contract, and RLS gates passed |
+| Frontend | Typecheck, ESLint, production build, 7 directed source files/29 tests, and changed-file Prettier for 19 files passed |
+| Required UI | Existing integrated BL-AI-177/178 desktop and 390-pixel mobile Reports/Settings evidence was re-inspected; Phase 09 introduced no new UI surface |
+| Shared Crawler | Pinned Go `1.25.4` test, race, and vet exited 0 |
+| Supply chain | Production dependency audit reported 0 vulnerabilities; CycloneDX 1.7 contained 629 exact components and 0 sensitive fields |
+| Repository hygiene | `git diff --check` exited 0 and no residual Docker container remained |
+
+The frontend production build retained only the existing non-blocking
+JavaScript chunk-size warning. A repository-wide optional Prettier diagnostic
+reported the existing format baseline outside the Phase 09 changed-file gate;
+all 19 changed frontend files passed the defined scoped formatting gate.
+
+### Cost-Control Proof
+
+- Existing `backlink_provider_budgets` and
+  `backlink_provider_usage_ledger` remain authoritative. Reservation,
+  exact settlement, known pre-dispatch release, and retained reservation for
+  an unknown charge are covered.
+- Migration `0032` enables and forces RLS on Provider Batch, public Artifact,
+  Workspace Projection, Artifact Usage, and Provider Fetch Lease tables.
+  Public Artifact columns exclude Organization, Workspace, and Website Project
+  identity; tenant Projection and Usage records remain project-isolated.
+- Global single-flight permits ordinary expired-lease takeover while an
+  `unknown_charge` outcome blocks reacquisition pending reconciliation.
+- Artifact completion is atomic across Batch, Artifact, Projection, Usage,
+  Budget settlement, and Lease completion. Injected rollback proves no partial
+  Artifact commit.
+- Workspace-local Bulk preserves complete, negative, and partial item results,
+  allocates actual cost exactly, rejects oversized batches before Provider
+  dispatch, and retries temporary item failures only.
+- Intent-specific freshness and negative-cache windows serve stale evidence
+  through SWR while scheduling one bounded background refresh.
+
+### Boundary Decision
+
+- DataForSEO remains configured but default-off. Runtime source and test scans
+  found no real DataForSEO endpoint; Provider execution is injected or mocked.
+- Phase 08 Placement/Monitoring behavior remains frozen: static validation is
+  complete, one failure cannot produce Lost, immutable Changed/Lost/Recovered
+  facts remain authoritative, and Browser fallback remains explicit-only.
+- No real DataForSEO, Provider, Browser, Gmail, Pub/Sub, AI, object-storage, or
+  production database call occurred.
+- No production resource mutation, credential use, Git commit, or push
+  occurred. `BL-AI-180` was not started.
+
+### Gate Decision
+
+- `DFS-COST-001..006 = INTEGRATED`.
+- Backlinks migration head is `0032`.
+- All defined BL-AI-179 mandatory gates exited 0.
+- `BL-AI-179 = DONE`.
+- Phase 09 Gate: `PASS_DEVELOPMENT_ONLY`.

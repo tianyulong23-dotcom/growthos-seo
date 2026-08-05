@@ -8,6 +8,7 @@ import {
 import type {
   ConfirmReplyMatchInput,
   ReplyMatchRepository,
+  UnbindReplyMatchInput,
 } from "../../../src/modules/backlinks/application/services/reply-match.repository.js";
 import {
   registerBacklinksReplyMatchRoutes,
@@ -50,11 +51,15 @@ const context = {
 describe("BL-AI-135 Reply Match Candidate APIs", () => {
   let app: FastifyInstance;
   let confirmation: ConfirmReplyMatchInput | undefined;
+  let unbind: UnbindReplyMatchInput | undefined;
   let confirmState: "confirmed" | "not_found" | "conflict";
+  let unbindState: "unbound" | "not_found" | "conflict";
 
   beforeEach(async () => {
     confirmation = undefined;
+    unbind = undefined;
     confirmState = "confirmed";
+    unbindState = "unbound";
     const repository: ReplyMatchRepository = {
       async saveMatchResult() {
         throw new Error("not used");
@@ -98,6 +103,18 @@ describe("BL-AI-135 Reply Match Candidate APIs", () => {
           opportunityId,
           matchStatus: "MATCH_CONFIRMED",
           auditEventId: "018f0000-0000-7000-8000-000000000435",
+        };
+      },
+      async unbindCandidate(input) {
+        unbind = input;
+        if (unbindState !== "unbound") return { state: unbindState };
+        return {
+          state: "unbound",
+          candidateId,
+          inboundMessageId,
+          opportunityId,
+          matchStatus: "CANDIDATES_READY",
+          auditEventId: "018f0000-0000-7000-8000-000000000535",
         };
       },
     };
@@ -230,5 +247,49 @@ describe("BL-AI-135 Reply Match Candidate APIs", () => {
     expect((await confirm()).statusCode).toBe(409);
     confirmState = "not_found";
     expect((await confirm()).statusCode).toBe(404);
+  });
+
+  it("unbinds a wrong confirmed association with actor and reason", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url:
+        `/api/v1/projects/project-key/backlinks/replies/${inboundMessageId}`
+        + "/match/unbind",
+      payload: {
+        expectedMatchStatus: "MATCH_CONFIRMED",
+        reason: "The reply belongs to another outreach thread.",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      candidateId,
+      inboundMessageId,
+      opportunityId,
+      matchStatus: "CANDIDATES_READY",
+      auditEventId: "018f0000-0000-7000-8000-000000000535",
+    });
+    expect(unbind).toEqual({
+      organizationId: "organization-135",
+      workspaceId: "workspace-135",
+      websiteProjectId: "project-135",
+      inboundMessageId,
+      expectedMatchStatus: "MATCH_CONFIRMED",
+      actorId: "user-135",
+      requestId: "request-135",
+      reason: "The reply belongs to another outreach thread.",
+    });
+
+    unbindState = "conflict";
+    expect((await app.inject({
+      method: "POST",
+      url:
+        `/api/v1/projects/project-key/backlinks/replies/${inboundMessageId}`
+        + "/match/unbind",
+      payload: {
+        expectedMatchStatus: "MATCH_CONFIRMED",
+        reason: "Retry after stale state.",
+      },
+    })).statusCode).toBe(409);
   });
 });

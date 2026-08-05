@@ -150,3 +150,49 @@ export function createOutboxRepository(client: OutboxQueryClient) {
     },
   };
 }
+
+export function createOutboxRelayRepository(client: OutboxQueryClient) {
+  return {
+    async claim(input: Readonly<{
+      workerId: string;
+      limit: number;
+      eventType?: string;
+      staleClaimBefore?: Date;
+    }>): Promise<readonly ClaimedOutboxEvent[]> {
+      if (!Number.isInteger(input.limit) || input.limit < 1) return [];
+      const result = await client.query(
+        `SELECT event_id AS "eventId",
+                organization_id AS "organizationId",
+                workspace_id AS "workspaceId",
+                website_project_id AS "websiteProjectId",
+                event_type AS "eventType",
+                aggregate_id AS "aggregateId",
+                aggregate_version AS "aggregateVersion",
+                idempotency_key AS "idempotencyKey",
+                payload,
+                payload_schema_version AS "payloadSchemaVersion",
+                status,
+                available_at AS "availableAt",
+                attempt_count AS "attemptCount"
+           FROM backlink_claim_outbox_events($1, $2, $3, $4)`,
+        [
+          input.workerId,
+          input.limit,
+          input.eventType ?? null,
+          input.staleClaimBefore ?? null,
+        ],
+      );
+      return result.rows as readonly ClaimedOutboxEvent[];
+    },
+
+    async mark(input: MarkOutboxInput): Promise<boolean> {
+      const outcome = input.outcome;
+      const retryAt = outcome === "failed" ? input.retryAt : null;
+      const result = await client.query(
+        `SELECT backlink_mark_outbox_event($1, $2, $3, $4) AS marked`,
+        [input.eventId, input.workerId, outcome, retryAt],
+      );
+      return result.rows[0]?.marked === true;
+    },
+  };
+}

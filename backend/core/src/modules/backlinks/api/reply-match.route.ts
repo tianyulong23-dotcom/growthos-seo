@@ -34,6 +34,10 @@ const confirmBody = z.object({
   expectedMatchStatus: z.literal("CANDIDATES_READY"),
   reason: nonBlank.max(500),
 }).strict();
+const unbindBody = z.object({
+  expectedMatchStatus: z.literal("MATCH_CONFIRMED"),
+  reason: nonBlank.max(500),
+}).strict();
 const reasonCode = z.record(z.string(), z.unknown());
 const candidate = z.object({
   id: z.uuid(),
@@ -68,6 +72,14 @@ const confirmResponse = z.object({
   inboundMessageId: z.uuid(),
   opportunityId: z.uuid(),
   matchStatus: z.literal("MATCH_CONFIRMED"),
+  auditEventId: z.uuid(),
+  meta: metaSchema,
+}).strict();
+const unbindResponse = z.object({
+  candidateId: z.uuid(),
+  inboundMessageId: z.uuid(),
+  opportunityId: z.uuid(),
+  matchStatus: z.enum(["CANDIDATES_READY", "UNMATCHED"]),
   auditEventId: z.uuid(),
   meta: metaSchema,
 }).strict();
@@ -170,6 +182,40 @@ export function registerBacklinksReplyMatchRoutes(
         context,
         inboundMessageId: request.params.inboundMessageId,
         candidateId: request.params.candidateId,
+        expectedMatchStatus: request.body.expectedMatchStatus,
+        requestId: request.id,
+        reason: request.body.reason,
+      });
+      return {
+        candidateId: result.candidateId,
+        inboundMessageId: result.inboundMessageId,
+        opportunityId: result.opportunityId,
+        matchStatus: result.matchStatus,
+        auditEventId: result.auditEventId,
+        meta: meta(request, context),
+      };
+    },
+  );
+
+  api.post(
+    "/api/v1/projects/:websiteProjectKey/backlinks/replies/:inboundMessageId/match/unbind",
+    {
+      schema: {
+        operationId: "backlinksUnbindReplyMatchV1",
+        params: projectParams,
+        body: unbindBody,
+        response: { 200: unbindResponse, ...errors },
+      },
+      errorHandler: sendError,
+    },
+    async (request) => {
+      const context = await options.module.projectContext.resolve({
+        actor: request.actor,
+        websiteProjectKey: request.params.websiteProjectKey,
+      });
+      const result = await options.commands.unbind({
+        context,
+        inboundMessageId: request.params.inboundMessageId,
         expectedMatchStatus: request.body.expectedMatchStatus,
         requestId: request.id,
         reason: request.body.reason,

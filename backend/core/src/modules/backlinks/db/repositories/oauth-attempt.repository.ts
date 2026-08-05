@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type {
   ConsumedOAuthAttempt,
   NewOAuthAttempt,
+  OAuthAttemptCleanupInput,
   OAuthAttemptConsumeInput,
   OAuthAttemptRepository,
 } from "../../domain/sending/oauth-attempt-repository.js";
@@ -130,6 +131,100 @@ implements OAuthAttemptRepository {
     }
   }
 
+  async cleanupExpired(input: OAuthAttemptCleanupInput): Promise<number> {
+    const rows = await withGmailTenantTransaction(
+      this.#pool,
+      input,
+      async (transaction) => (
+        await transaction.query(
+          `SELECT attempt.id AS "attemptId",
+                  secret.id AS "referenceId",
+                  secret.provider,
+                  secret.secret_kind AS "secretKind",
+                  secret.external_secret_id AS "externalSecretId",
+                  secret.external_secret_version AS "externalSecretVersion"
+             FROM backlinks.backlink_oauth_attempts AS attempt
+             JOIN backlinks.backlink_secret_references AS secret
+               ON secret.organization_id = attempt.organization_id
+              AND secret.id = attempt.pkce_verifier_secret_reference_id
+              AND secret.secret_kind = 'OAUTH_PKCE_VERIFIER'
+            WHERE attempt.organization_id = $1
+              AND attempt.workspace_id = $2
+              AND attempt.website_project_id = $3
+              AND attempt.consumed_at IS NULL
+              AND attempt.expires_at <= $4
+              AND secret.status = 'ACTIVE'
+            ORDER BY attempt.expires_at, attempt.id`,
+          [
+            input.organizationId,
+            input.workspaceId,
+            input.websiteProjectId,
+            input.expiredAt,
+          ],
+        )
+      ).rows,
+    );
+
+    let cleaned = 0;
+    for (const row of rows) {
+      const attemptId = row.attemptId;
+      const referenceId = row.referenceId;
+      const reference = referenceFromRow(row);
+      if (
+        typeof attemptId !== "string"
+        || typeof referenceId !== "string"
+        || reference === null
+      ) {
+        throw new TypeError(
+          "Expired OAuth attempt persistence returned an invalid row.",
+        );
+      }
+      const context = secretContext({
+        organizationId: input.organizationId,
+        workspaceId: input.workspaceId,
+        oauthAttemptId: attemptId,
+      });
+      await this.#secretStore.destroy({ reference, context });
+      cleaned += await withGmailTenantTransaction(
+        this.#pool,
+        input,
+        async (transaction) => {
+          const result = await transaction.query(
+            `UPDATE backlinks.backlink_secret_references AS secret
+                SET status = 'DESTROYED', version = version + 1,
+                    updated_at = $5, updated_by = $4
+              WHERE secret.organization_id = $1
+                AND secret.id = $6
+                AND secret.secret_kind = 'OAUTH_PKCE_VERIFIER'
+                AND secret.status = 'ACTIVE'
+                AND EXISTS (
+                  SELECT 1
+                    FROM backlinks.backlink_oauth_attempts AS attempt
+                   WHERE attempt.organization_id = $1
+                     AND attempt.workspace_id = $2
+                     AND attempt.website_project_id = $3
+                     AND attempt.id = $7
+                     AND attempt.pkce_verifier_secret_reference_id = secret.id
+                     AND attempt.consumed_at IS NULL
+                     AND attempt.expires_at <= $5
+                )`,
+            [
+              input.organizationId,
+              input.workspaceId,
+              input.websiteProjectId,
+              input.cleanedByUserId,
+              input.expiredAt,
+              referenceId,
+              attemptId,
+            ],
+          );
+          return result.rowCount ?? 0;
+        },
+      );
+    }
+    return cleaned;
+  }
+
   async consume(
     input: OAuthAttemptConsumeInput,
   ): Promise<ConsumedOAuthAttempt | null> {
@@ -150,7 +245,7 @@ implements OAuthAttemptRepository {
                 AND session_binding_hash = $6
                 AND consumed_at IS NULL
                 AND created_at <= $7
-                AND expires_at >= $7
+                AND expires_at > $7
             RETURNING id, pkce_verifier_secret_reference_id,
                       requested_scopes, redirect_uri, return_path
            )

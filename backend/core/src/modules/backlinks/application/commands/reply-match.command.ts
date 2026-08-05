@@ -6,6 +6,7 @@ import {
 import type {
   ConfirmReplyMatchInput,
   ReplyMatchRepository,
+  UnbindReplyMatchInput,
 } from "../services/reply-match.repository.js";
 
 type ConfirmReplyMatchCommand = Readonly<{
@@ -13,6 +14,14 @@ type ConfirmReplyMatchCommand = Readonly<{
   inboundMessageId: string;
   candidateId: string;
   expectedMatchStatus: "CANDIDATES_READY";
+  requestId: string;
+  reason: string;
+}>;
+
+type UnbindReplyMatchCommand = Readonly<{
+  context: ResolvedProjectContext;
+  inboundMessageId: string;
+  expectedMatchStatus: "MATCH_CONFIRMED";
   requestId: string;
   reason: string;
 }>;
@@ -83,6 +92,35 @@ export function createReplyMatchCommands(
         });
       }
       throw new Error("Reply Match confirmation returned an invalid state.");
+    },
+
+    async unbind(input: UnbindReplyMatchCommand) {
+      authorize(input.context);
+      const repositoryInput: UnbindReplyMatchInput = {
+        ...scope(input.context),
+        inboundMessageId: input.inboundMessageId,
+        expectedMatchStatus: input.expectedMatchStatus,
+        actorId: input.context.actor.userId,
+        requestId: input.requestId,
+        reason: input.reason,
+      };
+      const result = await dependencies.repository.unbindCandidate(
+        repositoryInput,
+      );
+      if (result.state === "unbound") return result;
+      if (result.state === "not_found") {
+        throw new BacklinkError({
+          code: backlinkErrorCodes.notFound,
+          message: "Inbound Reply was not found in this project.",
+        });
+      }
+      if (result.state === "conflict") {
+        throw new BacklinkError({
+          code: backlinkErrorCodes.conflict,
+          message: "Reply Match no longer has the expected bound state.",
+        });
+      }
+      throw new Error("Reply Match unbind returned an invalid state.");
     },
   });
 }

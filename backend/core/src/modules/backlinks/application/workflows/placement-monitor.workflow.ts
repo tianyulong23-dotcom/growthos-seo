@@ -27,11 +27,11 @@ export type PlacementMonitorWorkflowInput = Readonly<{
   placementId: string;
   monitorPolicyId: string;
   policyVersion: string;
-  scheduledFor: Date;
+  scheduledFor: Date | string;
   runId: string;
   observationId: string;
   workerId: string;
-  now: Date;
+  now: Date | string;
 }>;
 
 export type MonitoringRetryDelayInput = Readonly<{
@@ -60,6 +60,16 @@ function requireRetryInteger(
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new TypeError(`${name} is outside the supported retry bounds.`);
   }
+}
+
+function parseWorkflowDate(value: Date | string, name: string): Date {
+  const date = value instanceof Date
+    ? new Date(value.getTime())
+    : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new TypeError(`${name} must be a valid Date.`);
+  }
+  return date;
 }
 
 export function calculateMonitoringRetryDelaySeconds(
@@ -128,6 +138,11 @@ export async function runPlacementMonitorWorkflow(
   repository: PlacementMonitorRepository,
   activity: PlacementStaticMonitorActivity,
 ) {
+  const scheduledFor = parseWorkflowDate(
+    input.scheduledFor,
+    "scheduledFor",
+  );
+  const now = parseWorkflowDate(input.now, "now");
   const prepared = await repository.prepare({
     organizationId: input.organizationId,
     workspaceId: input.workspaceId,
@@ -135,10 +150,10 @@ export async function runPlacementMonitorWorkflow(
     placementId: input.placementId,
     monitorPolicyId: input.monitorPolicyId,
     policyVersion: input.policyVersion,
-    scheduledFor: input.scheduledFor,
+    scheduledFor,
     runId: input.runId,
     workerId: input.workerId,
-    now: input.now,
+    now,
   });
   if (prepared.state === "not_eligible") {
     return {
@@ -168,6 +183,7 @@ export async function runPlacementMonitorWorkflow(
     websiteProjectId: input.websiteProjectId,
     sourcePageUrl: execution.sourcePageUrl,
     targetUrl: execution.targetUrl,
+    browserFallbackAllowed: execution.browserFallbackEnabled,
     previousSuccessfulObservation:
       execution.previousSuccessfulObservation,
   });
@@ -187,7 +203,7 @@ export async function runPlacementMonitorWorkflow(
       retryBackoffMultiplier: execution.retryBackoffMultiplier,
     });
     const nextRetryAt = new Date(
-      input.now.getTime() + retryAfterSeconds * 1_000,
+      now.getTime() + retryAfterSeconds * 1_000,
     );
     const run = await repository.scheduleRetry({
       organizationId: input.organizationId,
@@ -203,7 +219,7 @@ export async function runPlacementMonitorWorkflow(
       retryAfterSeconds,
       nextRetryAt,
       workerId: input.workerId,
-      recordedAt: input.now,
+      recordedAt: now,
     });
     if (run.status !== "RETRY_WAIT") {
       return completedResult("already_completed", run);
@@ -214,9 +230,9 @@ export async function runPlacementMonitorWorkflow(
     };
   }
 
-  const completedAt = observation.observedAt > input.now
+  const completedAt = observation.observedAt > now
     ? observation.observedAt
-    : input.now;
+    : now;
   const statusDecision = decidePlacementMonitoringStatus({
     currentHealthStatus: execution.healthStatus,
     currentObservation: {

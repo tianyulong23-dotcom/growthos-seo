@@ -51,7 +51,15 @@ const snapshot = {
   page: {
     canonicalUrl: "https://publisher.example/article",
     noindex: false,
-    occurrences: [{ href: "https://owner.example/guide" }],
+    robotsDirectives: [],
+    occurrences: [{
+      resolvedHref: "https://owner.example/guide",
+      anchorText: "Owner guide",
+      rel: [],
+      nofollow: false,
+      sponsored: false,
+      ugc: false,
+    }],
   },
   result: {
     status: "present",
@@ -114,11 +122,22 @@ describe("BL-AI-158 immutable public evidence", () => {
         finalUrl: "https://publisher.example/article",
         contentType: "text/html",
         fetchedAt: "2026-07-29T09:00:00.000Z",
+        redirectChain: ["https://internal.example/redirect"],
+        xRobotsTag: null,
       },
       link: {
         canonicalUrl: "https://publisher.example/article",
         noindex: false,
         occurrenceCount: 1,
+        robotsDirectives: [],
+        occurrences: [{
+          resolvedHref: "https://owner.example/guide",
+          anchorText: "Owner guide",
+          rel: [],
+          nofollow: false,
+          sponsored: false,
+          ugc: false,
+        }],
       },
     });
     expect(values).toEqual([
@@ -133,7 +152,6 @@ describe("BL-AI-158 immutable public evidence", () => {
       "authorization",
       "databaseObjectKey",
       "requestedUrl",
-      "redirectChain",
       "resolvedIps",
       "Bearer secret",
     ]) {

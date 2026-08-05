@@ -8,7 +8,10 @@ import {
 const safeCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const costUsdSchema = z.number().finite().nonnegative()
   .max(Number.MAX_SAFE_INTEGER / 1_000_000);
-const countryCountsSchema = z.record(z.string().regex(/^[A-Z]{2}$/), safeCountSchema);
+const countryCountsSchema = z.record(
+  z.union([z.literal(""), z.string().regex(/^[A-Z]{2}$/)]),
+  safeCountSchema,
+);
 const referringDomainItemSchema = z
   .object({
     type: z.literal("backlinks_referring_domain"),
@@ -103,7 +106,9 @@ function stableJson(value: unknown): string {
 function toCountryCode(
   counts: Readonly<Record<string, number>> | undefined,
 ): string | null {
-  const codes = counts === undefined ? [] : Object.keys(counts);
+  const codes = counts === undefined
+    ? []
+    : Object.keys(counts).filter((code) => /^[A-Z]{2}$/.test(code));
   return codes.length === 1 ? (codes[0] ?? null) : null;
 }
 export function mapDataForSeoBacklinkSnapshot(input: Readonly<{

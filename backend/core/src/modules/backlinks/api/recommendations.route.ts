@@ -2,14 +2,60 @@ import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import type { BacklinksModule } from "../application/backlinks.module.js";
-import type { RecommendationsQuery } from "../application/queries/recommendations.query.js";
+import {
+  recommendationInventoryStatuses,
+  type RecommendationsQuery,
+} from "../application/queries/recommendations.query.js";
 import { BacklinkError, backlinkErrorCodes } from "../domain/errors/backlink-error.js";
 import { publicAssessmentSchema } from "./evidence-contracts.js";
 import { backlinkProblemContentType, backlinkProblemDetailsSchema,
   toBacklinkProblemDetails } from "./problem-details.js";
 
 const nonBlank = z.string().trim().min(1);
-const status = z.enum(["ready", "claimed", "rejected"]);
+const status = z.enum(recommendationInventoryStatuses);
+const contactEvidenceSchema = z.object({
+  id: z.uuid(),
+  sourceUrl: z.url(),
+  observedAt: z.string().datetime(),
+  extractionMethod: z.enum([
+    "mailto",
+    "visible_text",
+    "obfuscated_text",
+    "json_ld",
+    "manual",
+  ]),
+  evidenceSnippet: nonBlank,
+  confidence: z.number().int().min(0).max(100),
+}).strict();
+const contactCandidateSchema = z.object({
+  id: z.uuid(),
+  normalizedEmail: z.email(),
+  domainRelation: nonBlank,
+  confidence: z.number().int().min(0).max(100),
+  inferredPurpose: nonBlank,
+  purposeConfidence: z.number().int().min(0).max(100),
+  guessed: z.boolean(),
+  version: z.number().int().positive(),
+  eligible: z.boolean(),
+  contactReviewRequired: z.boolean(),
+  evidence: z.array(contactEvidenceSchema),
+}).strict();
+const contactJobSchema = z.object({
+  id: z.uuid(),
+  status: z.enum([
+    "pending",
+    "running",
+    "completed",
+    "partially_completed",
+    "no_contact_found",
+    "retry_scheduled",
+  ]),
+  candidateCount: z.number().int().min(0),
+  evidenceCount: z.number().int().min(0),
+  pagesVisited: z.number().int().min(0),
+  lastErrorCode: z.string().nullable(),
+  retryAfter: z.string().datetime().nullable(),
+}).strict();
 export const recommendationsParamsSchema =
   z.object({ websiteProjectKey: nonBlank }).strict();
 export const recommendationsQuerySchema = z.object({
@@ -22,6 +68,26 @@ const itemSchema = z.object({
   recommendationContextVersionId: nonBlank, version: z.number().int().positive(),
   scoreModelVersion: nonBlank, ruleVersion: nonBlank,
   assessment: publicAssessmentSchema,
+  rootUrl: z.url(),
+  faviconUrl: z.url(),
+  acquiredAt: z.string().datetime(),
+  matchReasons: z.array(nonBlank),
+  dataSources: z.array(nonBlank),
+  seoMetrics: z.object({
+    authority: z.number().nullable(),
+    editorialQuality: z.number().nullable(),
+    technicalHealth: z.number().nullable(),
+  }).strict(),
+  contactStatus: z.enum(["contactable", "running", "review", "not_found"]),
+  contactJob: contactJobSchema.nullable(),
+  contacts: z.array(contactCandidateSchema),
+  recommendedContactCandidateId: z.uuid().nullable(),
+  existingOpportunityId: z.uuid().nullable(),
+  canCreateOpportunity: z.boolean(),
+  createBlockReason: z.enum([
+    "existing_opportunity",
+    "no_eligible_contact",
+  ]).nullable(),
 }).strict();
 export const recommendationsResponseSchema = z.object({
   items: z.array(itemSchema), nextCursor: z.string().nullable(), hasMore: z.boolean(),

@@ -114,7 +114,11 @@ describe("BL-AI-036 foundation isolation and idempotency", () => {
 
     const observations = await withBacklinkTenantTransaction(
       tenantPool,
-      { workspaceId: ids.workspaceA, websiteProjectId: ids.projectA },
+      {
+        organizationId: ids.organizationA,
+        workspaceId: ids.workspaceA,
+        websiteProjectId: ids.projectA,
+      },
       async (transaction) => {
         const rows = [];
         for (const table of foundationTables) {
@@ -170,7 +174,11 @@ describe("BL-AI-036 foundation isolation and idempotency", () => {
     const attempts = Array.from({ length: 20 }, (_, index) =>
       withBacklinkTenantTransaction(
         tenantPool,
-        { workspaceId: ids.workspaceA, websiteProjectId: ids.projectA },
+        {
+          organizationId: ids.organizationA,
+          workspaceId: ids.workspaceA,
+          websiteProjectId: ids.projectA,
+        },
         async (transaction) => {
           const idempotency = createIdempotencyRepository(transaction);
           const jobs = createJobRepository(transaction);

@@ -9,6 +9,7 @@ import {
 } from "../../src/modules/backlinks/domain/sending/oauth-attempt.js";
 import type {
   NewOAuthAttempt,
+  OAuthAttemptCleanupInput,
   OAuthAttemptConsumeInput,
   OAuthAttemptRepository,
   ConsumedOAuthAttempt,
@@ -21,6 +22,7 @@ type StoredAttempt = {
 
 class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
   readonly attempts = new Map<string, StoredAttempt>();
+  readonly cleanupInputs: OAuthAttemptCleanupInput[] = [];
 
   async create(input: NewOAuthAttempt): Promise<void> {
     if (this.attempts.has(input.stateHash)) {
@@ -33,6 +35,24 @@ class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
       },
       consumedAt: null,
     });
+  }
+
+  async cleanupExpired(input: OAuthAttemptCleanupInput): Promise<number> {
+    this.cleanupInputs.push(input);
+    let cleaned = 0;
+    for (const [stateHash, stored] of this.attempts) {
+      if (
+        stored.creation.organizationId === input.organizationId
+        && stored.creation.workspaceId === input.workspaceId
+        && stored.creation.websiteProjectId === input.websiteProjectId
+        && stored.consumedAt === null
+        && stored.creation.expiresAt.getTime() <= input.expiredAt.getTime()
+      ) {
+        this.attempts.delete(stateHash);
+        cleaned += 1;
+      }
+    }
+    return cleaned;
   }
 
   async consume(
@@ -137,6 +157,13 @@ describe("BL-AI-100 OAuth attempt", () => {
     expect(started.codeChallenge).toBe(
       sha256Base64Url(stored?.creation.pkceVerifier ?? ""),
     );
+    expect(repository.cleanupInputs).toEqual([{
+      organizationId: context.organizationId,
+      workspaceId: context.workspaceId,
+      websiteProjectId: context.websiteProjectId,
+      cleanedByUserId: context.initiatedByUserId,
+      expiredAt: new Date("2026-07-27T03:00:00.000Z"),
+    }]);
   });
 
   it("rejects forged and replayed state with one non-secret error", async () => {

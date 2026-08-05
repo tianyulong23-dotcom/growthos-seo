@@ -302,8 +302,13 @@ describe("BL-AI-135 PostgreSQL Reply Match Repository", () => {
     `)).rows).toEqual([{ count: 0 }]);
   });
 
-  it("confirms once with an audit event and rejects a stale second decision", async () => {
+  it("confirms and unbinds with audit facts without changing business stage", async () => {
     const repo = repository();
+    const stageBefore = (await admin.query(`
+      SELECT business_stage AS "businessStage"
+      FROM backlinks.backlink_opportunities
+      WHERE id = '${opportunityA}'
+    `)).rows[0]?.businessStage;
     const listed = await repo.listCandidates({
       organizationId,
       workspaceId,
@@ -399,6 +404,66 @@ describe("BL-AI-135 PostgreSQL Reply Match Repository", () => {
       SELECT count(*)::integer AS count
       FROM backlinks.backlink_lifecycle_events
       WHERE event_type = 'reply.assignment.recorded'
+        AND aggregate_id = '${inboundA}'
+    `)).rows).toEqual([{ count: 1 }]);
+
+    await expect(repo.unbindCandidate({
+      organizationId,
+      workspaceId,
+      websiteProjectId: projectA,
+      inboundMessageId: inboundA,
+      expectedMatchStatus: "MATCH_CONFIRMED",
+      actorId: "user-135",
+      requestId: "request-135-unbind",
+      reason: "The reply belongs to a different outreach thread.",
+    })).resolves.toMatchObject({
+      state: "unbound",
+      candidateId: candidate.id,
+      opportunityId: opportunityA,
+      matchStatus: "CANDIDATES_READY",
+    });
+
+    const afterUnbind = await admin.query(`
+      SELECT inbound.match_status AS "matchStatus",
+             candidate.requires_manual_confirmation AS "requiresManual",
+             opportunity.business_stage AS "businessStage",
+             audit.action AS "auditAction",
+             audit.reason,
+             lifecycle.event_type AS "eventType",
+             lifecycle.after_state AS "revocationFact"
+      FROM backlinks.backlink_inbound_messages AS inbound
+      JOIN backlinks.backlink_reply_match_candidates AS candidate
+        ON candidate.inbound_message_id = inbound.id
+       AND candidate.id = '${candidate.id}'
+      JOIN backlinks.backlink_opportunities AS opportunity
+        ON opportunity.id = candidate.opportunity_id
+      JOIN backlinks.backlink_audit_events AS audit
+        ON audit.target_id = candidate.id
+       AND audit.action = 'reply_match_candidate.unbound'
+      JOIN backlinks.backlink_lifecycle_events AS lifecycle
+        ON lifecycle.id = audit.lifecycle_event_id
+      WHERE inbound.id = '${inboundA}'
+    `);
+    expect(afterUnbind.rows).toHaveLength(1);
+    expect(afterUnbind.rows[0]).toMatchObject({
+      matchStatus: "CANDIDATES_READY",
+      requiresManual: true,
+      businessStage: stageBefore,
+      auditAction: "reply_match_candidate.unbound",
+      reason: "The reply belongs to a different outreach thread.",
+      eventType: "reply.assignment.revoked",
+      revocationFact: {
+        inboundMessageId: inboundA,
+        matchCandidateId: candidate.id,
+        opportunityId: opportunityA,
+        actorId: "user-135",
+        contractVersion: "reply-assignment-revocation-fact.v1",
+      },
+    });
+    expect((await admin.query(`
+      SELECT count(*)::integer AS count
+      FROM backlinks.backlink_lifecycle_events
+      WHERE event_type = 'reply.assignment.revoked'
         AND aggregate_id = '${inboundA}'
     `)).rows).toEqual([{ count: 1 }]);
   });

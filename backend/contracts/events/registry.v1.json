@@ -21,6 +21,19 @@
   ],
   "events": [
     {
+      "name": "backlinks.contact-enrichment.requested.v1",
+      "ownerModule": "backlinks",
+      "publicationMode": "outbox",
+      "outboxOwner": "backlinks",
+      "consumerModules": [
+        "backlinks"
+      ],
+      "scope": "module-internal",
+      "payloadSchemaVersion": 1,
+      "dedupeKey": "jobId",
+      "consumerWritePolicy": "owner-only"
+    },
+    {
       "name": "backlinks.gmail-incremental-sync.requested.v1",
       "ownerModule": "backlinks",
       "publicationMode": "outbox",

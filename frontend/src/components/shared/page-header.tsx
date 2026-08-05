@@ -1,8 +1,8 @@
 import { ChevronRight } from "lucide-react"
-import { Link, useParams } from "react-router"
+import { Link } from "react-router"
 
 import type { NavigationItem } from "@/app/module-contract"
-import { defaultProject, getProject } from "@/app/project-context"
+import { useCurrentProject } from "@/app/project-context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 
@@ -21,8 +21,10 @@ export function PageHeader({
   onAction,
   actionDisabled,
 }: PageHeaderProps) {
-  const { projectId = defaultProject.id } = useParams()
-  const project = getProject(projectId)
+  const { currentProject: project } = useCurrentProject()
+  if (!project) {
+    throw new Error("PageHeader requires an authorized current project.")
+  }
 
   return (
     <div className="flex flex-col gap-4 border-b px-4 py-5 sm:px-6 lg:flex-row lg:items-end lg:justify-between lg:px-8">

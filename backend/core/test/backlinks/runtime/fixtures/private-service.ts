@@ -107,6 +107,15 @@ async function main(): Promise<void> {
               payload: {},
             },
           }),
+          getSendIntent: async () => ({
+            sendIntentId: "018f0000-0000-7000-8000-000000000014",
+            draftId: "018f0000-0000-7000-8000-000000000011",
+            status: "READY" as const,
+            version: 1,
+            requestedSendAt: "2026-07-27T05:00:00.000Z",
+            updatedAt: "2026-07-27T05:00:00.000Z",
+            attempt: null,
+          }),
           listMailMessages: async () => ({
             items: [],
             nextCursor: null,
@@ -145,6 +154,11 @@ async function main(): Promise<void> {
       }),
       contactCommands: {
         listCandidates: async () => [],
+        listOpportunityContacts: async () => ({
+          items: [],
+          state: "CONTACT_CONFIRMATION_REQUIRED" as const,
+          autoSelectedContactId: null,
+        }),
         confirm: async () => ({
           candidateId: "018f0000-0000-7000-8000-000000000001",
           contactId: "018f0000-0000-7000-8000-000000000002",
@@ -228,6 +242,60 @@ async function main(): Promise<void> {
           auditEventId: "audit-runtime-refill",
           replayed: false,
         }),
+      },
+      metricDashboardQuery: {
+        getDashboard: async () => ({
+          timezone: "UTC",
+          from: new Date("2026-07-28T00:00:00.000Z"),
+          to: new Date("2026-07-29T00:00:00.000Z"),
+          asOf: new Date("2026-07-29T01:00:00.000Z"),
+          summary: [],
+          trends: [],
+        }),
+      },
+      reportOverviewQuery: {
+        listPublished: async () => [],
+      },
+      reportExportWorkflow: {
+        request: async () => {
+          throw new Error("Runtime fixture does not request exports.");
+        },
+        run: async () => {
+          throw new Error("Runtime fixture does not render exports.");
+        },
+        get: async () => {
+          throw new Error("Runtime fixture does not read exports.");
+        },
+        authorizeDownload: async () => {
+          throw new Error("Runtime fixture does not authorize exports.");
+        },
+      },
+      settingsGovernanceService: {
+        getView: async () => ({
+          settings: {
+            id: "settings-runtime",
+            version: 1,
+            values: {
+              reportingTimezone: "UTC",
+              reportLookbackDays: 30,
+              exportExpiryHours: 24,
+            },
+          },
+          killSwitches: [],
+          editableKillSwitchLayers: ["project" as const, "provider" as const],
+          retention: {
+            id: "retention-runtime",
+            version: 1,
+            rules: [],
+            exceptions: [],
+          },
+        }),
+        updateSettings: async () => {
+          throw new Error("Runtime fixture does not update settings.");
+        },
+        updateKillSwitch: async () => {
+          throw new Error("Runtime fixture does not update kill switches.");
+        },
       },
       replyMatchCommands: {
         listCandidates: async () => ({

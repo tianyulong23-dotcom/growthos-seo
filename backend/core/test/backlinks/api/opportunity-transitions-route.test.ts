@@ -9,6 +9,9 @@ import { createActorContext, createProjectContext,
 import { BacklinkError, backlinkErrorCodes
 } from "../../../src/modules/backlinks/domain/errors/backlink-error.js";
 const opportunityId = "018f0000-0000-7000-8000-000000000078";
+const recommendationId = "018f0000-0000-7000-8000-000000000079";
+const cycleId = "018f0000-0000-7000-8000-000000000080";
+const contactCandidateId = "018f0000-0000-7000-8000-000000000081";
 const member = createActorContext({ userId: "user-78", sessionId: "session-78",
   roles: ["member"] });
 const context = { actor: member,
@@ -21,7 +24,16 @@ const context = { actor: member,
 describe("BL-AI-078/079 Opportunity command API", () => {
   it("enforces transition and management-patch guards", async () => {
     const commands = createOpportunityCommands({
-      createFromRecommendation: async () => { throw new Error("not used"); },
+      createFromRecommendation: async (input) => input.expectedVersion === 7
+        ? { state: "version_conflict", requestHash: input.requestHash }
+        : { state: "completed", requestHash: input.requestHash,
+          responseBody: { opportunityId, recommendationId, cycleId, joinSequence: 1,
+            websiteProjectId: "project-78", targetSiteKey: "example.com",
+            targetHostAscii: "www.example.com",
+            contactCandidateId, contactReviewRequired: false,
+            businessStage: "JOINED", managementStatus: "ACTIVE",
+            outcomeStatus: "OPEN", fulfillmentStatus: "NOT_EXPECTED", version: 1,
+            lifecycleEventId: "life-create", auditEventId: "audit-create" } },
       transitionBusinessStage: async (input) => {
         if (input.expectedVersion === 7) return { state: "version_conflict",
           requestHash: input.requestHash, currentStage: "JOINED" };
@@ -60,6 +72,25 @@ describe("BL-AI-078/079 Opportunity command API", () => {
     });
     await app.ready();
     afterAll(() => app.close());
+    const create = (project: string, expectedVersion: number, role?: string) => app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${project}/backlinks/opportunities`,
+      headers: { "idempotency-key": `create-${expectedVersion}`,
+        ...(role === undefined ? {} : { "x-role": role }) },
+      payload: { recommendationId, contactCandidateId, expectedVersion },
+    });
+    expect((await create("project-key", 1)).json()).toMatchObject({
+      opportunityId, recommendationId, cycleId, joinSequence: 1,
+      websiteProjectId: "project-78", targetSiteKey: "example.com",
+      targetHostAscii: "www.example.com",
+      contactCandidateId, contactReviewRequired: false,
+      businessStage: "JOINED", managementStatus: "ACTIVE",
+      outcomeStatus: "OPEN", fulfillmentStatus: "NOT_EXPECTED", version: 1,
+      replayed: false, meta: { websiteProjectId: "project-78", requestId: "request-78" },
+    });
+    expect((await create("project-key", 7)).statusCode).toBe(409);
+    expect((await create("project-key", 1, "viewer")).statusCode).toBe(403);
+    expect((await create("foreign", 1)).statusCode).toBe(403);
     const post = (project: string, expectedVersion: number,
       toBusinessStage: string, role?: string) => app.inject({
       method: "POST",

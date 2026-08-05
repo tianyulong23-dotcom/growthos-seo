@@ -1,17 +1,11 @@
+import { proxyActivities } from "@temporalio/workflow";
+
 import type {
   BacklinkProjectAnalysisContext,
   BacklinkProjectAnalysisInput,
 } from "../../activities/backlink-project-analysis.activity.js";
 import { runBacklinkProjectAnalysisWorkflow } from "./backlink-project-analysis.orchestration.js";
 
-type ProxyActivities = <T>(options: Readonly<{
-  startToCloseTimeout: string;
-  retry: Readonly<{ maximumAttempts: number }>;
-}>) => T;
-declare const require: (
-  id: "@temporalio/workflow",
-) => Readonly<{ proxyActivities: ProxyActivities }>;
-const { proxyActivities } = require("@temporalio/workflow");
 type WorkflowActivities = Readonly<{
   backlinksLoadProjectAnalysisContextV1(
     input: BacklinkProjectAnalysisInput,

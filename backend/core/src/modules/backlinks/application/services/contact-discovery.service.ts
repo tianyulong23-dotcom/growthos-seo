@@ -1,6 +1,10 @@
 import { domainToASCII } from "node:url";
+import { getDomain } from "tldts";
 import { parseContactPage } from "../../adapters/html/contact-parser.adapter.js";
-import type { SafeFetchPort } from "../../ports/safe-fetch.port.js";
+import type {
+  SafeFetchPort,
+  SafeFetchResult,
+} from "../../ports/safe-fetch.port.js";
 
 export type ContactDiscoveryResult = Readonly<{
   candidateCount: number; evidenceInserted: number; evidenceMerged: number;
@@ -14,7 +18,8 @@ type DiscoveryRecord = Readonly<{
   candidateId: string; evidenceId: string; normalizedEmail: string;
   emailDomainAscii: string; domainRelation: "same_registrable_domain" | "external_domain" | "unknown";
   syntaxValidatorVersion: string; confidence: number; sourceUrl: string;
-  observedAt: Date; extractionMethod: "mailto" | "visible_text";
+  observedAt: Date;
+  extractionMethod: "mailto" | "visible_text" | "obfuscated_text" | "json_ld";
   evidenceSnippet: string; parserVersion: string; contentSha256: string; expiresAt: Date;
   observedRole: string | null; inferredPurpose: string; purposeConfidence: number;
   purposeRuleVersion: string; purposeEvidence: readonly Readonly<Record<string, string>>[];
@@ -29,9 +34,19 @@ export interface ContactDiscoveryRepository {
 }
 
 const ignoredMailbox = /^(?:no-?reply|do-?not-?reply|noreply)$/iu;
-const relation = (emailDomain: string, prospectDomain: string) =>
-  emailDomain === prospectDomain || emailDomain.endsWith(`.${prospectDomain}`)
-    ? "same_registrable_domain" as const : "external_domain" as const;
+const relation = (emailDomain: string, prospectDomain: string) => {
+  const emailRegistrable = getDomain(emailDomain, { allowPrivateDomains: true });
+  const prospectRegistrable = getDomain(
+    prospectDomain,
+    { allowPrivateDomains: true },
+  );
+  if (emailRegistrable === null || prospectRegistrable === null) {
+    return "unknown" as const;
+  }
+  return emailRegistrable === prospectRegistrable
+    ? "same_registrable_domain" as const
+    : "external_domain" as const;
+};
 
 export class ContactDiscoveryService {
   constructor(private readonly dependencies: Readonly<{
@@ -47,6 +62,13 @@ export class ContactDiscoveryService {
     if (page.status < 200 || page.status >= 300) {
       throw new Error(`Contact discovery fetch returned HTTP ${page.status}.`);
     }
+    return this.discoverFetched(input, page);
+  }
+
+  async discoverFetched(
+    input: ContactDiscoveryInput,
+    page: SafeFetchResult,
+  ): Promise<ContactDiscoveryResult> {
     const parsed = parseContactPage(page);
     const observedAt = new Date(parsed.fetchedAt);
     const expiresAt = new Date(observedAt);
@@ -58,14 +80,21 @@ export class ContactDiscoveryService {
       const emailDomainAscii = domainToASCII(rawDomain).toLowerCase();
       const domainRelation = emailDomainAscii && prospectDomain
         ? relation(emailDomainAscii, prospectDomain) : "unknown";
-      const confidence = (candidate.evidence.source === "mailto" ? 90 : 80) -
+      const sourceConfidence = {
+        mailto: 90,
+        visible_text: 80,
+        obfuscated_text: 75,
+        json_ld: 85,
+      }[candidate.evidence.source];
+      const confidence = sourceConfidence -
         (domainRelation === "same_registrable_domain" ? 0 : 15);
       return [{
         candidateId: this.dependencies.newId(), evidenceId: this.dependencies.newId(),
         normalizedEmail: candidate.email, emailDomainAscii, domainRelation,
         syntaxValidatorVersion: parsed.syntaxValidator, confidence,
         sourceUrl: candidate.evidence.pageUrl, observedAt,
-        extractionMethod: candidate.evidence.source, evidenceSnippet: candidate.email,
+        extractionMethod: candidate.evidence.source,
+        evidenceSnippet: candidate.evidence.snippet || candidate.email,
         parserVersion: parsed.parser, contentSha256: parsed.contentSha256, expiresAt,
         observedRole: candidate.purposeDecision.observedRole,
         inferredPurpose: candidate.purposeDecision.inferredPurpose,

@@ -66,7 +66,7 @@ function createRepository(): PlacementCandidateRepository & Readonly<{
     requestHash: string;
     responseBody: Readonly<{
       candidateId: string;
-      status: "PENDING_MATCH";
+      status: "PENDING_VALIDATION";
       matchStatus: "UNMATCHED";
       initialValidationStatus: "PENDING";
       version: number;
@@ -163,7 +163,7 @@ describe("BL-AI-147 Placement Candidate creation API", () => {
     expect(created.statusCode).toBe(201);
     expect(created.json()).toMatchObject({
       candidateId,
-      status: "PENDING_MATCH",
+      status: "PENDING_VALIDATION",
       matchStatus: "UNMATCHED",
       initialValidationStatus: "PENDING",
       version: 1,
@@ -187,7 +187,7 @@ describe("BL-AI-147 Placement Candidate creation API", () => {
       targetUrl: requestBody.targetUrl,
       normalizedTargetUrl:
         "https://client.com/offer?campaign=summer",
-      status: "PENDING_MATCH",
+      status: "PENDING_VALIDATION",
       matchStatus: "UNMATCHED",
       initialValidationStatus: "PENDING",
       evidenceContractVersion: "placement.discovery.manual.v1",

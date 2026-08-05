@@ -78,5 +78,12 @@ describe("BL-AI-063 recommendation command APIs", () => {
       version: 1, replayed: false, lifecycleEventId: "life-refill",
       auditEventId: "audit-refill" });
     expect(calls.at(-1)?.text).toContain("backlink_recommendation_refills");
+    expect(calls.at(-1)?.text).toContain("backlink_outbox_events");
+    expect(calls.at(-1)?.text).toContain(
+      "backlinks.recommendation-refill.requested.v1",
+    );
+    expect(calls.at(-1)?.text).toContain(
+      "'contractVersion','backlinks.recommendation-refill.requested.v1'",
+    );
   });
 });

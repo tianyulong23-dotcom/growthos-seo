@@ -2,7 +2,7 @@ import type * as React from "react"
 import { Navigate, useNavigate, useParams } from "react-router"
 
 import type { NavigationItem } from "@/app/module-contract"
-import { defaultProject } from "@/app/project-context"
+import { useCurrentProject } from "@/app/project-context"
 import { PageHeader } from "@/components/shared/page-header"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
@@ -26,10 +26,12 @@ export function ModulePage({
   beforeContent,
 }: ModulePageProps) {
   const navigate = useNavigate()
-  const {
-    projectId = defaultProject.id,
-    view,
-  } = useParams<{ projectId: string; view?: string }>()
+  const { currentProject } = useCurrentProject()
+  const { view } = useParams<{ view?: string }>()
+  if (!currentProject) {
+    throw new Error("ModulePage requires an authorized current project.")
+  }
+  const projectId = currentProject.id
   const activeView = view ?? module.tabs[0]?.id
 
   if (!activeView) {

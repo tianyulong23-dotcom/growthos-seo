@@ -11,7 +11,13 @@ import { backlinkProblemContentType, backlinkProblemDetailsSchema,
 type Commands = ReturnType<typeof createOpportunityCommands>;
 const nonBlank = z.string().trim().min(1);
 const headers = z.object({ "idempotency-key": nonBlank.max(200) });
+const projectParams = z.object({ websiteProjectKey: nonBlank }).strict();
 const params = z.object({ websiteProjectKey: nonBlank, opportunityId: z.uuid() }).strict();
+export const createOpportunityBodySchema = z.object({
+  recommendationId: z.uuid(),
+  contactCandidateId: z.uuid(),
+  expectedVersion: z.number().int().positive(),
+}).strict();
 export const transitionOpportunityBodySchema = z.object({
   expectedVersion: z.number().int().positive(),
   toBusinessStage: z.enum(opportunityBusinessStages),
@@ -25,6 +31,16 @@ export const patchOpportunityManagementBodySchema = z.object({
 const metaSchema = z.object({ organizationId: nonBlank, workspaceId: nonBlank,
   websiteProjectId: nonBlank, requestId: nonBlank,
   schemaVersion: z.literal("backlinks.v1"), generatedAt: z.string().datetime() }).strict();
+const createResponse = z.object({
+  opportunityId: z.uuid(), recommendationId: z.uuid(), cycleId: z.uuid(),
+  websiteProjectId: nonBlank, targetSiteKey: nonBlank, targetHostAscii: nonBlank,
+  contactCandidateId: z.uuid(), contactReviewRequired: z.boolean(),
+  joinSequence: z.number().int().positive(), businessStage: z.literal("JOINED"),
+  managementStatus: z.literal("ACTIVE"), outcomeStatus: z.literal("OPEN"),
+  fulfillmentStatus: z.literal("NOT_EXPECTED"), version: z.number().int().positive(),
+  lifecycleEventId: nonBlank, auditEventId: nonBlank, replayed: z.boolean(),
+  meta: metaSchema,
+}).strict();
 const response = z.object({ opportunityId: z.uuid(),
   businessStage: z.enum(opportunityBusinessStages),
   managementStatus: z.enum(["ACTIVE", "PAUSED", "ARCHIVED"]),
@@ -44,6 +60,25 @@ function sendError(error: FastifyError, request: FastifyRequest, reply: FastifyR
 }
 export function registerBacklinksOpportunityCommandsRoutes(app: FastifyInstance, options:
   Readonly<{ module: BacklinksModule; commands: Commands }>): void {
+  app.withTypeProvider<ZodTypeProvider>().post(
+    "/api/v1/projects/:websiteProjectKey/backlinks/opportunities",
+    { schema: { operationId: "backlinksCreateOpportunityV1",
+      headers, params: projectParams, body: createOpportunityBodySchema,
+      response: { 201: createResponse, ...errors } }, errorHandler: sendError },
+    async (request, reply) => {
+      const context = await options.module.projectContext.resolve({ actor: request.actor,
+        websiteProjectKey: request.params.websiteProjectKey });
+      const result = await options.commands.createFromRecommendation({ context,
+        requestId: request.id, idempotencyKey: request.headers["idempotency-key"],
+        ...request.body });
+      return reply.code(201).send({ ...result, meta: {
+        organizationId: context.tenant.organizationId,
+        workspaceId: context.tenant.workspaceId,
+        websiteProjectId: context.project.websiteProjectId, requestId: request.id,
+        schemaVersion: "backlinks.v1" as const, generatedAt: new Date().toISOString(),
+      } });
+    },
+  );
   app.withTypeProvider<ZodTypeProvider>().post(
     "/api/v1/projects/:websiteProjectKey/backlinks/opportunities/:opportunityId/transition",
     { schema: { operationId: "backlinksTransitionOpportunityBusinessStageV1",

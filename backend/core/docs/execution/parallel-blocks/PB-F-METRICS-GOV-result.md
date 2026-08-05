@@ -1,9 +1,42 @@
 # PB-F-METRICS-GOV Result
 
-Status: HANDOFF_READY
+Status: INTEGRATED
 Workspace: `C:\Users\DELL\Documents\缝合\john3947-seo`
-Handoff updated at: 2026-07-29
+Handoff updated at: 2026-07-30
 Task: `BL-AI-161..176`
+
+## 2026-07-30 Integration Controller Acceptance
+
+`BL-AI-161..176 = INTEGRATED`.
+
+- Registered the exact `0030` and `0031` migration checksums in the protected
+  deployment manifest and advanced the Backlinks migration head to `0031`.
+- Extended the PostgreSQL 18 clean-install and historical-upgrade runner through
+  `0031`. PostgreSQL `18.4` clean install, upgrade compatibility, DataForSEO
+  writes, backup/restore, database contracts, and RLS all passed.
+- Registered the existing Metrics Dashboard, published Reports, asynchronous
+  Export, and versioned Settings routes in the shared Fastify private server
+  and public FastAPI Gateway.
+- Re-froze the shared Backlinks OpenAPI at 45 paths and 46 operations, and the
+  aggregate Platform OpenAPI at 67 paths and 72 operations.
+- The combined PB-D/PB-E/PB-F immutable-fact and PostgreSQL acceptance passed
+  6 files and 35 tests. Links source contracts passed 5/5.
+- `npm run verify:backlinks` passed: Unit 70 files/389 tests, API 30 files/86
+  tests, Contract 20 files/144 tests, Integration 46 passed files plus 4
+  environment-gated skips with 165 passed tests and 13 skipped tests, Security
+  9 files/102 tests, and Resilience 3 files/8 tests.
+- Full FastAPI passed 34 tests with 1 environment-gated skip and full Ruff
+  passed. Frontend typecheck, lint with one existing non-blocking Reports Hook
+  warning, production build, and Links source contracts passed. Pinned Go
+  `1.25.4` Crawler test, race, and vet passed.
+- PB-D Draft approval remains reconstructible from immutable facts; AUTO and
+  MANUAL Reply assignment retain the same fact contract. Every completed
+  Monitoring Observation retains exactly one immutable decision fact, and
+  historical `suspected_lost` replay uses its captured policy thresholds.
+- Browser remains default-off. No second Browser Worker, Queue, Launcher, or
+  network stack was created. DataForSEO remains unchanged.
+- No real Browser, Provider, DataForSEO, production database, commit, or push
+  was used. `BL-AI-179` was not started.
 
 ## 2026-07-29 BL-AI-169..176 Execution
 

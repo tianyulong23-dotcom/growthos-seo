@@ -17,6 +17,17 @@ from app.main import app
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CONTRACTS_ROOT = REPOSITORY_ROOT / "backend" / "contracts"
+PLATFORM_PROJECT_PATHS = frozenset(
+    {
+        "/health",
+        "/api/v1/projects",
+        "/api/v1/projects/{project_id}",
+        "/api/v1/projects/{project_id}/business-profile",
+        "/api/v1/projects/{project_id}/business-profile/runs",
+        "/api/v1/projects/{project_id}/favicon",
+        "/api/v1/projects/{project_id}/business-profile/refresh",
+    }
+)
 
 
 def load_json(path: Path) -> dict[str, object]:
@@ -156,7 +167,7 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
             ModuleOpenApi(
                 "platform",
                 seo4,
-                frozenset({"/health"}),
+                PLATFORM_PROJECT_PATHS,
                 (("projects", "platform"), ("audits", "audit")),
             ),
             ModuleOpenApi("backlinks", backlinks, frozenset({"/health"})),
@@ -169,9 +180,9 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
     assert operation_count(seo4) == 27
     assert "/health" in aggregate["paths"]
     assert aggregate["paths"]["/health"]["get"]["operationId"] == "platformHealthV1"
-    assert len(backlinks["paths"]) == 38
-    assert len(aggregate["paths"]) == 60
-    assert operation_count(aggregate) == 64
+    assert len(backlinks["paths"]) == 57
+    assert len(aggregate["paths"]) == 77
+    assert operation_count(aggregate) == 83
     modules = [
         operation["x-growthos-module"]
         for path, path_item in aggregate["paths"].items()
@@ -179,9 +190,9 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
         for method, operation in path_item.items()
         if method in {"get", "post", "put", "patch", "delete"}
     ]
-    assert modules.count("platform") == 8
+    assert modules.count("platform") == 6
     assert modules.count("audit") == 18
-    assert modules.count("backlinks") == 37
+    assert modules.count("backlinks") == 58
     assert all(
         "application/problem+json" in operation["responses"]["503"]["content"]
         for path, path_item in aggregate["paths"].items()
@@ -196,7 +207,7 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
         if method in {"get", "post", "put", "patch", "delete"}
     ]
     assert len(operation_ids) == len(set(operation_ids))
-    assert "list_projects_api_v1_projects_get" in operation_ids
+    assert "platformListWebsiteProjectsV1" in operation_ids
     assert "create_audit_run_api_v1_projects__project_id__audit_runs_post" in operation_ids
     assert load_json(aggregate_path) == aggregate
 
@@ -255,6 +266,7 @@ def test_accepts_the_repository_event_and_temporal_registries() -> None:
         "platform.business-profile-ai.v1",
         "audit.google-pagespeed.v1",
         "backlinks.dataforseo.v1",
+        "backlinks.browser.v1",
     }
 
 

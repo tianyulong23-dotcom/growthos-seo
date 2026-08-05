@@ -5,7 +5,9 @@ import {
 } from "./drafts.js";
 import {
   backlinkGmailConnections,
+  backlinkGmailSendIdentities,
 } from "./gmail-connections.js";
+import { backlinkContacts } from "./contacts.js";
 import { backlinkOpportunities } from "./opportunities.js";
 
 type Builder = {
@@ -34,6 +36,7 @@ const pg = require("drizzle-orm/pg-core") as {
   readonly uuid: (name: string) => Builder;
   readonly text: (name: string) => Builder;
   readonly integer: (name: string) => Builder;
+  readonly jsonb: (name: string) => Builder;
   readonly timestamp: (
     name: string,
     config: { readonly mode: "date"; readonly withTimezone: true },
@@ -57,6 +60,9 @@ export const backlinkSendIntents = pg.pgTable(
     opportunityId: pg.uuid("opportunity_id").notNull(),
     draftId: pg.uuid("draft_id").notNull(),
     approvedDraftVersionId: pg.uuid("approved_draft_version_id").notNull(),
+    contactId: pg.uuid("contact_id"),
+    contactVersion: pg.integer("contact_version"),
+    sendSnapshotId: pg.uuid("send_snapshot_id"),
     gmailConnectionId: pg.uuid("gmail_connection_id").notNull(),
     clientIdempotencyKey: pg.text("client_idempotency_key").notNull(),
     logicalMessageKey: pg.text("logical_message_key").notNull(),
@@ -119,6 +125,102 @@ export const backlinkSendIntents = pg.pgTable(
       foreignColumns: [
         backlinkGmailConnections.organizationId,
         backlinkGmailConnections.id,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_send_intent_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
+    }),
+  ],
+);
+
+export const backlinkSendSnapshots = pg.pgTable(
+  "backlink_send_snapshots",
+  {
+    id: pg.uuid("id").primaryKey(),
+    ...projectIdentityColumns(),
+    sendIntentId: pg.uuid("send_intent_id").notNull(),
+    opportunityId: pg.uuid("opportunity_id").notNull(),
+    opportunityVersion: pg.integer("opportunity_version").notNull(),
+    draftId: pg.uuid("draft_id").notNull(),
+    draftVersionId: pg.uuid("draft_version_id").notNull(),
+    draftVersionNo: pg.integer("draft_version_no").notNull(),
+    contactId: pg.uuid("contact_id").notNull(),
+    contactVersion: pg.integer("contact_version").notNull(),
+    recipient: pg.text("recipient").notNull(),
+    recipientHash: pg.text("recipient_hash").notNull(),
+    subjectText: pg.text("subject_text").notNull(),
+    bodyText: pg.text("body_text").notNull(),
+    bodyDocument: pg.jsonb("body_document"),
+    contentHash: pg.text("content_hash").notNull(),
+    gmailConnectionId: pg.uuid("gmail_connection_id").notNull(),
+    gmailConnectionVersion: pg.integer("gmail_connection_version").notNull(),
+    gmailIdentityId: pg.uuid("gmail_identity_id").notNull(),
+    gmailIdentityVersion: pg.integer("gmail_identity_version").notNull(),
+    snapshotSchemaVersion: pg.integer("snapshot_schema_version").notNull().default(1),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    createdBy: pg.text("created_by").notNull(),
+  },
+  (table) => [
+    pg.uniqueIndex("backlink_send_snapshot_tenant_identity_uq").on(
+      ...identity(table),
+      table.id,
+      table.sendIntentId,
+    ),
+    pg.uniqueIndex("backlink_send_snapshot_intent_uq").on(
+      ...identity(table),
+      table.sendIntentId,
+    ),
+    pg.foreignKey({
+      name: "backlink_send_snapshot_intent_fk",
+      columns: [...identity(table), table.sendIntentId],
+      foreignColumns: [...identity(backlinkSendIntents), backlinkSendIntents.id],
+    }),
+    pg.foreignKey({
+      name: "backlink_send_snapshot_opportunity_fk",
+      columns: [...identity(table), table.opportunityId],
+      foreignColumns: [...identity(backlinkOpportunities), backlinkOpportunities.id],
+    }),
+    pg.foreignKey({
+      name: "backlink_send_snapshot_draft_version_fk",
+      columns: [
+        ...identity(table),
+        table.draftVersionId,
+        table.draftId,
+        table.opportunityId,
+      ],
+      foreignColumns: [
+        ...identity(backlinkDraftVersions),
+        backlinkDraftVersions.id,
+        backlinkDraftVersions.draftId,
+        backlinkDraftVersions.opportunityId,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_send_snapshot_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
+    }),
+    pg.foreignKey({
+      name: "backlink_send_snapshot_connection_fk",
+      columns: [table.organizationId, table.gmailConnectionId],
+      foreignColumns: [
+        backlinkGmailConnections.organizationId,
+        backlinkGmailConnections.id,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_send_snapshot_identity_fk",
+      columns: [
+        table.organizationId,
+        table.gmailIdentityId,
+        table.gmailConnectionId,
+      ],
+      foreignColumns: [
+        backlinkGmailSendIdentities.organizationId,
+        backlinkGmailSendIdentities.id,
+        backlinkGmailSendIdentities.gmailConnectionId,
       ],
     }),
   ],

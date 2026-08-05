@@ -1,16 +1,9 @@
+import { proxyActivities } from "@temporalio/workflow";
+
 import type {
   PlacementMonitorWorkflowInput,
 } from "../../application/workflows/placement-monitor.workflow.js";
 
-type ProxyActivities = <T>(options: Readonly<{
-  startToCloseTimeout: string;
-  retry: Readonly<{ maximumAttempts: number }>;
-}>) => T;
-declare const require: (
-  id: "@temporalio/workflow",
-) => Readonly<{ proxyActivities: ProxyActivities }>;
-
-const { proxyActivities } = require("@temporalio/workflow");
 type PlacementMonitoringActivities = Readonly<{
   backlinksRunPlacementMonitoringV1(
     input: PlacementMonitorWorkflowInput,

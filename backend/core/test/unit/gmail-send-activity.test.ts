@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   GmailSendActivity,
   type GmailSendCommandLoader,
-  type SendExecutionContextResolver,
+  type GmailSendPolicyInputLoader,
 } from "../../src/modules/backlinks/application/activities/send-activity.js";
 import type {
   SendAttemptRepository,
@@ -47,11 +47,38 @@ const createActivity = () => {
       rfcMessageId: attempt.rfcMessageId,
     }),
   };
-  const contextResolver: SendExecutionContextResolver = {
-    resolve: vi.fn().mockResolvedValue(context),
-  };
   const commandLoader: GmailSendCommandLoader = {
     load: vi.fn().mockResolvedValue(command),
+  };
+  const policyInputLoader: GmailSendPolicyInputLoader = {
+    load: vi.fn().mockResolvedValue({
+      evaluatedAt: "2026-07-28T09:18:00.000Z",
+      draft: {
+        status: "approved",
+        approvedVersionId:
+          "018f0000-0000-7000-8000-000000000318",
+        requestedVersionId:
+          "018f0000-0000-7000-8000-000000000318",
+      },
+      suppression: { suppressed: false },
+      connection: {
+        connectionStatus: "CONNECTED",
+        sendAvailability: "AVAILABLE",
+      },
+      quota: {
+        status: "RESERVED",
+        eligibleAt: "2026-07-28T09:17:00.000Z",
+        expiresAt: "2026-07-28T09:28:00.000Z",
+      },
+      killSwitches: {
+        GLOBAL: false,
+        ORGANIZATION: false,
+        WORKSPACE: false,
+        WEBSITE_PROJECT: false,
+        GMAIL_SEND: false,
+      },
+      cooldownUntil: null,
+    }),
   };
   const gmail: GmailSendPort = {
     send: vi.fn().mockResolvedValue({
@@ -61,12 +88,12 @@ const createActivity = () => {
   };
   const activity = new GmailSendActivity({
     repository,
-    contextResolver,
     commandLoader,
+    policyInputLoader,
     gmail,
     clock: () => new Date("2026-07-28T09:18:00.000Z"),
   });
-  return { activity, repository, contextResolver, commandLoader, gmail };
+  return { activity, repository, commandLoader, policyInputLoader, gmail };
 };
 
 describe("BL-AI-118 Gmail Send Activity", () => {
@@ -74,10 +101,14 @@ describe("BL-AI-118 Gmail Send Activity", () => {
     const fixture = createActivity();
 
     await expect(fixture.activity.claimAttempt({
+      ...context,
       sendIntentId: attempt.sendIntentId,
       maxAttempts: 3,
     })).resolves.toEqual({ state: "claimed", attempt });
-    await expect(fixture.activity.dispatchAttempt(attempt)).resolves.toEqual({
+    await expect(fixture.activity.dispatchAttempt({
+      context,
+      attempt,
+    })).resolves.toEqual({
       kind: "accepted",
       providerMessageId: "gmail-message-118",
     });
@@ -103,7 +134,10 @@ describe("BL-AI-118 Gmail Send Activity", () => {
       rfcMessageId: "<different@send.growthos.invalid>",
     });
 
-    await expect(fixture.activity.dispatchAttempt(attempt)).rejects.toThrow(
+    await expect(fixture.activity.dispatchAttempt({
+      context,
+      attempt,
+    })).rejects.toThrow(
       "Gmail Send command does not match the claimed Attempt.",
     );
     expect(fixture.gmail.send).not.toHaveBeenCalled();
@@ -113,6 +147,7 @@ describe("BL-AI-118 Gmail Send Activity", () => {
     const fixture = createActivity();
 
     await fixture.activity.settleAttempt({
+      context,
       attempt,
       settlement: {
         status: "FAILED_RETRYABLE",

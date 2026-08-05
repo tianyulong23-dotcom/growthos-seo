@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const productionAllowlist: Readonly<Record<string, string>> = {
+  "@ai-sdk/openai": "4.0.15",
   "@fastify/swagger": "9.8.1",
   "@googleapis/gmail": "17.0.0",
   "@openfeature/server-sdk": "1.22.0",
@@ -18,7 +19,7 @@ const productionAllowlist: Readonly<Record<string, string>> = {
   exceljs: "4.4.0",
   fastify: "5.10.0",
   "fastify-type-provider-zod": "7.0.0",
-  "google-auth-library": "10.5.0",
+  "google-auth-library": "10.9.1",
   "isomorphic-dompurify": "3.18.0",
   jsdom: "29.1.1",
   nodemailer: "9.0.3",

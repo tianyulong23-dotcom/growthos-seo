@@ -1,118 +1,27 @@
-export type MetricPoint = {
-  snapshotId: string
-  snapshotVersion: number
-  windowStart: string
-  windowEnd: string
-  asOf: string
-  dimensions: Record<string, string>
-  numerator: number
-  denominator: number | null
-  value: number | null
-}
+import type {
+  BacklinksRequest,
+  BacklinksResponse,
+} from "@/api/generated/backlinks"
 
-export type MetricSummary = MetricPoint & {
-  metricKey: string
-  metricDefinitionVersion: string
-}
+export type MetricDashboardResponse =
+  BacklinksResponse<"backlinksGetMetricDashboardV1">
+export type ReportOverviewResponse =
+  BacklinksResponse<"backlinksListPublishedReportsV1">
+export type ReportExportResponse =
+  BacklinksResponse<"backlinksRequestReportExportV1">
+export type ReportDownloadResponse =
+  BacklinksResponse<"backlinksAuthorizeReportExportDownloadV1">
 
-export type MetricTrend = {
-  metricKey: string
-  metricDefinitionVersion: string
-  points: MetricPoint[]
-}
-
-export type MetricDashboardResponse = {
-  dashboard: {
-    timezone: string
-    from: string
-    to: string
-    asOf: string
-    summary: MetricSummary[]
-    trends: MetricTrend[]
-  }
-  meta: {
-    organizationId: string
-    workspaceId: string
-    websiteProjectId: string
-    requestId: string
-    schemaVersion: "backlink-metric-dashboard.v1"
-    generatedAt: string
-  }
-}
-
-export type ReportRevision = {
-  id: string
-  reportKey: string
-  revision: number
-  inputSnapshotIds: string[]
-  metricDefinitionVersions: Record<string, string>
-  querySpec: Record<string, unknown>
-  payload: Record<string, unknown>
-  sourceStartedAt: string
-  sourceEndedAt: string
-  sourceWatermarkAt: string
-  sourceWatermarkId: string
-  resultChecksum: string
-  generatedAt: string
-  freshness: "fresh" | "stale"
-}
-
-export type ReportOverviewResponse = {
-  reports: ReportRevision[]
-  meta: {
-    organizationId: string
-    workspaceId: string
-    websiteProjectId: string
-    requestId: string
-    schemaVersion: "backlink-report-overview.v1"
-    generatedAt: string
-  }
-}
-
-export type ReportExportFormat = "csv" | "xlsx" | "pdf"
-export type ReportExportStatus =
-  | "queued"
-  | "running"
-  | "failed"
-  | "completed"
-  | "expired"
-
-export type ReportExport = {
-  id: string
-  reportKey: string
-  reportRevisionId: string
-  format: ReportExportFormat
-  status: ReportExportStatus
-  createdAt: string
-  completedAt: string | null
-  expiresAt: string | null
-  failureCode: string | null
-  object: {
-    contentType: string
-    contentLength: number
-    sha256: string
-    storagePolicyVersion: string
-  } | null
-}
-
-export type ReportExportResponse = {
-  export: ReportExport
-  meta: {
-    requestId: string
-    schemaVersion: "backlink-report-export.v1"
-  }
-}
-
-export type ReportDownloadResponse = {
-  download: {
-    url: string
-    expiresAt: string
-  }
-  meta: {
-    requestId: string
-    schemaVersion: "backlink-report-export.v1"
-  }
-}
+export type MetricSummary =
+  MetricDashboardResponse["dashboard"]["summary"][number]
+export type MetricPoint =
+  MetricDashboardResponse["dashboard"]["trends"][number]["points"][number]
+export type MetricTrend = MetricDashboardResponse["dashboard"]["trends"][number]
+export type ReportRevision = ReportOverviewResponse["reports"][number]
+export type ReportExport = ReportExportResponse["export"]
+export type ReportExportFormat =
+  BacklinksRequest<"backlinksRequestReportExportV1">["body"]["format"]
+export type ReportExportStatus = ReportExport["status"]
 
 export type ReportingWindow = {
   from: string
@@ -123,11 +32,13 @@ export type ReportingWindow = {
 export type ReportsClient = {
   getMetricDashboard(
     websiteProjectKey: string,
-    input: ReportingWindow & { timezone: string }
+    input: ReportingWindow & { timezone: string },
+    signal?: AbortSignal
   ): Promise<MetricDashboardResponse>
   listReports(
     websiteProjectKey: string,
-    input: { asOf: string }
+    input: { asOf: string },
+    signal?: AbortSignal
   ): Promise<ReportOverviewResponse>
   requestReportExport(
     websiteProjectKey: string,
@@ -137,10 +48,12 @@ export type ReportsClient = {
   ): Promise<ReportExportResponse>
   getReportExport(
     websiteProjectKey: string,
-    exportId: string
+    exportId: string,
+    signal?: AbortSignal
   ): Promise<ReportExportResponse>
   authorizeExportDownload(
     websiteProjectKey: string,
-    exportId: string
+    exportId: string,
+    signal?: AbortSignal
   ): Promise<ReportDownloadResponse>
 }

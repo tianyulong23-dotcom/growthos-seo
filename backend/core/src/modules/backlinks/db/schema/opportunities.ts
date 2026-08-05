@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { projectIdentityColumns, versionedProjectAuditColumns } from "./common.js";
+import { backlinkContactCandidates } from "./contacts.js";
 import { backlinkRecommendations } from "./recommendations.js";
 type Builder = { notNull(): Builder; primaryKey(): unknown; default(value: unknown): unknown;
   defaultNow(): unknown };
@@ -14,6 +15,7 @@ const pg = require("drizzle-orm/pg-core") as {
   }) => unknown;
   readonly uuid: (name: string) => Builder; readonly text: (name: string) => Builder;
   readonly integer: (name: string) => Builder;
+  readonly boolean: (name: string) => Builder;
   readonly timestamp: (name: string, config: {
     readonly mode: "date"; readonly withTimezone: true }) => Builder;
 };
@@ -30,6 +32,8 @@ export const backlinkOpportunities = pg.pgTable(
     recommendationId: pg.uuid("recommendation_id").notNull(),
     prospectId: pg.uuid("prospect_id").notNull(),
     recommendationContextVersionId: pg.uuid("recommendation_context_version_id").notNull(),
+    sourceContactCandidateId: pg.uuid("source_contact_candidate_id"),
+    contactReviewRequired: pg.boolean("contact_review_required").notNull().default(true),
     targetSiteKey: pg.text("target_site_key").notNull(),
     targetHostAscii: pg.text("target_host_ascii").notNull(),
     targetIdentityKind: pg.text("target_identity_kind").notNull()
@@ -62,6 +66,14 @@ export const backlinkOpportunities = pg.pgTable(
         ...identity(backlinkRecommendations), backlinkRecommendations.id,
         backlinkRecommendations.prospectId,
         backlinkRecommendations.recommendationContextVersionId,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_opportunity_source_contact_candidate_fk",
+      columns: [...identity(table), table.sourceContactCandidateId],
+      foreignColumns: [
+        ...identity(backlinkContactCandidates),
+        backlinkContactCandidates.id,
       ],
     }),
   ],

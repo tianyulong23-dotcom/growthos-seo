@@ -8,6 +8,17 @@ import sys
 API_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CONTRACTS_ROOT = REPOSITORY_ROOT / "backend" / "contracts"
+PLATFORM_PROJECT_PATHS = frozenset(
+    {
+        "/health",
+        "/api/v1/projects",
+        "/api/v1/projects/{project_id}",
+        "/api/v1/projects/{project_id}/business-profile",
+        "/api/v1/projects/{project_id}/business-profile/runs",
+        "/api/v1/projects/{project_id}/favicon",
+        "/api/v1/projects/{project_id}/business-profile/refresh",
+    }
+)
 sys.path.insert(0, str(API_ROOT))
 
 from app.core.openapi_aggregation import (  # noqa: E402
@@ -36,7 +47,7 @@ def build_aggregate() -> dict[str, object]:
             ModuleOpenApi(
                 "platform",
                 seo4,
-                frozenset({"/health"}),
+                PLATFORM_PROJECT_PATHS,
                 (("projects", "platform"), ("audits", "audit")),
             ),
             ModuleOpenApi("backlinks", backlinks, frozenset({"/health"})),

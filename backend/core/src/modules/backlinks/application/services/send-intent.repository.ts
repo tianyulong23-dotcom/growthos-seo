@@ -19,10 +19,13 @@ export type CreateSendIntentRecordInput = Readonly<{
   workspaceId: string;
   websiteProjectId: string;
   sendIntentId: string;
+  sendSnapshotId: string;
   quotaReservationId: string;
   outboxEventId: string;
   draftId: string;
   approvedDraftVersionId: string;
+  contactId: string;
+  contactVersion: number;
   gmailConnectionId: string;
   clientIdempotencyKey: string;
   logicalMessageKey: string;
@@ -37,8 +40,11 @@ export type CreateSendIntentRecordInput = Readonly<{
 
 export type SendIntentRecord = Readonly<{
   sendIntentId: string;
+  sendSnapshotId: string;
   draftId: string;
   approvedDraftVersionId: string;
+  contactId: string;
+  contactVersion: number;
   status: "READY";
   version: 1;
   requestedSendAt: string;
@@ -49,7 +55,13 @@ export type SendIntentRepositoryResult =
   | Readonly<{ state: "replayed"; intent: SendIntentRecord }>
   | Readonly<{ state: "draft_not_found" }>
   | Readonly<{ state: "draft_not_approved" }>
+  | Readonly<{ state: "contact_unavailable" }>
+  | Readonly<{ state: "contact_version_conflict" }>
   | Readonly<{ state: "gmail_connection_unavailable" }>
+  | Readonly<{
+      state: "initial_outreach_cooldown";
+      retryAt: string;
+    }>
   | Readonly<{
       state: "quota_exceeded";
       dailyLimit: number;
@@ -81,16 +93,46 @@ const asDate = (value: unknown, field: string): Date => {
 const asNullableIso = (value: unknown): string | null =>
   value === null ? null : asDate(value, "timestamp").toISOString();
 
+const canonicalJson = (value: unknown): string => {
+  if (value === null) return "null";
+  if (
+    typeof value === "boolean"
+    || typeof value === "number"
+    || typeof value === "string"
+  ) {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (typeof value !== "object") {
+    throw new TypeError("Send Snapshot content is not JSON-compatible.");
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+};
+
+const sha256 = (value: string): string =>
+  createHash("sha256").update(value, "utf8").digest("hex");
+
 const intentFromRow = (
   row: Record<string, unknown>,
 ): SendIntentRecord => {
   const sendIntentId = row.sendIntentId;
+  const sendSnapshotId = row.sendSnapshotId;
   const draftId = row.draftId;
   const approvedDraftVersionId = row.approvedDraftVersionId;
+  const contactId = row.contactId;
+  const contactVersion = row.contactVersion;
   if (
     typeof sendIntentId !== "string"
+    || typeof sendSnapshotId !== "string"
     || typeof draftId !== "string"
     || typeof approvedDraftVersionId !== "string"
+    || typeof contactId !== "string"
+    || typeof contactVersion !== "number"
+    || !Number.isSafeInteger(contactVersion)
   ) {
     throw new TypeError(
       "Send Intent persistence returned an invalid Intent.",
@@ -98,8 +140,11 @@ const intentFromRow = (
   }
   return Object.freeze({
     sendIntentId,
+    sendSnapshotId,
     draftId,
     approvedDraftVersionId,
+    contactId,
+    contactVersion,
     status: "READY",
     version: 1,
     requestedSendAt: asDate(
@@ -179,9 +224,12 @@ implements SendIntentRepository {
           const existingResult = await transaction.query(
             `SELECT
                intent.id AS "sendIntentId",
+               intent.send_snapshot_id AS "sendSnapshotId",
                intent.draft_id AS "draftId",
                intent.approved_draft_version_id
                  AS "approvedDraftVersionId",
+               intent.contact_id AS "contactId",
+               intent.contact_version AS "contactVersion",
                intent.gmail_connection_id AS "gmailConnectionId",
                intent.client_idempotency_key
                  AS "clientIdempotencyKey",
@@ -216,6 +264,8 @@ implements SendIntentRepository {
               existing.draftId !== input.draftId
               || existing.approvedDraftVersionId
                 !== input.approvedDraftVersionId
+              || existing.contactId !== input.contactId
+              || existing.contactVersion !== input.contactVersion
               || existing.gmailConnectionId !== input.gmailConnectionId
               || existing.logicalMessageKey !== input.logicalMessageKey
               || existing.messagePurpose !== input.messagePurpose
@@ -226,6 +276,15 @@ implements SendIntentRepository {
 
             const companions = await transaction.query(
               `SELECT
+                 EXISTS (
+                   SELECT 1
+                     FROM backlinks.backlink_send_snapshots AS snapshot
+                    WHERE snapshot.organization_id = $1
+                      AND snapshot.workspace_id = $2
+                      AND snapshot.website_project_id = $3
+                      AND snapshot.send_intent_id = $4
+                      AND snapshot.id = $7
+                 ) AS "hasSendSnapshot",
                  EXISTS (
                    SELECT 1
                      FROM backlinks.backlink_rate_limit_reservations
@@ -253,11 +312,13 @@ implements SendIntentRepository {
                 existing.sendIntentId,
                 input.gmailConnectionId,
                 sendIntentCreatedEventType,
+                existing.sendSnapshotId,
               ],
             );
             const companion = companions.rows[0];
             if (
               companion?.hasReservation !== true
+              || companion.hasSendSnapshot !== true
               || companion.hasOutboxEvent !== true
             ) {
               throw new Error(
@@ -273,15 +334,38 @@ implements SendIntentRepository {
           const draftResult = await transaction.query(
             `SELECT
                draft.opportunity_id AS "opportunityId",
+               opportunity.version AS "opportunityVersion",
+               opportunity.prospect_id AS "prospectId",
+               opportunity.recommendation_context_version_id
+                 AS "recommendationContextVersionId",
                draft.status,
                draft.current_version_id AS "currentVersionId",
-               draft.approved_version_id AS "approvedVersionId"
+               draft.approved_version_id AS "approvedVersionId",
+               draft.contact_id AS "draftContactId",
+               draft.contact_version AS "draftContactVersion",
+               version.contact_id AS "versionContactId",
+               version.contact_version AS "versionContactVersion",
+               version.version_no AS "draftVersionNo",
+               version.subject_text AS "subjectText",
+               version.body_text AS "bodyText",
+               version.body_document AS "bodyDocument"
              FROM backlinks.backlink_email_drafts AS draft
+             JOIN backlinks.backlink_opportunities AS opportunity
+               ON opportunity.organization_id = draft.organization_id
+              AND opportunity.workspace_id = draft.workspace_id
+              AND opportunity.website_project_id = draft.website_project_id
+              AND opportunity.id = draft.opportunity_id
+             LEFT JOIN backlinks.backlink_draft_versions AS version
+               ON version.organization_id = draft.organization_id
+              AND version.workspace_id = draft.workspace_id
+              AND version.website_project_id = draft.website_project_id
+              AND version.draft_id = draft.id
+              AND version.id = draft.current_version_id
             WHERE draft.organization_id = $1
               AND draft.workspace_id = $2
               AND draft.website_project_id = $3
               AND draft.id = $4
-            FOR UPDATE`,
+            FOR UPDATE OF draft, opportunity`,
             [
               input.organizationId,
               input.workspaceId,
@@ -300,30 +384,161 @@ implements SendIntentRepository {
           ) {
             return { state: "draft_not_approved" };
           }
+          if (
+            draft.draftContactId !== input.contactId
+            || draft.draftContactVersion !== input.contactVersion
+            || draft.versionContactId !== input.contactId
+            || draft.versionContactVersion !== input.contactVersion
+          ) {
+            return { state: "contact_version_conflict" };
+          }
           const opportunityId = draft.opportunityId;
-          if (typeof opportunityId !== "string") {
+          if (
+            typeof opportunityId !== "string"
+            || typeof draft.opportunityVersion !== "number"
+            || !Number.isSafeInteger(draft.opportunityVersion)
+            || typeof draft.draftVersionNo !== "number"
+            || !Number.isSafeInteger(draft.draftVersionNo)
+            || typeof draft.subjectText !== "string"
+            || typeof draft.bodyText !== "string"
+          ) {
             throw new TypeError(
               "Send Intent persistence returned an invalid Draft.",
             );
           }
 
-          const bindingResult = await transaction.query(
-            `SELECT 1
-               FROM backlinks.backlink_gmail_workspace_bindings AS binding
-              WHERE binding.organization_id = $1
-                AND binding.workspace_id = $2
-                AND binding.gmail_connection_id = $3
-                AND binding.binding_status = 'ACTIVE'
-              LIMIT 1`,
+          const contactResult = await transaction.query(
+            `SELECT contact.id AS "contactId",
+                    contact.version AS "contactVersion",
+                    contact.normalized_email AS "normalizedEmail"
+               FROM backlinks.backlink_contacts AS contact
+              WHERE contact.organization_id = $1
+                AND contact.workspace_id = $2
+                AND contact.website_project_id = $3
+                AND contact.id = $4
+                AND contact.prospect_id = $5
+                AND contact.recommendation_context_version_id = $6
+                AND contact.status = 'active'
+                AND contact.guessed = false
+                AND contact.invalidated_at IS NULL
+              FOR SHARE`,
             [
               input.organizationId,
               input.workspaceId,
-              input.gmailConnectionId,
+              input.websiteProjectId,
+              input.contactId,
+              draft.prospectId,
+              draft.recommendationContextVersionId,
             ],
           );
-          if (bindingResult.rows[0] === undefined) {
+          const contact = contactResult.rows[0];
+          if (contact === undefined) {
+            return { state: "contact_unavailable" };
+          }
+          if (contact.contactVersion !== input.contactVersion) {
+            return { state: "contact_version_conflict" };
+          }
+          if (typeof contact.normalizedEmail !== "string") {
+            throw new TypeError(
+              "Send Intent persistence returned an invalid Contact.",
+            );
+          }
+          const recipient = contact.normalizedEmail.trim().toLowerCase();
+
+          const bindingResult = await transaction.query(
+            `SELECT connection.version AS "gmailConnectionVersion",
+                    identity.id AS "gmailIdentityId",
+                    identity.version AS "gmailIdentityVersion"
+               FROM backlinks.backlink_gmail_workspace_bindings AS binding
+               JOIN backlinks.backlink_gmail_connections AS connection
+                 ON connection.organization_id = binding.organization_id
+                AND connection.id = binding.gmail_connection_id
+               JOIN backlinks.backlink_gmail_send_identities AS identity
+                 ON identity.organization_id = connection.organization_id
+                AND identity.gmail_connection_id = connection.id
+                WHERE binding.organization_id = $1
+                  AND binding.workspace_id = $2
+                  AND binding.gmail_connection_id = $3
+                  AND binding.website_project_id = $4
+                  AND binding.binding_status = 'ACTIVE'
+                AND connection.connection_status = 'CONNECTED'
+                AND connection.send_availability = 'AVAILABLE'
+                AND identity.verification_status = 'accepted'
+              ORDER BY identity.is_default DESC,
+                       identity.is_primary DESC,
+                       identity.id
+              LIMIT 1
+              FOR SHARE OF binding, connection, identity`,
+            [
+                input.organizationId,
+                input.workspaceId,
+                input.gmailConnectionId,
+                input.websiteProjectId,
+            ],
+          );
+          const gmailBinding = bindingResult.rows[0];
+          if (gmailBinding === undefined) {
             return { state: "gmail_connection_unavailable" };
           }
+          if (
+            typeof gmailBinding.gmailConnectionVersion !== "number"
+            || !Number.isSafeInteger(gmailBinding.gmailConnectionVersion)
+            || typeof gmailBinding.gmailIdentityId !== "string"
+            || typeof gmailBinding.gmailIdentityVersion !== "number"
+            || !Number.isSafeInteger(gmailBinding.gmailIdentityVersion)
+          ) {
+            throw new TypeError(
+              "Send Intent persistence returned an invalid Gmail binding.",
+            );
+          }
+
+          if (input.messagePurpose === "INITIAL_OUTREACH") {
+            await transaction.query(
+              `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+              [
+                `initial-outreach:${input.organizationId}:`
+                + `${input.workspaceId}:${input.contactId}`,
+              ],
+            );
+            const cooldownResult = await transaction.query(
+              `SELECT max(
+                 intent.requested_send_at + interval '30 days'
+               ) AS "retryAt"
+                 FROM backlinks.backlink_send_intents AS intent
+                WHERE intent.organization_id = $1
+                  AND intent.workspace_id = $2
+                  AND intent.contact_id = $3
+                  AND intent.message_purpose = 'INITIAL_OUTREACH'
+                  AND intent.status NOT IN (
+                    'CANCELLED', 'REJECTED', 'FAILED_FINAL'
+                  )`,
+              [
+                input.organizationId,
+                input.workspaceId,
+                input.contactId,
+              ],
+            );
+            const retryValue = cooldownResult.rows[0]?.retryAt;
+            if (retryValue !== null && retryValue !== undefined) {
+              const retryAt = asDate(
+                retryValue,
+                "initial outreach retry_at",
+              );
+              if (retryAt.getTime() > input.requestedSendAt.getTime()) {
+                return {
+                  state: "initial_outreach_cooldown",
+                  retryAt: retryAt.toISOString(),
+                };
+              }
+            }
+          }
+
+          const recipientHash = sha256(recipient);
+          const contentHash = sha256(canonicalJson({
+            subjectText: draft.subjectText,
+            bodyText: draft.bodyText,
+            bodyDocument: draft.bodyDocument ?? null,
+          }));
 
           const usageResult = await transaction.query(
             `SELECT
@@ -422,12 +637,13 @@ implements SendIntentRepository {
             `INSERT INTO backlinks.backlink_send_intents (
                id, organization_id, workspace_id, website_project_id,
                opportunity_id, draft_id, approved_draft_version_id,
+               contact_id, contact_version, send_snapshot_id,
                gmail_connection_id, client_idempotency_key,
                logical_message_key, message_purpose, follow_up_index,
                requested_send_at, status, version, created_by, updated_by
              ) VALUES (
                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-               $13, 'READY', 1, $14, $14
+               $13, $14, $15, $16, 'READY', 1, $17, $17
              )`,
             [
               input.sendIntentId,
@@ -437,11 +653,57 @@ implements SendIntentRepository {
               opportunityId,
               input.draftId,
               input.approvedDraftVersionId,
+              input.contactId,
+              input.contactVersion,
+              input.sendSnapshotId,
               input.gmailConnectionId,
               input.clientIdempotencyKey,
               input.logicalMessageKey,
               input.messagePurpose,
               input.followUpIndex,
+              input.requestedSendAt,
+              input.actorId,
+            ],
+          );
+
+          await transaction.query(
+            `INSERT INTO backlinks.backlink_send_snapshots (
+               id, organization_id, workspace_id, website_project_id,
+               send_intent_id, opportunity_id, opportunity_version,
+               draft_id, draft_version_id, draft_version_no,
+               contact_id, contact_version, recipient, recipient_hash,
+               subject_text, body_text, body_document, content_hash,
+               gmail_connection_id, gmail_connection_version,
+               gmail_identity_id, gmail_identity_version,
+               snapshot_schema_version, created_at, created_by
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+               $11, $12, $13, $14, $15, $16, $17, $18,
+               $19, $20, $21, $22, 1, $23, $24
+             )`,
+            [
+              input.sendSnapshotId,
+              input.organizationId,
+              input.workspaceId,
+              input.websiteProjectId,
+              input.sendIntentId,
+              opportunityId,
+              draft.opportunityVersion,
+              input.draftId,
+              input.approvedDraftVersionId,
+              draft.draftVersionNo,
+              input.contactId,
+              input.contactVersion,
+              recipient,
+              recipientHash,
+              draft.subjectText,
+              draft.bodyText,
+              draft.bodyDocument ?? null,
+              contentHash,
+              input.gmailConnectionId,
+              gmailBinding.gmailConnectionVersion,
+              gmailBinding.gmailIdentityId,
+              gmailBinding.gmailIdentityVersion,
               input.requestedSendAt,
               input.actorId,
             ],
@@ -497,15 +759,22 @@ implements SendIntentRepository {
               `send-intent-created:${input.sendIntentId}`,
               {
                 sendIntentId: input.sendIntentId,
+                sendSnapshotId: input.sendSnapshotId,
                 draftId: input.draftId,
                 approvedDraftVersionId: input.approvedDraftVersionId,
+                contactId: input.contactId,
+                contactVersion: input.contactVersion,
+                recipientHash,
+                contentHash,
                 gmailConnectionId: input.gmailConnectionId,
+                gmailIdentityId: gmailBinding.gmailIdentityId,
                 messagePurpose: input.messagePurpose,
                 followUpIndex: input.followUpIndex,
                 requestedSendAt: input.requestedSendAt.toISOString(),
                 quotaReservationId: input.quotaReservationId,
                 quotaEligibleAt: eligibleAt.toISOString(),
                 quotaExpiresAt: expiresAt.toISOString(),
+                actorId: input.actorId,
                 status: "READY",
                 version: 1,
               },
@@ -517,8 +786,11 @@ implements SendIntentRepository {
             state: "created",
             intent: {
               sendIntentId: input.sendIntentId,
+              sendSnapshotId: input.sendSnapshotId,
               draftId: input.draftId,
               approvedDraftVersionId: input.approvedDraftVersionId,
+              contactId: input.contactId,
+              contactVersion: input.contactVersion,
               status: "READY",
               version: 1,
               requestedSendAt: input.requestedSendAt.toISOString(),

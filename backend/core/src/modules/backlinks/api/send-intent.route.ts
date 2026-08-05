@@ -10,6 +10,9 @@ import type { BacklinksModule } from "../application/backlinks.module.js";
 import type {
   createSendIntentCommands,
 } from "../application/commands/send-intent.command.js";
+import type {
+  SendIntentQuery,
+} from "../application/queries/send-intent.query.js";
 import {
   BacklinkError,
   backlinkErrorCodes,
@@ -22,6 +25,8 @@ import {
 import {
   createSendIntentBodySchema,
   createSendIntentResponseSchema,
+  getSendIntentParamsSchema,
+  getSendIntentResponseSchema,
   sendIntentHeadersSchema,
   sendIntentParamsSchema,
 } from "./send-intent.schema.js";
@@ -60,10 +65,46 @@ function sendError(
 export function registerBacklinksSendIntentRoute(
   app: FastifyInstance,
   options: Readonly<{
-    module: BacklinksModule;
+    module: BacklinksModule<SendIntentQuery>;
     commands: Commands;
   }>,
 ): void {
+  app.withTypeProvider<ZodTypeProvider>().get(
+    "/api/v1/projects/:websiteProjectKey/backlinks/send-intents/:sendIntentId",
+    {
+      schema: {
+        operationId: "backlinksGetSendIntentV1",
+        params: getSendIntentParamsSchema,
+        response: {
+          200: getSendIntentResponseSchema,
+          ...errors,
+        },
+      },
+      errorHandler: sendError,
+    },
+    async (request) => {
+      const context = await options.module.projectContext.resolve({
+        actor: request.actor,
+        websiteProjectKey: request.params.websiteProjectKey,
+      });
+      const sendIntent = await options.module.queries.getSendIntent(
+        context,
+        request.params.sendIntentId,
+      );
+      return {
+        sendIntent,
+        meta: {
+          organizationId: context.tenant.organizationId,
+          workspaceId: context.tenant.workspaceId,
+          websiteProjectId: context.project.websiteProjectId,
+          requestId: request.id,
+          schemaVersion: "backlinks.v1" as const,
+          generatedAt: new Date().toISOString(),
+        },
+      };
+    },
+  );
+
   app.withTypeProvider<ZodTypeProvider>().post(
     "/api/v1/projects/:websiteProjectKey/backlinks/drafts/:draftId/send-intents",
     {
@@ -88,6 +129,8 @@ export function registerBacklinksSendIntentRoute(
         context,
         draftId: request.params.draftId,
         approvedDraftVersionId: request.body.approvedDraftVersionId,
+        contactId: request.body.contactId,
+        contactVersion: request.body.contactVersion,
         gmailConnectionId: request.body.gmailConnectionId,
         messagePurpose: request.body.messagePurpose,
         followUpIndex: request.body.followUpIndex,

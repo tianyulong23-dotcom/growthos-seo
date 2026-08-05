@@ -25,6 +25,7 @@ const platformContextIssuer = "growthos-platform-gateway";
 const platformContextAudience = "growthos-backlinks-core";
 const maximumLifetimeMs = 60_000;
 const allowedClockSkewMs = 5_000;
+const verifiedContextByActor = new WeakMap<ActorContext, PlatformRequestContextV1>();
 
 const nonBlankIdentifier = z
   .string()
@@ -118,6 +119,16 @@ function authenticationFailure(): BacklinkError {
     code: backlinkErrorCodes.authenticationRequired,
     message: "A valid internal platform context is required.",
   });
+}
+
+export function verifiedPlatformContextForActor(
+  actor: ActorContext,
+): PlatformRequestContextV1 {
+  const context = verifiedContextByActor.get(actor);
+  if (context === undefined) {
+    throw authenticationFailure();
+  }
+  return context;
 }
 
 function headerValue(
@@ -277,6 +288,7 @@ export function registerBacklinksPlatformContextConsumer(
         sessionId: context.actor.sessionId,
         roles: context.actor.roles,
       });
+      verifiedContextByActor.set(request.actor, context);
     } catch (error) {
       return sendContextFailure(error, request, reply);
     }

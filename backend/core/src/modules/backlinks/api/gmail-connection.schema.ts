@@ -73,6 +73,27 @@ export const gmailStatusResponseSchema = z.object({
   meta: gmailConnectionMetaSchema,
 }).strict();
 
+export const gmailPollingSyncResponseSchema = z.object({
+  status: z.literal("ACCEPTED"),
+  workflowId: nonBlank.max(1_024),
+  meta: gmailConnectionMetaSchema,
+}).strict();
+
+export const gmailPollingSyncStatusResponseSchema = z.object({
+  state: z.enum(["BLOCKED", "WAITING_FOR_ACCEPTED_SEND", "POLLING"]),
+  workflowId: nonBlank.max(1_024),
+  pollingIntervalSeconds: z.number().int().min(15).max(3_600),
+  killSwitchOpen: z.boolean(),
+  acceptedSendCount: z.number().int().nonnegative(),
+  cursor: z.object({
+    historyId: nonBlank,
+    initialSyncCompletedAt: timestamp.nullable(),
+    lastSyncedAt: timestamp.nullable(),
+    version: z.number().int().positive(),
+  }).strict().nullable(),
+  meta: gmailConnectionMetaSchema,
+}).strict();
+
 export const gmailDisconnectBodySchema = z.object({
   expectedVersion: z.number().int().positive(),
 }).strict();

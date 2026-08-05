@@ -9,6 +9,14 @@ type TemporalConnection = Readonly<{
 type TemporalWorkflowClient = Readonly<{
   options: Readonly<{ namespace: string }>;
   workflowService: unknown;
+  start(type: string, options: Readonly<{
+    workflowId: string;
+    taskQueue: string;
+    args: readonly unknown[];
+  }>): Promise<unknown>;
+  getHandle(workflowId: string): Readonly<{
+    signal(signalName: string): Promise<void>;
+  }>;
 }>;
 const require = createRequire(import.meta.url);
 const temporalClientSdk = require("@temporalio/client") as Readonly<{

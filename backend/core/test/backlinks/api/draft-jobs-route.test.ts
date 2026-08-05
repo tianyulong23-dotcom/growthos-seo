@@ -23,6 +23,9 @@ const opportunityId = "018f0000-0000-7000-8000-000000000095";
 const snapshotId = "018f0000-0000-7000-8000-000000000195";
 const runId = "018f0000-0000-7000-8000-000000000295";
 const draftId = "018f0000-0000-7000-8000-000000000395";
+const contactId = "018f0000-0000-7000-8000-000000000495";
+const contactVersion = 2;
+const queuedAt = new Date("2026-07-27T09:00:00.000Z");
 const member = createActorContext({
   userId: "user-95",
   sessionId: "session-95",
@@ -53,6 +56,9 @@ describe("BL-AI-095 Draft Job API", () => {
     }>();
     let budgetAvailable = true;
     const repository = {
+      async prepareEvidenceSnapshot() {
+        return { snapshotId, replayed: false };
+      },
       async createJob(input: CreateDraftGenerationJobInput) {
         const prior = idempotency.get(input.idempotencyKey);
         if (prior !== undefined) {
@@ -67,12 +73,21 @@ describe("BL-AI-095 Draft Job API", () => {
           status: "QUEUED",
           started: false,
           opportunityId: input.opportunityId,
+          contactId: input.contactId,
+          contactVersion: input.contactVersion,
           evidenceSnapshotId: input.evidenceSnapshotId,
           promptVersion: input.promptVersion,
           outputSchemaVersion: input.outputSchemaVersion,
           baseDraftVersion: 1,
           versionId: null,
           lastSuccessfulVersionId: null,
+          queuedAt,
+          startedAt: null,
+          finishedAt: null,
+          latencyMs: null,
+          attemptCount: 0,
+          lastErrorCategory: null,
+          persistenceLatencyMs: null,
         };
         jobs.set(runId, job);
         idempotency.set(input.idempotencyKey, {
@@ -88,10 +103,23 @@ describe("BL-AI-095 Draft Job API", () => {
         }
         return job;
       },
+      async findLatestJob(input: {
+        opportunityId: string;
+        logicalDraftKey: string;
+      }) {
+        return [...jobs.values()]
+          .find((job) =>
+            job.opportunityId === input.opportunityId
+            && input.logicalDraftKey === "initial-outreach"
+          ) ?? null;
+      },
       async getDraft() {
         throw new Error("not used");
       },
       async claimJob() {
+        throw new Error("not used");
+      },
+      async loadPromptContext() {
         throw new Error("not used");
       },
       async completeJob() {
@@ -111,12 +139,18 @@ describe("BL-AI-095 Draft Job API", () => {
         },
       },
       newId: (() => {
-        const values = [draftId, runId];
+        const values = [snapshotId, draftId, runId];
         return () => values.shift() ?? "018f0000-0000-7000-8000-999999999999";
       })(),
       now: () => new Date("2026-07-27T09:00:00.000Z"),
       promptVersion: "draft-prompt.v1",
       outputSchemaVersion: "draft-output.v1",
+      generationMode: "MODEL",
+      scheduler: {
+        async start(input) {
+          return { workflowId: `draft-generation:${input.runId}` };
+        },
+      },
     });
     const app = Fastify({ logger: false, genReqId: () => "request-95" });
     await registerBacklinksOpenApi(app);
@@ -157,7 +191,8 @@ describe("BL-AI-095 Draft Job API", () => {
           ...(role === undefined ? {} : { "x-role": role }),
         },
         payload: {
-          evidenceSnapshotId: snapshotId,
+          contactId,
+          contactVersion,
           logicalDraftKey,
         },
       });
@@ -167,6 +202,11 @@ describe("BL-AI-095 Draft Job API", () => {
       jobId: runId,
       draftId,
       status: "QUEUED",
+      contactId,
+      contactVersion,
+      evidenceSnapshotId: snapshotId,
+      workflowId: `draft-generation:${runId}`,
+      generationMode: "MODEL",
       replayed: false,
       meta: { websiteProjectId: "project-95", requestId: "request-95" },
     });
@@ -204,9 +244,37 @@ describe("BL-AI-095 Draft Job API", () => {
         id: runId,
         draftId,
         status: "QUEUED",
+        contactId,
+        contactVersion,
         lastSuccessfulVersionId: null,
+        queuedAt: "2026-07-27T09:00:00.000Z",
+        startedAt: null,
+        finishedAt: null,
+        deadlineAt: "2026-07-27T09:02:00.000Z",
+        queueWaitMs: null,
+        latencyMs: null,
+        persistenceLatencyMs: null,
+        attemptCount: 0,
+        lastErrorCategory: null,
       },
     });
+    const latest = await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/project-key/backlinks/opportunities/${opportunityId}/draft-jobs/latest?logicalDraftKey=initial-outreach`,
+    });
+    expect(latest.statusCode).toBe(200);
+    expect(latest.json()).toMatchObject({
+      job: {
+        id: runId,
+        draftId,
+        status: "QUEUED",
+        queuedAt: "2026-07-27T09:00:00.000Z",
+      },
+    });
+    expect((await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/project-key/backlinks/opportunities/${opportunityId}/draft-jobs/latest?logicalDraftKey=unknown`,
+    })).json()).toMatchObject({ job: null });
     expect((await app.inject({
       method: "GET",
       url: `/api/v1/projects/foreign/backlinks/draft-jobs/${runId}`,

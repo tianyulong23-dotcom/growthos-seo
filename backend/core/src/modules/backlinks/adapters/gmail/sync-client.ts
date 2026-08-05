@@ -22,6 +22,7 @@ import {
 
 export const gmailSyncClientConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  initialQuery: z.string().trim().min(1).max(2_048).optional(),
 }).strict();
 
 export const gmailSyncClientAdapterFailureCodes = {
@@ -112,6 +113,7 @@ export class GmailSyncProviderError extends Error {
 export type GmailSyncClientAdapterOptions = Readonly<{
   config?: Readonly<{
     enabled?: boolean;
+    initialQuery?: string;
   }>;
   client?: GmailSyncProviderClient;
 }>;
@@ -307,6 +309,7 @@ const mapWatchResponse = (value: unknown): GmailWatchResult => {
 
 export class GmailSyncClientAdapter implements GmailSyncPort {
   readonly #enabled: boolean;
+  readonly #initialQuery: string | undefined;
   readonly #client: GmailSyncProviderClient | undefined;
 
   constructor(options: GmailSyncClientAdapterOptions = {}) {
@@ -315,6 +318,7 @@ export class GmailSyncClientAdapter implements GmailSyncPort {
       throw fail(gmailSyncClientAdapterFailureCodes.misconfigured);
     }
     this.#enabled = config.enabled;
+    this.#initialQuery = config.initialQuery;
     this.#client = options.client;
   }
 
@@ -331,7 +335,10 @@ export class GmailSyncClientAdapter implements GmailSyncPort {
       (client) => client.listInitial({
         gmailConnectionId: parsed.gmailConnectionId,
         userId: "me",
-        q: `after:${receivedAfterSeconds}`,
+        q: [
+          `after:${receivedAfterSeconds}`,
+          this.#initialQuery,
+        ].filter((value): value is string => value !== undefined).join(" "),
         ...(parsed.pageToken === undefined
           ? {}
           : { pageToken: parsed.pageToken }),

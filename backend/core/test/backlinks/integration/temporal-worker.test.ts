@@ -89,4 +89,42 @@ describe("backlinks Temporal client and worker", () => {
     expect(close).toHaveBeenCalledOnce();
     await expect(running.completion).resolves.toBeUndefined();
   });
+
+  it("starts and drains background services with the worker", async () => {
+    let finishRun: (() => void) | undefined;
+    const run = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRun = resolve;
+        }),
+    );
+    const shutdown = vi.fn(() => finishRun?.());
+    const close = vi.fn(async () => undefined);
+    const startService = vi.fn(async () => undefined);
+    const stopService = vi.fn(async () => undefined);
+    const factory = vi.fn<BacklinksWorkerFactory>(
+      async () => ({ run, shutdown, close }),
+    );
+    const config = backlinksTemporalConfigSchema.parse({
+      ...requiredConfig,
+      BACKLINKS_WORKER_ENABLED: "true",
+    });
+    const running = await startBacklinksWorker(
+      config,
+      {
+        ...registrations,
+        backgroundServices: [{
+          start: startService,
+          stop: stopService,
+        }],
+      },
+      factory,
+    );
+
+    expect(startService).toHaveBeenCalledOnce();
+    await running.stop();
+    expect(stopService).toHaveBeenCalledOnce();
+    expect(shutdown).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
 });

@@ -21,6 +21,9 @@ const draftId = "018f0000-0000-7000-8000-000000000314";
 const approvedDraftVersionId =
   "018f0000-0000-7000-8000-000000000414";
 const gmailConnectionId = "018f0000-0000-7000-8000-000000000514";
+const contactId = "018f0000-0000-7000-8000-000000000614";
+const sendSnapshotId = "018f0000-0000-7000-8000-000000000216";
+const contactVersion = 3;
 const requestedSendAt = new Date("2026-07-27T10:14:00.000Z");
 const context = {
   actor: createActorContext({
@@ -46,6 +49,8 @@ const input = {
   context,
   draftId,
   approvedDraftVersionId,
+  contactId,
+  contactVersion,
   gmailConnectionId,
   messagePurpose: "FOLLOW_UP" as const,
   followUpIndex: 1,
@@ -53,8 +58,11 @@ const input = {
 };
 const createdIntent = {
   sendIntentId,
+  sendSnapshotId,
   draftId,
   approvedDraftVersionId,
+  contactId,
+  contactVersion,
   status: "READY" as const,
   version: 1,
   requestedSendAt: requestedSendAt.toISOString(),
@@ -69,7 +77,12 @@ describe("BL-AI-114/115 Send Intent command", () => {
         return { state: "created", intent: createdIntent };
       },
     };
-    const ids = [sendIntentId, quotaReservationId, outboxEventId];
+    const ids = [
+      sendIntentId,
+      quotaReservationId,
+      outboxEventId,
+      sendSnapshotId,
+    ];
     const commands = createSendIntentCommands({
       repository,
       newId: () => ids.shift() ?? "unexpected-id",
@@ -78,8 +91,11 @@ describe("BL-AI-114/115 Send Intent command", () => {
 
     await expect(commands.create(input)).resolves.toEqual({
       sendIntentId,
+      sendSnapshotId,
       draftId,
       approvedDraftVersionId,
+      contactId,
+      contactVersion,
       status: "READY",
       version: 1,
       requestedSendAt: requestedSendAt.toISOString(),
@@ -89,10 +105,13 @@ describe("BL-AI-114/115 Send Intent command", () => {
       workspaceId: "workspace-114",
       websiteProjectId: "project-114",
       sendIntentId,
+      sendSnapshotId,
       quotaReservationId,
       outboxEventId,
       draftId,
       approvedDraftVersionId,
+      contactId,
+      contactVersion,
       gmailConnectionId,
       clientIdempotencyKey: "send-intent-114",
       messagePurpose: "FOLLOW_UP",
@@ -130,6 +149,31 @@ describe("BL-AI-114/115 Send Intent command", () => {
       ...createdIntent,
       sendIntentId: "018f0000-0000-7000-8000-000000000999",
       requestedSendAt: replayedAt,
+    });
+  });
+
+  it("uses the configured bounded local Gmail quota", async () => {
+    let recorded: CreateSendIntentRecordInput | undefined;
+    const repository: SendIntentRepository = {
+      async create(candidate) {
+        recorded = candidate;
+        return { state: "created", intent: createdIntent };
+      },
+    };
+    const commands = createSendIntentCommands({
+      repository,
+      newId: () => sendIntentId,
+      now: () => requestedSendAt,
+      quotaProfile: {
+        rolling24HourSendLimit: 20,
+        minimumIntervalSeconds: 120,
+      },
+    });
+
+    await commands.create(input);
+    expect(recorded).toMatchObject({
+      rolling24HourSendLimit: 20,
+      minimumIntervalSeconds: 120,
     });
   });
 
@@ -178,7 +222,13 @@ describe("BL-AI-114/115 Send Intent command", () => {
     [{ state: "draft_not_found" }, "BACKLINK_NOT_FOUND"],
     [{ state: "draft_not_approved" }, "BACKLINK_CONFLICT"],
     [{ state: "gmail_connection_unavailable" }, "BACKLINK_NOT_FOUND"],
+    [{ state: "contact_unavailable" }, "BACKLINK_NOT_FOUND"],
+    [{ state: "contact_version_conflict" }, "BACKLINK_CONFLICT"],
     [{ state: "conflict" }, "BACKLINK_CONFLICT"],
+    [{
+      state: "initial_outreach_cooldown",
+      retryAt: "2026-08-26T10:14:00.000Z",
+    }, "BACKLINK_RATE_LIMITED"],
     [{
       state: "quota_exceeded",
       dailyLimit: 5,

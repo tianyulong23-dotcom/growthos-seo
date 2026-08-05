@@ -64,6 +64,14 @@ const providerMigration = new URL(
   "../../../src/modules/backlinks/db/migrations/0002_backlink_provider_seo.sql",
   import.meta.url,
 );
+const migration = (name: string) => new URL(
+  `../../../src/modules/backlinks/db/migrations/${name}`,
+  import.meta.url,
+);
+const roles = new URL(
+  "../../../../database/roles/0001_growthos_schema_roles.sql",
+  import.meta.url,
+);
 const providerSnapshot = {
   provider: "dataforseo" as const,
   schemaVersion: "dataforseo.backlinks-referring-domains.v1",
@@ -84,12 +92,34 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
     client = new Client({ connectionString: harness.connectionString });
     await client.connect();
     await client.query(await readFile(providerMigration, "utf8"));
+    for (const name of [
+      "0003_backlink_recommendations.sql",
+      "0004_backlink_contacts_opportunities.sql",
+    ]) {
+      await client.query(await readFile(migration(name), "utf8"));
+    }
+    await client.query(await readFile(roles, "utf8"));
+    await client.query(await readFile(
+      migration("0005_backlink_schema_role_ownership.sql"),
+      "utf8",
+    ));
+    await client.query(await readFile(
+      migration("0032_dataforseo_cost_control.sql"),
+      "utf8",
+    ));
+    await client.query(await readFile(
+      migration("0042_backlink_project_recommendation_context.sql"),
+      "utf8",
+    ));
+    await client.query("SET search_path = backlinks, pg_catalog");
   }, 120_000);
   beforeEach(() => client.query(
-    `TRUNCATE backlink_provider_usage_ledger, backlink_provider_cache_entries,
+    `TRUNCATE provider_artifact_usages, workspace_evidence_projections,
+       provider_artifacts, provider_fetch_leases, provider_batch_requests,
+       backlink_provider_usage_ledger, backlink_provider_cache_entries,
        backlink_seo_snapshots, backlink_provider_requests,
        backlink_provider_budgets, backlink_audit_events, backlink_lifecycle_events,
-       backlink_project_context_snapshots, backlink_jobs`,
+       backlink_project_context_snapshots, backlink_jobs CASCADE`,
   ));
   afterAll(async () => {
     await client.end();
@@ -116,14 +146,24 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
     expect(replay).toEqual(first);
     expect(provider.calls).toHaveLength(1);
     expect((await client.query(`
-      SELECT l.status, l.actual_cost_micros, b.spent_micros, b.reserved_micros
+      SELECT l.status, l.actual_cost_micros, b.spent_micros, b.reserved_micros,
+        batch.status AS batch_status,
+        count(usage.id)::int AS usage_count
       FROM backlink_provider_usage_ledger l
       JOIN backlink_provider_budgets b ON b.id=l.budget_id
+      JOIN provider_batch_requests batch ON batch.id=l.provider_request_id
+      JOIN provider_artifacts artifact ON artifact.source_batch_id=batch.id
+      JOIN provider_artifact_usages usage
+        ON usage.artifact_id=artifact.id
+      GROUP BY l.status,l.actual_cost_micros,b.spent_micros,b.reserved_micros,
+        batch.status
     `)).rows).toEqual([{
       status: "settled",
       actual_cost_micros: "20000",
       spent_micros: "20000",
       reserved_micros: "0",
+      batch_status: "succeeded",
+      usage_count: 2,
     }]);
   }, 60_000);
 
@@ -139,6 +179,9 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       countryCode: "US",
       profileVersionId: "profile-v1",
       promotionTargetVersionId: "promotion-v1",
+      products: ["Example product"],
+      keywords: ["example keyword"],
+      targetUrls: ["https://example.com/"],
       actorId: "user-051",
     });
     await client.query(`INSERT INTO backlink_provider_budgets (
@@ -165,7 +208,6 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
     });
     return createBacklinkProjectAnalysisActivities(snapshots, {
       dataForSeo: service,
-      cacheTtlMs: 60_000,
       cacheSchemaVersion: 1,
       estimatedCostMicros: 20_000,
       limit: 100,
@@ -195,15 +237,21 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
 
     expect(fetchBacklinkSnapshot).toHaveBeenCalledOnce();
     const stored = await client.query(`
-      SELECT r.status, l.status AS ledger_status, b.reserved_micros
+      SELECT r.status, l.status AS ledger_status, b.reserved_micros,
+        batch.status AS batch_status, lease.status AS lease_status
         FROM backlink_provider_requests r
         JOIN backlink_provider_usage_ledger l ON l.provider_request_id=r.id
         JOIN backlink_provider_budgets b ON b.id=l.budget_id
+        JOIN provider_batch_requests batch ON batch.id=r.id
+        JOIN provider_fetch_leases lease
+          ON lease.artifact_fingerprint=batch.normalized_request_hash
     `);
     expect(stored.rows).toEqual([{
       status: "unknown_charge",
       ledger_status: "reserved",
       reserved_micros: "20000",
+      batch_status: "unknown_charge",
+      lease_status: "unknown_charge",
     }]);
   }, 60_000);
 
@@ -219,6 +267,9 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       countryCode: "US",
       profileVersionId: "profile-v1",
       promotionTargetVersionId: "promotion-v1",
+      products: ["Example product"],
+      keywords: ["example keyword"],
+      targetUrls: ["https://example.com/"],
       actorId: "user-039",
     });
     const activities = createBacklinkProjectAnalysisActivities(snapshots);

@@ -13,14 +13,10 @@ import {
   Send,
   X,
 } from "lucide-react"
-import { useLocation, useNavigate, useParams } from "react-router"
+import { useLocation, useNavigate } from "react-router"
 
 import { allNavigation } from "@/app/platform-navigation"
-import {
-  defaultProject,
-  getProject,
-  projects,
-} from "@/app/project-context"
+import { useCurrentProject } from "@/app/project-context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
@@ -46,7 +42,9 @@ type AgentDockContentProps = {
   onClose?: () => void
 }
 
-const initialMessages: AgentMessage[] = [
+type AgentScope = "default" | "backlinks"
+
+const defaultInitialMessages: AgentMessage[] = [
   {
     id: 1,
     role: "agent",
@@ -67,6 +65,31 @@ const initialMessages: AgentMessage[] = [
   },
 ]
 
+const backlinksInitialMessages: AgentMessage[] = [
+  {
+    id: 1,
+    role: "agent",
+    content:
+      "我可以帮助你筛选推荐网站、推进外链机会、整理草稿和处理待回复邮件。",
+  },
+  {
+    id: 2,
+    role: "user",
+    content: "先告诉我当前最值得优先处理的外链工作。",
+  },
+  {
+    id: 3,
+    role: "agent",
+    content:
+      "建议先处理需要确认的回复，再补全缺少联系人的机会，最后从高匹配推荐中筛选下一批目标。",
+    task: true,
+  },
+]
+
+function getAgentScope(pathname: string): AgentScope {
+  return pathname.includes("/backlinks/") ? "backlinks" : "default"
+}
+
 function getPageContext(pathname: string) {
   const [, , , moduleId, viewId] = pathname.split("/")
   const currentModule =
@@ -76,7 +99,28 @@ function getPageContext(pathname: string) {
   return currentView?.label ?? currentModule.label
 }
 
-function buildReply(prompt: string, context?: string | null) {
+function buildReply(
+  prompt: string,
+  context: string | null | undefined,
+  scope: AgentScope
+) {
+  if (scope === "backlinks") {
+    if (prompt.includes("当前页面")) {
+      return context
+        ? `我正在基于“${context}”整理下一步。建议优先处理需要人工判断的项目，再推进可以立即行动的机会。`
+        : "请先引用当前页面，我会结合外链数据整理下一步。"
+    }
+    if (prompt.includes("推荐")) {
+      return "建议先筛选综合评分较高、主题匹配且数据完整的网站，再将值得推进的目标加入外链机会。"
+    }
+    if (prompt.includes("邮件")) {
+      return "建议先处理需要确认的回复，再检查待回复邮件，最后整理下一批待发送草稿。"
+    }
+    return context
+      ? `我会结合“${context}”和当前项目的推荐、机会与邮件状态继续分析。`
+      : "我会结合当前项目的推荐、机会与邮件状态继续分析。"
+  }
+
   if (prompt.includes("当前页面")) {
     return context
       ? `我正在基于“${context}”中的数据进行分析。当前优先级最高的是影响抓取和排名的异常项，我已经整理为一个三步执行计划。`
@@ -95,37 +139,76 @@ function buildReply(prompt: string, context?: string | null) {
 
 function AgentTaskCard({
   projectId,
+  pathname,
+  scope,
   onNavigate,
 }: {
   projectId: string
+  pathname: string
+  scope: AgentScope
   onNavigate?: () => void
 }) {
   const navigate = useNavigate()
+  const backlinksView = pathname.split("/")[4] ?? "projects"
+  const task =
+    scope === "backlinks"
+      ? {
+          title:
+            backlinksView === "email"
+              ? "邮件处理建议"
+              : backlinksView === "opportunities"
+                ? "机会推进建议"
+                : backlinksView === "recommendations"
+                  ? "推荐筛选建议"
+                  : "项目推进建议",
+          steps:
+            backlinksView === "email"
+              ? ["检查待回复邮件", "确认未匹配回复", "整理待发送草稿"]
+              : backlinksView === "opportunities"
+                ? ["补全联系人", "推进可联系机会", "复核暂停与归档项"]
+                : backlinksView === "recommendations"
+                  ? ["筛选高匹配网站", "复核风险提示", "确定下一批目标"]
+                  : ["检查项目准备度", "处理当前待办", "推进下一阶段"],
+          actionLabel:
+            backlinksView === "email"
+              ? "打开邮件中心"
+              : backlinksView === "opportunities"
+                ? "打开外链机会"
+                : backlinksView === "recommendations"
+                  ? "打开推荐池"
+                  : "打开项目控制台",
+          path: `/projects/${projectId}/backlinks/${backlinksView}`,
+        }
+      : {
+          title: "优先问题分析",
+          steps: ["读取最近一次网站审计", "评估问题影响范围", "生成修复优先级"],
+          actionLabel: "打开问题清单",
+          path: `/projects/${projectId}/audit/issues`,
+        }
 
   return (
     <div className="mt-3 rounded-md border bg-muted/20">
       <div className="flex items-center justify-between border-b px-3 py-2">
         <div className="flex items-center gap-2 text-xs font-medium">
           <FileSearch className="size-3.5 text-muted-foreground" />
-          优先问题分析
+          {task.title}
         </div>
         <Badge variant="outline" className="h-5 rounded-sm font-normal">
           已完成
         </Badge>
       </div>
       <div className="space-y-2.5 p-3">
-        {["读取最近一次网站审计", "评估问题影响范围", "生成修复优先级"].map(
-          (step) => (
-            <div key={step} className="flex items-center gap-2 text-xs">
-              <span className="flex size-4 items-center justify-center text-emerald-600 dark:text-emerald-400">
-                <Check className="size-3.5" />
-              </span>
-              <span>{step}</span>
-            </div>
-          )
-        )}
+        {task.steps.map((step) => (
+          <div key={step} className="flex items-center gap-2 text-xs">
+            <span className="flex size-4 items-center justify-center text-emerald-600 dark:text-emerald-400">
+              <Check className="size-3.5" />
+            </span>
+            <span>{step}</span>
+          </div>
+        ))}
         <Progress
           value={100}
+          aria-label={`${task.title}完成进度`}
           className="h-1 [&_[data-slot=progress-indicator]]:bg-emerald-500/70"
         />
         <Button
@@ -133,11 +216,11 @@ function AgentTaskCard({
           size="sm"
           className="w-full justify-between rounded-md bg-background"
           onClick={() => {
-            navigate(`/projects/${projectId}/audit/issues`)
+            navigate(task.path)
             onNavigate?.()
           }}
         >
-          打开问题清单
+          {task.actionLabel}
           <ArrowRight />
         </Button>
       </div>
@@ -148,16 +231,28 @@ function AgentTaskCard({
 function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
   const location = useLocation()
   const { state: sidebarState, toggleSidebar } = useSidebar()
-  const { projectId = defaultProject.id } = useParams()
-  const project = getProject(projectId)
+  const { currentProject: project, projects } = useCurrentProject()
+  if (!project) {
+    throw new Error("AgentDockContent requires an authorized current project.")
+  }
   const context = getPageContext(location.pathname)
+  const scope = getAgentScope(location.pathname)
+  const initialMessages =
+    scope === "backlinks" ? backlinksInitialMessages : defaultInitialMessages
+  const conversationKey = `${project.id}:${scope}`
   const [histories, setHistories] = React.useState<
     Record<string, AgentMessage[]>
   >(() =>
     Object.fromEntries(
-      projects.map((item) => [
-        item.id,
-        initialMessages.map((message) => ({ ...message })),
+      projects.flatMap((item) => [
+        [
+          `${item.id}:default`,
+          defaultInitialMessages.map((message) => ({ ...message })),
+        ],
+        [
+          `${item.id}:backlinks`,
+          backlinksInitialMessages.map((message) => ({ ...message })),
+        ],
       ])
     )
   )
@@ -170,7 +265,7 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
   const viewportRef = React.useRef<HTMLDivElement>(null)
   const timerRef = React.useRef<number | null>(null)
   const messageIdRef = React.useRef(10)
-  const messages = histories[project.id] ?? initialMessages
+  const messages = histories[conversationKey] ?? initialMessages
   const activeAttachedContext =
     attachedContext?.projectId === project.id ? attachedContext.label : null
 
@@ -193,7 +288,7 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
   function replaceProjectMessages(nextMessages: AgentMessage[]) {
     setHistories((current) => ({
       ...current,
-      [project.id]: nextMessages,
+      [conversationKey]: nextMessages,
     }))
   }
 
@@ -218,11 +313,11 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
       const reply: AgentMessage = {
         id: messageIdRef.current++,
         role: "agent",
-        content: buildReply(content, messageContext),
+        content: buildReply(content, messageContext, scope),
       }
       setHistories((current) => ({
         ...current,
-        [project.id]: [...(current[project.id] ?? []), reply],
+        [conversationKey]: [...(current[conversationKey] ?? []), reply],
       }))
       setIsThinking(false)
       timerRef.current = null
@@ -314,7 +409,12 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
               )}
               <p>{message.content}</p>
               {message.task && (
-                <AgentTaskCard projectId={project.id} onNavigate={onNavigate} />
+                <AgentTaskCard
+                  projectId={project.id}
+                  pathname={location.pathname}
+                  scope={scope}
+                  onNavigate={onNavigate}
+                />
               )}
             </div>
           )
@@ -330,30 +430,31 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
 
       <div className="shrink-0 border-t bg-background p-3">
         <div className="mb-2 no-scrollbar flex gap-1 overflow-x-auto">
-          {["分析当前页面", "寻找增长机会", "生成本周周报"].map(
-            (suggestion) => (
-              <Button
-                key={suggestion}
-                variant="ghost"
-                size="xs"
-                className="shrink-0 rounded-md border bg-background font-normal"
-                onClick={() => {
-                  if (suggestion === "分析当前页面") {
-                    setAttachedContext({
-                      projectId: project.id,
-                      label: context,
-                    })
-                    sendMessage(suggestion, context)
-                    return
-                  }
-                  sendMessage(suggestion)
-                }}
-                disabled={isThinking}
-              >
-                {suggestion}
-              </Button>
-            )
-          )}
+          {(scope === "backlinks"
+            ? ["分析当前页面", "筛选推荐网站", "整理待办邮件"]
+            : ["分析当前页面", "寻找增长机会", "生成本周周报"]
+          ).map((suggestion) => (
+            <Button
+              key={suggestion}
+              variant="ghost"
+              size="xs"
+              className="shrink-0 rounded-md border bg-background font-normal"
+              onClick={() => {
+                if (suggestion === "分析当前页面") {
+                  setAttachedContext({
+                    projectId: project.id,
+                    label: context,
+                  })
+                  sendMessage(suggestion, context)
+                  return
+                }
+                sendMessage(suggestion)
+              }}
+              disabled={isThinking}
+            >
+              {suggestion}
+            </Button>
+          ))}
         </div>
         {activeAttachedContext ? (
           <div className="mb-2 flex min-w-0 items-center gap-1">
@@ -399,7 +500,11 @@ function AgentDockContent({ onNavigate, onClose }: AgentDockContentProps) {
                 sendMessage()
               }
             }}
-            placeholder={`询问 ${project.domain} 的 SEO 数据...`}
+            placeholder={
+              scope === "backlinks"
+                ? `询问 ${project.domain} 的外链进展...`
+                : `询问 ${project.domain} 的 SEO 数据...`
+            }
             className="min-h-14 resize-none rounded-none border-0 bg-transparent p-1 shadow-none focus-visible:ring-0"
           />
           <div className="mt-1 flex items-center justify-between">

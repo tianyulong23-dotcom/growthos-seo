@@ -87,6 +87,8 @@ describe("BL-AI-077 project Opportunity counter", () => {
         "0005_backlink_schema_role_ownership.sql",
         "0006_backlink_opportunities.sql",
         "0007_backlink_opportunity_counter.sql",
+        "0011_backlink_contact_purpose_correction.sql",
+        "0039_backlink_opportunity_contact_gate.sql",
       ]) {
         await client.query(await readFile(migration(name), "utf8"));
       }
@@ -102,6 +104,14 @@ describe("BL-AI-077 project Opportunity counter", () => {
       const inventoryIds = Array.from(
         { length: concurrency },
         (_, index) => id(3_000 + index),
+      );
+      const contactCandidateIds = Array.from(
+        { length: concurrency },
+        (_, index) => id(4_000 + index),
+      );
+      const contactEvidenceIds = Array.from(
+        { length: concurrency },
+        (_, index) => id(5_000 + index),
       );
       const domains = Array.from(
         { length: concurrency },
@@ -133,6 +143,31 @@ describe("BL-AI-077 project Opportunity counter", () => {
           i(id,recommendation_id,prospect_id)`, [
         inventoryIds, recommendationIds, prospectIds, organizationId,
         workspaceId, websiteProjectId, recommendationContextVersionId,
+      ]);
+      await client.query(`INSERT INTO backlink_contact_candidates (
+        id,organization_id,workspace_id,website_project_id,prospect_id,
+        recommendation_context_version_id,normalized_email,email_domain_ascii,
+        domain_relation,syntax_validator_version,confidence,guessed,status,
+        inferred_purpose,purpose_confidence,created_by,updated_by
+      ) SELECT c.id,$4,$5,$6,c.prospect_id,$7,'editor@' || c.domain,c.domain,
+          'same_registrable_domain','email-syntax.v1',95,false,'candidate',
+          'editorial',95,'seed','seed'
+        FROM unnest($1::uuid[],$2::uuid[],$3::text[])
+          c(id,prospect_id,domain)`, [
+        contactCandidateIds, prospectIds, domains, organizationId,
+        workspaceId, websiteProjectId, recommendationContextVersionId,
+      ]);
+      await client.query(`INSERT INTO backlink_contact_evidence (
+        id,organization_id,workspace_id,website_project_id,candidate_id,
+        source_url,observed_at,extraction_method,evidence_snippet,
+        parser_version,content_sha256,confidence,expires_at,created_by
+      ) SELECT e.id,$4,$5,$6,e.candidate_id,'https://' || e.domain || '/contact',
+          now(),'visible_text','editor@' || e.domain,'contact-parser.v1',
+          repeat('a',64),95,now()+interval '30 days','seed'
+        FROM unnest($1::uuid[],$2::uuid[],$3::text[])
+          e(id,candidate_id,domain)`, [
+        contactEvidenceIds, contactCandidateIds, domains, organizationId,
+        workspaceId, websiteProjectId,
       ]);
     } finally {
       await client.end();
@@ -182,6 +217,7 @@ describe("BL-AI-077 project Opportunity counter", () => {
           .createFromRecommendation({
             context,
             recommendationId: id(2_000 + index),
+            contactCandidateId: id(4_000 + index),
             expectedVersion: 1,
             idempotencyKey: `accept-rec-077-${index + 1}`,
             requestId: `request-077-${index + 1}`,

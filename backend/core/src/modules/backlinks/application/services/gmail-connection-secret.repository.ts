@@ -112,6 +112,11 @@ export type RefreshGmailConnectionResult = Readonly<{
   version: number;
 }>;
 
+export type ResolveGmailAccessTokenInput = Readonly<{
+  context: ResolvedProjectContext;
+  connectionId: string;
+}>;
+
 export class GmailConnectionSecretRepositoryError extends Error {
   readonly code = "GMAIL_CONNECTION_SECRET_REPOSITORY_FAILED";
 
@@ -225,6 +230,55 @@ implements GmailConnectionCompletionGateway {
       { organizationId, connectionId: input.connectionId },
       async () => this.refreshUnderLock(input),
     );
+  }
+
+  async resolveAccessToken(
+    input: ResolveGmailAccessTokenInput,
+  ): Promise<string> {
+    if (input.connectionId.trim().length === 0) {
+      throw new TypeError("A connection ID is required.");
+    }
+
+    const lookup = lookupInput(input.context, input.connectionId);
+    let current = await this.#persistence.findRefreshState(lookup);
+    if (
+      current === null
+      || current.view.connectionStatus !== "CONNECTED"
+      || current.view.sendAvailability !== "AVAILABLE"
+    ) {
+      throw new GmailConnectionSecretRepositoryError();
+    }
+
+    const refreshBefore = Date.now() + 60_000;
+    if (Date.parse(current.view.tokenExpiresAt) <= refreshBefore) {
+      const refreshed = await this.refresh({
+        ...input,
+        expectedVersion: current.version,
+      });
+      if (refreshed.outcome === "REAUTH_REQUIRED") {
+        throw new GmailConnectionSecretRepositoryError();
+      }
+      current = await this.#persistence.findRefreshState(lookup);
+      if (
+        current === null
+        || current.view.connectionStatus !== "CONNECTED"
+        || current.view.sendAvailability !== "AVAILABLE"
+      ) {
+        throw new GmailConnectionSecretRepositoryError();
+      }
+    }
+
+    const tokens = decodeTokens(await this.#secretStore.resolve({
+      reference: current.tokenSecretReference,
+      context: tokenContext(
+        current.organizationId,
+        current.connectionId,
+      ),
+    }));
+    if (Date.parse(tokens.expiresAt) <= Date.now()) {
+      throw new GmailConnectionSecretRepositoryError();
+    }
+    return tokens.accessToken;
   }
 
   private async refreshUnderLock(

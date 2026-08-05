@@ -94,10 +94,13 @@ describe("BL-AI-096 Draft editing and approval API", () => {
     };
     const queryRepository: Pick<
       DraftGenerationRepository,
-      "getJob" | "getDraft"
+      "getJob" | "findLatestJob" | "getDraft"
     > = {
       async getJob() {
         throw new Error("unused");
+      },
+      async findLatestJob() {
+        return null;
       },
       async getDraft() {
         const current = versions.get(currentVersionId);
@@ -105,6 +108,8 @@ describe("BL-AI-096 Draft editing and approval API", () => {
         return {
           draftId,
           opportunityId: "018f0000-0000-7000-8000-000000000396",
+          contactId: null,
+          contactVersion: null,
           status: aggregateVersion === 4 ? "approved" : "draft",
           draftVersion: aggregateVersion,
           approvedVersionId: aggregateVersion === 4

@@ -1,6 +1,10 @@
 import * as React from "react"
 
 import {
+  backlinksProjectQueries,
+  createProjectQueryKey,
+} from "@/features/outreach/api/project-query"
+import {
   disconnectGmailConnection,
   getGmailConnectionStatus,
   startGmailConnection,
@@ -12,14 +16,42 @@ import type {
 
 type GmailConnectionLoadStatus = "idle" | "loading" | "ready" | "error"
 
+const oauthCallbackErrorParam = "gmailOAuth"
+const invalidOAuthAttempt = "invalid_or_expired"
+const invalidOAuthAttemptMessage =
+  "Gmail 授权已过期或失效，请重新连接并在 10 分钟内完成 Google 同意。"
+
+function readOAuthCallbackError(): string | null {
+  if (typeof window === "undefined") return null
+  const url = new URL(window.location.href)
+  return url.searchParams.get(oauthCallbackErrorParam) === invalidOAuthAttempt
+    ? invalidOAuthAttemptMessage
+    : null
+}
+
+function clearOAuthCallbackError(): void {
+  if (typeof window === "undefined") return
+  const url = new URL(window.location.href)
+  if (!url.searchParams.has(oauthCallbackErrorParam)) return
+  url.searchParams.delete(oauthCallbackErrorParam)
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${url.pathname}${url.search}${url.hash}`
+  )
+}
+
 export function useGmailConnection(
   websiteProjectKey: string,
   enabled: boolean
 ) {
+  const callbackError = React.useMemo(() => readOAuthCallbackError(), [])
   const [status, setStatus] = React.useState<GmailConnectionLoadStatus>("idle")
   const [connection, setConnection] =
     React.useState<GmailConnectionView | null>(null)
-  const [errorMessage, setErrorMessage] = React.useState<string | null>(null)
+  const [errorMessage, setErrorMessage] = React.useState<string | null>(
+    callbackError
+  )
   const [busyAction, setBusyAction] = React.useState<
     "connect" | "disconnect" | null
   >(null)
@@ -34,12 +66,25 @@ export function useGmailConnection(
   const visibleConnection = currentProjectLoaded ? connection : null
   const visibleStatus = enabled && !currentProjectLoaded ? "loading" : status
 
+  React.useEffect(() => {
+    if (callbackError !== null) {
+      clearOAuthCallbackError()
+    }
+  }, [callbackError])
+
   const refresh = React.useCallback(async () => {
     if (!enabled) return
+    const queryKey = createProjectQueryKey(
+      websiteProjectKey,
+      "gmail-connection-status"
+    )
+    backlinksProjectQueries.invalidate(queryKey)
     setStatus("loading")
     setErrorMessage(null)
     try {
-      const response = await getGmailConnectionStatus(websiteProjectKey)
+      const response = await backlinksProjectQueries.fetch(queryKey, (signal) =>
+        getGmailConnectionStatus(websiteProjectKey, signal)
+      )
       setConnection(response.connection)
       setLoadedProjectKey(websiteProjectKey)
       setStatus("ready")
@@ -54,28 +99,36 @@ export function useGmailConnection(
   React.useEffect(() => {
     if (!enabled) return
     let cancelled = false
-
-    void getGmailConnectionStatus(websiteProjectKey).then(
-      (response) => {
-        if (cancelled) return
-        setConnection(response.connection)
-        setLoadedProjectKey(websiteProjectKey)
-        setErrorMessage(null)
-        setStatus("ready")
-      },
-      () => {
-        if (cancelled) return
-        setConnection(null)
-        setLoadedProjectKey(websiteProjectKey)
-        setErrorMessage("无法读取 Gmail 连接状态；界面不会推断为已连接。")
-        setStatus("error")
-      }
+    const queryKey = createProjectQueryKey(
+      websiteProjectKey,
+      "gmail-connection-status"
     )
+
+    void backlinksProjectQueries
+      .fetch(queryKey, (signal) =>
+        getGmailConnectionStatus(websiteProjectKey, signal)
+      )
+      .then(
+        (response) => {
+          if (cancelled) return
+          setConnection(response.connection)
+          setLoadedProjectKey(websiteProjectKey)
+          setErrorMessage(callbackError)
+          setStatus("ready")
+        },
+        () => {
+          if (cancelled) return
+          setConnection(null)
+          setLoadedProjectKey(websiteProjectKey)
+          setErrorMessage("无法读取 Gmail 连接状态；界面不会推断为已连接。")
+          setStatus("error")
+        }
+      )
 
     return () => {
       cancelled = true
     }
-  }, [enabled, websiteProjectKey])
+  }, [callbackError, enabled, websiteProjectKey])
 
   const connect = React.useCallback(async () => {
     setBusyAction("connect")
@@ -103,6 +156,9 @@ export function useGmailConnection(
         websiteProjectKey,
         visibleConnection.connectionId,
         visibleConnection.version
+      )
+      backlinksProjectQueries.invalidate(
+        createProjectQueryKey(websiteProjectKey, "gmail-connection-status")
       )
       setConnection(response.connection)
       setLastDisconnect(response.revocationStatus)

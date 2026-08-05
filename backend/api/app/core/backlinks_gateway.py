@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -6,6 +8,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from app.core.platform_request_context import (
+    ResolvedPlatformCollectionContext,
     ResolvedPlatformRequestContext,
     issue_platform_request_context_v1,
     strip_untrusted_platform_context_headers,
@@ -13,6 +16,12 @@ from app.core.platform_request_context import (
 
 
 class PlatformContextResolver(Protocol):
+    async def resolve_collection(
+        self,
+        *,
+        request: Request,
+    ) -> ResolvedPlatformCollectionContext: ...
+
     async def resolve(
         self,
         *,
@@ -38,6 +47,14 @@ class PlatformContextResolutionError(RuntimeError):
 
 
 class RejectingPlatformContextResolver:
+    async def resolve_collection(
+        self,
+        *,
+        request: Request,
+    ) -> ResolvedPlatformCollectionContext:
+        del request
+        raise self._error()
+
     async def resolve(
         self,
         *,
@@ -45,12 +62,22 @@ class RejectingPlatformContextResolver:
         website_project_key: str,
     ) -> ResolvedPlatformRequestContext:
         del request, website_project_key
-        raise PlatformContextResolutionError(
+        raise self._error()
+
+    @staticmethod
+    def _error() -> PlatformContextResolutionError:
+        return PlatformContextResolutionError(
             status=401,
             code="PLATFORM_AUTHENTICATION_REQUIRED",
             title="Platform authentication required",
             detail="The platform could not resolve an authenticated request context.",
         )
+
+
+@dataclass(frozen=True)
+class ProjectContextProjectionDelivery:
+    published: bool
+    error: str | None
 
 
 def problem_response(
@@ -104,6 +131,7 @@ class BacklinksGateway:
         *,
         resolved: ResolvedPlatformRequestContext,
         website_project_key: str,
+        query_params: Sequence[tuple[str, str]] | None = None,
     ) -> Response:
         if resolved.project.website_project_key != website_project_key:
             return problem_response(
@@ -159,7 +187,11 @@ class BacklinksGateway:
             upstream = await self._client.request(
                 request.method,
                 f"{self._base_url}{request.url.path}",
-                params=list(request.query_params.multi_items()),
+                params=(
+                    list(request.query_params.multi_items())
+                    if query_params is None
+                    else list(query_params)
+                ),
                 headers=forwarded_headers,
                 content=await request.body(),
             )
@@ -206,6 +238,50 @@ class BacklinksGateway:
 
         return self._upstream_response(upstream)
 
+    async def project_context_changed(
+        self,
+        *,
+        resolved: ResolvedPlatformRequestContext,
+        payload: dict[str, object],
+    ) -> ProjectContextProjectionDelivery:
+        try:
+            signed_context = issue_platform_request_context_v1(
+                resolved,
+                signing_key=self._require_signing_key(),
+                now=datetime.now(UTC),
+            )
+        except ValueError:
+            return ProjectContextProjectionDelivery(
+                published=False,
+                error="Backlinks gateway signing configuration is unavailable.",
+            )
+        headers = {
+            "content-type": "application/json",
+            "x-correlation-id": resolved.correlation_id,
+            **signed_context,
+        }
+        try:
+            upstream = await self._client.post(
+                (
+                    f"{self._base_url}/internal/v1/projects/"
+                    f"{resolved.project.website_project_key}/backlinks/"
+                    "project-context-projection"
+                ),
+                headers=headers,
+                json=payload,
+            )
+        except httpx.RequestError:
+            return ProjectContextProjectionDelivery(
+                published=False,
+                error="The Backlinks service could not be reached.",
+            )
+        if 200 <= upstream.status_code < 300:
+            return ProjectContextProjectionDelivery(published=True, error=None)
+        return ProjectContextProjectionDelivery(
+            published=False,
+            error=f"Backlinks Core rejected the projection with HTTP {upstream.status_code}.",
+        )
+
     @staticmethod
     def _upstream_response(upstream: httpx.Response) -> Response:
         response_headers = {
@@ -247,4 +323,6 @@ class BacklinksGateway:
             or request.url.path.endswith("/reverify")
             or request.url.path.endswith("/send-intents")
             or request.url.path.endswith("/transition")
+            or request.url.path.endswith("/contacts/candidates")
+            or request.url.path.endswith("/opportunities")
         )

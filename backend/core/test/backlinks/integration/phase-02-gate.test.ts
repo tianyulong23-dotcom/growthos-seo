@@ -70,6 +70,12 @@ describe("BL-AI-041 Phase 02 gate", () => {
     temporal = await startBacklinksTemporalHarness();
     database = new PostgresClient({ connectionString: postgres.connectionString });
     await database.connect();
+    await database.query(`
+      ALTER TABLE backlink_project_context_snapshots
+        ADD COLUMN products jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN keywords jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN target_urls jsonb NOT NULL DEFAULT '[]'::jsonb
+    `);
   }, 120_000);
   afterAll(async () => {
     await database?.end();
@@ -89,6 +95,9 @@ describe("BL-AI-041 Phase 02 gate", () => {
       countryCode: "US",
       profileVersionId: "profile-v1",
       promotionTargetVersionId: "promotion-v1",
+      products: ["Example product"],
+      keywords: ["example keyword"],
+      targetUrls: ["https://example.com/"],
       actorId: "gate-test",
     });
     await createJobRepository(database).create({

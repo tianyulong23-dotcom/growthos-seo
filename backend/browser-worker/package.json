@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\"",
     "typecheck": "tsc --noEmit",

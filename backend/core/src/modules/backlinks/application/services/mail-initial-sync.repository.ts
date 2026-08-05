@@ -223,14 +223,16 @@ const assertSyncConnectionAvailable = async (
       WHERE connection.organization_id = $1
         AND connection.id = $2
         AND connection.connection_status = 'CONNECTED'
-        AND connection.mail_sync_capability = true
-        AND binding.workspace_id = $3
-        AND binding.binding_status = 'ACTIVE'
+          AND connection.mail_sync_capability = true
+          AND binding.workspace_id = $3
+          AND binding.website_project_id = $4
+          AND binding.binding_status = 'ACTIVE'
       LIMIT 1`,
     [
       input.organizationId,
       input.gmailConnectionId,
       input.workspaceId,
+      input.websiteProjectId,
     ],
   );
   if (result.rows[0] === undefined) {

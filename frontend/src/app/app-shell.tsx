@@ -7,25 +7,22 @@ import {
   Command,
   Globe2,
   ListTodo,
-  LogOut,
   Moon,
   Plus,
   Search,
   Settings,
+  Settings2,
   Sun,
+  UserRound,
 } from "lucide-react"
-import { Link, Outlet, useLocation, useNavigate, useParams } from "react-router"
+import { Link, Outlet, useLocation, useNavigate } from "react-router"
 
 import {
   getModulePath,
   settingsNavigation,
   workspaceNavigation,
 } from "@/app/platform-navigation"
-import {
-  defaultProject,
-  getProject,
-  projects,
-} from "@/app/project-context"
+import { useCurrentProject } from "@/app/project-context"
 import { AgentDock, MobileAgentSheet } from "@/components/agent/agent-dock"
 import { useTheme } from "@/components/theme-provider"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -62,15 +59,18 @@ function AppSidebar() {
   const location = useLocation()
   const navigate = useNavigate()
   const { isMobile, setOpenMobile } = useSidebar()
-  const { projectId = defaultProject.id } = useParams()
-  const project = getProject(projectId)
+  const {
+    currentProject: project,
+    projects,
+    switchProject: switchCurrentProject,
+  } = useCurrentProject()
+  if (!project) {
+    throw new Error("AppSidebar requires an authorized current project.")
+  }
   const activeModule = location.pathname.split("/")[3] ?? "overview"
 
   function switchProject(nextProjectId: string) {
-    const suffix = location.pathname
-      .replace(`/projects/${projectId}`, "")
-      .replace(/^\/+/, "")
-    navigate(`/projects/${nextProjectId}/${suffix || "overview"}`)
+    switchCurrentProject(nextProjectId)
     if (isMobile) {
       setOpenMobile(false)
     }
@@ -89,6 +89,7 @@ function AppSidebar() {
           <Link
             to={`/projects/${project.id}/overview`}
             onClick={closeMobileSidebar}
+            aria-label="GrowthOS 项目首页"
             className="flex min-w-0 flex-1 items-center gap-2.5 overflow-hidden"
           >
             <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
@@ -106,7 +107,10 @@ function AppSidebar() {
         <DropdownMenu>
           <DropdownMenuTrigger
             render={
-              <button className="flex h-12 w-full items-center gap-2 rounded-md border bg-background px-2 text-left shadow-xs outline-none group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:border-0 group-data-[collapsible=icon]:p-0 hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-sidebar-ring" />
+              <button
+                className="flex h-12 w-full items-center gap-2 rounded-md border bg-background px-2 text-left shadow-xs outline-none group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:border-0 group-data-[collapsible=icon]:p-0 hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+                aria-label={`切换项目，当前项目 ${project.name}`}
+              />
             }
           >
             <span className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-background text-muted-foreground">
@@ -155,11 +159,21 @@ function AppSidebar() {
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={() =>
-                navigate(`/projects/${project.id}/backlinks/projects`)
+                navigate(
+                  `/projects/${project.id}/backlinks/projects?mode=create`
+                )
               }
             >
               <Plus />
               新建项目
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() =>
+                navigate(`/projects/${project.id}/backlinks/projects`)
+              }
+            >
+              <Settings2 />
+              管理项目
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -234,35 +248,6 @@ function AppSidebar() {
 
 function HeaderActions() {
   const { theme, setTheme } = useTheme()
-  const navigate = useNavigate()
-  const { projectId = defaultProject.id } = useParams()
-  const [tasks, setTasks] = React.useState([
-    {
-      id: 1,
-      title: "补充 watchwise.io 联系人",
-      detail: "高优先级 · 外链机会",
-      href: `/projects/${projectId}/backlinks/opportunities`,
-    },
-    {
-      id: 2,
-      title: "确认 streamscope.co 开发信",
-      detail: "人工确认 · 邮件草稿",
-      href: `/projects/${projectId}/backlinks/email`,
-    },
-    {
-      id: 3,
-      title: "修复 livingroomlab.com 丢失链接",
-      detail: "高优先级 · 链接监控",
-      href: `/projects/${projectId}/performance/links`,
-    },
-    {
-      id: 4,
-      title: "生成 7 月客户报告",
-      detail: "数据完整度 86%",
-      href: `/projects/${projectId}/performance/reports`,
-    },
-  ])
-  const [notifications, setNotifications] = React.useState(3)
 
   return (
     <div className="flex items-center gap-1">
@@ -283,28 +268,10 @@ function HeaderActions() {
           <DropdownMenuGroup>
             <DropdownMenuLabel className="flex items-center justify-between">
               任务中心
-              <Badge variant="secondary">{tasks.length} 个任务</Badge>
+              <Badge variant="secondary">0 个任务</Badge>
             </DropdownMenuLabel>
-            {tasks.map((task) => (
-              <DropdownMenuItem
-                key={task.id}
-                className="items-start"
-                onClick={() => navigate(task.href)}
-              >
-                <CheckCircle2 className="mt-0.5 text-emerald-600" />
-                <span className="flex-1">
-                  <span className="block">{task.title}</span>
-                  <span className="block text-xs font-normal text-muted-foreground">
-                    {task.detail}
-                  </span>
-                </span>
-              </DropdownMenuItem>
-            ))}
+            <DropdownMenuItem disabled>暂无服务端任务</DropdownMenuItem>
           </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => setTasks([])}>
-            清除已完成任务
-          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
@@ -314,46 +281,20 @@ function HeaderActions() {
             <Button
               variant="ghost"
               size="icon-sm"
-              className="relative"
               aria-label="通知"
               title="通知"
             />
           }
         >
           <Bell />
-          {notifications > 0 && (
-            <span className="absolute top-1 right-1 size-1.5 rounded-full bg-primary" />
-          )}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-80">
           <DropdownMenuGroup>
             <DropdownMenuLabel className="flex items-center justify-between">
               通知
-              <button
-                className="text-xs font-normal text-primary"
-                onClick={() => setNotifications(0)}
-              >
-                全部已读
-              </button>
+              <Badge variant="secondary">0</Badge>
             </DropdownMenuLabel>
-            <DropdownMenuItem className="items-start">
-              <span className="mt-1 size-2 rounded-full bg-destructive" />
-              <span>
-                <span className="block">livingroomlab.com 链接已丢失</span>
-                <span className="text-xs font-normal text-muted-foreground">
-                  18 分钟前
-                </span>
-              </span>
-            </DropdownMenuItem>
-            <DropdownMenuItem className="items-start">
-              <span className="mt-1 size-2 rounded-full bg-primary" />
-              <span>
-                <span className="block">streamerfocus.com 返回合作报价</span>
-                <span className="text-xs font-normal text-muted-foreground">
-                  1 小时前
-                </span>
-              </span>
-            </DropdownMenuItem>
+            <DropdownMenuItem disabled>暂无服务端通知</DropdownMenuItem>
           </DropdownMenuGroup>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -368,46 +309,24 @@ function HeaderActions() {
         {theme === "dark" ? <Sun /> : <Moon />}
       </Button>
 
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <button
-              className="ml-1 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              aria-label="账户菜单"
-            />
-          }
-        >
-          <Avatar className="size-8">
-            <AvatarFallback className="bg-foreground text-xs text-background">
-              林
-            </AvatarFallback>
-          </Avatar>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-56">
-          <DropdownMenuGroup>
-            <DropdownMenuLabel>
-              <span className="block">林木</span>
-              <span className="block text-xs font-normal text-muted-foreground">
-                admin@seo.local
-              </span>
-            </DropdownMenuLabel>
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem>
-            <Settings />
-            账户设置
-          </DropdownMenuItem>
-          <DropdownMenuItem>
-            <LogOut />
-            退出登录
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label="账户"
+        title="账户"
+      >
+        <UserRound />
+      </Button>
     </div>
   )
 }
 
 export function AppShell() {
+  const { currentProject: project } = useCurrentProject()
+  if (!project) {
+    throw new Error("AppShell requires an authorized current project.")
+  }
+
   return (
     <TooltipProvider>
       <SidebarProvider
@@ -415,7 +334,7 @@ export function AppShell() {
         style={{ "--sidebar-width": "14rem" } as React.CSSProperties}
       >
         <AppSidebar />
-        <AgentDock />
+        <AgentDock key={project.id} />
         <SidebarInset className="min-w-0">
           <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur">
             <SidebarTrigger
@@ -423,7 +342,7 @@ export function AppShell() {
               aria-label="展开或收起导航"
               title="展开或收起导航"
             />
-            <MobileAgentSheet />
+            <MobileAgentSheet key={project.id} />
             <div className="relative hidden max-w-md flex-1 md:block">
               <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
               <input
@@ -438,7 +357,7 @@ export function AppShell() {
               <HeaderActions />
             </div>
           </header>
-          <Outlet />
+          <Outlet key={project.id} />
         </SidebarInset>
       </SidebarProvider>
     </TooltipProvider>

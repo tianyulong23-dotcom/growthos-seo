@@ -1,16 +1,14 @@
-import { ApiError, apiRequest } from "@/api/client"
+import { ApiError } from "@/api/client"
+import { requestBacklinks } from "@/api/generated/backlinks"
 
 import type {
+  KillSwitchView,
   SettingsClient,
   SettingsGovernanceView,
   SettingsVersion,
   UpdateKillSwitchInput,
   UpdateSettingsInput,
-  KillSwitchView,
 } from "./types"
-
-const settingsPath = (websiteProjectKey: string) =>
-  `/api/v1/projects/${encodeURIComponent(websiteProjectKey)}/backlinks/settings`
 
 export function isSettingsApiStatus(
   error: unknown,
@@ -20,26 +18,24 @@ export function isSettingsApiStatus(
 }
 
 export async function getSettings(
-  websiteProjectKey: string
+  websiteProjectKey: string,
+  signal?: AbortSignal
 ): Promise<SettingsGovernanceView> {
-  return apiRequest<SettingsGovernanceView>(settingsPath(websiteProjectKey))
+  return requestBacklinks(
+    "backlinksGetSettingsGovernanceV1",
+    { path: { websiteProjectKey } },
+    { signal }
+  )
 }
 
 export async function updateSettings(
   websiteProjectKey: string,
   input: UpdateSettingsInput
 ): Promise<{ settings: SettingsVersion }> {
-  return apiRequest<{ settings: SettingsVersion }>(
-    settingsPath(websiteProjectKey),
-    {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        expectedVersion: input.expectedVersion,
-        values: input.values,
-      }),
-    }
-  )
+  return requestBacklinks("backlinksUpdateSettingsV1", {
+    path: { websiteProjectKey },
+    body: input,
+  })
 }
 
 export async function updateKillSwitch(
@@ -47,21 +43,10 @@ export async function updateKillSwitch(
   capability: string,
   input: UpdateKillSwitchInput
 ): Promise<{ killSwitch: KillSwitchView }> {
-  return apiRequest<{ killSwitch: KillSwitchView }>(
-    `${settingsPath(websiteProjectKey)}/kill-switches/${encodeURIComponent(capability)}`,
-    {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        expectedVersion: input.expectedVersion,
-        layer: input.layer,
-        provider: input.provider,
-        blocked: input.blocked,
-        confirmation: input.confirmation,
-        reason: input.reason,
-      }),
-    }
-  )
+  return requestBacklinks("backlinksUpdateKillSwitchV1", {
+    path: { websiteProjectKey, capability },
+    body: input,
+  })
 }
 
 export const settingsClient: SettingsClient = {

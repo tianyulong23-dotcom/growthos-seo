@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
 
@@ -11,9 +11,11 @@ test("BL-AI-101..106 frontend uses token-free Gmail connection contracts", () =>
   const types = read("./types.ts")
   const panel = read("./gmail-safety-panel.tsx")
 
-  assert.match(api, /gmail-connections.*status/s)
-  assert.match(api, /gmail-connections.*connect/s)
-  assert.match(api, /disconnect/s)
+  assert.match(api, /backlinksGetGmailConnectionStatusV1/)
+  assert.match(api, /backlinksConnectGmailV1/)
+  assert.match(api, /backlinksCompleteGmailConnectionV1/)
+  assert.match(api, /backlinksDisconnectGmailV1/)
+  assert.doesNotMatch(api, /apiRequest|gmail-connections/)
   assert.doesNotMatch(
     `${api}\n${types}`,
     /accessToken|refreshToken|authorizationCode/
@@ -27,10 +29,15 @@ test("BL-AI-121 Gmail connection UI distinguishes reauthorization and restricted
   const hook = read("./use-gmail-connection.ts")
   const panel = read("./gmail-safety-panel.tsx")
 
-  assert.match(api, /gmail-connections.*status/s)
-  assert.match(api, /gmail-connections.*connect/s)
-  assert.match(api, /disconnect/s)
+  assert.match(api, /requestBacklinks/)
+  assert.match(hook, /createProjectQueryKey/)
+  assert.match(hook, /backlinksProjectQueries\.fetch/)
+  assert.match(hook, /getGmailConnectionStatus\(websiteProjectKey, signal\)/)
   assert.match(hook, /window\.location\.assign\(response\.authorizationUrl\)/)
+  assert.match(hook, /gmailOAuth/)
+  assert.match(hook, /invalid_or_expired/)
+  assert.match(hook, /10 分钟/)
+  assert.match(hook, /window\.history\.replaceState/)
   assert.match(hook, /界面不会推断为已连接/)
   assert.match(panel, /授权已被撤销，需重新授权/)
   assert.match(panel, /发送受限/)
@@ -45,37 +52,42 @@ test("BL-AI-122 creates only an approved Send Intent after an explicit review", 
   const draftApi = read("../drafts/api.ts")
   const draftPage = read("../drafts/draft-page.tsx")
 
-  assert.match(draftApi, /send-intents/)
+  assert.match(draftApi, /backlinksListOpportunityContactsV1/)
+  assert.match(draftApi, /backlinksCreateSendIntentV1/)
+  assert.match(draftApi, /backlinksGetSendIntentV1/)
   assert.match(draftApi, /approvedDraftVersionId/)
   assert.match(draftApi, /gmailConnectionId/)
   assert.match(draftApi, /idempotency-key/)
-  assert.match(draftPage, /二次确认/)
+  assert.doesNotMatch(draftApi, /apiRequest|send-intents/)
+  assert.match(draftPage, /发送前最终确认/)
   assert.match(draftPage, /发送身份/)
   assert.match(draftPage, /收件人/)
   assert.match(draftPage, /已批准版本/)
-  assert.match(draftPage, /创建 Send Intent/)
-  assert.match(draftPage, /创建结果未知/)
-  assert.match(draftPage, /不是发送成功/)
+  assert.match(draftPage, /最终确认并发送/)
+  assert.match(draftPage, /最终提交结果未知/)
+  assert.match(draftPage, /Gmail Provider 已接受/)
+  assert.match(draftPage, /DELIVERY_UNKNOWN/)
   assert.doesNotMatch(draftPage, /window\.location\.assign/)
 })
 
 test("BL-AI-107..120 frontend projects safety constraints without local send success", () => {
   const workspace = read("../outreach-workspace.tsx")
   const panel = read("./gmail-safety-panel.tsx")
-  const review = read("./send-review-sheet.tsx")
+  const draftPage = read("../drafts/draft-page.tsx")
+  const reviewPath = fileURLToPath(
+    new URL("./send-review-sheet.tsx", import.meta.url)
+  )
 
   assert.doesNotMatch(workspace, /Mock 发送成功/)
-  assert.match(review, /Suppression 与配额/)
-  assert.match(review, /NEW_CONNECTION/)
-  assert.match(review, /BL-AI-122/)
-  assert.match(review, /HARD_BOUNCE/)
-  assert.match(review, /SOFT_BOUNCE_THRESHOLD/)
-  assert.match(review, /DELIVERY_UNKNOWN/)
-  assert.match(review, /普通用户不能解除/)
+  assert.equal(existsSync(reviewPath), false)
+  assert.match(panel, /抑制 HMAC、24h 配额/)
+  assert.match(panel, /NEW_CONNECTION/)
+  assert.match(panel, /硬退信、投诉和退订立即抑制/)
   assert.match(panel, /软退信 30 天内累计 3 次后抑制/)
-  assert.match(review, /本地演示不可发送/)
-  assert.match(review, /<Button disabled>/)
-  assert.doesNotMatch(review, /发送成功|已发送/)
+  assert.match(draftPage, /最终提交结果未知/)
+  assert.match(draftPage, /禁止再次提交发送/)
+  assert.doesNotMatch(draftPage, /使用原请求键重试/)
+  assert.doesNotMatch(draftPage, /Mock 发送成功/)
 })
 
 test("BL-AI-121..130 frontend preserves send controls and adds read-only mail sync projection", () => {
@@ -85,12 +97,11 @@ test("BL-AI-121..130 frontend preserves send controls and adds read-only mail sy
 
   assert.match(types, /mailSyncCapability: boolean/)
   assert.match(workspace, /MailSyncStatusPanel/)
-  assert.match(mailSync, /gmail\.readonly/)
-  assert.match(mailSync, /Provider Adapter 默认关闭/)
-  assert.match(mailSync, /初始同步固定回看 7 天/)
-  assert.match(mailSync, /最多 10 页 \/ 1000\s+条/)
-  assert.match(mailSync, /审计事件/)
-  assert.match(mailSync, /运行状态读接口尚未开放/)
+  assert.match(mailSync, /连接 Gmail/)
+  assert.match(mailSync, /MailCenter/)
   assert.doesNotMatch(mailSync, /accessToken|refreshToken|authorizationCode/)
-  assert.doesNotMatch(mailSync, /同步成功/)
+  assert.doesNotMatch(
+    mailSync,
+    /BL-AI|Provider Adapter|gmail\.readonly|Token|审计事件|接口尚未开放|同步成功/
+  )
 })

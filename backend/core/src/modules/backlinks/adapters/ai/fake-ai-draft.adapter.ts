@@ -63,6 +63,7 @@ export function createFakeAiDraftAdapter(options: Readonly<{
           modelId: "fake-draft-model",
           modelVersion: "v1",
         },
+        estimatedCostUsd: 0,
         latencyMs: 1,
         repairCount: 0,
       };

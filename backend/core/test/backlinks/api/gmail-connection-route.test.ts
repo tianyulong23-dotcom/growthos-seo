@@ -45,6 +45,10 @@ type StoredAttempt = {
 class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
   readonly attempts = new Map<string, StoredAttempt>();
 
+  async cleanupExpired(): Promise<number> {
+    return 0;
+  }
+
   async create(input: NewOAuthAttempt): Promise<void> {
     this.attempts.set(input.stateHash, {
       creation: { ...input, requestedScopes: [...input.requestedScopes] },
@@ -129,7 +133,10 @@ afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()));
 });
 
-function setup(options?: Readonly<{ grantedScopes?: readonly string[] }>) {
+function setup(options?: Readonly<{
+  grantedScopes?: readonly string[];
+  syncError?: Error;
+}>) {
   const repository = new FakeOAuthAttemptRepository();
   let randomValue = 1;
   const oauthAttempts = new OAuthAttemptService({
@@ -223,6 +230,10 @@ function setup(options?: Readonly<{ grantedScopes?: readonly string[] }>) {
     },
   });
   const statusContexts: string[][] = [];
+  const syncInputs: {
+    readonly connectionId: string;
+    readonly contextIds: readonly string[];
+  }[] = [];
   const query = createGmailConnectionQuery({
     reader: {
       async findVisibleConnection(context) {
@@ -246,6 +257,7 @@ function setup(options?: Readonly<{ grantedScopes?: readonly string[] }>) {
     completionFacts,
     disconnectInputs,
     statusContexts,
+    syncInputs,
     async ready() {
       await registerBacklinksOpenApi(app);
       app.decorateRequest("actor");
@@ -283,6 +295,41 @@ function setup(options?: Readonly<{ grantedScopes?: readonly string[] }>) {
         }),
         commands,
         query,
+        syncCommands: {
+          async start(input) {
+            syncInputs.push({
+              connectionId: input.connectionId,
+              contextIds: [
+                input.context.tenant.organizationId,
+                input.context.tenant.workspaceId,
+                input.context.project.websiteProjectId,
+                input.context.actor.userId,
+              ],
+            });
+            if (options?.syncError !== undefined) {
+              throw options.syncError;
+            }
+            return {
+              status: "ACCEPTED",
+              workflowId: id(40),
+            };
+          },
+          async status() {
+            return {
+              state: "POLLING",
+              workflowId: id(40),
+              pollingIntervalSeconds: 60,
+              killSwitchOpen: true,
+              acceptedSendCount: 2,
+              cursor: {
+                historyId: "166995",
+                initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",
+                lastSyncedAt: "2026-08-04T00:01:00.000Z",
+                version: 3,
+              },
+            };
+          },
+        },
       });
       await app.ready();
     },
@@ -386,7 +433,41 @@ describe("BL-AI-103 Gmail connection APIs", () => {
         { get: { operationId: "backlinksGetGmailConnectionStatusV1" } },
       "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/{connectionId}/disconnect":
         { post: { operationId: "backlinksDisconnectGmailV1" } },
+      "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/{connectionId}/sync-status":
+        { get: { operationId: "backlinksGetGmailPollingSyncStatusV1" } },
     });
+  });
+
+  it("returns polling, cursor, and recovery status without credentials", async () => {
+    const test = setup();
+    await test.ready();
+
+    const response = await test.app.inject({
+      method: "GET",
+      url: `${routeBase}/${connection.connectionId}/sync-status`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      state: "POLLING",
+      workflowId: id(40),
+      pollingIntervalSeconds: 60,
+      killSwitchOpen: true,
+      acceptedSendCount: 2,
+      cursor: {
+        historyId: "166995",
+        initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",
+        lastSyncedAt: "2026-08-04T00:01:00.000Z",
+        version: 3,
+      },
+      meta: {
+        websiteProjectId: id(3),
+        requestId: "request-103",
+      },
+    });
+    expect(response.body).not.toMatch(
+      /accessToken|refreshToken|tokenSecretReference|credentialReference/,
+    );
   });
 
   it("disconnects by resolved project scope without returning credentials", async () => {
@@ -427,6 +508,56 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     });
     expect(forbidden.statusCode).toBe(403);
     expect(test.disconnectInputs).toHaveLength(1);
+  });
+
+  it("maps a blocked Gmail polling sync to a conflict response", async () => {
+    const isolatedRuntimeError = new Error(
+      "Gmail polling is blocked by the project Kill Switch.",
+    ) as Error & {
+      code: typeof backlinkErrorCodes.conflict;
+      retryable: boolean;
+    };
+    isolatedRuntimeError.name = "BacklinkError";
+    isolatedRuntimeError.code = backlinkErrorCodes.conflict;
+    isolatedRuntimeError.retryable = false;
+    const test = setup({
+      syncError: isolatedRuntimeError,
+    });
+    await test.ready();
+
+    const response = await test.app.inject({
+      method: "POST",
+      url: `${routeBase}/${connection.connectionId}/sync`,
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      code: backlinkErrorCodes.conflict,
+      retryable: false,
+    });
+    expect(test.syncInputs).toEqual([{
+      connectionId: connection.connectionId,
+      contextIds: [id(1), id(2), id(3), "user-103"],
+    }]);
+  });
+
+  it("maps an unsupported sync request media type to an invalid request", async () => {
+    const test = setup();
+    await test.ready();
+
+    const response = await test.app.inject({
+      method: "POST",
+      url: `${routeBase}/${connection.connectionId}/sync`,
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      payload: "invalid=transport",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      code: backlinkErrorCodes.invalidRequest,
+      retryable: false,
+    });
+    expect(test.syncInputs).toHaveLength(0);
   });
 
   it("rejects missing permission, cross-project/session state, and replay", async () => {
@@ -513,5 +644,29 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     expect(test.completionFacts).toHaveLength(0);
     expect(response.body).not.toContain("access-token-103");
     expect(response.body).not.toContain("refresh-token-103");
+  });
+
+  it("does not persist a grant containing an unapproved extra scope", async () => {
+    const test = setup({
+      grantedScopes: [...gmailOAuthScopes, "https://www.googleapis.com/auth/drive.readonly"],
+    });
+    await test.ready();
+    await test.app.inject({
+      method: "POST",
+      url: `${routeBase}/connect`,
+      payload: {},
+    });
+    const state = test.authorizeCalls[0]?.state ?? "";
+
+    const response = await test.app.inject({
+      method: "GET",
+      url: `${routeBase}/callback?code=authorization-code-103&state=${state}`,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      code: backlinkErrorCodes.invalidRequest,
+    });
+    expect(test.completionFacts).toHaveLength(0);
   });
 });

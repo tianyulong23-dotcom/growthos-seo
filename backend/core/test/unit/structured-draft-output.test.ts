@@ -23,6 +23,7 @@ const attempt = (content: string) => ({
     modelVersion: "2026-07-01",
   },
   latencyMs: 12,
+  estimatedCostUsd: 0.0001,
 });
 
 describe("BL-AI-091 structured Draft output", () => {
@@ -45,6 +46,7 @@ describe("BL-AI-091 structured Draft output", () => {
         repairCount: 1,
         usage: { inputTokens: 20, outputTokens: 40 },
         latencyMs: 24,
+        estimatedCostUsd: 0.0002,
       });
     expect(generate).toHaveBeenCalledTimes(2);
     expect(generate.mock.calls[1]?.[0]).toMatchObject({

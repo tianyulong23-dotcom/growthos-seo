@@ -1,4 +1,4 @@
-import { apiRequest } from "@/api/client"
+import { requestBacklinks } from "@/api/generated/backlinks"
 
 import type {
   MetricDashboardResponse,
@@ -10,34 +10,33 @@ import type {
   ReportsClient,
 } from "./types"
 
-const projectBase = (websiteProjectKey: string) =>
-  `/api/v1/projects/${encodeURIComponent(websiteProjectKey)}`
-const metricDashboardPath = "/backlinks/metrics/dashboard"
-const reportsPath = "/backlinks/reports"
-const reportExportsPath = "/backlinks/report-exports"
-
 export async function getMetricDashboard(
   websiteProjectKey: string,
-  input: ReportingWindow & { timezone: string }
+  input: ReportingWindow & { timezone: string },
+  signal?: AbortSignal
 ): Promise<MetricDashboardResponse> {
-  const query = new URLSearchParams({
-    from: input.from,
-    to: input.to,
-    asOf: input.asOf,
-    timezone: input.timezone,
-  })
-  return apiRequest<MetricDashboardResponse>(
-    `${projectBase(websiteProjectKey)}${metricDashboardPath}?${query}`
+  return requestBacklinks(
+    "backlinksGetMetricDashboardV1",
+    {
+      path: { websiteProjectKey },
+      query: input,
+    },
+    { signal }
   )
 }
 
 export async function listReports(
   websiteProjectKey: string,
-  input: { asOf: string }
+  input: { asOf: string },
+  signal?: AbortSignal
 ): Promise<ReportOverviewResponse> {
-  const query = new URLSearchParams({ asOf: input.asOf })
-  return apiRequest<ReportOverviewResponse>(
-    `${projectBase(websiteProjectKey)}${reportsPath}?${query}`
+  return requestBacklinks(
+    "backlinksListPublishedReportsV1",
+    {
+      path: { websiteProjectKey },
+      query: input,
+    },
+    { signal }
   )
 }
 
@@ -47,31 +46,33 @@ export async function requestReportExport(
   reportRevisionId: string,
   format: ReportExportFormat
 ): Promise<ReportExportResponse> {
-  return apiRequest<ReportExportResponse>(
-    `${projectBase(websiteProjectKey)}${reportsPath}/${encodeURIComponent(reportKey)}/revisions/${encodeURIComponent(reportRevisionId)}/exports`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ format }),
-    }
-  )
+  return requestBacklinks("backlinksRequestReportExportV1", {
+    path: { websiteProjectKey, reportKey, reportRevisionId },
+    body: { format },
+  })
 }
 
 export async function getReportExport(
   websiteProjectKey: string,
-  exportId: string
+  exportId: string,
+  signal?: AbortSignal
 ): Promise<ReportExportResponse> {
-  return apiRequest<ReportExportResponse>(
-    `${projectBase(websiteProjectKey)}${reportExportsPath}/${encodeURIComponent(exportId)}`
+  return requestBacklinks(
+    "backlinksGetReportExportV1",
+    { path: { websiteProjectKey, exportId } },
+    { signal }
   )
 }
 
 export async function authorizeExportDownload(
   websiteProjectKey: string,
-  exportId: string
+  exportId: string,
+  signal?: AbortSignal
 ): Promise<ReportDownloadResponse> {
-  return apiRequest<ReportDownloadResponse>(
-    `${projectBase(websiteProjectKey)}${reportExportsPath}/${encodeURIComponent(exportId)}/download`
+  return requestBacklinks(
+    "backlinksAuthorizeReportExportDownloadV1",
+    { path: { websiteProjectKey, exportId } },
+    { signal }
   )
 }
 

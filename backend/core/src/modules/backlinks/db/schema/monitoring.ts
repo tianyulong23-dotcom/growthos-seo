@@ -93,6 +93,8 @@ export const backlinkMonitorPolicies = pg.pgTable(
       .boolean("browser_fallback_enabled")
       .notNull()
       .default(false),
+    sourceOutboxEventId: pg.uuid("source_outbox_event_id"),
+    workflowId: pg.text("workflow_id"),
     nextCheckAt: timestamp("next_check_at").notNull(),
     schemaVersion: pg.integer("schema_version").notNull(),
     version: pg.integer("version").notNull().default(1),

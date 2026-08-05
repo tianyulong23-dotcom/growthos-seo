@@ -1,4 +1,5 @@
 export type BacklinkTenantContext = Readonly<{
+  organizationId: string;
   workspaceId: string;
   websiteProjectId: string;
 }>;
@@ -30,9 +31,14 @@ export async function withBacklinkTenantTransaction<T>(
     await client.query("BEGIN");
     try {
       await client.query(
-        `SELECT set_config('app.current_workspace_id', $1, true),
-                set_config('app.current_website_project_id', $2, true)`,
-        [context.workspaceId, context.websiteProjectId],
+        `SELECT set_config('app.current_organization_id', $1, true),
+                set_config('app.current_workspace_id', $2, true),
+                set_config('app.current_website_project_id', $3, true)`,
+        [
+          context.organizationId,
+          context.workspaceId,
+          context.websiteProjectId,
+        ],
       );
       const result = await work(client);
       await client.query("COMMIT");

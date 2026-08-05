@@ -1,3 +1,9 @@
+import {
+  prepareReadyRecommendationRefill,
+  type RecommendationEvidenceCandidate,
+  type ReadyRecommendationDecision,
+} from "../../domain/recommendations/evaluation.js";
+
 export type BacklinkRecommendationRefillInput = Readonly<{
   organizationId: string;
   workspaceId: string;
@@ -10,6 +16,12 @@ export type BacklinkRecommendationRefillInput = Readonly<{
   refillWindowKey: string;
   lowWatermark: number;
   highWatermark: number;
+}>;
+export type RecommendationProviderExecutionSummary = Readonly<{
+  source: "cache" | "stale-cache" | "single-flight" | "provider";
+  acquiredAt: string;
+  costMicros: number;
+  requestFingerprint: string;
 }>;
 export type RecommendationRefillStart =
   | Readonly<{ status: "inventory_sufficient"; readyCount: number }>
@@ -27,6 +39,13 @@ type StoreReadyRecommendationsInput =
   BacklinkRecommendationRefillInput & Readonly<{
     jobId: string;
     recommendations: readonly ReadyRecommendationDecision[];
+    provider: RecommendationProviderExecutionSummary;
+    evaluationSummary: Readonly<{
+      evaluated: number;
+      ready: number;
+      excluded: number;
+      insufficientData: number;
+    }>;
   }>;
 type RecordFailureInput = BacklinkRecommendationRefillInput & Readonly<{
   jobId: string;
@@ -40,6 +59,7 @@ export type BacklinkRecommendationRefillActivities = Readonly<{
     input: ExecuteRefillInput,
   ): Promise<Readonly<{
     candidates: readonly RecommendationEvidenceCandidate[];
+    provider: RecommendationProviderExecutionSummary;
   }>>;
   storeReadyRecommendations(
     input: StoreReadyRecommendationsInput,
@@ -78,13 +98,13 @@ export async function runBacklinkRecommendationRefillWorkflow(
       candidates: result.candidates,
       requestedCount,
     });
-    const stored = prepared.ready.length === 0
-      ? { addedCount: 0 }
-      : await activities.storeReadyRecommendations({
-        ...input,
-        jobId: start.jobId,
-        recommendations: prepared.ready,
-      });
+    const stored = await activities.storeReadyRecommendations({
+      ...input,
+      jobId: start.jobId,
+      recommendations: prepared.ready,
+      provider: result.provider,
+      evaluationSummary: prepared.counts,
+    });
     if (
       !Number.isInteger(stored.addedCount) ||
       stored.addedCount < 0 ||
@@ -110,8 +130,3 @@ export async function runBacklinkRecommendationRefillWorkflow(
     throw error;
   }
 }
-import {
-  prepareReadyRecommendationRefill,
-  type RecommendationEvidenceCandidate,
-  type ReadyRecommendationDecision,
-} from "../../domain/recommendations/evaluation.js";

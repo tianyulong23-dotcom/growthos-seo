@@ -68,7 +68,7 @@ SELECT 'completed' state,* FROM completed UNION ALL SELECT 'replay',"requestHash
       const requestHash = digest({ recommendationContextVersionId: input.recommendationContextVersionId,
         expectedVersion: input.expectedVersion, lowWatermark: input.lowWatermark,
         highWatermark: input.highWatermark, refillWindowKey: input.refillWindowKey });
-      const ids = Array.from({ length: 5 }, () => randomUUID());
+      const ids = Array.from({ length: 6 }, () => randomUUID());
       const workflowId = buildBacklinksWorkflowId({
         workspaceId: tenant.workspaceId,
         websiteProjectId: project.websiteProjectId,
@@ -82,12 +82,14 @@ job AS (INSERT INTO backlink_jobs (id,organization_id,workspace_id,website_proje
 refill AS (INSERT INTO backlink_recommendation_refills (id,organization_id,workspace_id,website_project_id,job_id,recommendation_context_version_id,trigger_reason,low_watermark,high_watermark,refill_window_key,created_by,updated_by) SELECT $11,$1,$2,$3,job.id,$5,'manual',$16,$17,$18,$4,$4 FROM job RETURNING id),
 lifecycle AS (INSERT INTO backlink_lifecycle_events (id,organization_id,workspace_id,website_project_id,job_id,aggregate_type,aggregate_id,sequence,aggregate_version,event_type,actor_type,actor_id,after_state,correlation_id,idempotency_key) SELECT $12,$1,$2,$3,$10,'recommendation_refill',refill.id,1,1,'recommendation_refill.requested','user',$4,jsonb_build_object('status','queued'),$14,'recommendation.refill:'||$7 FROM refill RETURNING id),
 audit AS (INSERT INTO backlink_audit_events (id,organization_id,workspace_id,website_project_id,job_id,lifecycle_event_id,actor_id,actor_kind,action,target_type,target_id,outcome,after_redacted,request_id,correlation_id,integrity_hash) SELECT $13,$1,$2,$3,$10,lifecycle.id,$4,'user','recommendation_refill.requested','recommendation_refill',$11,'success',jsonb_build_object('status','queued'),$14,$14,$8 FROM lifecycle RETURNING id),
-completed AS (INSERT INTO backlink_idempotency_records (id,organization_id,workspace_id,website_project_id,idempotency_key,command_type,request_hash,response_status,response_body,response_schema_version,completed_at,expires_at,created_by,updated_by) SELECT $9,$1,$2,$3,$7,'recommendation.refill',$8,202,jsonb_build_object('jobId',$10,'workflowId',$15,'status','queued','version',1,'lifecycleEventId',$12,'auditEventId',$13),1,now(),now()+interval '24 hours',$4,$4 FROM audit RETURNING request_hash "requestHash",response_body "responseBody")
+outbox AS (INSERT INTO backlink_outbox_events (id,organization_id,workspace_id,website_project_id,event_type,aggregate_id,aggregate_version,idempotency_key,payload,payload_schema_version,created_by,updated_by) SELECT $19,$1,$2,$3,'backlinks.recommendation-refill.requested.v1',$10,1,$15,jsonb_build_object('contractVersion','backlinks.recommendation-refill.requested.v1','organizationId',$1::text,'workspaceId',$2::text,'websiteProjectId',$3::text,'recommendationContextVersionId',$5::text,'jobId',$10::text,'workflowId',$15,'correlationId',$14,'actorId',$4,'refillWindowKey',$18,'lowWatermark',$16,'highWatermark',$17),1,$4,$4 FROM refill RETURNING id),
+completed AS (INSERT INTO backlink_idempotency_records (id,organization_id,workspace_id,website_project_id,idempotency_key,command_type,request_hash,response_status,response_body,response_schema_version,completed_at,expires_at,created_by,updated_by) SELECT $9,$1,$2,$3,$7,'recommendation.refill',$8,202,jsonb_build_object('jobId',$10,'workflowId',$15,'status','queued','version',1,'lifecycleEventId',$12,'auditEventId',$13),1,now(),now()+interval '24 hours',$4,$4 FROM audit CROSS JOIN outbox RETURNING request_hash "requestHash",response_body "responseBody")
 SELECT 'completed' state,* FROM completed UNION ALL SELECT 'replay',"requestHash","responseBody" FROM prior UNION ALL SELECT 'version_conflict',$8,NULL WHERE NOT EXISTS (SELECT 1 FROM completed) AND NOT EXISTS (SELECT 1 FROM prior)`;
       const values = [tenant.organizationId, tenant.workspaceId, project.websiteProjectId,
-        actor.userId, input.recommendationContextVersionId, input.expectedVersion,
-        input.idempotencyKey, requestHash, ...ids, input.requestId, workflowId,
-        input.lowWatermark, input.highWatermark, input.refillWindowKey];
+        actor.userId, input.recommendationContextVersionId,
+        input.expectedVersion, input.idempotencyKey, requestHash,
+        ...ids.slice(0, 5), input.requestId, workflowId, input.lowWatermark,
+        input.highWatermark, input.refillWindowKey, ids[5]];
       return result<RecommendationRefillResult>(
         (await client.query(sql, values)).rows[0] as ResultRow | undefined, requestHash);
     },

@@ -1,3 +1,5 @@
+import type { BacklinksResponse } from "@/api/generated/backlinks"
+
 export const linkViews = [
   "all",
   "candidate",
@@ -7,198 +9,90 @@ export const linkViews = [
   "recovered",
 ] as const
 
-export type LinkView = (typeof linkViews)[number]
+export type LinksPage = BacklinksResponse<"backlinksListLinksV1">
+export type CandidateLinkResponse =
+  BacklinksResponse<"backlinksGetCandidateLinkV1">
+export type PlacementLinkResponse =
+  BacklinksResponse<"backlinksGetPlacementLinkV1">
+export type LifecycleEventsPage =
+  BacklinksResponse<"backlinksListPlacementLifecycleEventsV1">
+export type PlacementEvidenceResponse =
+  BacklinksResponse<"backlinksGetPlacementEvidenceV1">
+export type PlacementReverifyResult =
+  BacklinksResponse<"backlinksReverifyPlacementV1">
+export type PlacementCandidateCreation =
+  BacklinksResponse<"backlinksCreatePlacementCandidateV1">
+export type OpportunityListResponse =
+  BacklinksResponse<"backlinksListOpportunitiesV1">
+export type OpportunityListItem = OpportunityListResponse["items"][number]
+
+export type LinkListItem = LinksPage["items"][number]
+export type LinkCandidate = Extract<LinkListItem, { recordType: "candidate" }>
+export type LinkPlacement = Extract<LinkListItem, { recordType: "placement" }>
+export type LinkView = LinkListItem["displayState"] | "all"
 export type LinkDisplayState = Exclude<LinkView, "all">
-export type EvidenceFreshness = "fresh" | "stale" | "unknown"
-export type MonitorRunStatus =
-  | "idle"
-  | "scheduled"
-  | "running"
-  | "retry_wait"
-  | "failed"
-  | "completed"
-export type ObservationResult = "present" | "changed" | "absent" | "inaccessible"
-export type LifecycleEventType =
-  | "placement.confirmed"
-  | "placement.changed"
-  | "placement.lost"
-  | "placement.recovered"
-  | "placement.restored"
-
-export type LinkCandidate = Readonly<{
-  recordType: "candidate"
-  displayState: "candidate"
-  candidateId: string
-  sourcePageUrl: string | null
-  targetUrl: string
-  candidateStatus: string
-  matchStatus: string
-  validationStatus: string
-  version: number
-  createdAt: string
-  countsTowardKpi: false
-}>
-
-export type LinkPlacement = Readonly<{
-  recordType: "placement"
-  displayState: Exclude<LinkDisplayState, "candidate">
-  placementId: string
-  candidateId: string
-  sourcePageUrl: string
-  targetUrl: string
-  initialValidationStatus: string
-  healthStatus: string
-  monitoringStatus: string
-  version: number
-  createdAt: string
-  countsTowardKpi: true
-}>
-
-export type LinkListItem = LinkCandidate | LinkPlacement
-
-export type ValidationEvidence = Readonly<{
-  validationRunId: string
-  status: string
-  observedAt?: string
-  evidenceSnapshotHash: string
-  evidenceContractVersion: string
-  evidenceSchemaVersion: number
-}>
-
-export type LatestObservation = Readonly<{
-  observationId: string
-  result: ObservationResult
-  observedAt: string
-  executionMode: "static" | "browser"
-  evidence: Readonly<{
-    evidenceId: string
-    hash: string
-    contractVersion: string
-    schemaVersion: number
-    freshness: EvidenceFreshness
-  }>
-  failure: Readonly<{
-    status: "none" | "failed"
-    code: string | null
-  }>
-}>
-
-export type LatestMonitorRun = Readonly<{
-  monitorRunId: string | null
-  status: MonitorRunStatus
-  scheduledFor: string | null
-  updatedAt: string | null
-}>
-
-export type CandidateLinkDetail = LinkCandidate &
-  Readonly<{
-    opportunityId: string | null
-    normalizedSourceUrl: string | null
-    normalizedTargetUrl: string
-    urlNormalizationVersion: string
-    latestValidation: ValidationEvidence | null
-  }>
-
-export type PlacementLinkDetail = LinkPlacement &
-  Readonly<{
-    opportunityId: string
-    normalizedSourceUrl: string
-    normalizedTargetUrl: string
-    urlNormalizationVersion: string
-    updatedAt: string
-    initialValidation: ValidationEvidence
-    latestObservation: LatestObservation | null
-    latestMonitorRun: LatestMonitorRun
-  }>
-
+export type CandidateLinkDetail = CandidateLinkResponse["link"]
+export type PlacementLinkDetail = PlacementLinkResponse["link"]
 export type LinkDetail = CandidateLinkDetail | PlacementLinkDetail
-
-export type LinksPage = Readonly<{
-  items: LinkListItem[]
-  nextCursor: string | null
-  hasMore: boolean
-}>
-
-export type LifecycleEvent = Readonly<{
-  eventId: string
-  eventType: LifecycleEventType
-  occurredAt: string
-  placementVersion: number
-  previousHealthStatus: string | null
-  nextHealthStatus: string | null
-  observationId: string | null
-  reason: string | null
-}>
-
-export type LifecycleEventsPage = Readonly<{
-  items: LifecycleEvent[]
-  nextCursor: string | null
-  hasMore: boolean
-}>
-
-export type PlacementEvidence = Readonly<{
-  evidenceId: string
-  placementId: string
-  kind: "placement_observation"
-  immutable: true
-  hashVerified: true
-  hash: string
-  contractVersion: string
-  schemaVersion: number
-  observedAt: string
-  executionMode: "static" | "browser"
-  result: ObservationResult
-  reasonCode: string | null
-  failure: Readonly<{
-    status: "none" | "failed"
-    code: string | null
-  }>
-  freshness: EvidenceFreshness
-  source: Readonly<{
-    sourcePageUrl: string
-    targetUrl: string
-    fetchMode: "static" | "browser"
-    httpStatus: number | null
-    finalUrl: string | null
-    contentType: string | null
-    fetchedAt: string | null
-  }>
-  link: Readonly<{
-    canonicalUrl: string | null
-    noindex: boolean | null
-    occurrenceCount: number | null
-  }>
-}>
-
-export type PlacementReverifyResult = Readonly<{
-  placementId: string
-  placementVersion: number
-  accepted: boolean
-  replayed: boolean
-  browserFallbackAllowed: false
-  monitorRun: Readonly<{
-    monitorRunId: string
-    status: Exclude<MonitorRunStatus, "idle">
-    scheduledFor: string
-  }>
-}>
+export type LifecycleEvent = LifecycleEventsPage["items"][number]
+export type LifecycleEventType = LifecycleEvent["eventType"]
+export type PlacementEvidence = PlacementEvidenceResponse["evidence"]
+export type EvidenceFreshness = PlacementEvidence["freshness"]
+export type ObservationResult = PlacementEvidence["result"]
+export type LatestObservation = NonNullable<
+  PlacementLinkDetail["latestObservation"]
+>
+export type LatestMonitorRun = PlacementLinkDetail["latestMonitorRun"]
+export type MonitorRunStatus = LatestMonitorRun["status"]
+export type ValidationEvidence = Omit<
+  NonNullable<CandidateLinkDetail["latestValidation"]>,
+  "observedAt"
+> & {
+  observedAt?: string
+}
 
 export type LinksClient = Readonly<{
+  listOpportunities(
+    websiteProjectKey: string,
+    signal?: AbortSignal
+  ): Promise<OpportunityListResponse>
+  createPlacementCandidate(
+    websiteProjectKey: string,
+    input: Readonly<{
+      sourceType: "manual" | "import"
+      opportunityId?: string
+      sourcePageUrl: string
+      targetUrl: string
+      sourceExternalId?: string
+      evidence: {
+        contractVersion: string
+        schemaVersion: number
+        evidenceId: string
+        observedAt: string
+        sourceRef: string
+        payload: Record<string, string | number>
+      }
+      idempotencyKey: string
+    }>
+  ): Promise<PlacementCandidateCreation>
   listLinks(
     websiteProjectKey: string,
     input: Readonly<{
       view: LinkView
       limit: number
       cursor?: string
-    }>
+    }>,
+    signal?: AbortSignal
   ): Promise<LinksPage>
   getCandidateLink(
     websiteProjectKey: string,
-    candidateId: string
+    candidateId: string,
+    signal?: AbortSignal
   ): Promise<CandidateLinkDetail>
   getPlacementLink(
     websiteProjectKey: string,
-    placementId: string
+    placementId: string,
+    signal?: AbortSignal
   ): Promise<PlacementLinkDetail>
   listPlacementEvents(
     websiteProjectKey: string,
@@ -206,11 +100,13 @@ export type LinksClient = Readonly<{
     input: Readonly<{
       limit: number
       cursor?: string
-    }>
+    }>,
+    signal?: AbortSignal
   ): Promise<LifecycleEventsPage>
   getPlacementEvidence(
     websiteProjectKey: string,
-    evidenceId: string
+    evidenceId: string,
+    signal?: AbortSignal
   ): Promise<PlacementEvidence>
   reverifyPlacement(
     websiteProjectKey: string,

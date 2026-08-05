@@ -294,15 +294,17 @@ implements GmailDailyQuotaRepository {
       const binding = await transaction.query(
         `SELECT 1
            FROM backlinks.backlink_gmail_workspace_bindings AS binding
-          WHERE binding.organization_id = $1
-            AND binding.workspace_id = $2
-            AND binding.gmail_connection_id = $3
-            AND binding.binding_status = 'ACTIVE'
+            WHERE binding.organization_id = $1
+              AND binding.workspace_id = $2
+              AND binding.gmail_connection_id = $3
+              AND binding.website_project_id = $4
+              AND binding.binding_status = 'ACTIVE'
           LIMIT 1`,
         [
           input.organizationId,
           input.workspaceId,
           input.gmailConnectionId,
+          input.websiteProjectId,
         ],
       );
       if (binding.rows[0] === undefined) {

@@ -46,6 +46,15 @@ class ResolvedPlatformRequestContext:
     correlation_id: str
 
 
+@dataclass(frozen=True)
+class ResolvedPlatformCollectionContext:
+    actor: PlatformActor
+    tenant: PlatformTenant
+    permissions: tuple[str, ...]
+    correlation_id: str
+    authorized_project_ids: tuple[str, ...] | None
+
+
 def strip_untrusted_platform_context_headers(
     headers: Mapping[str, str],
 ) -> dict[str, str]:

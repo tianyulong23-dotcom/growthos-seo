@@ -51,6 +51,40 @@ const rows = ["alpha", "beta"].map((name, index) => ({
 }));
 
 describe("BL-AI-062 recommendations list API", () => {
+  it.each(["shown", "stale_context", "accepted"] as const)(
+    "returns historical inventory status %s without a validation failure",
+    async (historicalStatus) => {
+      const historicalRow = {
+        ...rows[0],
+        status: historicalStatus,
+      };
+      const app = Fastify({ logger: false, genReqId: () => "request-history" });
+      await registerBacklinksOpenApi(app);
+      app.decorateRequest("actor");
+      app.addHook("preHandler", async (request) => { request.actor = actor; });
+      registerBacklinksRecommendationsRoute(app, {
+        module: createBacklinksModule({
+          projectContext: { resolve: async () => context },
+          queries: createRecommendationsQuery({
+            query: async () => ({ rows: [historicalRow] }),
+          }),
+        }),
+      });
+      await app.ready();
+
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/projects/project-key/backlinks/recommendations?status=${historicalStatus}`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        items: [{ id: historicalRow.id, status: historicalStatus }],
+      });
+      await app.close();
+    },
+  );
+
   it("enforces project scope, filters, and a stable seek cursor", async () => {
     const calls: { text: string; values?: readonly unknown[] }[] = [];
     const rejectedRow = {

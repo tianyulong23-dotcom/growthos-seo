@@ -7,27 +7,50 @@ import {
 } from "../../domain/drafts/draft-document.js";
 import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
 import type {
+  DraftGenerationJob,
   DraftGenerationRepository,
 } from "../repositories/draft-generation.repository.js";
 import { draftDocumentSchema } from "../schemas/draft-document.schema.js";
+
+const draftJobDeadlineMs = 120_000;
+
+type DraftJobView = Readonly<{
+  id: string;
+  draftId: string;
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "REFUSED";
+  contactId: string | null;
+  contactVersion: number | null;
+  versionId: string | null;
+  lastSuccessfulVersionId: string | null;
+  queuedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  deadlineAt: string;
+  queueWaitMs: number | null;
+  latencyMs: number | null;
+  persistenceLatencyMs: number | null;
+  attemptCount: number;
+  lastErrorCategory: string | null;
+}>;
 
 export type DraftQuery = Readonly<{
   getJob(
     context: ResolvedProjectContext,
     runId: string,
-  ): Promise<Readonly<{
-    id: string;
-    draftId: string;
-    status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "REFUSED";
-    versionId: string | null;
-    lastSuccessfulVersionId: string | null;
-  }>>;
+  ): Promise<DraftJobView>;
+  findLatestJob(
+    context: ResolvedProjectContext,
+    opportunityId: string,
+    logicalDraftKey: string,
+  ): Promise<DraftJobView | null>;
   getDraft(
     context: ResolvedProjectContext,
     draftId: string,
   ): Promise<Readonly<{
     id: string;
     opportunityId: string;
+    contactId: string | null;
+    contactVersion: number | null;
     status: "generating" | "draft" | "approved" | "rejected" | "sent";
     draftVersion: number;
     approvedVersionId: string | null;
@@ -43,8 +66,34 @@ export type DraftQuery = Readonly<{
   }>>;
 }>;
 
+const toJobView = (job: DraftGenerationJob): DraftJobView => ({
+  id: job.runId,
+  draftId: job.draftId,
+  status: job.status,
+  contactId: job.contactId,
+  contactVersion: job.contactVersion,
+  versionId: job.versionId,
+  lastSuccessfulVersionId: job.lastSuccessfulVersionId,
+  queuedAt: job.queuedAt.toISOString(),
+  startedAt: job.startedAt?.toISOString() ?? null,
+  finishedAt: job.finishedAt?.toISOString() ?? null,
+  deadlineAt: new Date(
+    job.queuedAt.getTime() + draftJobDeadlineMs,
+  ).toISOString(),
+  queueWaitMs: job.startedAt === null
+    ? null
+    : Math.max(0, job.startedAt.getTime() - job.queuedAt.getTime()),
+  latencyMs: job.latencyMs,
+  persistenceLatencyMs: job.persistenceLatencyMs,
+  attemptCount: job.attemptCount,
+  lastErrorCategory: job.lastErrorCategory,
+});
+
 export function createDraftQuery(
-  repository: Pick<DraftGenerationRepository, "getJob" | "getDraft">,
+  repository: Pick<
+    DraftGenerationRepository,
+    "getJob" | "findLatestJob" | "getDraft"
+  >,
 ): DraftQuery {
   return Object.freeze({
     async getJob(context, runId) {
@@ -55,19 +104,23 @@ export function createDraftQuery(
           websiteProjectId: context.project.websiteProjectId,
           runId,
         });
-        return {
-          id: job.runId,
-          draftId: job.draftId,
-          status: job.status,
-          versionId: job.versionId,
-          lastSuccessfulVersionId: job.lastSuccessfulVersionId,
-        };
+        return toJobView(job);
       } catch {
         throw new BacklinkError({
           code: backlinkErrorCodes.notFound,
           message: "Draft generation Job was not found in this project.",
         });
       }
+    },
+    async findLatestJob(context, opportunityId, logicalDraftKey) {
+      const job = await repository.findLatestJob({
+        organizationId: context.tenant.organizationId,
+        workspaceId: context.tenant.workspaceId,
+        websiteProjectId: context.project.websiteProjectId,
+        opportunityId,
+        logicalDraftKey,
+      });
+      return job === null ? null : toJobView(job);
     },
     async getDraft(context, draftId) {
       let draft;
@@ -87,6 +140,8 @@ export function createDraftQuery(
       return {
         id: draft.draftId,
         opportunityId: draft.opportunityId,
+        contactId: draft.contactId,
+        contactVersion: draft.contactVersion,
         status: draft.status,
         draftVersion: draft.draftVersion,
         approvedVersionId: draft.approvedVersionId,

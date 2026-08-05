@@ -10,9 +10,13 @@ import type { BacklinksModule } from "../application/backlinks.module.js";
 import type { createGmailConnectionCommands } from "../application/commands/gmail-connection.command.js";
 import type { GmailConnectionView } from "../application/gmail-connection.gateway.js";
 import type { createGmailConnectionQuery } from "../application/queries/gmail-connection.query.js";
+import type {
+  GmailPollingSyncCommands,
+} from "../application/workflows/gmail-polling-sync-workflow.js";
 import {
   BacklinkError,
   backlinkErrorCodes,
+  isBacklinkError,
 } from "../domain/errors/backlink-error.js";
 import {
   backlinkProblemContentType,
@@ -28,6 +32,8 @@ import {
   gmailConnectResponseSchema,
   gmailDisconnectBodySchema,
   gmailDisconnectResponseSchema,
+  gmailPollingSyncResponseSchema,
+  gmailPollingSyncStatusResponseSchema,
   gmailStatusResponseSchema,
 } from "./gmail-connection.schema.js";
 
@@ -49,15 +55,25 @@ function sendGmailConnectionError(
   request: FastifyRequest,
   reply: FastifyReply,
 ): void {
+  const invalidTransportRequest =
+    error.validation !== undefined
+    || error.code?.startsWith("FST_ERR_CTP_") === true;
+  request.log.warn({
+    event: "backlinks.gmail-connection.request.failed",
+    errorName: error.name,
+    errorCode: error.code,
+    backlinkError: isBacklinkError(error),
+    validationError: invalidTransportRequest,
+  });
   const normalized =
     error instanceof BacklinkError
       ? error
-      : error.validation === undefined
-        ? error
-        : new BacklinkError({
+      : invalidTransportRequest
+        ? new BacklinkError({
             code: backlinkErrorCodes.invalidRequest,
             message: "Request validation failed.",
-          });
+          })
+        : error;
   const problem = toBacklinkProblemDetails(normalized, request.id);
   void reply.code(problem.status).type(backlinkProblemContentType).send(problem);
 }
@@ -90,6 +106,7 @@ export function registerBacklinksGmailConnectionRoutes(
     module: BacklinksModule;
     commands: GmailConnectionCommands;
     query: GmailConnectionQuery;
+    syncCommands: GmailPollingSyncCommands;
   }>,
 ): void {
   const api = app.withTypeProvider<ZodTypeProvider>();
@@ -183,6 +200,52 @@ export function registerBacklinksGmailConnectionRoutes(
     return {
       ...result,
       connection: serializeConnection(result.connection),
+      meta: meta(request, context),
+    };
+  });
+
+  api.post(`${basePath}/:connectionId/sync`, {
+    schema: {
+      operationId: "backlinksStartGmailPollingSyncV1",
+      params: gmailConnectionResourceParamsSchema,
+      response: { 202: gmailPollingSyncResponseSchema, ...errorResponses },
+    },
+    errorHandler: sendGmailConnectionError,
+  }, async (request, reply) => {
+    const context = await options.module.projectContext.resolve({
+      actor: request.actor,
+      websiteProjectKey: request.params.websiteProjectKey,
+    });
+    const result = await options.syncCommands.start({
+      context,
+      connectionId: request.params.connectionId,
+    });
+    return reply.code(202).send({
+      ...result,
+      meta: meta(request, context),
+    });
+  });
+
+  api.get(`${basePath}/:connectionId/sync-status`, {
+    schema: {
+      operationId: "backlinksGetGmailPollingSyncStatusV1",
+      params: gmailConnectionResourceParamsSchema,
+      response: {
+        200: gmailPollingSyncStatusResponseSchema,
+        ...errorResponses,
+      },
+    },
+    errorHandler: sendGmailConnectionError,
+  }, async (request) => {
+    const context = await options.module.projectContext.resolve({
+      actor: request.actor,
+      websiteProjectKey: request.params.websiteProjectKey,
+    });
+    return {
+      ...await options.syncCommands.status({
+        context,
+        connectionId: request.params.connectionId,
+      }),
       meta: meta(request, context),
     };
   });

@@ -36,6 +36,8 @@ coverage.out
 # Browser tests
 playwright-report/
 test-results/
+.playwright-cli/
+/output/
 
 # Editors and operating systems
 .vscode/*

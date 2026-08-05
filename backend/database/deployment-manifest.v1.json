@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-07-29",
+  "generatedAt": "2026-08-05",
   "postgresql": {
     "requiredMajor": 18,
     "image": "postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296"
@@ -13,8 +13,8 @@
     "backlinks": "ROLE-BACKLINKS"
   },
   "heads": {
-    "alembic": "20260724_0007",
-    "backlinks": "0029"
+    "alembic": "20260805_0008",
+    "backlinks": "0042"
   },
   "steps": [
     {
@@ -118,6 +118,18 @@
       "prerequisites": ["shared-bootstrap-0001", "alembic-20260722-0006"],
       "recovery": "forward-only",
       "recoveryNote": "Do not reverse schema ownership in place; restore the verified pre-migration backup or apply a reviewed forward repair."
+    },
+    {
+      "order": 27,
+      "migrationId": "alembic-20260805-0008",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260805_0008_website_project_authority.py",
+      "sha256": "f47eab47d20ff1e21e78d4a68f4c47cfdf8a4b16cca955421643fdc647545966",
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": ["platform"],
+      "prerequisites": ["alembic-20260724-0007"],
+      "recovery": "forward-only",
+      "recoveryNote": "Website Project authority and immutable profile, promotion target, audit, and outbox facts are restored from backup or repaired with a reviewed forward migration."
     },
     {
       "order": 30,
@@ -386,6 +398,162 @@
       "prerequisites": ["backlinks-0028"],
       "recovery": "forward-only",
       "recoveryNote": "Placement monitoring policies, runs, and immutable observations are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 52,
+      "migrationId": "backlinks-0030",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0030_backlink_metrics_reports.sql",
+      "sha256": "f0c3a2053b79d1e358f5737b3d530af25548c8bc40f37bcc415e87b55f0d648f",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0029"],
+      "recovery": "forward-only",
+      "recoveryNote": "Immutable metric snapshots, report revisions, and report publications are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 53,
+      "migrationId": "backlinks-0031",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0031_backlink_tasks_notifications.sql",
+      "sha256": "d7d0ddefab7667a3ec451ff6bf4825ba66d120da969b243b72be627fac27769a",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0030"],
+      "recovery": "forward-only",
+      "recoveryNote": "Task, notification, and per-user notification read-state projections are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 54,
+      "migrationId": "backlinks-0032",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0032_dataforseo_cost_control.sql",
+      "sha256": "66dd40d4120b8899fb1eaac8e40f1166f10f79a902461772395841bf8d7d656c",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0031"],
+      "recovery": "forward-only",
+      "recoveryNote": "DataForSEO batch requests, public artifacts, workspace projections, usage allocation, and fetch leases are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 55,
+      "migrationId": "backlinks-0033",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0033_backlink_runtime_governance.sql",
+      "sha256": "cce1cda06ebb80a704276058f59bb4a554f99866489e02e673f7224073b55cd9",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0032"],
+      "recovery": "forward-only",
+      "recoveryNote": "Runtime settings, kill switches, retention policies, and report export state are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 56,
+      "migrationId": "backlinks-0034",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0034_backlink_outbox_temporal_projection.sql",
+      "sha256": "bf14be7adb566496d2f3a66a881b05b6c6e1602c644251d618ca5c7f4cad1023",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0033"],
+      "recovery": "forward-only",
+      "recoveryNote": "Outbox relay functions and monitoring projection trace fields are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 57,
+      "migrationId": "backlinks-0035",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0035_backlink_contact_send_snapshots.sql",
+      "sha256": "59d3165f4123def9dc32f8bc5b0656401b87eb67a4cbfa099e0f6c85562080ea",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0034"],
+      "recovery": "forward-only",
+      "recoveryNote": "Opportunity Contact bindings and immutable Send Snapshots are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 58,
+      "migrationId": "backlinks-0036",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0036_backlink_opportunity_counter_reconciliation.sql",
+      "sha256": "9f0da0eb72bf32e79f3e46ceea2de3d84cb8134565fc7f490ea22372dff7b123",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0035"],
+      "recovery": "forward-only",
+      "recoveryNote": "Legacy Opportunity sequence counters are reconciled under tenant RLS before the next formal allocation."
+    },
+    {
+      "order": 59,
+      "migrationId": "backlinks-0037",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0037_dataforseo_worker_execution.sql",
+      "sha256": "2079f0b542fa52a18f743990e7e1b3b36f1d223ad1eccb2b70fa3e5e5574f797",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0036"],
+      "recovery": "forward-only",
+      "recoveryNote": "DataForSEO worker execution privileges are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 60,
+      "migrationId": "backlinks-0038",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0038_backlink_contact_enrichment.sql",
+      "sha256": "208f21ae1d891f02bf8544aa3a7f05651650ab5334b6218edd8cbc1cc5d978f4",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0037"],
+      "recovery": "forward-only",
+      "recoveryNote": "Contact enrichment jobs, bounded page evidence, and contact evidence metadata are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 61,
+      "migrationId": "backlinks-0039",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0039_backlink_opportunity_contact_gate.sql",
+      "sha256": "29f27573d7691cfefabc500ff6d1c323b7fffab87cb75aea6f2983c854622b37",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0038"],
+      "recovery": "forward-only",
+      "recoveryNote": "Opportunity source-contact bindings and review flags are repaired with a reviewed forward migration."
+    },
+    {
+      "order": 62,
+      "migrationId": "backlinks-0040",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0040_backlink_existing_placements.sql",
+      "sha256": "1792efae155284703c7e0e68a84e6904c59e9588c9fa5f8c1fc63ad023baccfb",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0039"],
+      "recovery": "forward-only",
+      "recoveryNote": "Existing manual and imported links can be repaired as monitored Placements without inventing an Outreach Opportunity."
+    },
+    {
+      "order": 63,
+      "migrationId": "backlinks-0041",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0041_backlink_gmail_project_bindings.sql",
+      "sha256": "2fc8f8da3dff626c3df210f3991062371c58c831757622f131c0ace6dd094b29",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0040"],
+      "recovery": "forward-only",
+      "recoveryNote": "Gmail connections are bound to one Website Project and require an explicit authorization per project."
+    },
+    {
+      "order": 64,
+      "migrationId": "backlinks-0042",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0042_backlink_project_recommendation_context.sql",
+      "sha256": "118be380ff4c505a6b64b2ef114a6dcf98fedd9a663f4116fa282c2cbbec1ce5",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0041"],
+      "recovery": "forward-only",
+      "recoveryNote": "Recommendation discovery and Draft generation read immutable products, keywords, and target URLs from the requested Website Project context."
     }
   ]
 }

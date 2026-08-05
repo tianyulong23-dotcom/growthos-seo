@@ -1,104 +1,191 @@
 # PB-FE-REPORTS Result
 
-Status: HANDOFF_READY
+Status: INTEGRATED
+Integrated tasks: `BL-AI-177`, `BL-AI-178`
+Integrated at: 2026-07-30
 Workspace: `C:\Users\DELL\Documents\缝合\john3947-seo`
-Handoff updated at: 2026-07-29
-Requested sequence: `BL-AI-161..176 frontend sync`
+Next task: `BL-AI-179` NOT STARTED
 
-## 2026-07-29 Feature-private Frontend Sync
+## Scope
 
-The frozen `BL-AI-161..176` Metric Snapshot, Report Revision, Export, Settings,
-Kill Switch, and Retention DTOs are implemented in the PB-FE-REPORTS
-feature-private directories. Shared navigation, page composition, and server
-route registration remain integration-controller work.
+The feature-private Reports and Settings implementations were preserved and
+accepted against the frozen Metrics, Reports, Export, Settings, Kill Switch,
+and Retention OpenAPI/DTOs.
 
-### Reports workspace
+After the feature handoff returned `HANDOFF_READY`, the main-directory
+integration controller completed the shared ownership work:
 
-- Added typed clients for Metric Dashboard, published Report Revisions,
-  asynchronous Export requests/status, and authorized download.
-- The UI displays server-provided `metric.value`, numerator, denominator,
-  Snapshot ID/version, Metric Definition version, reporting window, Workspace
-  timezone, Report input Snapshot IDs, checksum, and server freshness.
-- Candidate is explicitly marked as excluded from successful Placement KPI.
-- The frontend does not aggregate facts, inspect mutable frontend state for a
-  formal metric, generate a Blob, or fabricate an export file.
-- Export states cover `queued`, `running`, `failed`, `completed`, and
-  `expired`. Download is enabled only for a completed, non-expired server
-  object and calls the authorization endpoint before navigation.
-- PDF remains visibly disabled with `PDF_EXPORT_DISABLED`.
+- registered Reports and Settings in the existing Backlinks navigation;
+- mounted both workspaces under the protected
+  `/projects/:projectId/backlinks/:view` workspace;
+- passed the route-derived Website Project key and the existing shared API
+  clients;
+- read the Reports timezone and lookback window from server Settings rather
+  than browser-local timezone;
+- suppressed the unrelated generic header action on Reports and Settings;
+- added shared-route source acceptance tests; and
+- updated this result and Canonical State.
 
-### Settings workspace
+Integration-controller changes are limited to:
 
-- Added versioned Settings reads/writes with `expectedVersion`, explicit 403
-  and 409 states, and append-only version display.
-- Only Project and Provider kill-switch layers are operable. Effective block
-  and source layer/version are read from the server.
-- Dangerous changes require the exact
-  `CONFIRM DANGEROUS CHANGE` confirmation plus a reason.
-- DataForSEO is shown as a Provider target without reading or changing
-  DataForSEO implementation state.
-- Retention rules and the `legal_hold`, `audit_record`, `lifecycle_record`,
-  and `active_suppression` exceptions are read-only. The UI states that
-  selection does not execute deletion on a read path.
+- `frontend/src/features/outreach/manifest.ts`
+- `frontend/src/features/outreach/module.tsx`
+- `frontend/src/features/outreach/outreach-workspace.tsx`
+- `frontend/src/features/outreach/reports/reports-workspace.tsx`
+- `frontend/src/features/outreach/reports/reports-source.test.mjs`
+- `frontend/src/features/outreach/settings/settings-source.test.mjs`
+- `backend/core/docs/execution/parallel-blocks/PB-FE-REPORTS-result.md`
+- `backend/core/docs/execution/backlinks-ai-coding-state.md`
 
-### RED / GREEN
+No second Browser Worker, Queue, Launcher, or network stack was created.
+Browser remains default-off, DataForSEO is unchanged, and `BL-AI-179` was not
+started.
 
-| Command or check | Exit code | Evidence |
-| --- | ---: | --- |
-| Feature RED tests | non-zero | Six source-contract tests failed before Reports/Settings types, clients, and workspaces existed. |
-| Feature GREEN tests | `0` | Six source-contract tests pass. |
-| Frontend `npm run typecheck` | `0` | TypeScript passed after feature and manual-preview additions. |
-| Frontend `npm run lint -- --quiet` | `0` | ESLint passed. |
-| Frontend `npm run build` | `0` | Production build passed; only the existing non-fatal chunk-size advisory remains. |
-| Desktop browser | `0` | Reports and Settings rendered at 1440px; export and dangerous-setting flows were exercised. |
-| Mobile browser | `0` | Reports and Settings rendered at 390x844 without overlap or clipped controls. |
-| Browser console | `0` | No business UI errors; the Reports preview had only a missing `favicon.ico` 404. |
+## Reports Contract
 
-### Integration handoff
+The Reports feature consumes only these frozen public operations:
 
-1. Mount `ReportsWorkspace` and `SettingsWorkspace` through the protected
-   shared page/navigation owner.
-2. Register the PB-F module-local Dashboard, published Reports, Export, and
-   Settings routes through the shared server/OpenAPI owner.
-3. Preserve explicit Workspace timezone and reporting-window inputs; do not
-   replace them with browser timezone or frontend-derived metric values.
-4. Keep PDF disabled until the isolated renderer is integrated.
+- `GET /api/v1/projects/{websiteProjectKey}/backlinks/metrics/dashboard`
+- `GET /api/v1/projects/{websiteProjectKey}/backlinks/reports`
+- `POST /api/v1/projects/{websiteProjectKey}/backlinks/reports/{reportKey}/revisions/{reportRevisionId}/exports`
+- `GET /api/v1/projects/{websiteProjectKey}/backlinks/report-exports/{exportId}`
+- `GET /api/v1/projects/{websiteProjectKey}/backlinks/report-exports/{exportId}/download`
 
-No protected frontend file, shared API client, navigation, global CSS, Crawler,
-DataForSEO implementation, Canonical State, commit, or push was changed.
+The UI displays server-provided Metric Snapshots, trend points, reporting
+window, Workspace timezone, Report Revision inputs/checksum/freshness, and
+Export lifecycle state. Candidate remains excluded from successful Placement
+KPI. The frontend does not calculate formal metrics, infer freshness, create
+files, or fabricate download URLs. Download is enabled only for a completed
+Export with a server object, and PDF remains disabled by
+`PDF_EXPORT_DISABLED`.
 
-HANDOFF_READY
+## Settings Contract
 
-## Historical Blocked Audit (Superseded on 2026-07-29)
+The feature client consumes only these frozen public operations:
 
-The remainder of this section records the pre-implementation audit only.
-References to the PB-F gate being blocked below are historical and do not
-override the `HANDOFF_READY` frontend synchronization above.
+- `GET /api/v1/projects/{websiteProjectKey}/backlinks/settings`
+- `PUT /api/v1/projects/{websiteProjectKey}/backlinks/settings`
+- `PUT /api/v1/projects/{websiteProjectKey}/backlinks/settings/kill-switches/{capability}`
 
-The following result describes the earlier state before the immutable facts
-and PB-F DTOs were integrated. It no longer controls the current handoff.
+Verified DTO behavior:
 
-### Gate Decision
+- Settings writes send the server Settings `version` as `expectedVersion`.
+- Kill Switch writes send the effective source `sourceVersion` as
+  `expectedVersion`.
+- 403 is represented for both read and command authorization failures.
+- 409 is represented as an `ExpectedVersion` conflict requiring refresh.
+- Dangerous Kill Switch changes require a non-empty reason and the exact
+  `CONFIRM DANGEROUS CHANGE` confirmation.
+- Only server-authorized `project` and `provider` layers can be selected.
+- Provider-layer commands use only the Provider identity returned by the
+  server DTO. No Provider name is invented by the frontend.
+- Effective `global`, `organization`, and `workspace` sources remain visible
+  as read-only facts and expose no mutation controls.
 
-`BL-AI-177` and `BL-AI-178` were not started.
+## DFS-COST Boundary
 
-V1.4.1 requires the Metrics, Reports, Export, Settings, Kill Switch, and
-Retention public DTOs to be frozen before PB-FE-REPORTS starts. The preceding
-PB-F gate remains blocked at `BL-AI-161` because the integrated Draft, Reply,
-and Monitoring domains do not yet provide all immutable facts required to
-define reconstructible metrics.
+The acceptance was checked against the integrated `DFS-COST-001..006`,
+`DFS-COST-GATE: PASS_DEVELOPMENT_ONLY`, and migration head `0032`.
 
-The current Backlinks OpenAPI passes its checker at 38 paths but contains no
-PB-F public paths. Freezing a frontend contract in that state would fabricate
-API operations, metric semantics, export states, or settings behavior.
+- DataForSEO remains visible as a configured Provider.
+- No ordinary `FORCE_LIVE` control or command is exposed.
+- No Provider call, cost-control command, budget override, or Artifact API is
+  fabricated by the Settings feature.
+- Refresh calls only the frozen Settings governance GET operation; it does not
+  invoke a Provider or a mutation command.
+- No cross-tenant Artifact surface is present.
+- No global or organization mutation setting is present.
+- Existing running Jobs are described as retaining their startup-bound
+  Settings version.
 
-### Downstream Scope
+## Retention
 
-- No file was created under `frontend/src/features/outreach/reports/**`.
-- No file was created under `frontend/src/features/outreach/settings/**`.
-- No protected frontend file, navigation, shared API client, global CSS,
-  backend route, migration, DataForSEO file, or Canonical State file changed.
-- No desktop, 390px, keyboard, export-lifecycle, stale, forbidden, conflict, or
-  settings-version UI test was claimed because there is no authorized frozen
-  DTO or feature implementation to exercise.
-- `BL-AI-178` was not started after the `BL-AI-177` gate failed.
+Retention is read-only in this feature:
+
+- Rules display server-provided category and retention days.
+- `legal_hold`, `audit_record`, `lifecycle_record`, and
+  `active_suppression` each have an explicit exception explanation.
+- The page states that the read path only selects expired records and does not
+  execute deletion.
+- No Retention update or delete command exists in the feature.
+
+## Verification
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Directed frontend tests | PASS | Reports, Settings, Links, Mail, and Gmail source suites: 26 tests, 26 passed |
+| Typecheck | PASS | `npm run typecheck`: exit 0 |
+| Lint | PASS | `npm run lint`: exit 0 |
+| Production build | PASS | `npm run build`: exit 0; Vite 8.1.5 built 2302 modules |
+| Formatting | PASS | Prettier check passed for all shared and feature files changed by the integration controller |
+| Core regression | PASS | `npm run verify:backlinks`: Unit 397, API 86, Contract 144, Integration 171 passed with 13 skipped, Security 102, Resilience 8 |
+| FastAPI regression | PASS | Locked Docker environment: Ruff passed; Pytest 34 passed, 1 skipped |
+| Feature browser acceptance | PASS | Reports and Settings feature-private desktop/mobile artifacts retained; Settings console reported 0 errors and 0 warnings |
+
+The build retains the existing non-fatal advisory that the main minified chunk
+is larger than 500 kB.
+
+## Feature-Private Browser Acceptance
+
+Playwright acceptance was completed in the feature block before shared
+integration. Reports artifacts cover desktop summary/completed Export and
+390px summary/trends views. Settings acceptance covered:
+
+- Desktop 1440x900 rendered Settings versions, DataForSEO, effective source
+  layer/version, authorized controls, and Retention without overlap.
+- A Settings save advanced server preview version 12 to version 13.
+- GET 403 rendered `无权查看治理设置`.
+- Settings command 403 and Kill Switch command 403 rendered
+  `当前账号无权修改该设置`.
+- Settings command 409 and Kill Switch command 409 rendered
+  `ExpectedVersion 冲突，请刷新后重新提交`.
+- Selecting the organization-sourced DataForSEO switch rendered a read-only
+  notice and no mutation editor.
+- Keyboard Tab reached Refresh, Settings inputs, switch rows, layer selector,
+  reason, confirmation, and the dangerous command.
+- Enter selected the DataForSEO Provider row. The dangerous command remained
+  disabled until both reason and exact confirmation were entered, then Enter
+  submitted it and advanced source version 5 to 6.
+- At 390x844, document and body `scrollWidth` remained 390px. The Retention
+  table used only its local horizontal overflow container.
+- Console inspection reported 0 errors and 0 warnings.
+
+Artifacts:
+
+- `frontend/output/playwright/bl-ai-177/desktop-summary.png`
+- `frontend/output/playwright/bl-ai-177/desktop-completed-export.png`
+- `frontend/output/playwright/bl-ai-177/mobile-summary-390.png`
+- `frontend/output/playwright/bl-ai-177/mobile-trends-390.png`
+- `frontend/output/playwright/bl-ai-178/desktop-settings.png`
+- `frontend/output/playwright/bl-ai-178/desktop-readonly-source.png`
+- `frontend/output/playwright/bl-ai-178/desktop-settings-conflict.png`
+- `frontend/output/playwright/bl-ai-178/mobile-settings-390.png`
+- `frontend/output/playwright/bl-ai-178/vite.stdout.log`
+- `frontend/output/playwright/bl-ai-178/vite.stderr.log`
+
+## Handoff Boundary
+
+Before the handoff, five protected files matched the feature-block turn-start
+SHA-256 baseline:
+
+- `frontend/src/App.tsx`: `865f6aa56d79c9367fd12d91d6e64e7411ade1a3db8f9baca92f4b459e3a086e`
+- `frontend/src/app/app-shell.tsx`: `790353b5cac6dd408a9211f105500ded7fe500e79a32b7c6eb96d23172762422`
+- `frontend/src/api/client.ts`: `8bbc36fcf1cbf65ec213cfb200d437506ad2629aecca99016f9f17ad080b3c6a`
+- `frontend/src/index.css`: `1205c138b38ffc62d8d209d3b8105e2bc03bd8964d3dc57b7e0d1e12d2085afd`
+- `frontend/src/features/outreach/api/client.ts`: `add2e3bb08030b9208f4188ed8deabb9fe82f3a6239507eafcd1cb30e9c75006`
+
+Two pre-existing dirty protected workspace files changed concurrently while
+BL-AI-178 acceptance was running. The feature block did not edit or revert
+either file:
+
+- `frontend/src/features/outreach/outreach-workspace.tsx`: turn-start `7bf9b9d99c14ebead82bb0e8092fcaa4bf3da349a1f8cb07da5c71ed7cd00dde`; final observed `0232857efa26e84c44b998ecd79d3d4b5632c2ff3abed518580fe333fee6bf71`
+- `frontend/src/features/projects/project-workspace.tsx`: turn-start `11668907222752181c9039b111c3d11225314a5cbbbe0cb5ddcce287690ca6b0`; final observed `6273fd6b24608fa687cec2af3f7aecabe6d5a5a58f3825ec53162e5628d14a64`
+
+After `HANDOFF_READY`, the main-directory integration controller intentionally
+edited the shared Backlinks navigation and protected Outreach workspace. It
+did not edit `frontend/src/api/client.ts`, backend implementation, OpenAPI,
+migrations, DataForSEO implementation, global CSS, or Project workspace.
+No real Browser, Provider, or DataForSEO call, production mutation, commit, or
+push occurred.
+
+INTEGRATED

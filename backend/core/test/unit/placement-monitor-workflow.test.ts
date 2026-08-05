@@ -136,6 +136,7 @@ describe("BL-AI-152 Placement Monitor Workflow", () => {
       websiteProjectId: input.websiteProjectId,
       sourcePageUrl: execution.sourcePageUrl,
       targetUrl: execution.targetUrl,
+      browserFallbackAllowed: execution.browserFallbackEnabled,
       previousSuccessfulObservation: null,
     });
     expect(store.complete).toHaveBeenCalledOnce();
@@ -153,6 +154,28 @@ describe("BL-AI-152 Placement Monitor Workflow", () => {
       status: "SUCCEEDED",
       result: "present",
     });
+  });
+
+  it("normalizes Temporal ISO dates before preparing the monitor run", async () => {
+    const store = repository({ state: "ready", execution });
+
+    await runPlacementMonitorWorkflow(
+      {
+        ...input,
+        scheduledFor: "2026-07-28T09:00:00.000Z",
+        now: "2026-07-28T09:00:05.000Z",
+      },
+      store,
+      activity(observation()),
+    );
+
+    expect(store.prepare).toHaveBeenCalledWith(expect.objectContaining({
+      scheduledFor: new Date("2026-07-28T09:00:00.000Z"),
+      now: new Date("2026-07-28T09:00:05.000Z"),
+    }));
+    expect(store.complete).toHaveBeenCalledWith(expect.objectContaining({
+      completedAt: new Date("2026-07-28T09:00:05.000Z"),
+    }));
   });
 
   it("replays a terminal run without another external fetch", async () => {

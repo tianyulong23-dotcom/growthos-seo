@@ -29,9 +29,15 @@ const input = {
     budgetReservationId: "reservation-1",
   },
   request: { target: "example.com", targetType: "domain" as const, limit: 100 },
+  intent: "DISCOVERY" as const,
+  refreshMode: "BACKGROUND_REFRESH" as const,
+  execution: "BACKGROUND" as const,
+  locationCode: "US",
+  languageCode: "en-US",
+  responseSchemaVersion: "dataforseo.backlinks-referring-domains.v1",
+  usagePurpose: "project-analysis-discovery",
   projectContextVersion: 7,
   cacheSchemaVersion: 1,
-  cacheTtlMs: 60_000,
   estimatedCostMicros: 20_000,
 };
 type Flight = { promise: Promise<BacklinkProviderSnapshot>;
@@ -62,7 +68,7 @@ class MemoryCoordinator implements DataForSeoRequestCoordinator {
     return {
       kind: "leader" as const,
       complete: async (value: BacklinkProviderSnapshot) => {
-        this.cache.set(key, { snapshot: value, expiresAt: start.expiresAt });
+        this.cache.set(key, { snapshot: value, expiresAt: start.freshUntil });
         this.flights.delete(key);
         flight.resolve(value);
       },
@@ -159,7 +165,7 @@ describe("DataForSeoRequestService", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("creates a new request when project version or parameters change", async () => {
+  it("excludes private project versions but includes Provider parameters", async () => {
     const fetch = vi.fn(async () => snapshot);
     const { service } = createService(fetch);
 
@@ -170,8 +176,8 @@ describe("DataForSeoRequestService", () => {
     ]);
 
     const fingerprints = results.map((result) => result.requestFingerprint);
-    expect(new Set(fingerprints).size).toBe(3);
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(new Set(fingerprints).size).toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("serves a historical cache entry while the Provider Kill Switch is closed", async () => {

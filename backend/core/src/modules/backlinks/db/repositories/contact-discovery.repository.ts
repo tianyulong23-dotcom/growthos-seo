@@ -9,7 +9,11 @@ export function createContactDiscoveryRepository(
   pool: BacklinkTenantPool,
 ): ContactDiscoveryRepository {
   return { merge: (input: ContactDiscoveryWrite) => withBacklinkTenantTransaction(
-    pool, { workspaceId: input.workspaceId, websiteProjectId: input.websiteProjectId },
+    pool, {
+      organizationId: input.organizationId,
+      workspaceId: input.workspaceId,
+      websiteProjectId: input.websiteProjectId,
+    },
     async (client) => {
     let evidenceInserted = 0, evidenceMerged = 0;
     for (const record of input.records) {
@@ -55,13 +59,15 @@ export function createContactDiscoveryRepository(
         const merged = await client.query(`
           UPDATE backlink_contact_evidence SET
             observed_at=LEAST(observed_at,$8),confidence=GREATEST(confidence,$9),
-            expires_at=GREATEST(expires_at,$10)
+            expires_at=GREATEST(expires_at,$10),
+            rule_version=$11,domain_relation=$12
           WHERE organization_id=$1 AND workspace_id=$2 AND website_project_id=$3
             AND candidate_id=$4 AND source_url=$5 AND extraction_method=$6
             AND content_sha256=$7 RETURNING id
         `, [input.organizationId, input.workspaceId, input.websiteProjectId,
           candidateId, record.sourceUrl, record.extractionMethod,
-          record.contentSha256, record.observedAt, record.confidence, record.expiresAt]);
+          record.contentSha256, record.observedAt, record.confidence,
+          record.expiresAt, record.purposeRuleVersion, record.domainRelation]);
         if (merged.rows[0] !== undefined) {
           evidenceMerged++;
           continue;
@@ -70,12 +76,14 @@ export function createContactDiscoveryRepository(
           INSERT INTO backlink_contact_evidence (
             id,organization_id,workspace_id,website_project_id,candidate_id,
             source_url,observed_at,extraction_method,evidence_snippet,parser_version,
-            content_sha256,confidence,expires_at,created_by
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            content_sha256,confidence,expires_at,created_by,rule_version,
+            domain_relation
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         `, [record.evidenceId, input.organizationId, input.workspaceId,
           input.websiteProjectId, candidateId, record.sourceUrl, record.observedAt,
           record.extractionMethod, record.evidenceSnippet, record.parserVersion,
-          record.contentSha256, record.confidence, record.expiresAt, input.actorId]);
+          record.contentSha256, record.confidence, record.expiresAt, input.actorId,
+          record.purposeRuleVersion, record.domainRelation]);
         evidenceInserted++;
     }
     return { candidateCount: input.records.length, evidenceInserted, evidenceMerged };

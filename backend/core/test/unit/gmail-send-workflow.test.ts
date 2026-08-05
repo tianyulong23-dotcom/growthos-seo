@@ -10,6 +10,14 @@ import {
 } from "../../src/modules/backlinks/ports/gmail-send.port.js";
 
 const sendIntentId = "018f0000-0000-7000-8000-000000000118";
+const workflowInput = {
+  sendIntentId,
+  organizationId: "018f0000-0000-7000-8000-000000000001",
+  workspaceId: "018f0000-0000-7000-8000-000000000002",
+  websiteProjectId: "018f0000-0000-7000-8000-000000000003",
+  gmailConnectionId: "018f0000-0000-7000-8000-000000000004",
+  actorId: "worker-bl-ai-118",
+};
 const attempt = (attemptNo: number) => ({
   sendIntentId,
   attemptId:
@@ -56,14 +64,14 @@ describe("BL-AI-118 Gmail Send Workflow", () => {
       settleAttempt,
     };
 
-    await expect(runGmailSendWorkflow({ sendIntentId }, activities))
+    await expect(runGmailSendWorkflow(workflowInput, activities))
       .resolves.toEqual({
         outcome: "completed",
         providerMessageId: "gmail-message-118",
         providerThreadId: "gmail-thread-118",
         rfcMessageId: attempt(1).rfcMessageId,
       });
-    await expect(runGmailSendWorkflow({ sendIntentId }, activities))
+    await expect(runGmailSendWorkflow(workflowInput, activities))
       .resolves.toEqual({
         outcome: "already_completed",
         providerMessageId: "gmail-message-118",
@@ -72,6 +80,13 @@ describe("BL-AI-118 Gmail Send Workflow", () => {
       });
     expect(dispatchAttempt).toHaveBeenCalledTimes(1);
     expect(settleAttempt).toHaveBeenCalledWith({
+      context: {
+        organizationId: workflowInput.organizationId,
+        workspaceId: workflowInput.workspaceId,
+        websiteProjectId: workflowInput.websiteProjectId,
+        gmailConnectionId: workflowInput.gmailConnectionId,
+        actorId: workflowInput.actorId,
+      },
       attempt: attempt(1),
       settlement: {
         status: "PROVIDER_ACCEPTED",
@@ -99,7 +114,7 @@ describe("BL-AI-118 Gmail Send Workflow", () => {
       }),
     };
 
-    await expect(runGmailSendWorkflow({ sendIntentId }, activities))
+    await expect(runGmailSendWorkflow(workflowInput, activities))
       .resolves.toEqual({
         outcome: "reconciliation_required",
         attemptId: attempt(1).attemptId,
@@ -108,6 +123,13 @@ describe("BL-AI-118 Gmail Send Workflow", () => {
       });
     expect(activities.dispatchAttempt).toHaveBeenCalledTimes(1);
     expect(activities.settleAttempt).toHaveBeenCalledWith({
+      context: {
+        organizationId: workflowInput.organizationId,
+        workspaceId: workflowInput.workspaceId,
+        websiteProjectId: workflowInput.websiteProjectId,
+        gmailConnectionId: workflowInput.gmailConnectionId,
+        actorId: workflowInput.actorId,
+      },
       attempt: attempt(1),
       settlement: {
         status: "DELIVERY_UNKNOWN",
@@ -145,7 +167,7 @@ describe("BL-AI-118 Gmail Send Workflow", () => {
     };
 
     await expect(runGmailSendWorkflow(
-      { sendIntentId },
+      workflowInput,
       activities,
       { maxAttempts: 3, wait },
     )).resolves.toEqual({
@@ -156,6 +178,13 @@ describe("BL-AI-118 Gmail Send Workflow", () => {
     expect(wait).toHaveBeenCalledTimes(2);
     expect(wait).toHaveBeenNthCalledWith(1, 30_000);
     expect(activities.settleAttempt).toHaveBeenNthCalledWith(3, {
+      context: {
+        organizationId: workflowInput.organizationId,
+        workspaceId: workflowInput.workspaceId,
+        websiteProjectId: workflowInput.websiteProjectId,
+        gmailConnectionId: workflowInput.gmailConnectionId,
+        actorId: workflowInput.actorId,
+      },
       attempt: attempt(3),
       settlement: {
         status: "FAILED_FINAL",
@@ -176,7 +205,7 @@ describe("BL-AI-118 Gmail Send Workflow", () => {
       settleAttempt: vi.fn(),
     };
 
-    await expect(runGmailSendWorkflow({ sendIntentId }, activities))
+    await expect(runGmailSendWorkflow(workflowInput, activities))
       .resolves.toEqual({
         outcome: "reconciliation_required",
         attemptId: attempt(1).attemptId,

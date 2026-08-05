@@ -12,17 +12,21 @@ import {
 import { Link, useParams } from "react-router"
 
 import { ApiError } from "@/api/client"
-import { defaultProject } from "@/app/project-context"
+import { useCurrentProject } from "@/app/project-context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { getBacklinkOpportunity } from "@/features/outreach/api/client"
+import {
+  backlinksProjectQueries,
+  createProjectQueryKey,
+} from "@/features/outreach/api/project-query"
 import {
   approveDraft,
   createSendIntent,
   getDraft,
-  listContactCandidates,
+  getSendIntent,
+  listOpportunityContacts,
   saveDraftVersion,
 } from "@/features/outreach/drafts/api"
 import {
@@ -30,12 +34,14 @@ import {
   normalizeDraftDocument,
 } from "@/features/outreach/drafts/draft-document"
 import { DraftEditor } from "@/features/outreach/drafts/draft-editor"
+import { DraftGeneration } from "@/features/outreach/drafts/draft-generation"
 import type {
-  ContactCandidate,
   DraftDocument,
   DraftSnapshot,
   DraftStatus,
+  OpportunityContact,
   SendIntentResult,
+  SendIntentView,
 } from "@/features/outreach/drafts/types"
 import { useGmailConnection } from "@/features/outreach/gmail/use-gmail-connection"
 
@@ -46,6 +52,25 @@ const statusLabels: Record<DraftStatus, string> = {
   rejected: "已拒绝",
   sent: "已发送",
 }
+
+const sendIntentStatusLabels: Record<SendIntentView["status"], string> = {
+  READY: "已排队",
+  DISPATCHING: "正在发送",
+  PROVIDER_ACCEPTED: "Gmail Provider 已接受",
+  DELIVERY_UNKNOWN: "发送结果未知",
+  FAILED_RETRYABLE: "发送失败，等待受控恢复",
+  FAILED_FINAL: "发送失败",
+  CANCELLED: "已取消",
+  REJECTED: "已拒绝",
+}
+
+const terminalSendIntentStatuses = new Set<SendIntentView["status"]>([
+  "PROVIDER_ACCEPTED",
+  "DELIVERY_UNKNOWN",
+  "FAILED_FINAL",
+  "CANCELLED",
+  "REJECTED",
+])
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError && error.status === 409) {
@@ -81,7 +106,8 @@ function sendIntentErrorMessage(error: unknown): {
     }
     if (error.status >= 400 && error.status < 500) {
       return {
-        message: "服务端拒绝创建 Send Intent；请刷新并核对批准版本和 Gmail 身份。",
+        message:
+          "服务端拒绝创建 Send Intent；请刷新并核对批准版本和 Gmail 身份。",
         unknown: false,
       }
     }
@@ -89,16 +115,18 @@ function sendIntentErrorMessage(error: unknown): {
 
   return {
     message:
-      "创建结果未知。不会显示为已发送；请使用相同请求键重试或等待服务端记录可查询。",
+      "最终提交结果未知。不要再次点击发送；请刷新页面并核对服务端发送记录。",
     unknown: true,
   }
 }
 
-export function DraftPage() {
-  const { projectId = defaultProject.id, draftId } = useParams<{
-    projectId: string
-    draftId: string
-  }>()
+function DraftEditorPage({
+  projectId,
+  draftId,
+}: {
+  projectId: string
+  draftId: string
+}) {
   const [snapshot, setSnapshot] = React.useState<DraftSnapshot | null>(null)
   const [subjectText, setSubjectText] = React.useState("")
   const [bodyDocument, setBodyDocument] =
@@ -113,7 +141,7 @@ export function DraftPage() {
     "idle" | "loading" | "ready" | "error"
   >("idle")
   const [recipientCandidates, setRecipientCandidates] = React.useState<
-    ContactCandidate[]
+    OpportunityContact[]
   >([])
   const [recipientError, setRecipientError] = React.useState<string | null>(
     null
@@ -126,6 +154,11 @@ export function DraftPage() {
   const [sendIntent, setSendIntent] = React.useState<SendIntentResult | null>(
     null
   )
+  const [sendIntentView, setSendIntentView] =
+    React.useState<SendIntentView | null>(null)
+  const [sendStatusError, setSendStatusError] = React.useState<string | null>(
+    null
+  )
   const [sendIntentUnknown, setSendIntentUnknown] = React.useState(false)
   const gmailConnection = useGmailConnection(projectId, Boolean(draftId))
 
@@ -135,13 +168,9 @@ export function DraftPage() {
       setRecipientCandidates([])
       setRecipientError(null)
       try {
-        const opportunity = await getBacklinkOpportunity(
+        const response = await listOpportunityContacts(
           projectId,
           opportunityId
-        )
-        const response = await listContactCandidates(
-          projectId,
-          opportunity.item.prospectId
         )
         setRecipientCandidates(response.items)
         setRecipientStatus("ready")
@@ -156,11 +185,14 @@ export function DraftPage() {
   )
 
   const load = React.useCallback(async () => {
-    if (!draftId) return
+    const draftKey = createProjectQueryKey(projectId, "draft", draftId)
+    backlinksProjectQueries.invalidate(draftKey)
     setLoading(true)
     setError(null)
     try {
-      const response = await getDraft(projectId, draftId)
+      const response = await backlinksProjectQueries.fetch(draftKey, (signal) =>
+        getDraft(projectId, draftId, signal)
+      )
       const currentVersion = response.draft.currentVersion
       setSnapshot(response.draft)
       setSubjectText(currentVersion?.subjectText ?? "")
@@ -222,6 +254,8 @@ export function DraftPage() {
       setSendConfirmed(false)
       setSendRequestKey(null)
       setSendIntent(null)
+      setSendIntentView(null)
+      setSendStatusError(null)
       setSendIntentUnknown(false)
       setNotice("当前草稿版本已人工批准。")
     } catch (approveError) {
@@ -231,17 +265,17 @@ export function DraftPage() {
     }
   }
 
-  if (!draftId) {
-    return <div className="p-6 text-sm text-destructive">草稿 ID 缺失。</div>
-  }
-
   const currentVersion = snapshot?.currentVersion ?? null
   const readOnly =
     snapshot?.status === "approved" || snapshot?.status === "sent"
   const busy = loading || saving || approving || creatingSendIntent
   const recipient =
-    recipientStatus === "ready" && recipientCandidates.length === 1
-      ? recipientCandidates[0]
+    recipientStatus === "ready" && snapshot?.contactId
+      ? recipientCandidates.find(
+          (candidate) =>
+            candidate.id === snapshot.contactId &&
+            candidate.version === snapshot.contactVersion
+        ) ?? null
       : null
   const approvedVersionMatchesCurrent =
     snapshot?.approvedVersionId !== null &&
@@ -259,13 +293,15 @@ export function DraftPage() {
     sendPreconditionsReady &&
     sendConfirmed &&
     !busy &&
-    sendIntent === null
+    sendIntent === null &&
+    !sendIntentUnknown
 
   const createApprovedSendIntent = async () => {
     if (
       !draftId ||
       !snapshot?.approvedVersionId ||
       !gmailConnection.connection ||
+      !recipient ||
       !canCreateSendIntent
     ) {
       return
@@ -283,6 +319,8 @@ export function DraftPage() {
         draftId,
         {
           approvedDraftVersionId: snapshot.approvedVersionId,
+          contactId: recipient.id,
+          contactVersion: recipient.version,
           gmailConnectionId: gmailConnection.connection.connectionId,
           messagePurpose: "INITIAL_OUTREACH",
           followUpIndex: 0,
@@ -290,7 +328,7 @@ export function DraftPage() {
         idempotencyKey
       )
       setSendIntent(response)
-      setNotice("Send Intent 已创建并处于 READY；这不是发送成功。")
+      setNotice("发送任务已提交，正在读取服务端发送状态。")
     } catch (sendError) {
       const result = sendIntentErrorMessage(sendError)
       setSendIntentUnknown(result.unknown)
@@ -299,6 +337,41 @@ export function DraftPage() {
       setCreatingSendIntent(false)
     }
   }
+
+  React.useEffect(() => {
+    if (!sendIntent) return
+
+    const controller = new AbortController()
+    let timer: number | null = null
+
+    const poll = async () => {
+      try {
+        const response = await getSendIntent(
+          projectId,
+          sendIntent.sendIntentId,
+          controller.signal
+        )
+        if (controller.signal.aborted) return
+        setSendIntentView(response.sendIntent)
+        setSendStatusError(null)
+        if (!terminalSendIntentStatuses.has(response.sendIntent.status)) {
+          timer = window.setTimeout(() => void poll(), 1200)
+        }
+      } catch (statusError) {
+        if (controller.signal.aborted) return
+        setSendStatusError(errorMessage(statusError))
+        timer = window.setTimeout(() => void poll(), 3000)
+      }
+    }
+
+    void poll()
+    return () => {
+      controller.abort()
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [projectId, sendIntent])
+
+  const persistedSendStatus = sendIntentView?.status ?? sendIntent?.status ?? null
 
   return (
     <div className="min-w-0">
@@ -427,19 +500,19 @@ export function DraftPage() {
                       id="send-confirmation-title"
                       className="text-sm font-semibold"
                     >
-                      发送前二次确认
+                      发送前最终确认
                     </h2>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      只会创建服务端 Send Intent；服务端仍会重新校验身份、抑制和配额。
+                      确认后会创建不可变发送快照并交给 Worker。服务端仍会重新校验联系人、批准版本、发送身份、抑制和配额。
                     </p>
                   </div>
-                  <Badge variant="outline">服务端复核</Badge>
+                  <Badge variant="outline">人工最终确认</Badge>
                 </div>
 
                 <dl className="grid gap-3 text-sm sm:grid-cols-3">
                   <div>
                     <dt className="text-xs text-muted-foreground">发送身份</dt>
-                    <dd className="mt-1 break-all font-medium">
+                    <dd className="mt-1 font-medium break-all">
                       {gmailReady
                         ? gmailConnection.connection?.primaryEmail
                         : "Gmail 身份未就绪"}
@@ -447,17 +520,17 @@ export function DraftPage() {
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">收件人</dt>
-                    <dd className="mt-1 break-all font-medium">
+                    <dd className="mt-1 font-medium break-all">
                       {recipient?.normalizedEmail ??
                         (recipientStatus === "loading"
                           ? "正在读取候选"
                           : "未获得唯一候选")}
+                      {recipient && (
+                        <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                          仅展示联系人候选，执行时仍由服务端重新校验。
+                        </span>
+                      )}
                     </dd>
-                    {recipient && (
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        仅展示联系人候选，执行时仍由服务端重新校验。
-                      </div>
-                    )}
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">
@@ -474,34 +547,36 @@ export function DraftPage() {
                 {recipientStatus === "error" && recipientError && (
                   <p className="text-xs text-destructive">{recipientError}</p>
                 )}
-                {recipientStatus === "ready" &&
-                  recipientCandidates.length !== 1 && (
-                    <p className="text-xs text-destructive">
-                      {recipientCandidates.length === 0
-                        ? "未找到收件人候选，不能创建 Send Intent。"
-                        : "候选不止一个，公开契约未定义本地发送目标选择，不能创建 Send Intent。"}
-                    </p>
-                  )}
+                {recipientStatus === "ready" && recipient === null && (
+                  <p className="text-xs text-destructive">
+                    {recipientCandidates.length === 0
+                      ? "当前机会没有可发送的已确认联系人。"
+                      : "草稿绑定的联系人版本已变化，请返回机会详情重新选择并生成草稿。"}
+                  </p>
+                )}
                 {!approvedVersionMatchesCurrent && (
                   <p className="text-xs text-destructive">
-                    当前展示版本与已批准版本不一致，不能创建 Send Intent。
+                    当前展示版本与已批准版本不一致，不能发送。
                   </p>
                 )}
                 {!gmailReady && gmailConnection.status !== "loading" && (
                   <p className="text-xs text-destructive">
-                    Gmail 连接未处于可发送状态，不能创建 Send Intent。
+                    Gmail 连接未处于可发送状态，不能发送。
                   </p>
                 )}
 
                 <label className="flex items-start gap-2 text-sm">
                   <Checkbox
                     checked={sendConfirmed}
-                    disabled={!sendPreconditionsReady || sendIntent !== null}
+                    disabled={
+                      !sendPreconditionsReady ||
+                      sendIntent !== null ||
+                      sendIntentUnknown
+                    }
                     onCheckedChange={setSendConfirmed}
                   />
                   <span>
-                    我已核对发送身份、收件人候选与已批准版本，并确认创建
-                    Send Intent 不等同于发送成功。
+                    我已核对 Gmail 发送身份、收件人和已批准版本，并确认立即提交发送。
                   </span>
                 </label>
 
@@ -516,12 +591,12 @@ export function DraftPage() {
                       <Send />
                     )}
                     {sendIntentUnknown
-                      ? "使用原请求键重试"
-                      : "创建 Send Intent"}
+                      ? "等待服务端核对"
+                      : "最终确认并发送"}
                   </Button>
                   {sendIntentUnknown && (
-                    <span className="text-xs text-muted-foreground">
-                      结果未知时会保留原 idempotency key，避免重复创建。
+                    <span className="text-xs text-destructive">
+                      结果未知，禁止再次提交发送。请刷新页面并核对服务端记录。
                     </span>
                   )}
                 </div>
@@ -532,14 +607,54 @@ export function DraftPage() {
                     className="flex items-start gap-2 border-t pt-3 text-sm"
                   >
                     <Check className="mt-0.5 size-4 shrink-0 text-primary" />
-                    <div>
+                    <div className="min-w-0">
                       <div className="font-medium">
-                        Send Intent 已创建 · {sendIntent.status}
+                        {persistedSendStatus
+                          ? sendIntentStatusLabels[persistedSendStatus]
+                          : "正在读取发送状态"}
                       </div>
                       <div className="mt-1 text-xs text-muted-foreground">
-                        请求时间 {formatTimestamp(sendIntent.requestedSendAt)}
-                        。READY 只是服务端已记录发送意图，不是发送成功。
+                        提交时间 {formatTimestamp(sendIntent.requestedSendAt)}
+                        {persistedSendStatus
+                          ? ` · ${persistedSendStatus}`
+                          : ""}
                       </div>
+                      {sendStatusError && (
+                        <p className="mt-2 text-xs text-destructive">
+                          状态读取失败，页面会继续受控重试：{sendStatusError}
+                        </p>
+                      )}
+                      {sendIntentView?.attempt && (
+                        <dl className="mt-3 grid gap-1 text-xs text-muted-foreground">
+                          <div className="grid gap-0.5">
+                            <dt>RFC Message-ID</dt>
+                            <dd className="font-mono break-all">
+                              {sendIntentView.attempt.rfcMessageId}
+                            </dd>
+                          </div>
+                          {sendIntentView.attempt.providerMessageId && (
+                            <div className="grid gap-0.5">
+                              <dt>Gmail Message ID</dt>
+                              <dd className="font-mono break-all">
+                                {sendIntentView.attempt.providerMessageId}
+                              </dd>
+                            </div>
+                          )}
+                          {sendIntentView.attempt.providerThreadId && (
+                            <div className="grid gap-0.5">
+                              <dt>Gmail Thread ID</dt>
+                              <dd className="font-mono break-all">
+                                {sendIntentView.attempt.providerThreadId}
+                              </dd>
+                            </div>
+                          )}
+                        </dl>
+                      )}
+                      {persistedSendStatus === "DELIVERY_UNKNOWN" && (
+                        <p className="mt-2 text-xs font-medium text-destructive">
+                          Gmail 返回未知结果。系统不会自动重试，请先人工核对收件箱和 Provider 记录。
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -592,4 +707,20 @@ export function DraftPage() {
       </main>
     </div>
   )
+}
+
+export function DraftPage() {
+  const { currentProject } = useCurrentProject()
+  const { draftId } = useParams<{ draftId: string }>()
+  if (!currentProject) {
+    throw new Error("DraftPage requires an authorized current project.")
+  }
+  const projectId = currentProject.id
+  if (!draftId) {
+    return <div className="p-6 text-sm text-destructive">草稿 ID 缺失。</div>
+  }
+  if (draftId === "new") {
+    return <DraftGeneration websiteProjectKey={projectId} />
+  }
+  return <DraftEditorPage projectId={projectId} draftId={draftId} />
 }

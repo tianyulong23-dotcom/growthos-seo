@@ -4,12 +4,17 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const approvedDirectLicenses: Readonly<Record<string, string>> = {
-  "@fastify/swagger": "MIT", "@opentelemetry/api": "Apache-2.0",
+  "@ai-sdk/openai": "Apache-2.0",
+  "@fastify/swagger": "MIT", "@googleapis/gmail": "Apache-2.0",
+  "@opentelemetry/api": "Apache-2.0",
   "@temporalio/client": "MIT", "@temporalio/worker": "MIT",
   "@types/node": "MIT", eslint: "MIT",
+  ai: "Apache-2.0",
+  "dataforseo-client": "ISC",
   "drizzle-orm": "Apache-2.0",
   cheerio: "MIT",
   fastify: "MIT", "fastify-type-provider-zod": "MIT",
+  "google-auth-library": "Apache-2.0",
   "isomorphic-dompurify": "MIT", jsdom: "MIT",
   msw: "MIT", nodemailer: "MIT-0", pg: "MIT", "postal-mime": "MIT-0", tsx: "MIT",
   "robots-parser": "MIT",
@@ -21,6 +26,7 @@ const approvedDirectLicenses: Readonly<Record<string, string>> = {
   vitest: "MIT", zod: "MIT",
 };
 const approvedSourceLicenses: Readonly<Record<string, string>> = {
+  "OSS-GOOGLE-01": "Apache-2.0", "OSS-GOOGLE-02": "Apache-2.0",
   "OSS-INF-01": "MIT", "OSS-INF-01A": "MIT",
   "OSS-INF-02": "MIT", "OSS-INF-02A": "MIT",
   "OSS-INF-03": "Apache-2.0", "OSS-INF-04": "MIT",
@@ -37,8 +43,9 @@ const approvedSourceLicenses: Readonly<Record<string, string>> = {
   "OSS-TOOL-03": "MIT", "OSS-TOOL-04": "MIT", "OSS-TOOL-05": "MIT",
 };
 const compatibleLicenses = new Set([
-  "(MIT OR CC0-1.0)", "(MPL-2.0 OR Apache-2.0)",
-  "0BSD", "Apache-2.0", "Apache-2.0 AND MIT",
+  "(AFL-2.1 OR BSD-3-Clause)", "(MIT OR CC0-1.0)",
+  "(MPL-2.0 OR Apache-2.0)",
+  "0BSD", "Apache-2.0", "Apache-2.0 AND MIT", "BSD",
   "Artistic-2.0", "BSD-2-Clause", "BSD-3-Clause", "BlueOak-1.0.0",
   "CC-BY-4.0", "CC0-1.0", "ISC", "MIT", "MIT-0", "PostgreSQL", "Unlicense",
 ]);

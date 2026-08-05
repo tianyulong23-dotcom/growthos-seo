@@ -199,9 +199,9 @@ implements
          ),
          binding AS (
            INSERT INTO backlinks.backlink_gmail_workspace_bindings (
-             id, organization_id, workspace_id, gmail_connection_id,
-             created_by, updated_by
-           ) SELECT $11, $2, $12, id, $3, $3 FROM connection
+             id, organization_id, workspace_id, website_project_id,
+             gmail_connection_id, created_by, updated_by
+           ) SELECT $11, $2, $12, $13, id, $3, $3 FROM connection
            RETURNING id
          ),
          identity AS (
@@ -210,7 +210,7 @@ implements
              display_name, is_primary, is_default, verification_status,
              treat_as_alias, source, observed_at, created_by, updated_by
            ) SELECT
-             $13, $2, id, primary_email, display_name, true, true,
+             $14, $2, id, primary_email, display_name, true, true,
              'accepted', false, 'OIDC_PRIMARY', connected_at, $3, $3
              FROM connection
            ON CONFLICT (
@@ -245,6 +245,7 @@ implements
           input.tokenExpiresAt,
           this.#newId(),
           input.workspaceId,
+          input.websiteProjectId,
           this.#newId(),
         ],
       );
@@ -275,11 +276,13 @@ implements
               AND binding.gmail_connection_id = connection.id
             WHERE connection.organization_id = $1
               AND binding.workspace_id = $2
+              AND binding.website_project_id = $3
               AND binding.binding_status = 'ACTIVE'
               AND binding.is_primary = true`,
           [
             context.tenant.organizationId,
             context.tenant.workspaceId,
+            context.project.websiteProjectId,
           ],
         );
         const row = result.rows[0];
@@ -309,10 +312,16 @@ implements
           WHERE connection.organization_id = $1
             AND connection.id = $2
             AND binding.workspace_id = $3
+            AND binding.website_project_id = $4
             AND binding.binding_status = 'ACTIVE'
             AND connection.connection_status IN ('CONNECTED', 'REAUTH_REQUIRED')
             AND secret.status = 'ACTIVE'`,
-        [input.organizationId, input.connectionId, input.workspaceId],
+        [
+          input.organizationId,
+          input.connectionId,
+          input.workspaceId,
+          input.websiteProjectId,
+        ],
       );
       const row = result.rows[0];
       if (row === undefined) {
@@ -356,6 +365,7 @@ implements
                       FROM backlinks.backlink_gmail_workspace_bindings AS binding
                      WHERE binding.organization_id = $1
                        AND binding.workspace_id = $3
+                       AND binding.website_project_id = $9
                        AND binding.gmail_connection_id = connection.id
                        AND binding.binding_status = 'ACTIVE'
                   )
@@ -401,6 +411,7 @@ implements
               input.tokenExpiresAt,
               JSON.stringify(input.grantedScopes),
               input.actorId,
+              input.websiteProjectId,
             ],
           );
           const row = result.rows[0];
@@ -453,6 +464,7 @@ implements
                   FROM backlinks.backlink_gmail_workspace_bindings AS binding
                  WHERE binding.organization_id = $1
                    AND binding.workspace_id = $3
+                   AND binding.website_project_id = $7
                    AND binding.gmail_connection_id = connection.id
                    AND binding.binding_status = 'ACTIVE'
               )
@@ -464,6 +476,7 @@ implements
             input.expectedVersion,
             input.reason,
             input.actorId,
+            input.websiteProjectId,
           ],
         );
         return result.rows[0] !== undefined;
@@ -498,6 +511,7 @@ implements
             AND connection.id = $2
             AND connection.version = $3
             AND binding.workspace_id = $4
+            AND binding.website_project_id = $5
             AND binding.binding_status = 'ACTIVE'
           FOR UPDATE OF connection`,
         [
@@ -505,6 +519,7 @@ implements
           input.connectionId,
           input.expectedVersion,
           input.workspaceId,
+          input.websiteProjectId,
         ],
       );
       const row = selected.rows[0];
@@ -552,8 +567,16 @@ implements
             SET binding_status = 'INACTIVE', version = version + 1,
                 updated_at = now(), updated_by = $3
           WHERE organization_id = $1 AND gmail_connection_id = $2
+            AND workspace_id = $4
+            AND website_project_id = $5
             AND binding_status = 'ACTIVE'`,
-        [input.organizationId, input.connectionId, input.actorId],
+        [
+          input.organizationId,
+          input.connectionId,
+          input.actorId,
+          input.workspaceId,
+          input.websiteProjectId,
+        ],
       );
       const disconnectedRow = disconnected.rows[0];
       if (disconnectedRow === undefined) {

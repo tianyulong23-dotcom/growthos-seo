@@ -18,6 +18,8 @@ type CreateSendIntentCommand = Readonly<{
   context: ResolvedProjectContext;
   draftId: string;
   approvedDraftVersionId: string;
+  contactId: string;
+  contactVersion: number;
   gmailConnectionId: string;
   messagePurpose: SendIntentMessagePurpose;
   followUpIndex: number;
@@ -71,7 +73,7 @@ const logicalMessageKey = (
   input: CreateSendIntentCommand,
 ): string => {
   return createHash("sha256")
-    .update("backlinks-send-intent:v1")
+    .update("backlinks-send-intent:v2")
     .update("\0")
     .update(input.context.tenant.organizationId)
     .update("\0")
@@ -82,6 +84,10 @@ const logicalMessageKey = (
     .update(input.draftId)
     .update("\0")
     .update(input.approvedDraftVersionId)
+    .update("\0")
+    .update(input.contactId)
+    .update("\0")
+    .update(String(input.contactVersion))
     .update("\0")
     .update(input.gmailConnectionId)
     .update("\0")
@@ -104,20 +110,28 @@ const requireCreated = (
   if (
     result.state === "draft_not_found"
     || result.state === "gmail_connection_unavailable"
+    || result.state === "contact_unavailable"
   ) {
     throw new BacklinkError({
       code: backlinkErrorCodes.notFound,
       message: result.state === "draft_not_found"
         ? "Draft was not found in this project."
-        : "Gmail connection is not active for this workspace.",
+        : result.state === "contact_unavailable"
+          ? "The selected Contact is not active for this Opportunity."
+          : "Gmail connection is not active for this workspace.",
     });
   }
-  if (result.state === "quota_exceeded") {
+  if (
+    result.state === "quota_exceeded"
+    || result.state === "initial_outreach_cooldown"
+  ) {
     throw new BacklinkError({
       code: backlinkErrorCodes.rateLimited,
-      message: result.retryAt === null
-        ? `Gmail rolling quota of ${result.dailyLimit} is exhausted.`
-        : `Gmail rolling quota is exhausted until ${result.retryAt}.`,
+      message: result.state === "initial_outreach_cooldown"
+        ? `Initial outreach to this Contact is paused until ${result.retryAt}.`
+        : result.retryAt === null
+          ? `Gmail rolling quota of ${result.dailyLimit} is exhausted.`
+          : `Gmail rolling quota is exhausted until ${result.retryAt}.`,
       retryable: true,
     });
   }
@@ -125,6 +139,8 @@ const requireCreated = (
     code: backlinkErrorCodes.conflict,
     message: result.state === "draft_not_approved"
       ? "The requested Draft Version is not the exact approved Version."
+      : result.state === "contact_version_conflict"
+        ? "The selected Contact or Draft Contact binding has changed."
       : "A Send Intent already exists for this request or logical message.",
   });
 };
@@ -133,7 +149,12 @@ export function createSendIntentCommands(dependencies: Readonly<{
   repository: SendIntentRepository;
   newId(): string;
   now(): Date;
+  quotaProfile?: Readonly<{
+    rolling24HourSendLimit: number;
+    minimumIntervalSeconds: number;
+  }>;
 }>) {
+  const quotaProfile = dependencies.quotaProfile ?? defaultQuotaProfile;
   return Object.freeze({
     async create(input: CreateSendIntentCommand) {
       authorize(input.context);
@@ -141,16 +162,20 @@ export function createSendIntentCommands(dependencies: Readonly<{
       const sendIntentId = dependencies.newId();
       const quotaReservationId = dependencies.newId();
       const outboxEventId = dependencies.newId();
+      const sendSnapshotId = dependencies.newId();
       const requestedSendAt = dependencies.now();
       return requireCreated(await dependencies.repository.create({
         organizationId: input.context.tenant.organizationId,
         workspaceId: input.context.tenant.workspaceId,
         websiteProjectId: input.context.project.websiteProjectId,
         sendIntentId,
+        sendSnapshotId,
         quotaReservationId,
         outboxEventId,
         draftId: input.draftId,
         approvedDraftVersionId: input.approvedDraftVersionId,
+        contactId: input.contactId,
+        contactVersion: input.contactVersion,
         gmailConnectionId: input.gmailConnectionId,
         clientIdempotencyKey: input.idempotencyKey,
         logicalMessageKey: logicalMessageKey(input),
@@ -158,9 +183,9 @@ export function createSendIntentCommands(dependencies: Readonly<{
         followUpIndex: input.followUpIndex,
         requestedSendAt,
         rolling24HourSendLimit:
-          defaultQuotaProfile.rolling24HourSendLimit,
+          quotaProfile.rolling24HourSendLimit,
         minimumIntervalSeconds:
-          defaultQuotaProfile.minimumIntervalSeconds,
+          quotaProfile.minimumIntervalSeconds,
         reservationTtlSeconds,
         actorId: input.context.actor.userId,
       }));

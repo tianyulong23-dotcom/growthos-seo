@@ -5,7 +5,14 @@ import pytest
 
 DATABASE_URL = os.getenv("SEO4_INT_004_DATABASE_URL")
 
-PLATFORM_TABLES = {"projects", "site_profiles"}
+PLATFORM_TABLES = {
+    "project_audit_events",
+    "project_outbox_events",
+    "projects",
+    "promotion_target_versions",
+    "site_profiles",
+    "website_profile_versions",
+}
 CRAWLING_TABLES = {
     "backlink_checks",
     "crawl_checkpoints",
@@ -60,6 +67,13 @@ PLACEMENT_TABLES = {
     "backlink_placement_validation_runs",
     "backlink_placements",
 }
+COST_CONTROL_TABLES = {
+    "provider_artifact_usages",
+    "provider_artifacts",
+    "provider_batch_requests",
+    "provider_fetch_leases",
+    "workspace_evidence_projections",
+}
 CONTACT_PURPOSE_COLUMNS = {
     "observed_role",
     "inferred_purpose",
@@ -67,10 +81,16 @@ CONTACT_PURPOSE_COLUMNS = {
     "purpose_rule_version",
     "purpose_evidence",
 }
+PROJECT_RECOMMENDATION_CONTEXT_COLUMNS = {
+    "products",
+    "keywords",
+    "target_urls",
+}
 
 ORGANIZATION_ID = "seo4-int-004-organization"
 PROJECT_ID = "seo4-int-004-project"
 OTHER_PROJECT_ID = "seo4-int-004-other-project"
+WORKSPACE_ID = "seo4-int-004-workspace"
 RUN_ID = "seo4-int-004-run"
 BACKLINKS_ORGANIZATION_ID = "018f0000-0000-7000-8000-000000000801"
 BACKLINKS_WORKSPACE_ID = "018f0000-0000-7000-8000-000000000802"
@@ -147,7 +167,7 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     assert int(fetch_scalar(connection, "SHOW server_version_num")) // 10000 == 18
     assert (
         fetch_scalar(connection, "SELECT version_num FROM public.alembic_version")
-        == "20260724_0007"
+        == "20260805_0008"
     )
 
     rows = connection.execute(
@@ -178,13 +198,14 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     assert by_schema["platform"] == PLATFORM_TABLES
     assert by_schema["crawling"] == CRAWLING_TABLES
     assert by_schema["audit"] == AUDIT_TABLES
-    assert len(by_schema["backlinks"]) == 57
+    assert len(by_schema["backlinks"]) == 75
     assert ASSESSMENT_TABLES <= by_schema["backlinks"]
     assert DRAFT_TABLES <= by_schema["backlinks"]
     assert GMAIL_AUTH_TABLES <= by_schema["backlinks"]
     assert SEND_PERSISTENCE_TABLES <= by_schema["backlinks"]
     assert MAIL_SYNC_TABLES <= by_schema["backlinks"]
     assert PLACEMENT_TABLES <= by_schema["backlinks"]
+    assert COST_CONTROL_TABLES <= by_schema["backlinks"]
 
     for table in ("backlink_contact_candidates", "backlink_contacts"):
         columns = {
@@ -200,6 +221,19 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
             ).fetchall()
         }
         assert CONTACT_PURPOSE_COLUMNS <= columns
+
+    project_context_columns = {
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'backlinks'
+              AND table_name = 'backlink_project_context_snapshots'
+            """
+        ).fetchall()
+    }
+    assert PROJECT_RECOMMENDATION_CONTEXT_COLUMNS <= project_context_columns
 
     hardened_roles = connection.execute(
         """
@@ -244,6 +278,16 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
         "DELETE FROM crawling.crawl_runs WHERE run_id = %s",
         (RUN_ID,),
     )
+    for table in (
+        "project_outbox_events",
+        "project_audit_events",
+        "promotion_target_versions",
+        "website_profile_versions",
+    ):
+        connection.execute(
+            f"DELETE FROM platform.{table} WHERE project_id IN (%s, %s)",
+            (PROJECT_ID, OTHER_PROJECT_ID),
+        )
     connection.execute(
         "DELETE FROM platform.projects WHERE id IN (%s, %s)",
         (PROJECT_ID, OTHER_PROJECT_ID),
@@ -254,22 +298,68 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     connection.execute(
         """
         INSERT INTO platform.projects (
-          id, organization_id, name, domain, country, language
-        ) VALUES (%s, %s, 'SEO4 INT 004', 'seo4-int-004.example', 'US', 'en')
+          id, organization_id, workspace_id, project_key, name, domain,
+          country, target_market, language
+        ) VALUES (
+          %s, %s, %s, 'seo4-int-004', 'SEO4 INT 004',
+          'seo4-int-004.example', 'US', 'United States', 'en'
+        )
         """,
-        (PROJECT_ID, ORGANIZATION_ID),
+        (PROJECT_ID, ORGANIZATION_ID, WORKSPACE_ID),
+    )
+    connection.execute(
+        """
+        INSERT INTO platform.website_profile_versions (
+          id, organization_id, workspace_id, project_id, version, name,
+          canonical_domain, country_code, target_market, locale, products,
+          input_required, created_by
+        ) VALUES (
+          'seo4-int-004-profile-v1', %s, %s, %s, 1, 'SEO4 INT 004',
+          'seo4-int-004.example', 'US', 'United States', 'en',
+          '["SEO"]'::jsonb, '[]'::jsonb, 'seo4-int-004'
+        )
+        """,
+        (ORGANIZATION_ID, WORKSPACE_ID, PROJECT_ID),
+    )
+    connection.execute(
+        """
+        INSERT INTO platform.promotion_target_versions (
+          id, organization_id, workspace_id, project_id, version, keywords,
+          target_urls, input_required, created_by
+        ) VALUES (
+          'seo4-int-004-promotion-v1', %s, %s, %s, 1,
+          '["technical seo"]'::jsonb,
+          '["https://seo4-int-004.example/"]'::jsonb,
+          '[]'::jsonb, 'seo4-int-004'
+        )
+        """,
+        (ORGANIZATION_ID, WORKSPACE_ID, PROJECT_ID),
+    )
+    connection.execute(
+        """
+        UPDATE platform.projects
+           SET current_profile_version_id = 'seo4-int-004-profile-v1',
+               current_promotion_target_version_id =
+                 'seo4-int-004-promotion-v1'
+         WHERE id = %s
+        """,
+        (PROJECT_ID,),
     )
     expect_sqlstate(
         connection,
         """
         INSERT INTO platform.projects (
-          id, organization_id, name, domain, country, language
+          id, organization_id, workspace_id, project_key, name, domain,
+          country, target_market, language
         ) VALUES (
           'seo4-int-004-other-project',
           'seo4-int-004-organization',
+          'seo4-int-004-workspace',
+          'seo4-int-004-other',
           'Wrong project',
           'seo4-int-004-other.example',
           'US',
+          'United States',
           'en'
         )
         """,
@@ -290,13 +380,17 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
         connection,
         """
         INSERT INTO platform.projects (
-          id, organization_id, name, domain, country, language
+          id, organization_id, workspace_id, project_key, name, domain,
+          country, target_market, language
         ) VALUES (
           'seo4-int-004-other-project',
           'seo4-int-004-organization',
+          'seo4-int-004-workspace',
+          'seo4-int-004-cross-schema',
           'Cross schema write',
           'seo4-int-004-cross-schema.example',
           'US',
+          'United States',
           'en'
         )
         """,

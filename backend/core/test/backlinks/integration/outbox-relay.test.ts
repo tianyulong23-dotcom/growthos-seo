@@ -8,10 +8,13 @@ import {
   BACKLINK_PLACEMENT_MONITORING_LIFECYCLE,
   BACKLINK_PLACEMENT_MONITORING_REQUESTED,
   BACKLINK_PROJECT_ANALYSIS_REQUESTED,
+  BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
   createBacklinkOutboxRelay,
   createPlacementMonitoringLifecycleOutboxRelay,
   createPlacementMonitoringRequestedOutboxRelay,
+  createRecommendationRefillOutboxRelay,
   createTemporalBacklinkProjectAnalysisStarter,
+  createTemporalRecommendationRefillConsumer,
 } from "../../../src/modules/backlinks/workflows/outbox-relay.js";
 import {
   backlinksRuntimeContract,
@@ -155,6 +158,64 @@ describe("BL-AI-040 Outbox Relay", () => {
     });
   });
 
+  it("relays one recommendation refill request to its existing Temporal workflow", async () => {
+    const repository = createOutboxRepository(client);
+    const recommendationContextVersionId = id(6, 30);
+    const jobId = id(4, 30);
+    const eventId = id(5, 30);
+    const workflowId = buildBacklinksWorkflowId({
+      workspaceId: scope.workspaceId,
+      websiteProjectId: scope.websiteProjectId,
+      workflow: "recommendation-refill",
+      instanceId: jobId,
+    });
+    const payload = {
+      contractVersion: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
+      ...scope,
+      recommendationContextVersionId,
+      jobId,
+      workflowId,
+      correlationId: "request-recommendation-refill-30",
+      actorId: "relay-test",
+      refillWindowKey: "manual-2026-08-04",
+      lowWatermark: 5,
+      highWatermark: 20,
+    };
+    await repository.append({
+      eventId,
+      ...scope,
+      eventType: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
+      aggregateId: jobId,
+      aggregateVersion: 1,
+      idempotencyKey: workflowId,
+      payload,
+      payloadSchemaVersion: 1,
+      actorId: "relay-test",
+    });
+    const temporalStart = vi.fn(async () => undefined);
+    const relay = createRecommendationRefillOutboxRelay({
+      repository,
+      consumer: createTemporalRecommendationRefillConsumer(
+        { start: temporalStart },
+        backlinksRuntimeContract.taskQueue,
+      ),
+    });
+
+    await expect(relay.runOnce({
+      workerId: "recommendation-refill-relay",
+      limit: 1,
+      staleClaimBefore: new Date(0),
+    })).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
+    expect(temporalStart).toHaveBeenCalledWith(
+      backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
+      {
+        workflowId,
+        taskQueue: backlinksRuntimeContract.taskQueue,
+        args: [payload],
+      },
+    );
+  });
+
   it("relays Placement monitoring request and lifecycle contracts to their owner consumers", async () => {
     const repository = createOutboxRepository(client);
     const placementId = id(6, 3);
@@ -177,7 +238,7 @@ describe("BL-AI-040 Outbox Relay", () => {
         contractVersion: BACKLINK_PLACEMENT_MONITORING_REQUESTED,
         placementId,
         candidateId: id(6, 5),
-        opportunityId: id(6, 6),
+        opportunityId: null,
         initialValidationId: id(6, 7),
         websiteProjectId: scope.websiteProjectId,
       },
@@ -256,9 +317,11 @@ describe("BL-AI-040 Outbox Relay", () => {
     });
     expect(requested).toHaveBeenNthCalledWith(1, {
       ...scope,
+      sourceOutboxEventId: requestedEventId,
+      requestedAt: expect.any(Date),
       placementId,
       candidateId: id(6, 5),
-      opportunityId: id(6, 6),
+      opportunityId: null,
       initialValidationId: id(6, 7),
     });
     expect(requested).toHaveBeenNthCalledWith(2, {

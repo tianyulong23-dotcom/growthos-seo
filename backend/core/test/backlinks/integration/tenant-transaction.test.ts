@@ -90,10 +90,15 @@ describe.skipIf(databaseUrl === undefined)("BL-AI-034 tenant transaction", () =>
   it("clears committed tenant context before reusing the same connection", async () => {
     const first = await withBacklinkTenantTransaction(
       tenantPool,
-      { workspaceId: ids.workspaceA, websiteProjectId: ids.projectA },
+      {
+        organizationId: ids.organizationA,
+        workspaceId: ids.workspaceA,
+        websiteProjectId: ids.projectA,
+      },
       async (transaction) => {
         const context = await transaction.query(`
-          SELECT current_setting('app.current_workspace_id', true) AS "workspaceId",
+          SELECT current_setting('app.current_organization_id', true) AS "organizationId",
+                 current_setting('app.current_workspace_id', true) AS "workspaceId",
                  current_setting('app.current_website_project_id', true) AS "websiteProjectId",
                  pg_backend_pid() AS pid
         `);
@@ -104,6 +109,7 @@ describe.skipIf(databaseUrl === undefined)("BL-AI-034 tenant transaction", () =>
       },
     );
     expect(first.context).toMatchObject({
+      organizationId: ids.organizationA,
       workspaceId: ids.workspaceA,
       websiteProjectId: ids.projectA,
     });
@@ -112,10 +118,12 @@ describe.skipIf(databaseUrl === undefined)("BL-AI-034 tenant transaction", () =>
     const released = await tenantPool.connect();
     try {
       const cleared = await released.query(`
-        SELECT current_setting('app.current_workspace_id', true) AS "workspaceId",
+        SELECT current_setting('app.current_organization_id', true) AS "organizationId",
+               current_setting('app.current_workspace_id', true) AS "workspaceId",
                current_setting('app.current_website_project_id', true) AS "websiteProjectId",
                pg_backend_pid() AS pid
       `);
+      expect(cleared.rows[0]?.organizationId ?? "").toBe("");
       expect(cleared.rows[0]?.workspaceId ?? "").toBe("");
       expect(cleared.rows[0]?.websiteProjectId ?? "").toBe("");
       expect(cleared.rows[0]?.pid).toBe(first.context?.pid);
@@ -128,7 +136,11 @@ describe.skipIf(databaseUrl === undefined)("BL-AI-034 tenant transaction", () =>
 
     const second = await withBacklinkTenantTransaction(
       tenantPool,
-      { workspaceId: ids.workspaceA, websiteProjectId: ids.projectB },
+      {
+        organizationId: ids.organizationA,
+        workspaceId: ids.workspaceA,
+        websiteProjectId: ids.projectB,
+      },
       async (transaction) => ({
         context: (
           await transaction.query(`
@@ -155,7 +167,11 @@ describe.skipIf(databaseUrl === undefined)("BL-AI-034 tenant transaction", () =>
     await expect(
       withBacklinkTenantTransaction(
         tenantPool,
-        { workspaceId: ids.workspaceA, websiteProjectId: ids.projectA },
+        {
+          organizationId: ids.organizationA,
+          workspaceId: ids.workspaceA,
+          websiteProjectId: ids.projectA,
+        },
         async (transaction) => {
           transactionPid = (
             await transaction.query("SELECT pg_backend_pid() AS pid")
@@ -182,10 +198,12 @@ describe.skipIf(databaseUrl === undefined)("BL-AI-034 tenant transaction", () =>
     const released = await tenantPool.connect();
     try {
       const cleared = await released.query(`
-        SELECT current_setting('app.current_workspace_id', true) AS "workspaceId",
+        SELECT current_setting('app.current_organization_id', true) AS "organizationId",
+               current_setting('app.current_workspace_id', true) AS "workspaceId",
                current_setting('app.current_website_project_id', true) AS "websiteProjectId",
                pg_backend_pid() AS pid
       `);
+      expect(cleared.rows[0]?.organizationId ?? "").toBe("");
       expect(cleared.rows[0]?.workspaceId ?? "").toBe("");
       expect(cleared.rows[0]?.websiteProjectId ?? "").toBe("");
       expect(cleared.rows[0]?.pid).toBe(transactionPid);

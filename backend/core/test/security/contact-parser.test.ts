@@ -70,8 +70,28 @@ describe("BL-AI-070 contact Candidate parser", () => {
     ["user@localhost", false],
     ["üser@example.com", false],
     ["user\u0000@example.com", false],
+    ["bad@all.voter", false],
+    ["editorial@weekendspecial.co.zawe", false],
   ] as const)("locks conservative email syntax for %s", (value, expected) => {
     expect(isCandidateEmail(value)).toBe(expected);
+  });
+
+  it("does not join adjacent DOM text or natural language into email candidates", () => {
+    const body = new TextEncoder().encode(`
+      <body>
+        <span>editorial@weekendspecial.co.za</span><span>We publish weekly.</span>
+        <span>info@dstvproinstallation.co.za</span><strong>Professional service.</strong>
+        <p>Bad at all. Voter participation and risks are at stake. Research matters.</p>
+        <p>press at example dot com</p>
+      </body>
+    `);
+
+    expect(parseContactPage(page(body)).candidates.map(({ email }) => email))
+      .toEqual([
+        "editorial@weekendspecial.co.za",
+        "info@dstvproinstallation.co.za",
+        "press@example.com",
+      ]);
   });
 
   it("rejects non-HTML and excessive DOM input", () => {

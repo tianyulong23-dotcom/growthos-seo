@@ -6,6 +6,9 @@ import Fastify from "fastify";
 
 import { createBacklinksModule } from "../src/modules/backlinks/application/backlinks.module.js";
 import { createContactCommands } from "../src/modules/backlinks/application/commands/contacts.command.js";
+import {
+  createContactEnrichmentCommands,
+} from "../src/modules/backlinks/application/commands/contact-enrichment.command.js";
 import type {
   createDraftCommands,
   createDraftEditingCommands,
@@ -25,6 +28,9 @@ import { registerBacklinksAssessmentRoute } from "../src/modules/backlinks/api/a
 import { registerBacklinksContextRoute } from "../src/modules/backlinks/api/context.route.js";
 import { registerBacklinksContactsRoutes } from "../src/modules/backlinks/api/contacts.route.js";
 import {
+  registerBacklinksContactEnrichmentRoutes,
+} from "../src/modules/backlinks/api/contact-enrichment.route.js";
+import {
   registerBacklinksDraftEditingRoutes,
   registerBacklinksDraftRoutes,
 } from "../src/modules/backlinks/api/draft.route.js";
@@ -43,6 +49,10 @@ import { registerBacklinksReplyMatchRoutes } from "../src/modules/backlinks/api/
 import { registerBacklinksSendIntentRoute } from "../src/modules/backlinks/api/send-intent.route.js";
 import { registerBacklinksSummaryRoute } from "../src/modules/backlinks/api/summary.route.js";
 import { registerBacklinksLinksRoutes } from "../src/modules/backlinks/api/links.route.js";
+import { registerBacklinksMetricDashboardRoute } from "../src/modules/backlinks/api/metrics/metric-dashboard.route.js";
+import { registerBacklinksReportExportRoutes } from "../src/modules/backlinks/api/reports/report-export.route.js";
+import { registerBacklinksReportOverviewRoute } from "../src/modules/backlinks/api/reports/report-overview.route.js";
+import { registerBacklinksSettingsGovernanceRoutes } from "../src/modules/backlinks/api/settings/settings-governance.route.js";
 import { gmailOAuthScopes } from "../src/modules/backlinks/domain/sending/oauth-attempt.js";
 
 export type JsonValue =
@@ -66,11 +76,26 @@ function isSensitiveFieldName(value: string): boolean {
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .split(/[^A-Za-z0-9]+/)
     .map((token) => token.toLowerCase());
-  return tokens.some((token) =>
-    ["provider", "vendor", "database", "db", "prisma", "drizzle", "internal"].includes(
-      token,
-    ),
-  );
+  if (
+    tokens.some((token) =>
+      ["database", "db", "prisma", "drizzle", "internal"].includes(token),
+    )
+  ) {
+    return true;
+  }
+  return tokens.some((token) => ["provider", "vendor"].includes(token))
+    && tokens.some((token) =>
+      [
+        "payload",
+        "request",
+        "response",
+        "body",
+        "raw",
+        "token",
+        "secret",
+        "credential",
+      ].includes(token),
+    );
 }
 
 export function findSensitiveOpenApiFields(
@@ -98,6 +123,41 @@ export function findSensitiveOpenApiFields(
       findSensitiveOpenApiFields(child, `${path}.${key}`),
     ),
   ];
+}
+
+export function findUnresolvedOpenApiRefs(document: JsonValue): string[] {
+  const resolveRef = (ref: string): JsonValue | undefined => {
+    if (!ref.startsWith("#/")) return undefined;
+    return ref
+      .slice(2)
+      .split("/")
+      .map((token) => token.replace(/~1/g, "/").replace(/~0/g, "~"))
+      .reduce<JsonValue | undefined>(
+        (value, token) =>
+          isJsonObject(value) || Array.isArray(value)
+            ? value[token as keyof typeof value]
+            : undefined,
+        document,
+      );
+  };
+  const visit = (value: JsonValue, path: string): string[] => {
+    if (Array.isArray(value)) {
+      return value.flatMap((item, index) => visit(item, `${path}[${index}]`));
+    }
+    if (!isJsonObject(value)) return [];
+    const ref = value.$ref;
+    const ownErrors =
+      typeof ref === "string" && resolveRef(ref) === undefined
+        ? [`${path} -> ${ref}`]
+        : [];
+    return [
+      ...ownErrors,
+      ...Object.entries(value).flatMap(([key, child]) =>
+        visit(child, `${path}.${key}`),
+      ),
+    ];
+  };
+  return visit(document, "$");
 }
 
 export function findBreakingOpenApiChanges(
@@ -143,6 +203,11 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         jobId: "018f0000-0000-7000-8000-000000000010",
         draftId: "018f0000-0000-7000-8000-000000000011",
         status: "QUEUED",
+        contactId: "018f0000-0000-7000-8000-000000000013",
+        contactVersion: 1,
+        evidenceSnapshotId: "018f0000-0000-7000-8000-000000000014",
+        workflowId: "draft-generation:018f0000-0000-7000-8000-000000000010",
+        generationMode: "MODEL",
         replayed: false,
       }),
     };
@@ -163,9 +228,12 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
     const sendIntentCommands: SendIntentCommands = {
       create: async () => ({
         sendIntentId: "018f0000-0000-7000-8000-000000000114",
+        sendSnapshotId: "018f0000-0000-7000-8000-000000000115",
         draftId: "018f0000-0000-7000-8000-000000000011",
         approvedDraftVersionId:
           "018f0000-0000-7000-8000-000000000012",
+        contactId: "018f0000-0000-7000-8000-000000000013",
+        contactVersion: 1,
         status: "READY",
         version: 1,
         requestedSendAt: "2026-07-27T10:14:00.000Z",
@@ -214,12 +282,26 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
           id: "018f0000-0000-7000-8000-000000000010",
           draftId: "018f0000-0000-7000-8000-000000000011",
           status: "QUEUED",
+          contactId: "018f0000-0000-7000-8000-000000000013",
+          contactVersion: 1,
           versionId: null,
           lastSuccessfulVersionId: null,
+          queuedAt: "2026-07-27T05:00:00.000Z",
+          startedAt: null,
+          finishedAt: null,
+          deadlineAt: "2026-07-27T05:02:00.000Z",
+          queueWaitMs: null,
+          latencyMs: null,
+          persistenceLatencyMs: null,
+          attemptCount: 0,
+          lastErrorCategory: null,
         }),
+        findLatestJob: async () => null,
         getDraft: async () => ({
           id: "018f0000-0000-7000-8000-000000000011",
           opportunityId: "018f0000-0000-7000-8000-000000000004",
+          contactId: "018f0000-0000-7000-8000-000000000013",
+          contactVersion: 1,
           status: "draft",
           draftVersion: 1,
           approvedVersionId: null,
@@ -238,6 +320,15 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
             source: "MODEL",
             createdAt: "2026-07-27T05:00:00.000Z",
           },
+        }),
+        getSendIntent: async () => ({
+          sendIntentId: "018f0000-0000-7000-8000-000000000014",
+          draftId: "018f0000-0000-7000-8000-000000000011",
+          status: "READY",
+          version: 1,
+          requestedSendAt: "2026-07-27T05:00:00.000Z",
+          updatedAt: "2026-07-27T05:00:00.000Z",
+          attempt: null,
         }),
         listMailMessages: async () => ({
           items: [],
@@ -260,6 +351,18 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
     registerBacklinksHealthRoute(app, { BACKLINKS_API_ENABLED: true });
     registerBacklinksContextRoute(app, { module });
     registerBacklinksContactsRoutes(app, { module, commands: createContactCommands({ query: async () => ({ rows: [] }) }) });
+    registerBacklinksContactEnrichmentRoutes(app, {
+      module,
+      commands: createContactEnrichmentCommands(
+        { query: async () => ({ rows: [] }) },
+        {
+          maxPages: 8,
+          maxDepth: 2,
+          maxAttempts: 3,
+          browserAllowed: true,
+        },
+      ),
+    });
     registerBacklinksRecommendationsRoute(app, { module });
     registerBacklinksOpportunitiesRoutes(app, { module });
     registerBacklinksOpportunityCommandsRoutes(app, { module,
@@ -331,6 +434,116 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         }),
       },
     });
+    registerBacklinksMetricDashboardRoute(app, {
+      projectContext: module.projectContext,
+      query: {
+        getDashboard: async (input) => ({
+          timezone: input.timezone,
+          from: input.from,
+          to: input.to,
+          asOf: input.asOf,
+          summary: [],
+          trends: [],
+        }),
+      },
+    });
+    registerBacklinksReportOverviewRoute(app, {
+      projectContext: module.projectContext,
+      query: {
+        listPublished: async () => [],
+      },
+    });
+    registerBacklinksReportExportRoutes(app, {
+      projectContext: module.projectContext,
+      workflow: {
+        request: async (input) => ({
+          id: "018f0000-0000-7000-8000-000000000169",
+          ...input.scope,
+          reportKey: input.reportKey,
+          reportRevisionId: input.reportRevisionId,
+          format: input.format,
+          status: "queued",
+          requestedBy: input.requestedBy,
+          correlationId: input.correlationId,
+          objectReference: null,
+          createdAt: new Date("2026-07-29T01:00:00.000Z"),
+          completedAt: null,
+          expiresAt: null,
+          failureCode: null,
+        }),
+        get: async () => ({
+          id: "018f0000-0000-7000-8000-000000000169",
+          organizationId: "organization-openapi",
+          workspaceId: "workspace-openapi",
+          websiteProjectId: "project-openapi",
+          reportKey: "weekly-performance",
+          reportRevisionId:
+            "018f0000-0000-7000-8000-000000000165",
+          format: "csv",
+          status: "completed",
+          requestedBy: "user-openapi",
+          correlationId: "request-openapi",
+          objectReference: null,
+          createdAt: new Date("2026-07-29T01:00:00.000Z"),
+          completedAt: new Date("2026-07-29T01:01:00.000Z"),
+          expiresAt: new Date("2026-07-30T01:01:00.000Z"),
+          failureCode: null,
+        }),
+        run: async () => {
+          throw new Error("OpenAPI generation must not render exports.");
+        },
+        authorizeDownload: async () => ({
+          url: "https://objects.example.test/signed/export.csv",
+          expiresAt: new Date("2026-07-29T01:10:00.000Z"),
+        }),
+      },
+    });
+    registerBacklinksSettingsGovernanceRoutes(app, {
+      projectContext: module.projectContext,
+      service: {
+        getView: async () => ({
+          settings: {
+            id: "settings-openapi",
+            version: 1,
+            values: {
+              reportingTimezone: "UTC",
+              reportLookbackDays: 30,
+              exportExpiryHours: 24,
+            },
+          },
+          killSwitches: [{
+            capability: "DATA_PROVIDER",
+            provider: "DataForSEO",
+            effectiveBlocked: true,
+            sourceLayer: "organization",
+            sourceScopeId: "organization-openapi",
+            sourceVersion: 1,
+            editable: false,
+          }],
+          editableKillSwitchLayers: ["project", "provider"],
+          retention: {
+            id: "retention-openapi",
+            version: 1,
+            rules: [],
+            exceptions: [],
+          },
+        }),
+        updateSettings: async (input) => ({
+          id: "settings-openapi",
+          version: input.expectedVersion + 1,
+          values: input.values,
+        }),
+        updateKillSwitch: async (input) => ({
+          capability: input.capability,
+          provider: input.provider,
+          effectiveBlocked: input.blocked,
+          sourceLayer: input.layer,
+          sourceScopeId: input.scope.websiteProjectId,
+          sourceVersion: input.expectedVersion + 1,
+          editable: true,
+        }),
+      },
+    });
     registerBacklinksRecommendationCommandsRoutes(app, { module, commands: createRecommendationCommands({ query: async () => ({ rows: [] }) }) });
     registerBacklinksAssessmentRoute(app, { module });
     registerBacklinksDraftRoutes(app, { module, commands: draftCommands });
@@ -366,6 +579,25 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
       query: {
         getStatus: async () => gmailConnection,
       },
+      syncCommands: {
+        start: async () => ({
+          status: "ACCEPTED",
+          workflowId: "backlinks:gmail-polling-sync:openapi",
+        }),
+        status: async () => ({
+          state: "POLLING",
+          workflowId: "backlinks:gmail-polling-sync:openapi",
+          pollingIntervalSeconds: 60,
+          killSwitchOpen: true,
+          acceptedSendCount: 1,
+          cursor: {
+            historyId: "12345",
+            initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",
+            lastSyncedAt: "2026-08-04T00:01:00.000Z",
+            version: 1,
+          },
+        }),
+      },
     });
     registerBacklinksReplyMatchRoutes(app, {
       module,
@@ -374,6 +606,7 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
           saveMatchResult: async () => ({ state: "not_found" }),
           listCandidates: async () => ({ state: "not_found" }),
           confirmCandidate: async () => ({ state: "not_found" }),
+          unbindCandidate: async () => ({ state: "not_found" }),
         },
       }),
     });
@@ -397,6 +630,12 @@ export async function writeBacklinksOpenApiBaseline(): Promise<void> {
       `Sensitive Backlinks OpenAPI fields:\n- ${sensitiveFields.join("\n- ")}`,
     );
   }
+  const unresolvedRefs = findUnresolvedOpenApiRefs(document);
+  if (unresolvedRefs.length > 0) {
+    throw new Error(
+      `Unresolved Backlinks OpenAPI refs:\n- ${unresolvedRefs.join("\n- ")}`,
+    );
+  }
   await mkdir(dirname(baselinePath), { recursive: true });
   await writeFile(baselinePath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
   console.log(
@@ -409,7 +648,12 @@ export async function checkBacklinksOpenApi(): Promise<void> {
   const current = await generateBacklinksOpenApi();
   const breakingChanges = findBreakingOpenApiChanges(baseline, current);
   const sensitiveFields = findSensitiveOpenApiFields(current);
-  if (breakingChanges.length > 0 || sensitiveFields.length > 0) {
+  const unresolvedRefs = findUnresolvedOpenApiRefs(current);
+  if (
+    breakingChanges.length > 0 ||
+    sensitiveFields.length > 0 ||
+    unresolvedRefs.length > 0
+  ) {
     throw new Error(
       [
         breakingChanges.length > 0
@@ -417,6 +661,9 @@ export async function checkBacklinksOpenApi(): Promise<void> {
           : "",
         sensitiveFields.length > 0
           ? `Sensitive Backlinks OpenAPI fields:\n- ${sensitiveFields.join("\n- ")}`
+          : "",
+        unresolvedRefs.length > 0
+          ? `Unresolved Backlinks OpenAPI refs:\n- ${unresolvedRefs.join("\n- ")}`
           : "",
       ]
         .filter(Boolean)

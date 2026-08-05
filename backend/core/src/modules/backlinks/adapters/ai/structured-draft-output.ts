@@ -8,6 +8,7 @@ import {
 export type RawAiDraftAttempt = Readonly<{
   content: string;
   usage: Readonly<{ inputTokens: number; outputTokens: number }>;
+  estimatedCostUsd: number;
   model: AiDraftResult["model"];
   latencyMs: number;
 }>;
@@ -74,6 +75,7 @@ export async function generateStructuredDraftWithRepair(
     return {
       output: parsedFirst.output,
       usage: first.usage,
+      estimatedCostUsd: first.estimatedCostUsd,
       model: first.model,
       latencyMs: first.latencyMs,
       repairCount: 0,
@@ -96,6 +98,9 @@ export async function generateStructuredDraftWithRepair(
       inputTokens: first.usage.inputTokens + second.usage.inputTokens,
       outputTokens: first.usage.outputTokens + second.usage.outputTokens,
     },
+    estimatedCostUsd: Number((
+      first.estimatedCostUsd + second.estimatedCostUsd
+    ).toFixed(6)),
     model: second.model,
     latencyMs: first.latencyMs + second.latencyMs,
     repairCount: 1,

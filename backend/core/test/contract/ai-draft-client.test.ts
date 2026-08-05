@@ -42,19 +42,30 @@ const result = {
   },
   latencyMs: 12,
   repairCount: 0 as const,
+  estimatedCostUsd: 0.0001,
 };
 
 describe("BL-AI-090 real AI Adapter shell", () => {
+  const validConfig = {
+    enabled: true,
+    secretRef: "secret-ref",
+    providerRef: "provider-ref",
+    modelId: "model-1",
+    modelVersion: "2026-07-01",
+    timeoutMs: 1000,
+    maxInputTokens: 1000,
+    maxOutputTokens: 500,
+    absoluteBudgetUsd: 0.01,
+  } as const;
+
   it.each([
-    [{ enabled: true, modelId: "model-1", timeoutMs: 1000 }, "secretRef"],
-    [{ enabled: true, secretRef: "secret-ref", timeoutMs: 1000 }, "modelId"],
-    [{ enabled: true, secretRef: "secret-ref", modelId: "model-1" }, "timeoutMs"],
-    [{
-      enabled: true,
-      secretRef: "secret-ref",
-      modelId: "model-1",
-      timeoutMs: 0,
-    }, "timeoutMs"],
+    [{ ...validConfig, secretRef: undefined }, "secretRef"],
+    [{ ...validConfig, modelId: undefined }, "modelId"],
+    [{ ...validConfig, timeoutMs: undefined }, "timeoutMs"],
+    [{ ...validConfig, timeoutMs: 0 }, "timeoutMs"],
+    [{ ...validConfig, maxInputTokens: 0 }, "maxInputTokens"],
+    [{ ...validConfig, maxOutputTokens: 0 }, "maxOutputTokens"],
+    [{ ...validConfig, absoluteBudgetUsd: 0 }, "absoluteBudgetUsd"],
   ] as const)("fails closed when %s is invalid", async (config, field) => {
     const error = await createAiDraftClient({
       config,
@@ -82,12 +93,8 @@ describe("BL-AI-090 real AI Adapter shell", () => {
     const generate = vi.fn(async () => result);
     const client = createAiDraftClient({
       config: {
-        enabled: true,
+        ...validConfig,
         secretRef: "SECRET_REF_MUST_NOT_BE_LOGGED",
-        providerRef: "provider-ref",
-        modelId: "model-1",
-        modelVersion: "2026-07-01",
-        timeoutMs: 1000,
       },
       transport: { generate },
       logger: (event) => logs.push(event),

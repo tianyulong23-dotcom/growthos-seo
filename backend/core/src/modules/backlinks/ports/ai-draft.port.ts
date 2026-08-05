@@ -87,6 +87,7 @@ export type AiDraftResult = Readonly<{
     inputTokens: number;
     outputTokens: number;
   }>;
+  estimatedCostUsd: number;
   model: Readonly<{
     providerRef: string;
     modelId: string;

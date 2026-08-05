@@ -30,12 +30,18 @@ describe("BL-AI-037 Project Context Snapshot Repository", () => {
     await harness.migrate();
     client = new Client({ connectionString: harness.connectionString });
     await client.connect();
+    await client.query(`
+      ALTER TABLE backlink_project_context_snapshots
+        ADD COLUMN products jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN keywords jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN target_urls jsonb NOT NULL DEFAULT '[]'::jsonb
+    `);
     repository = createProjectContextSnapshotRepository(client);
   }, 120_000);
   afterAll(async () => {
     await client?.end();
     await harness?.stop();
-  });
+  }, 120_000);
   const snapshot = (
     version: number,
     projectStatus: AppendProjectContextSnapshotInput["projectStatus"],
@@ -49,6 +55,9 @@ describe("BL-AI-037 Project Context Snapshot Repository", () => {
     countryCode: "US",
     profileVersionId: `profile-version-${version}`,
     promotionTargetVersionId: `target-version-${version}`,
+    products: [`Product ${version}`],
+    keywords: [`keyword ${version}`],
+    targetUrls: [`https://example.com/target-${version}`],
     actorId: "user-037",
   });
   it("appends versions without changing history and represents pause/delete", async () => {
@@ -70,17 +79,24 @@ describe("BL-AI-037 Project Context Snapshot Repository", () => {
     const stored = await client.query(`
       SELECT snapshot_version AS "snapshotVersion",
              project_status AS "projectStatus",
-             canonical_domain AS "canonicalDomain"
+             canonical_domain AS "canonicalDomain",
+             products, keywords, target_urls AS "targetUrls"
         FROM backlink_project_context_snapshots
        ORDER BY snapshot_version
     `);
     expect(stored.rows).toEqual([
       { snapshotVersion: 1, projectStatus: "ACTIVE",
-        canonicalDomain: "example.com" },
+        canonicalDomain: "example.com", products: ["Product 1"],
+        keywords: ["keyword 1"],
+        targetUrls: ["https://example.com/target-1"] },
       { snapshotVersion: 2, projectStatus: "PAUSED",
-        canonicalDomain: "new.example.com" },
+        canonicalDomain: "new.example.com", products: ["Product 2"],
+        keywords: ["keyword 2"],
+        targetUrls: ["https://example.com/target-2"] },
       { snapshotVersion: 3, projectStatus: "DELETED",
-        canonicalDomain: "new.example.com" },
+        canonicalDomain: "new.example.com", products: ["Product 3"],
+        keywords: ["keyword 3"],
+        targetUrls: ["https://example.com/target-3"] },
     ]);
   });
   it("enforces fixed states, positive versions, and tenant RLS metadata", async () => {

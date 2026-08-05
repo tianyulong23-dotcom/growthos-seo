@@ -15,13 +15,13 @@ export const overviewNavigation: NavigationItem = {
 export const performanceNavigation: NavigationItem = {
   id: "performance",
   label: "效果",
-  description: "统一查看搜索、内容和转化表现",
+  description: "统一查看搜索、内容、链接健康和增长报告",
   icon: BarChart3,
   tabs: [
     { id: "search", label: "搜索表现" },
     { id: "content", label: "内容表现" },
     { id: "links", label: "链接监控" },
-    { id: "reports", label: "客户报告" },
+    { id: "reports", label: "指标与报告" },
   ],
   action: "导出报告",
 }
@@ -34,7 +34,7 @@ export const settingsNavigation: NavigationItem = {
   tabs: [
     { id: "profile", label: "项目资料" },
     { id: "sources", label: "数据连接" },
-    { id: "outreach", label: "外联规则" },
+    { id: "outreach", label: "外联规则与治理" },
     { id: "notifications", label: "通知设置" },
   ],
   action: "保存设置",

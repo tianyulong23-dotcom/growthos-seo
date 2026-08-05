@@ -157,8 +157,8 @@ try {
     $RouteCount = ($RouteOutput -split "\r?\n" |
         Where-Object { $_.Trim().Length -gt 0 } |
         Select-Object -Last 1).Trim()
-    if ($RouteCount -ne "7") {
-        throw "Expected seven Backlinks Gateway routes, got: $RouteOutput"
+    if ($RouteCount -ne "45") {
+        throw "Expected 45 Backlinks Gateway routes, got: $RouteOutput"
     }
 
     $Context = Invoke-RuntimeRequest "GET" (
@@ -215,7 +215,7 @@ try {
     }
 
     Write-Output (
-        "Shared runtime isolation passed: routes=7, commandCount=1, " +
+        "Shared runtime isolation passed: routes=45, commandCount=1, " +
         "healthAfterStop=200, auditAfterStop=200, backlinksAfterStop=503."
     )
 }

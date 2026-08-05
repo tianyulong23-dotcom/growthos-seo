@@ -115,6 +115,9 @@ export const backlinkContacts = pg.pgTable(
     status: pg.text("status").notNull().default("active"), ...invalidation(),
   },
   (table) => [
+    pg.uniqueIndex("backlink_contact_tenant_identity_uq").on(
+      ...identity(table), table.id,
+    ),
     pg.uniqueIndex("backlink_contact_email_uq").on(
       ...identity(table), table.prospectId, table.recommendationContextVersionId,
       table.normalizedEmail,

@@ -35,7 +35,7 @@ export type BacklinkProjectAnalysisActivities = Readonly<{
 }>;
 type ProviderAnalysisOptions = Readonly<{
   dataForSeo: Pick<DataForSeoRequestService, "execute">;
-  cacheSchemaVersion: number; cacheTtlMs: number;
+  cacheSchemaVersion: number;
   estimatedCostMicros: number; limit: number;
 }>;
 
@@ -65,9 +65,15 @@ export function createBacklinkProjectAnalysisActivities(
             target: snapshot.canonicalDomain, targetType: "domain",
             limit: providerAnalysis.limit,
           },
+          intent: "DISCOVERY",
+          refreshMode: "BACKGROUND_REFRESH",
+          execution: "BACKGROUND",
+          locationCode: snapshot.countryCode,
+          languageCode: snapshot.locale,
+          responseSchemaVersion: "dataforseo.backlinks-referring-domains.v1",
+          usagePurpose: "project-analysis-discovery",
           projectContextVersion: snapshot.snapshotVersion,
           cacheSchemaVersion: providerAnalysis.cacheSchemaVersion,
-          cacheTtlMs: providerAnalysis.cacheTtlMs,
           estimatedCostMicros: providerAnalysis.estimatedCostMicros,
         });
       }

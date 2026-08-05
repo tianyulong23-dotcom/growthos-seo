@@ -10,6 +10,7 @@ import {
   BACKLINK_PLACEMENT_MONITORING_REQUESTED,
   BACKLINK_PROJECT_ANALYSIS_REQUESTED,
   createTemporalBacklinkProjectAnalysisStarter,
+  createTemporalPlacementMonitoringInitializationConsumer,
   createTemporalPlacementMonitoringStarter,
 } from "../../src/modules/backlinks/workflows/outbox-relay.js";
 
@@ -132,6 +133,49 @@ describe("BL-AI-ARCH-006 shared runtime namespaces", () => {
     );
     expect(BACKLINK_PLACEMENT_MONITORING_LIFECYCLE).toBe(
       "backlinks.placement-monitoring.lifecycle.v1",
+    );
+  });
+
+  it("uses the Outbox ID for idempotent monitoring projection dispatch", async () => {
+    const start = vi.fn(async () => undefined);
+    const sourceOutboxEventId =
+      "40000000-0000-4000-8000-000000000012";
+    const consumer = createTemporalPlacementMonitoringInitializationConsumer(
+      { start },
+      backlinksRuntimeContract.taskQueue,
+      "worker-1",
+    );
+
+    await consumer.consume({
+      organizationId: "10000000-0000-4000-8000-000000000006",
+      ...scope,
+      sourceOutboxEventId,
+      requestedAt: new Date("2026-07-31T06:00:00.000Z"),
+      placementId: "40000000-0000-4000-8000-000000000013",
+      candidateId: "40000000-0000-4000-8000-000000000014",
+      opportunityId: "40000000-0000-4000-8000-000000000015",
+      initialValidationId: "40000000-0000-4000-8000-000000000016",
+    });
+
+    const workflowId = buildBacklinksWorkflowId({
+      ...scope,
+      workflow: "placement-monitoring-initialization",
+      instanceId: sourceOutboxEventId,
+    });
+    expect(start).toHaveBeenCalledWith(
+      backlinksRuntimeContract.workflows
+        .placementMonitoringInitialization.workflowType,
+      {
+        workflowId,
+        taskQueue: backlinksRuntimeContract.taskQueue,
+        args: [expect.objectContaining({
+          sourceOutboxEventId,
+          projectionId: sourceOutboxEventId,
+          workflowId,
+          workerId: "worker-1",
+          requestedAt: "2026-07-31T06:00:00.000Z",
+        })],
+      },
     );
   });
 });

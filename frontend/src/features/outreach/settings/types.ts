@@ -1,74 +1,28 @@
-export type SettingsValues = {
-  reportingTimezone: string
-  reportLookbackDays: number
-  exportExpiryHours: number
-}
+import type {
+  BacklinksRequest,
+  BacklinksResponse,
+} from "@/api/generated/backlinks"
 
-export type SettingsVersion = {
-  id: string
-  version: number
-  values: SettingsValues
-}
-
-export type KillSwitchLayer = "project" | "provider"
-export type KillSwitchSourceLayer =
-  | "global"
-  | "organization"
-  | "workspace"
-  | "project"
-  | "provider"
-  | "default"
-  | "authority_unavailable"
-
-export type KillSwitchView = {
-  capability: string
-  provider: string | null
-  effectiveBlocked: boolean
-  sourceLayer: KillSwitchSourceLayer
-  sourceScopeId: string | null
-  sourceVersion: number | null
-  editable: boolean
-}
-
-export type RetentionException =
-  | "legal_hold"
-  | "audit_record"
-  | "lifecycle_record"
-  | "active_suppression"
-
-export type RetentionPolicyView = {
-  id: string
-  version: number
-  rules: Array<{
-    category: string
-    retainForDays: number
-  }>
-  exceptions: RetentionException[]
-}
-
-export type SettingsGovernanceView = {
-  settings: SettingsVersion
-  killSwitches: KillSwitchView[]
-  editableKillSwitchLayers: KillSwitchLayer[]
-  retention: RetentionPolicyView
-}
-
-export type UpdateSettingsInput = {
-  expectedVersion: number
-  values: SettingsValues
-}
-
-export type UpdateKillSwitchInput = {
-  expectedVersion: number
-  layer: KillSwitchLayer
-  provider: string | null
-  blocked: boolean
-  confirmation: string
-  reason: string
-}
+export type SettingsGovernanceView =
+  BacklinksResponse<"backlinksGetSettingsGovernanceV1">
+export type SettingsVersion = SettingsGovernanceView["settings"]
+export type SettingsValues = SettingsVersion["values"]
+export type KillSwitchView = SettingsGovernanceView["killSwitches"][number]
+export type KillSwitchLayer =
+  SettingsGovernanceView["editableKillSwitchLayers"][number]
+export type KillSwitchSourceLayer = KillSwitchView["sourceLayer"]
+export type RetentionPolicyView = SettingsGovernanceView["retention"]
+export type RetentionException = RetentionPolicyView["exceptions"][number]
+export type UpdateSettingsInput =
+  BacklinksRequest<"backlinksUpdateSettingsV1">["body"]
+export type UpdateKillSwitchInput =
+  BacklinksRequest<"backlinksUpdateKillSwitchV1">["body"]
 
 export type SettingsClient = {
-  getSettings(websiteProjectKey: string): Promise<SettingsGovernanceView>
+  getSettings(
+    websiteProjectKey: string,
+    signal?: AbortSignal
+  ): Promise<SettingsGovernanceView>
   updateSettings(
     websiteProjectKey: string,
     input: UpdateSettingsInput

@@ -1,7 +1,10 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { LogController, type FastifyInstance } from "fastify";
 
 import type { BacklinksModule } from "../application/backlinks.module.js";
 import type { createContactCommands } from "../application/commands/contacts.command.js";
+import type {
+  createContactEnrichmentCommands,
+} from "../application/commands/contact-enrichment.command.js";
 import type {
   createDraftCommands,
   createDraftEditingCommands,
@@ -12,16 +15,26 @@ import type { createPlacementCandidateCommand } from "../application/commands/pl
 import type { createPlacementReverifyCommand } from "../application/commands/placement-reverify.command.js";
 import type { createPlacementReviewCommand } from "../application/commands/placement-review.command.js";
 import type { createRecommendationCommands } from "../application/commands/recommendations.command.js";
+import type {
+  ProjectContextProjectionCommand,
+} from "../application/commands/project-context-projection.command.js";
 import type { createReplyMatchCommands } from "../application/commands/reply-match.command.js";
 import type { createSendIntentCommands } from "../application/commands/send-intent.command.js";
 import type { AssessmentQuery } from "../application/queries/assessment.query.js";
 import type { DraftQuery } from "../application/queries/draft.query.js";
 import type { createGmailConnectionQuery } from "../application/queries/gmail-connection.query.js";
 import type { OpportunitiesQuery } from "../application/queries/opportunities.query.js";
+import type { MetricDashboardQuery } from "../application/queries/metric-dashboard.query.js";
 import type { PlacementLinksQuery } from "../application/queries/placement-links.query.js";
 import type { RecommendationsQuery } from "../application/queries/recommendations.query.js";
+import type { ReportOverviewQuery } from "../application/queries/report-overview.query.js";
 import type { ReplyMailQuery } from "../application/queries/reply-mail.query.js";
+import type { SendIntentQuery } from "../application/queries/send-intent.query.js";
 import type { SummaryQuery } from "../application/queries/summary.query.js";
+import type { ReportExportWorkflow } from "../application/workflows/report-export.workflow.js";
+import type {
+  GmailPollingSyncCommands,
+} from "../application/workflows/gmail-polling-sync-workflow.js";
 import {
   createDisabledGmailPushWebhook,
   type GmailPushWebhookHandler,
@@ -29,6 +42,9 @@ import {
 import type { BacklinksConfig } from "../config/index.js";
 import { registerBacklinksAssessmentRoute } from "./assessment.route.js";
 import { registerBacklinksContactsRoutes } from "./contacts.route.js";
+import {
+  registerBacklinksContactEnrichmentRoutes,
+} from "./contact-enrichment.route.js";
 import { registerBacklinksContextRoute } from "./context.route.js";
 import {
   registerBacklinksDraftEditingRoutes,
@@ -39,17 +55,27 @@ import { registerBacklinksGmailMailPushRoute } from "./gmail-mail-push.route.js"
 import { registerBacklinksHealthRoute } from "./health.route.js";
 import { registerBacklinksRequestLoggingHook } from "./hooks/request-logging.hook.js";
 import { registerBacklinksLinksRoutes } from "./links.route.js";
+import { registerBacklinksMetricDashboardRoute } from "./metrics/metric-dashboard.route.js";
 import { registerBacklinksOpenApi } from "./openapi.js";
 import { registerBacklinksOpportunitiesRoutes } from "./opportunities.route.js";
 import { registerBacklinksOpportunityCommandsRoutes } from "./opportunity-commands.route.js";
 import { registerBacklinksPlacementCandidateRoutes } from "./placement-candidates.route.js";
 import { registerBacklinksPlacementReviewRoutes } from "./placement-review.route.js";
+import {
+  registerProjectContextProjectionRoute,
+} from "./project-context-projection.route.js";
 import { registerBacklinksPlatformContextConsumer } from "./platform-request-context.js";
 import { registerBacklinksRecommendationCommandsRoutes } from "./recommendation-commands.route.js";
 import { registerBacklinksRecommendationsRoute } from "./recommendations.route.js";
 import { registerBacklinksReplyMailRoutes } from "./reply-mail.route.js";
 import { registerBacklinksReplyMatchRoutes } from "./reply-match.route.js";
+import { registerBacklinksReportExportRoutes } from "./reports/report-export.route.js";
+import { registerBacklinksReportOverviewRoute } from "./reports/report-overview.route.js";
 import { registerBacklinksSendIntentRoute } from "./send-intent.route.js";
+import {
+  registerBacklinksSettingsGovernanceRoutes,
+  type BacklinksSettingsGovernanceService,
+} from "./settings/settings-governance.route.js";
 import { registerBacklinksSummaryRoute } from "./summary.route.js";
 
 type BacklinksApiQueries =
@@ -59,8 +85,11 @@ type BacklinksApiQueries =
   & PlacementLinksQuery
   & RecommendationsQuery
   & ReplyMailQuery
+  & SendIntentQuery
   & SummaryQuery;
 type ContactCommands = ReturnType<typeof createContactCommands>;
+type ContactEnrichmentCommands =
+  ReturnType<typeof createContactEnrichmentCommands>;
 type DraftCommands = ReturnType<typeof createDraftCommands>;
 type DraftEditingCommands = ReturnType<typeof createDraftEditingCommands>;
 type GmailConnectionCommands = ReturnType<typeof createGmailConnectionCommands>;
@@ -76,17 +105,24 @@ type SendIntentCommands = ReturnType<typeof createSendIntentCommands>;
 export type BacklinksPrivateApiDependencies = Readonly<{
   module: BacklinksModule<BacklinksApiQueries>;
   contactCommands: ContactCommands;
+  contactEnrichmentCommands: ContactEnrichmentCommands;
   draftCommands: DraftCommands;
   draftEditingCommands: DraftEditingCommands;
   gmailConnectionCommands: GmailConnectionCommands;
   gmailConnectionQuery: GmailConnectionQuery;
+  gmailPollingSyncCommands: GmailPollingSyncCommands;
   opportunityCommands: OpportunityCommands;
   placementCandidateCommand: PlacementCandidateCommand;
   placementReverifyCommand: PlacementReverifyCommand;
   placementReviewCommand: PlacementReviewCommand;
   recommendationCommands: RecommendationCommands;
+  metricDashboardQuery: MetricDashboardQuery;
+  reportOverviewQuery: ReportOverviewQuery;
+  reportExportWorkflow: ReportExportWorkflow;
   replyMatchCommands: ReplyMatchCommands;
   sendIntentCommands: SendIntentCommands;
+  settingsGovernanceService: BacklinksSettingsGovernanceService;
+  projectContextProjectionCommand?: ProjectContextProjectionCommand;
   gmailPushWebhook?: GmailPushWebhookHandler;
 }>;
 
@@ -94,6 +130,7 @@ export type CreateBacklinksPrivateApiOptions = Readonly<{
   config: BacklinksConfig;
   platformContextSigningKey: string | Buffer;
   dependencies: BacklinksPrivateApiDependencies;
+  readiness?: () => Promise<void>;
   logger?: boolean;
 }>;
 
@@ -130,6 +167,7 @@ export async function createBacklinksPrivateApi(
 
   const app = Fastify({
     logger: options.logger ?? true,
+    logController: new LogController({ disableRequestLogging: true }),
     bodyLimit: options.config.BACKLINK_API_BODY_LIMIT,
     requestTimeout: options.config.BACKLINK_API_REQUEST_TIMEOUT_MS,
   });
@@ -139,12 +177,38 @@ export async function createBacklinksPrivateApi(
     signingKey: options.platformContextSigningKey,
   });
   registerBacklinksHealthRoute(app, options.config);
+  app.get(
+    "/ready",
+    {
+      schema: {
+        hide: true,
+      },
+    },
+    async (_request, reply) => {
+      try {
+        await options.readiness?.();
+        return { status: "ok" as const };
+      } catch {
+        return reply.code(503).send({ status: "unavailable" as const });
+      }
+    },
+  );
   registerBacklinksContextRoute(app, {
     module: options.dependencies.module,
   });
+  if (options.dependencies.projectContextProjectionCommand !== undefined) {
+    registerProjectContextProjectionRoute(
+      app,
+      options.dependencies.projectContextProjectionCommand,
+    );
+  }
   registerBacklinksContactsRoutes(app, {
     module: options.dependencies.module,
     commands: options.dependencies.contactCommands,
+  });
+  registerBacklinksContactEnrichmentRoutes(app, {
+    module: options.dependencies.module,
+    commands: options.dependencies.contactEnrichmentCommands,
   });
   registerBacklinksRecommendationsRoute(app, {
     module: options.dependencies.module,
@@ -167,6 +231,22 @@ export async function createBacklinksPrivateApi(
   registerBacklinksLinksRoutes(app, {
     module: options.dependencies.module,
     reverifyCommand: options.dependencies.placementReverifyCommand,
+  });
+  registerBacklinksMetricDashboardRoute(app, {
+    projectContext: options.dependencies.module.projectContext,
+    query: options.dependencies.metricDashboardQuery,
+  });
+  registerBacklinksReportOverviewRoute(app, {
+    projectContext: options.dependencies.module.projectContext,
+    query: options.dependencies.reportOverviewQuery,
+  });
+  registerBacklinksReportExportRoutes(app, {
+    projectContext: options.dependencies.module.projectContext,
+    workflow: options.dependencies.reportExportWorkflow,
+  });
+  registerBacklinksSettingsGovernanceRoutes(app, {
+    projectContext: options.dependencies.module.projectContext,
+    service: options.dependencies.settingsGovernanceService,
   });
   registerBacklinksRecommendationCommandsRoutes(app, {
     module: options.dependencies.module,
@@ -191,6 +271,7 @@ export async function createBacklinksPrivateApi(
     module: options.dependencies.module,
     commands: options.dependencies.gmailConnectionCommands,
     query: options.dependencies.gmailConnectionQuery,
+    syncCommands: options.dependencies.gmailPollingSyncCommands,
   });
   registerBacklinksReplyMatchRoutes(app, {
     module: options.dependencies.module,

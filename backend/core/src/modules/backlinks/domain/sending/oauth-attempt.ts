@@ -107,6 +107,13 @@ export class OAuthAttemptService {
     const pkceVerifier = this.randomBase64Url(32);
     const codeChallenge = sha256Base64Url(pkceVerifier);
 
+    await this.repository.cleanupExpired({
+      organizationId: input.organizationId,
+      workspaceId: input.workspaceId,
+      websiteProjectId: input.websiteProjectId,
+      cleanedByUserId: input.initiatedByUserId,
+      expiredAt: createdAt,
+    });
     await this.repository.create({
       id: this.newId(),
       organizationId: input.organizationId,

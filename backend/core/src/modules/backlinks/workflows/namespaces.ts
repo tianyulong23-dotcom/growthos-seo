@@ -1,8 +1,13 @@
 const workflowKinds = [
   "project-analysis",
   "recommendation-refill",
+  "contact-enrichment",
   "placement-initial-validation",
   "placement-monitoring",
+  "placement-monitoring-initialization",
+  "draft-generation",
+  "gmail-send",
+  "gmail-polling-sync",
 ] as const;
 export type BacklinksWorkflowKind = (typeof workflowKinds)[number];
 
@@ -20,6 +25,10 @@ export const backlinksRuntimeContract = Object.freeze({
       workflowType: "backlinksRecommendationRefillV1Workflow",
       workflow: "recommendation-refill",
     },
+    contactEnrichment: {
+      workflowType: "backlinksContactEnrichmentV1Workflow",
+      workflow: "contact-enrichment",
+    },
     placementInitialValidation: {
       workflowType: "backlinksPlacementInitialValidationV1Workflow",
       workflow: "placement-initial-validation",
@@ -27,6 +36,23 @@ export const backlinksRuntimeContract = Object.freeze({
     placementMonitoring: {
       workflowType: "backlinksPlacementMonitoringV1Workflow",
       workflow: "placement-monitoring",
+    },
+    placementMonitoringInitialization: {
+      workflowType:
+        "backlinksPlacementMonitoringInitializationV1Workflow",
+      workflow: "placement-monitoring-initialization",
+    },
+    draftGeneration: {
+      workflowType: "backlinksDraftGenerationV1Workflow",
+      workflow: "draft-generation",
+    },
+    gmailSend: {
+      workflowType: "backlinksGmailSendV1Workflow",
+      workflow: "gmail-send",
+    },
+    gmailPollingSync: {
+      workflowType: "backlinksGmailPollingSyncV1Workflow",
+      workflow: "gmail-polling-sync",
     },
   },
   activities: {
@@ -36,9 +62,17 @@ export const backlinksRuntimeContract = Object.freeze({
     storeReadyRecommendations: "backlinksStoreReadyRecommendationsV1",
     recordRecommendationRefillFailure:
       "backlinksRecordRecommendationRefillFailureV1",
+    runContactEnrichment: "backlinksRunContactEnrichmentV1",
     runPlacementInitialValidation:
       "backlinksRunPlacementInitialValidationV1",
     runPlacementMonitoring: "backlinksRunPlacementMonitoringV1",
+    initializePlacementMonitoring:
+      "backlinksInitializePlacementMonitoringV1",
+    runDraftGeneration: "backlinksRunDraftGenerationV1",
+    claimGmailSendAttempt: "backlinksClaimGmailSendAttemptV1",
+    dispatchGmailSendAttempt: "backlinksDispatchGmailSendAttemptV1",
+    settleGmailSendAttempt: "backlinksSettleGmailSendAttemptV1",
+    runGmailPollingSync: "backlinksRunGmailPollingSyncV1",
   },
   providers: {
     dataForSeo: {

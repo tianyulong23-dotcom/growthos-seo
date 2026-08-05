@@ -58,7 +58,8 @@ describe("BL-AI-072 contact discovery", () => {
       "../../../../database/roles/0001_growthos_schema_roles.sql", import.meta.url,
     ), "utf8"));
     for (const name of ["0005_backlink_schema_role_ownership.sql",
-      "0011_backlink_contact_purpose_correction.sql"]) {
+      "0011_backlink_contact_purpose_correction.sql",
+      "0038_backlink_contact_enrichment.sql"]) {
       await client.query(await readFile(migration(name), "utf8"));
     }
     await client.query("SET search_path = backlinks, pg_catalog");
@@ -119,7 +120,7 @@ describe("BL-AI-072 contact discovery", () => {
         ruleId: "general.contact",
       })],
       evidenceCount: 1, sourceUrl: input.targetUrl, method: "mailto",
-      snippet: "editor@example.com", contacts: 0,
+      snippet: "editor@example.com mailto:editor@example.com", contacts: 0,
     });
   });
 

@@ -9,7 +9,7 @@ import {
 } from "testcontainers";
 
 const POSTGRES_IMAGE =
-  "postgres:17.10-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394";
+  "postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296";
 const POSTGRES_PORT = 5432;
 const DATABASE_NAME = "backlinks_test";
 const DATABASE_USER = "backlinks_test";
