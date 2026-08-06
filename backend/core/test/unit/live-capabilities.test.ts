@@ -17,7 +17,7 @@ const base = {
   GOOGLE_OAUTH_CLIENT_SECRET_REF:
     "secret://growthos/local-product/google/oauth-client-secret/v1",
   GOOGLE_OAUTH_REDIRECT_URI:
-    "http://localhost:7200/api/v1/projects/live001-canary/backlinks/gmail-connections/callback",
+    "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
   GMAIL_SEND_ENABLED: "false",
   GMAIL_SYNC_ENABLED: "false",
   DATAFORSEO_ENABLED: "false",
@@ -39,7 +39,7 @@ const localProduct = {
   BACKLINKS_LIVE_CANARY_STAGE: undefined,
   LOCAL_PRODUCT_WEBSITE_PROJECT_KEY: "project-real",
   GOOGLE_OAUTH_REDIRECT_URI:
-    "http://localhost:7200/api/v1/projects/project-real/backlinks/gmail-connections/callback",
+    "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
   GMAIL_SEND_ENABLED: "true",
   GMAIL_SYNC_ENABLED: "false",
   GMAIL_ROLLING_24_HOUR_SEND_LIMIT: "20",
@@ -51,8 +51,14 @@ const localProductDataForSeo = {
   DATAFORSEO_ENABLED: "true",
   DATAFORSEO_CREDENTIAL_SECRET_REF:
     "secret://growthos/local-product/dataforseo/provider-credential/v7",
-  DATAFORSEO_ENDPOINT_ALLOWLIST:
-    '["https://api.dataforseo.com/v3/backlinks/referring_domains/live","https://api.dataforseo.com/v3/backlinks/summary/live"]',
+  DATAFORSEO_ENDPOINT_ALLOWLIST: JSON.stringify([
+    "https://api.dataforseo.com/v3/serp/google/organic/task_post",
+    "https://api.dataforseo.com/v3/serp/google/organic/tasks_ready",
+    "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
+    "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
+    "https://api.dataforseo.com/v3/backlinks/competitors/live",
+    "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
+  ]),
   DATAFORSEO_REQUEST_TIMEOUT_MS: "60000",
   DATAFORSEO_ESTIMATED_COST_MICROS: "1000",
   DATAFORSEO_ABSOLUTE_BUDGET_MICROS: "5000",
@@ -198,7 +204,7 @@ describe("local product capability matrix", () => {
       gmailMinimumIntervalSeconds: 120,
       gmailRecipientSecretReference: null,
       googleOauthRedirectUri:
-        "http://localhost:7200/api/v1/projects/project-real/backlinks/gmail-connections/callback",
+        "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
     });
   });
 
@@ -219,14 +225,27 @@ describe("local product capability matrix", () => {
     });
   });
 
-  it("fails closed for a stale stage or mismatched dynamic redirect", () => {
+  it("does not require a default project key for the project-scoped worker", () => {
+    expect(readBacklinksLiveCapabilities({
+      ...localProduct,
+      LOCAL_PRODUCT_WEBSITE_PROJECT_KEY: undefined,
+    })).toMatchObject({
+      mode: "LOCAL_PRODUCT",
+      googleOauthEnabled: true,
+      googleOauthRedirectUri:
+        "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
+    });
+  });
+
+  it("fails closed for a stale stage or mismatched stable redirect", () => {
     expect(() => readBacklinksLiveCapabilities({
       ...localProduct,
       BACKLINKS_LIVE_CANARY_STAGE: "LIVE-004",
     })).toThrow("BACKLINKS_LOCAL_PRODUCT_STAGE_FORBIDDEN");
     expect(() => readBacklinksLiveCapabilities({
       ...localProduct,
-      GOOGLE_OAUTH_REDIRECT_URI: base.GOOGLE_OAUTH_REDIRECT_URI,
+      GOOGLE_OAUTH_REDIRECT_URI:
+        "http://localhost:7200/api/v1/projects/project-real/backlinks/gmail-connections/callback",
     })).toThrow("BACKLINKS_GOOGLE_OAUTH_REDIRECT_URI_INVALID");
   });
 

@@ -15,15 +15,19 @@ const environment = Object.freeze({
   DATAFORSEO_CREDENTIAL_SECRET_REF:
     "secret://growthos/local-product/dataforseo/provider-credential/v7",
   DATAFORSEO_ENDPOINT_ALLOWLIST: JSON.stringify([
+    "https://api.dataforseo.com/v3/serp/google/organic/task_post",
+    "https://api.dataforseo.com/v3/serp/google/organic/tasks_ready",
+    "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
+    "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
+    "https://api.dataforseo.com/v3/backlinks/competitors/live",
     "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
-    "https://api.dataforseo.com/v3/backlinks/summary/live",
   ]),
   DATAFORSEO_REQUEST_TIMEOUT_MS: "60000",
   DATAFORSEO_ESTIMATED_COST_MICROS: "50000",
   DATAFORSEO_ABSOLUTE_BUDGET_MICROS: "100000",
   DATAFORSEO_MAX_PAID_CALLS: "25",
   DATAFORSEO_CANDIDATE_LIMIT: "20",
-  DATAFORSEO_LOCATION_CODE: "ZA",
+  DATAFORSEO_LOCATION_CODE: "2840",
   DATAFORSEO_LANGUAGE_CODE: "en",
   DATAFORSEO_DISCOVERY_TARGETS_JSON: JSON.stringify([
     "showmax.com",

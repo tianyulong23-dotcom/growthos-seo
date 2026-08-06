@@ -2,74 +2,70 @@ import * as React from "react"
 
 import type { Project } from "@/app/project-context"
 
-import {
-  requestRecommendationRefill,
-  type RecommendationItem,
-} from "./api"
+import type { RecommendationInventoryStatus } from "./api"
 
-const targetInventory = 20
 const pollIntervalMs = 2_000
-const maxWaitMs = 10 * 60_000
+const maxWaitMs = 60_000
+const markerRetentionMs = 24 * 60 * 60_000
 
-type RefillStatus =
+type ContactBatchWaitStatus =
   | "idle"
   | "running"
   | "succeeded"
   | "failed"
   | "timed_out"
 
-type RefillMarker = {
+type ContactBatchWaitMarker = {
   websiteProjectKey: string
   websiteProjectId: string
   profileVersionId: string
   contextVersion: number
-  idempotencyKey: string
-  refillWindowKey: string
-  jobId: string | null
-  workflowId: string | null
+  batchId: string | null
   startedAt: number
-  expiresAt: number
+  retainedUntil: number
   pollCount: number
   lastQueryAt: number | null
 }
 
 export type RecommendationRefillState = {
-  status: RefillStatus
+  status: ContactBatchWaitStatus
   phase: string
-  jobId: string | null
+  batchId: string | null
   startedAt: number | null
   elapsedMs: number
   pollCount: number
   lastQueryAt: number | null
   error: string | null
+  batch: RecommendationInventoryStatus["contactBatch"]
 }
 
 const idleState: RecommendationRefillState = {
   status: "idle",
-  phase: "等待用户生成推荐",
-  jobId: null,
+  phase: "等待查看本批联系人处理进度",
+  batchId: null,
   startedAt: null,
   elapsedMs: 0,
   pollCount: 0,
   lastQueryAt: null,
   error: null,
+  batch: null,
 }
 
 function storageKey(project: Project) {
-  return `growthos:recommendation-refill:${project.id}:${project.profileVersionId}`
+  return `growthos:contact-batch-wait:${project.id}:${project.profileVersionId}`
 }
 
-function readMarker(project: Project): RefillMarker | null {
+function readMarker(project: Project): ContactBatchWaitMarker | null {
   try {
     const raw = window.sessionStorage.getItem(storageKey(project))
     if (!raw) return null
-    const marker = JSON.parse(raw) as RefillMarker
+    const marker = JSON.parse(raw) as ContactBatchWaitMarker
     if (
       marker.websiteProjectKey !== project.id ||
       marker.websiteProjectId !== project.websiteProjectId ||
       marker.profileVersionId !== project.profileVersionId ||
       marker.contextVersion !== project.contextVersion ||
-      marker.expiresAt <= Date.now()
+      marker.retainedUntil <= Date.now()
     ) {
       window.sessionStorage.removeItem(storageKey(project))
       return null
@@ -81,60 +77,67 @@ function readMarker(project: Project): RefillMarker | null {
   }
 }
 
-function writeMarker(project: Project, marker: RefillMarker) {
+function writeMarker(project: Project, marker: ContactBatchWaitMarker) {
   window.sessionStorage.setItem(storageKey(project), JSON.stringify(marker))
 }
 
-function runningState(marker: RefillMarker): RecommendationRefillState {
-  return {
-    status: "running",
-    phase:
-      marker.pollCount === 0
-        ? "补池任务已提交"
-        : "正在读取当前项目推荐库存",
-    jobId: marker.jobId,
-    startedAt: marker.startedAt,
-    elapsedMs: Math.max(0, Date.now() - marker.startedAt),
-    pollCount: marker.pollCount,
-    lastQueryAt: marker.lastQueryAt,
-    error: null,
-  }
-}
-
-function createMarker(project: Project): RefillMarker {
+function createMarker(
+  project: Project,
+  batchId: string | null
+): ContactBatchWaitMarker {
   const startedAt = Date.now()
-  const windowStart = new Date(
-    Math.floor(startedAt / (15 * 60_000)) * 15 * 60_000
-  )
-    .toISOString()
-    .slice(0, 16)
   return {
     websiteProjectKey: project.id,
     websiteProjectId: project.websiteProjectId,
     profileVersionId: project.profileVersionId,
     contextVersion: project.contextVersion,
-    idempotencyKey: crypto.randomUUID(),
-    refillWindowKey: `${project.websiteProjectId}:${project.profileVersionId}:${windowStart}`,
-    jobId: null,
-    workflowId: null,
+    batchId,
     startedAt,
-    expiresAt: startedAt + maxWaitMs,
+    retainedUntil: startedAt + markerRetentionMs,
     pollCount: 0,
     lastQueryAt: null,
   }
 }
 
+function runningState(
+  marker: ContactBatchWaitMarker,
+  batch: RecommendationInventoryStatus["contactBatch"] = null
+): RecommendationRefillState {
+  return {
+    status: "running",
+    phase:
+      batch === null
+        ? "正在读取当前项目联系人批次"
+        : `正在等待本批联系人终态 ${batch.terminalJobCount}/${batch.totalJobCount}`,
+    batchId: marker.batchId,
+    startedAt: marker.startedAt,
+    elapsedMs: Math.max(0, Date.now() - marker.startedAt),
+    pollCount: marker.pollCount,
+    lastQueryAt: marker.lastQueryAt,
+    error: null,
+    batch,
+  }
+}
+
 export function useRecommendationRefill(
   project: Project,
-  pollInventory: () => Promise<readonly RecommendationItem[] | null>
+  pollInventory: () => Promise<RecommendationInventoryStatus | null>
 ) {
   const scopeKey = `${project.id}:${project.profileVersionId}:${project.contextVersion}`
   const activeScopeRef = React.useRef(scopeKey)
-  const submittingRef = React.useRef(false)
   const pollInFlightRef = React.useRef(false)
   const [state, setState] = React.useState<RecommendationRefillState>(() => {
     const marker = readMarker(project)
-    return marker ? runningState(marker) : idleState
+    if (!marker) return idleState
+    if (Date.now() - marker.startedAt >= maxWaitMs) {
+      return {
+        ...runningState(marker),
+        status: "timed_out",
+        phase: "前台等待已结束",
+        error: "后台继续处理中",
+      }
+    }
+    return runningState(marker)
   })
 
   React.useEffect(() => {
@@ -179,43 +182,69 @@ export function useRecommendationRefill(
         return
       }
       if (Date.now() - marker.startedAt >= maxWaitMs) {
-        window.sessionStorage.removeItem(storageKey(project))
         setState({
-          ...runningState(marker),
+          ...runningState(marker, state.batch),
           status: "timed_out",
-          phase: "等待推荐库存超时",
+          phase: "前台等待已结束",
           elapsedMs: Date.now() - marker.startedAt,
-          error: "后台任务未在十分钟内返回足够推荐，请检查任务状态后重试。",
+          error: "后台继续处理中",
         })
         return
       }
 
       pollInFlightRef.current = true
       try {
-        const items = await pollInventory()
+        const inventory = await pollInventory()
         if (cancelled || activeScopeRef.current !== expectedScope) return
         const queriedAt = Date.now()
+        const observedBatch = inventory?.contactBatch ?? null
+        const batch =
+          marker.batchId === null ||
+          observedBatch === null ||
+          observedBatch.id === marker.batchId
+            ? observedBatch
+            : null
         const nextMarker = {
           ...marker,
+          batchId: marker.batchId ?? batch?.id ?? null,
           pollCount: marker.pollCount + 1,
           lastQueryAt: queriedAt,
         }
-        if (items !== null && items.length >= targetInventory) {
+        const terminal =
+          batch !== null &&
+          (batch.status === "completed" ||
+            batch.status === "stale_context" ||
+            (batch.totalJobCount > 0 &&
+              batch.terminalJobCount >= batch.totalJobCount))
+        if (terminal) {
           window.sessionStorage.removeItem(storageKey(project))
           setState({
             status: "succeeded",
-            phase: "当前项目推荐库存已就绪",
-            jobId: nextMarker.jobId,
+            phase:
+              batch.status === "stale_context"
+                ? "项目资料已更新，本批停止发布"
+                : "本批联系人处理已完成",
+            batchId: batch.id,
             startedAt: nextMarker.startedAt,
             elapsedMs: queriedAt - nextMarker.startedAt,
             pollCount: nextMarker.pollCount,
             lastQueryAt: queriedAt,
             error: null,
+            batch,
           })
           return
         }
         writeMarker(project, nextMarker)
-        setState(runningState(nextMarker))
+        setState(runningState(nextMarker, batch))
+      } catch {
+        if (!cancelled && activeScopeRef.current === expectedScope) {
+          setState((current) => ({
+            ...current,
+            status: "failed",
+            phase: "联系人批次状态读取失败",
+            error: "当前无法读取联系人批次状态。",
+          }))
+        }
       } finally {
         pollInFlightRef.current = false
       }
@@ -224,54 +253,31 @@ export function useRecommendationRefill(
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [pollInventory, project, scopeKey, state.status, state.pollCount])
+  }, [pollInventory, project, scopeKey, state.batch, state.pollCount, state.status])
 
-  const start = React.useCallback(async () => {
-    if (
-      submittingRef.current ||
-      state.status === "running" ||
-      project.inputRequired.length > 0
-    ) {
-      return
-    }
-    submittingRef.current = true
-    const expectedScope = scopeKey
-    const marker = readMarker(project) ?? createMarker(project)
-    writeMarker(project, marker)
-    setState(runningState(marker))
-    try {
-      const job = await requestRecommendationRefill(
-        project.id,
-        project.profileVersionId,
-        marker.idempotencyKey,
-        marker.refillWindowKey
-      )
-      if (activeScopeRef.current !== expectedScope) return
-      const nextMarker = {
-        ...marker,
-        jobId: job.jobId,
-        workflowId: job.workflowId,
-      }
-      writeMarker(project, nextMarker)
-      setState(runningState(nextMarker))
-    } catch {
-      if (activeScopeRef.current !== expectedScope) return
-      window.sessionStorage.removeItem(storageKey(project))
-      setState({
-        ...runningState(marker),
-        status: "failed",
-        phase: "补池任务提交失败",
-        elapsedMs: Date.now() - marker.startedAt,
-        error: "服务端没有接受本次补池任务，未创建浏览器本地推荐。",
-      })
-    } finally {
-      submittingRef.current = false
-    }
-  }, [project, scopeKey, state.status])
+  const start = React.useCallback(
+    (batchId: string | null = null) => {
+      if (project.inputRequired.length > 0 || state.status === "running") return
+      const existing = readMarker(project)
+      const marker =
+        existing === null
+          ? createMarker(project, batchId)
+          : {
+              ...existing,
+              batchId: batchId ?? existing.batchId,
+              startedAt: Date.now(),
+              retainedUntil: Date.now() + markerRetentionMs,
+              pollCount: 0,
+              lastQueryAt: null,
+            }
+      writeMarker(project, marker)
+      setState(runningState(marker))
+    },
+    [project, state.status]
+  )
 
   return {
     ...state,
-    targetInventory,
     start,
   }
 }

@@ -133,7 +133,7 @@ function Invoke-IntegratedParallelBlockMigrations {
     Invoke-PsqlFile -Database $Database -Path (
         Join-Path $BacklinksMigrationPath "0027_backlink_negotiation_facts.sql"
     )
-    Invoke-BacklinksMigrations -Database $Database -First 28 -Last 42
+    Invoke-BacklinksMigrations -Database $Database -First 28 -Last 45
 }
 
 function Invoke-DatabaseContract {

@@ -277,6 +277,7 @@ export function createTemporalPlacementMonitoringInitializationConsumer(
         });
       }
       const workflowId = buildBacklinksWorkflowId({
+        organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
         workflow: "placement-monitoring-initialization",
@@ -453,6 +454,7 @@ export function createTemporalContactEnrichmentConsumer(
   return {
     async consume(input) {
       const workflowId = buildBacklinksWorkflowId({
+        organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
         workflow: "contact-enrichment",
@@ -483,6 +485,7 @@ export function createTemporalRecommendationRefillConsumer(
   return {
     async consume(input) {
       const workflowId = buildBacklinksWorkflowId({
+        organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
         workflow: "recommendation-refill",
@@ -516,6 +519,7 @@ export function createTemporalGmailSendConsumer(
   return {
     async consume(input) {
       const workflowId = buildBacklinksWorkflowId({
+        organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
         workflow: "gmail-send",
@@ -562,6 +566,7 @@ export function createTemporalPlacementMonitoringStarter(
   return {
     async start(input) {
       const workflowId = buildBacklinksWorkflowId({
+        organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
         workflow: "placement-monitoring",
@@ -593,6 +598,7 @@ export function createTemporalPlacementInitialValidationStarter(
   return {
     async start(input) {
       const workflowId = buildBacklinksWorkflowId({
+        organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
         workflow: "placement-initial-validation",

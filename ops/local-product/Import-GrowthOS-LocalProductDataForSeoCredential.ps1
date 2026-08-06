@@ -14,6 +14,11 @@ param(
         "secret://growthos/local-product/dataforseo/provider-credential/v1"
     ),
     [string[]]$EndpointAllowlist = @(
+        "https://api.dataforseo.com/v3/serp/google/organic/task_post",
+        "https://api.dataforseo.com/v3/serp/google/organic/tasks_ready",
+        "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
+        "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
+        "https://api.dataforseo.com/v3/backlinks/competitors/live",
         "https://api.dataforseo.com/v3/backlinks/referring_domains/live"
     ),
     [Parameter(Mandatory = $true)]

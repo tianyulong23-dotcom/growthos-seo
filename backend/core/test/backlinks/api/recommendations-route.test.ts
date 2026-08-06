@@ -27,6 +27,8 @@ const componentWeights = [35, 30, 15, 15, 5] as const;
 const rows = ["alpha", "beta"].map((name, index) => ({
   id: `018f0000-0000-7000-8000-00000000000${index + 1}`,
   hostname: `${name}.example`, score: "90.0000", status: "ready",
+  publicationStatus: "PUBLISHED",
+  verifiedPublicEmailCount: 1,
   recommendationContextVersionId: "context-1", version: index + 1,
   scoreModelVersion: "recommendation-open-evidence-score.v1",
   ruleVersion: "rules-v1",
@@ -51,6 +53,37 @@ const rows = ["alpha", "beta"].map((name, index) => ({
 }));
 
 describe("BL-AI-062 recommendations list API", () => {
+  it("resolves commercial inventory through the active context snapshot", async () => {
+    const calls: { text: string; values?: readonly unknown[] }[] = [];
+    const query = createRecommendationsQuery({
+      query: async (text, values) => {
+        calls.push({ text, values });
+        return { rows: [{}] };
+      },
+    });
+
+    const result = await query.getRecommendationInventoryStatus({
+      ...context,
+      project: createProjectContext({
+        ...context.project,
+        profileVersionId: "project-1:legacy-profile",
+      }),
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.values).toEqual(["org-1", "workspace-1", "project-1"]);
+    expect(calls[0]?.text).toContain("WITH current_context AS");
+    expect(calls[0]?.text).toContain(
+      "project_context_version_id=(SELECT id FROM current_context)",
+    );
+    expect(result).toMatchObject({
+      candidateReadyCount: 0,
+      publishedContactReadyCount: 0,
+      historicalEmailHitRate: 0.1,
+      refillInFlight: false,
+    });
+  });
+
   it.each(["shown", "stale_context", "accepted"] as const)(
     "returns historical inventory status %s without a validation failure",
     async (historicalStatus) => {

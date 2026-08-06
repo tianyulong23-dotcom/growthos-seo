@@ -7,7 +7,7 @@ import {
 import { gmailOAuthScopes } from "../../src/modules/backlinks/domain/sending/oauth-attempt.js";
 
 const redirectUri =
-  "http://localhost:7200/api/v1/projects/live001-canary/backlinks/gmail-connections/callback";
+  "http://localhost:7200/api/v1/backlinks/gmail-connections/callback";
 
 describe("Google Auth official client", () => {
   it("generates an offline consent URL with exact redirect, scopes, state, and PKCE", async () => {

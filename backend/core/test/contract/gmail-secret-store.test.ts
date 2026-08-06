@@ -69,35 +69,40 @@ const identity = {
   displayName: "Owner",
 } as const;
 
-const tokenContext = (
-  connectionId: string,
-): SecretEncryptionContext => ({
+const completionContext = {
+  organizationId: context.tenant.organizationId,
+  workspaceId: context.tenant.workspaceId,
+  websiteProjectId: context.project.websiteProjectId,
+  actorId: context.actor.userId,
+} as const;
+
+const tokenContext = (connectionId: string): SecretEncryptionContext => ({
   organizationId: context.tenant.organizationId,
   subjectProvider: "google",
   connectionId,
 });
 
-const reference = (
-  externalSecretVersion: string,
-): SecretStoreReference => ({
+const reference = (externalSecretVersion: string): SecretStoreReference => ({
   provider: "platform-secret-store",
   secretKind: secretKinds.gmailTokenSet,
   externalSecretId: "gmail-connection-104",
   externalSecretVersion,
 });
 
-const view = (connectionId: string, expiresAt: string) => ({
-  connectionId,
-  primaryEmail: identity.email,
-  displayName: identity.displayName,
-  hostedDomain: null,
-  grantedScopes: gmailOAuthScopes,
-  connectionStatus: "CONNECTED",
-  sendAvailability: "AVAILABLE",
-  mailSyncCapability: true,
-  tokenExpiresAt: expiresAt,
-  connectedAt: "2026-07-27T04:00:00.000Z",
-} as const);
+const view = (connectionId: string, expiresAt: string, version = 1) =>
+  ({
+    connectionId,
+    version,
+    primaryEmail: identity.email,
+    displayName: identity.displayName,
+    hostedDomain: null,
+    grantedScopes: gmailOAuthScopes,
+    connectionStatus: "CONNECTED",
+    sendAvailability: "AVAILABLE",
+    mailSyncCapability: true,
+    tokenExpiresAt: expiresAt,
+    connectedAt: "2026-07-27T04:00:00.000Z",
+  }) as const;
 
 class SerialRefreshLock implements GmailConnectionRefreshLock {
   private tail = Promise.resolve();
@@ -130,13 +135,22 @@ class FakeSecretStore implements SecretStorePort {
 class FakePersistence implements GmailConnectionSecretPersistence {
   readonly creates: GmailConnectionSecretPersistenceCreateInput[] = [];
   readonly replaces: GmailConnectionSecretPersistenceReplaceInput[] = [];
+  activeConnectionId: string | null = null;
   state: GmailConnectionSecretPersistenceRefreshState | null = null;
 
-  async createConnectionWithWorkspaceBinding(
+  async findActiveConnectionIdBySubject() {
+    return this.activeConnectionId;
+  }
+
+  async saveAuthorizedConnectionWithBindings(
     input: GmailConnectionSecretPersistenceCreateInput,
   ) {
     this.creates.push(input);
-    return view(input.connectionId, input.tokenExpiresAt);
+    this.activeConnectionId = input.connectionId;
+    return {
+      view: view(input.connectionId, input.tokenExpiresAt),
+      retiredTokenSecretReference: null,
+    };
   }
 
   async findRefreshState() {
@@ -154,7 +168,11 @@ class FakePersistence implements GmailConnectionSecretPersistence {
       ...this.state,
       version: this.state.version + 1,
       tokenSecretReference: input.tokenSecretReference,
-      view: view(this.state.connectionId, input.tokenExpiresAt),
+      view: view(
+        this.state.connectionId,
+        input.tokenExpiresAt,
+        this.state.version + 1,
+      ),
     };
     return this.state;
   }
@@ -174,11 +192,13 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
     };
     const adapter = new SecretStoreClientAdapter({ client });
 
-    await expect(adapter.create({
-      secretKind: secretKinds.gmailTokenSet,
-      plaintext: JSON.stringify(initialTokens),
-      context: tokenContext(id(100)),
-    })).rejects.toMatchObject({
+    await expect(
+      adapter.create({
+        secretKind: secretKinds.gmailTokenSet,
+        plaintext: JSON.stringify(initialTokens),
+        context: tokenContext(id(100)),
+      }),
+    ).rejects.toMatchObject({
       operation: "create",
       code: secretStoreFailureCodes.disabled,
       retryable: false,
@@ -188,10 +208,13 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
     expect(client.rotate).not.toHaveBeenCalled();
     expect(client.destroy).not.toHaveBeenCalled();
 
-    const source = readFileSync(new URL(
-      "../../src/modules/backlinks/adapters/security/secret-store-client.ts",
-      import.meta.url,
-    ), "utf8");
+    const source = readFileSync(
+      new URL(
+        "../../src/modules/backlinks/adapters/security/secret-store-client.ts",
+        import.meta.url,
+      ),
+      "utf8",
+    );
     expect(source).not.toMatch(
       /\bfetch\s*\(|SecretManagerServiceClient|KeyManagementServiceClient|@google-cloud/,
     );
@@ -220,19 +243,23 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
       context: tokenContext(id(100)),
     });
 
-    await expect(adapter.resolve({
-      reference: firstReference,
-      context: tokenContext(id(100)),
-    })).resolves.toBe(JSON.stringify(initialTokens));
+    await expect(
+      adapter.resolve({
+        reference: firstReference,
+        context: tokenContext(id(100)),
+      }),
+    ).resolves.toBe(JSON.stringify(initialTokens));
     const nextReference = await adapter.rotate({
       reference: firstReference,
       plaintext: JSON.stringify(refreshedTokens),
       context: tokenContext(id(100)),
     });
-    await expect(adapter.destroy({
-      reference: firstReference,
-      context: tokenContext(id(100)),
-    })).resolves.toEqual({ destroyed: true });
+    await expect(
+      adapter.destroy({
+        reference: firstReference,
+        context: tokenContext(id(100)),
+      }),
+    ).resolves.toEqual({ destroyed: true });
 
     expect(firstReference).toEqual(reference("1"));
     expect(nextReference).toEqual(reference("2"));
@@ -285,11 +312,13 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
       newId: () => id(100),
     });
 
-    await expect(repository.complete({
-      context,
-      identity,
-      tokens: initialTokens,
-    })).resolves.toEqual(view(id(100), initialTokens.expiresAt));
+    await expect(
+      repository.complete({
+        context: completionContext,
+        identity,
+        tokens: initialTokens,
+      }),
+    ).resolves.toEqual(view(id(100), initialTokens.expiresAt));
 
     expect(secretStore.create).toHaveBeenCalledWith({
       secretKind: secretKinds.gmailTokenSet,
@@ -297,7 +326,9 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
       context: tokenContext(id(100)),
     });
     expect(persistence.creates).toHaveLength(1);
-    expect(persistence.creates[0]?.tokenSecretReference).toEqual(reference("1"));
+    expect(persistence.creates[0]?.tokenSecretReference).toEqual(
+      reference("1"),
+    );
     expect(JSON.stringify(persistence.creates)).not.toMatch(
       /access-token-104-initial|refresh-token-104|accessToken|refreshToken/,
     );
@@ -327,11 +358,13 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
     });
 
     const results = await Promise.all(
-      Array.from({ length: 20 }, () => repository.refresh({
-        context,
-        connectionId: id(100),
-        expectedVersion: 1,
-      })),
+      Array.from({ length: 20 }, () =>
+        repository.refresh({
+          context,
+          connectionId: id(100),
+          expectedVersion: 1,
+        }),
+      ),
     );
 
     expect(refresh).toHaveBeenCalledOnce();
@@ -340,10 +373,12 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
     });
     expect(secretStore.resolve).toHaveBeenCalledOnce();
     expect(secretStore.rotate).toHaveBeenCalledOnce();
-    expect(secretStore.rotate).toHaveBeenCalledWith(expect.objectContaining({
-      reference: reference("1"),
-      context: tokenContext(id(100)),
-    }));
+    expect(secretStore.rotate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reference: reference("1"),
+        context: tokenContext(id(100)),
+      }),
+    );
     const rotatedPlaintext = secretStore.rotate.mock.calls[0]?.[0].plaintext;
     expect(JSON.parse(rotatedPlaintext ?? "")).toEqual({
       ...refreshedTokens,
@@ -358,7 +393,9 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
     expect(JSON.stringify(persistence.replaces)).not.toMatch(
       /access-token-104-refreshed|refresh-token-104|accessToken|refreshToken/,
     );
-    expect(results.filter((result) => result.outcome === "REFRESHED")).toHaveLength(1);
+    expect(
+      results.filter((result) => result.outcome === "REFRESHED"),
+    ).toHaveLength(1);
     expect(
       results.filter((result) => result.outcome === "ALREADY_REFRESHED"),
     ).toHaveLength(19);

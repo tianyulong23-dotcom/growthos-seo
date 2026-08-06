@@ -450,6 +450,10 @@ implements SendIntentRepository {
                     identity.id AS "gmailIdentityId",
                     identity.version AS "gmailIdentityVersion"
                FROM backlinks.backlink_gmail_workspace_bindings AS binding
+               JOIN backlinks.backlink_website_project_mailbox_bindings AS project_binding
+                 ON project_binding.organization_id = binding.organization_id
+                AND project_binding.workspace_id = binding.workspace_id
+                AND project_binding.gmail_workspace_binding_id = binding.id
                JOIN backlinks.backlink_gmail_connections AS connection
                  ON connection.organization_id = binding.organization_id
                 AND connection.id = binding.gmail_connection_id
@@ -459,8 +463,10 @@ implements SendIntentRepository {
                 WHERE binding.organization_id = $1
                   AND binding.workspace_id = $2
                   AND binding.gmail_connection_id = $3
-                  AND binding.website_project_id = $4
                   AND binding.binding_status = 'ACTIVE'
+                  AND project_binding.website_project_id = $4
+                  AND project_binding.binding_status = 'ACTIVE'
+                  AND project_binding.is_selected = true
                 AND connection.connection_status = 'CONNECTED'
                 AND connection.send_availability = 'AVAILABLE'
                 AND identity.verification_status = 'accepted'

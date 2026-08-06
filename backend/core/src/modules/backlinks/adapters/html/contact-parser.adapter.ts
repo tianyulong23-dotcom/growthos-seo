@@ -122,6 +122,7 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
     source: ContactCandidate["evidence"]["source"],
     mailtoLabel?: string,
     snippet = raw,
+    nearbyText?: string,
   ) => {
     const email = raw.trim().toLowerCase();
     if (!isCandidateEmail(email) || candidates.has(email)) return;
@@ -131,6 +132,9 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
       ...(mailtoLabel === undefined || mailtoLabel.trim() === ""
         ? {}
         : { mailtoLabel }),
+      ...(nearbyText === undefined || nearbyText.trim() === ""
+        ? {}
+        : { nearbyText }),
       ...(title === "" ? {} : { pageTitle: title }),
     });
     candidates.set(email, Object.freeze({
@@ -155,6 +159,7 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
         "mailto",
         $(element).text(),
         `${$(element).text()} ${href}`,
+        $(element).parent().text(),
       );
     } catch {
       // Invalid percent encoding cannot provide trustworthy evidence.
@@ -168,7 +173,13 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
     if (node.type !== "text") continue;
     const visibleText = $(node).text();
     for (const match of visibleText.matchAll(emailPattern)) {
-      add(match[0], "visible_text", undefined, match[0]);
+      add(
+        match[0],
+        "visible_text",
+        undefined,
+        match[0],
+        $(node).parent().text(),
+      );
     }
     for (const pattern of [
       bracketedObfuscatedEmailPattern,
@@ -181,7 +192,13 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
         const domain = rawDomain
           .replace(/\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*/giu, ".")
           .replace(/\s+/gu, "");
-        add(`${local}@${domain}`, "obfuscated_text", undefined, match[0]);
+        add(
+          `${local}@${domain}`,
+          "obfuscated_text",
+          undefined,
+          match[0],
+          $(node).parent().text(),
+        );
       }
     }
   }

@@ -70,7 +70,8 @@ export const platformRequestContextSchema = z
         websiteProjectId: nonBlankIdentifier,
         websiteProjectKey: nonBlankIdentifier,
       })
-      .strict(),
+      .strict()
+      .nullable(),
     permissions: z
       .array(permission)
       .min(1)
@@ -98,7 +99,7 @@ export type PlatformRequestContextV1 = Readonly<{
   project: Readonly<{
     websiteProjectId: string;
     websiteProjectKey: string;
-  }>;
+  }> | null;
   permissions: readonly string[];
 }>;
 
@@ -199,7 +200,9 @@ function freezeContext(
       roles: Object.freeze([...context.actor.roles]),
     }),
     tenant: Object.freeze({ ...context.tenant }),
-    project: Object.freeze({ ...context.project }),
+    project: context.project === null
+      ? null
+      : Object.freeze({ ...context.project }),
     permissions: Object.freeze([...context.permissions]),
   });
 }
@@ -245,7 +248,10 @@ export function verifyPlatformRequestContextV1(
   const requestedProjectKey = projectKey(request);
   if (
     requestedProjectKey !== undefined
-    && requestedProjectKey !== context.project.websiteProjectKey
+    && (
+      context.project === null
+      || requestedProjectKey !== context.project.websiteProjectKey
+    )
   ) {
     throw new BacklinkError({
       code: backlinkErrorCodes.accessDenied,
@@ -267,6 +273,13 @@ function sendContextFailure(
     .send(problem);
 }
 
+function requiresPlatformContext(request: FastifyRequest): boolean {
+  return projectKey(request) !== undefined
+    || request.url.startsWith(
+      "/api/v1/backlinks/gmail-connections/callback",
+    );
+}
+
 export function registerBacklinksPlatformContextConsumer(
   app: FastifyInstance,
   options: ConsumerOptions,
@@ -277,7 +290,7 @@ export function registerBacklinksPlatformContextConsumer(
   app.decorateRequest("actor");
   app.decorateRequest("platformContext");
   app.addHook("preHandler", async (request, reply) => {
-    if (projectKey(request) === undefined) {
+    if (!requiresPlatformContext(request)) {
       return;
     }
     try {

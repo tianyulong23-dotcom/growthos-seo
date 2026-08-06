@@ -64,7 +64,6 @@ class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
       stored === undefined
       || stored.creation.organizationId !== input.organizationId
       || stored.creation.workspaceId !== input.workspaceId
-      || stored.creation.websiteProjectId !== input.websiteProjectId
       || stored.creation.initiatedByUserId !== input.initiatedByUserId
       || stored.creation.sessionBindingHash !== input.sessionBindingHash
       || stored.consumedAt !== null
@@ -76,6 +75,9 @@ class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
     stored.consumedAt = new Date(input.consumedAt);
     return {
       attemptId: stored.creation.id,
+      organizationId: stored.creation.organizationId,
+      workspaceId: stored.creation.workspaceId,
+      websiteProjectId: stored.creation.websiteProjectId,
       pkceVerifier: stored.creation.pkceVerifier,
       requestedScopes: stored.creation.requestedScopes,
       redirectUri: stored.creation.redirectUri,
@@ -87,7 +89,8 @@ class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
 const id = (value: number) =>
   `018f0000-0000-7000-8000-${String(value).padStart(12, "0")}`;
 const redirectUri =
-  "https://app.example.com/api/v1/gmail-connections/callback";
+  "http://localhost:7200/api/v1/backlinks/gmail-connections/callback";
+const returnPath = "/projects/project-key/backlinks/email";
 const routeBase =
   "/api/v1/projects/project-key/backlinks/gmail-connections";
 const member = createActorContext({
@@ -199,15 +202,22 @@ function setup(options?: Readonly<{
       async complete(input: GmailConnectionCompletionInput) {
         completionFacts.push({
           contextIds: [
-            input.context.tenant.organizationId,
-            input.context.tenant.workspaceId,
-            input.context.project.websiteProjectId,
-            input.context.actor.userId,
+            input.context.organizationId,
+            input.context.workspaceId,
+            input.context.websiteProjectId,
+            input.context.actorId,
           ],
           sawAccessToken: input.tokens.accessToken === "access-token-103",
           sawRefreshToken: input.tokens.refreshToken === "refresh-token-103",
         });
         return connection;
+      },
+    },
+    selector: {
+      async selectForProject(_context, connectionId) {
+        return connectionId === connection.connectionId
+          ? { accounts: [connection], selectedConnection: connection }
+          : null;
       },
     },
     disconnectWorkflow: {
@@ -236,13 +246,16 @@ function setup(options?: Readonly<{
   }[] = [];
   const query = createGmailConnectionQuery({
     reader: {
-      async findVisibleConnection(context) {
+      async findProjectMailboxState(context) {
         statusContexts.push([
           context.tenant.organizationId,
           context.tenant.workspaceId,
           context.project.websiteProjectId,
         ]);
-        return connection;
+        return {
+          accounts: [connection],
+          selectedConnection: connection,
+        };
       },
     },
   });
@@ -261,6 +274,7 @@ function setup(options?: Readonly<{
     async ready() {
       await registerBacklinksOpenApi(app);
       app.decorateRequest("actor");
+      app.decorateRequest("platformContext");
       app.addHook("preHandler", async (request) => {
         const role = request.headers["x-role"];
         const session = request.headers["x-session"];
@@ -270,6 +284,22 @@ function setup(options?: Readonly<{
             typeof session === "string" ? session : member.sessionId,
           roles: [role === "viewer" ? "viewer" : "member"],
         });
+        request.platformContext = {
+          version: "PlatformRequestContext.v1",
+          issuer: "growthos-platform-gateway",
+          audience: "growthos-backlinks-core",
+          issuedAt: "2026-07-27T04:59:30.000Z",
+          expiresAt: "2026-07-27T05:00:30.000Z",
+          correlationId: "request-103",
+          actor: {
+            userId: request.actor.userId,
+            sessionId: request.actor.sessionId,
+            roles: request.actor.roles,
+          },
+          tenant,
+          project: null,
+          permissions: ["backlinks.gmail:manage"],
+        };
       });
       registerBacklinksGmailConnectionRoutes(app, {
         module: createBacklinksModule({
@@ -344,7 +374,7 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     const connect = await test.app.inject({
       method: "POST",
       url: `${routeBase}/connect`,
-      payload: { returnPath: "/backlinks/email" },
+      payload: { returnPath },
     });
     expect(connect.statusCode).toBe(200);
     expect(connect.json()).toMatchObject({
@@ -373,12 +403,13 @@ describe("BL-AI-103 Gmail connection APIs", () => {
       websiteProjectId: id(3),
       initiatedByUserId: "user-103",
       redirectUri,
-      returnPath: "/backlinks/email",
+      returnPath,
     });
 
     const callback = await test.app.inject({
       method: "GET",
-      url: `${routeBase}/callback?code=authorization-code-103&state=${state}`,
+      url: `/api/v1/backlinks/gmail-connections/callback`
+        + `?code=authorization-code-103&state=${state}`,
     });
     expect(callback.statusCode).toBe(200);
     expect(test.callbackCalls).toEqual([{
@@ -393,7 +424,7 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     }]);
     expect(callback.json()).toMatchObject({
       connection,
-      returnPath: "/backlinks/email",
+      returnPath,
       meta: { websiteProjectId: id(3), requestId: "request-103" },
     });
 
@@ -404,6 +435,7 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     expect(status.statusCode).toBe(200);
     expect(status.json()).toMatchObject({
       connection,
+      accounts: [connection],
       meta: { websiteProjectId: id(3), requestId: "request-103" },
     });
     expect(test.statusContexts).toEqual([[id(1), id(2), id(3)]]);
@@ -427,10 +459,14 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     expect(apps[0]?.swagger().paths).toMatchObject({
       "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/connect":
         { post: { operationId: "backlinksConnectGmailV1" } },
-      "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/callback":
+      "/api/v1/backlinks/gmail-connections/callback":
         { get: { operationId: "backlinksCompleteGmailConnectionV1" } },
+      "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/callback":
+        { get: { operationId: "backlinksCompleteLegacyGmailConnectionV1" } },
       "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/status":
         { get: { operationId: "backlinksGetGmailConnectionStatusV1" } },
+      "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/select":
+        { post: { operationId: "backlinksSelectGmailConnectionV1" } },
       "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/{connectionId}/disconnect":
         { post: { operationId: "backlinksDisconnectGmailV1" } },
       "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/{connectionId}/sync-status":
@@ -560,7 +596,7 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     expect(test.syncInputs).toHaveLength(0);
   });
 
-  it("rejects missing permission, cross-project/session state, and replay", async () => {
+  it("rejects missing permission, session mismatch, and replay while ignoring the legacy path project", async () => {
     const test = setup();
     await test.ready();
 
@@ -578,33 +614,33 @@ describe("BL-AI-103 Gmail connection APIs", () => {
       payload: {},
     });
     const state = test.authorizeCalls[0]?.state ?? "";
-    const callbackUrl = (projectKey: string) =>
+    const legacyCallbackUrl = (projectKey: string) =>
       `/api/v1/projects/${projectKey}/backlinks/gmail-connections/callback`
+      + `?code=authorization-code-103&state=${state}`;
+    const stableCallbackUrl =
+      `/api/v1/backlinks/gmail-connections/callback`
       + `?code=authorization-code-103&state=${state}`;
 
     expect((await test.app.inject({
       method: "GET",
-      url: callbackUrl("project-key"),
+      url: stableCallbackUrl,
       headers: { "x-role": "viewer" },
     })).statusCode).toBe(403);
     expect((await test.app.inject({
       method: "GET",
-      url: callbackUrl("other-project"),
-    })).statusCode).toBe(400);
-    expect((await test.app.inject({
-      method: "GET",
-      url: callbackUrl("project-key"),
+      url: legacyCallbackUrl("other-project"),
       headers: { "x-session": "other-session" },
     })).statusCode).toBe(400);
     expect(test.callbackCalls).toHaveLength(0);
 
     expect((await test.app.inject({
       method: "GET",
-      url: callbackUrl("project-key"),
+      url: legacyCallbackUrl("other-project"),
     })).statusCode).toBe(200);
+    expect(test.completionFacts[0]?.contextIds[2]).toBe(id(3));
     const replay = await test.app.inject({
       method: "GET",
-      url: callbackUrl("project-key"),
+      url: stableCallbackUrl,
     });
     expect(replay.statusCode).toBe(400);
     expect(replay.body).not.toContain(state);
@@ -634,7 +670,8 @@ describe("BL-AI-103 Gmail connection APIs", () => {
 
     const response = await test.app.inject({
       method: "GET",
-      url: `${routeBase}/callback?code=authorization-code-103&state=${state}`,
+      url: `/api/v1/backlinks/gmail-connections/callback`
+        + `?code=authorization-code-103&state=${state}`,
     });
 
     expect(response.statusCode).toBe(400);
@@ -660,7 +697,8 @@ describe("BL-AI-103 Gmail connection APIs", () => {
 
     const response = await test.app.inject({
       method: "GET",
-      url: `${routeBase}/callback?code=authorization-code-103&state=${state}`,
+      url: `/api/v1/backlinks/gmail-connections/callback`
+        + `?code=authorization-code-103&state=${state}`,
     });
 
     expect(response.statusCode).toBe(400);

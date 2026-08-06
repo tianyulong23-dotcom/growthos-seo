@@ -3,16 +3,18 @@ import { randomUUID } from "node:crypto";
 import { load } from "cheerio";
 import { z } from "zod";
 
-import { DataForSeoAdapter } from "../adapters/dataforseo/adapter.js";
-import { DataForSeoClient } from "../adapters/dataforseo/client.js";
-import { createOfficialDataForSeoRuntimeFactory } from "../adapters/dataforseo/official-runtime.js";
+import {
+  createCommercialOfficialDataForSeoRuntime,
+} from "../adapters/dataforseo/commercial-official-runtime.js";
 import { SafeFetchAdapter } from "../adapters/http/safe-fetch.adapter.js";
 import {
   LocalProductSecretStoreClient,
   parseLocalProductSecretReference,
 } from "../adapters/security/local-product-secret-store-client.js";
 import { DataForSeoCallPolicy } from "../application/policies/dataforseo-call.policy.js";
-import { DataForSeoRequestService } from "../application/services/dataforseo-request.service.js";
+import {
+  executeCommercialRecommendationDiscovery,
+} from "../application/services/commercial-recommendation-discovery.service.js";
 import type {
   BacklinkRecommendationRefillActivities,
   RecommendationProviderExecutionSummary,
@@ -70,6 +72,22 @@ const websiteFetchConcurrency = 8;
 const jsonStringArraySchema = z.array(
   z.string().trim().min(1).max(2_048),
 ).min(1).max(100);
+const dataForSeoCredentialSchema = z.object({
+  login: z.string().trim().min(1).max(512),
+  password: z.string().min(1).max(2_048),
+}).strict();
+const storedCommercialScoreSchema = z.object({
+  decision: z.literal("ready"),
+  scoreModelVersion: z.literal("recommendation-commercial-fit.v2"),
+  ruleVersion: z.string().trim().min(1),
+  total: z.number().min(0).max(100),
+  components: z.array(z.object({
+    id: z.string().trim().min(1),
+    weight: z.number().min(0).max(100),
+  }).passthrough()),
+  hitGates: z.array(z.string()),
+  missingEvidence: z.array(z.string()),
+}).passthrough();
 const configurationSchema = z.object({
   credentialSecretRef: localProductDataForSeoCredentialReferenceSchema,
   endpointAllowlist: localProductDataForSeoEndpointAllowlistSchema,
@@ -78,6 +96,11 @@ const configurationSchema = z.object({
   absoluteBudgetMicros: z.number().int().positive().max(100_000_000),
   maxPaidCalls: z.number().int().min(1).max(1_000),
   candidateLimit: z.number().int().min(10).max(100),
+  locationCode: z.string().trim().regex(/^[1-9][0-9]*$/u),
+  languageCode: z.string().trim().min(2).max(32),
+  discoveryTargets: z.array(
+    z.string().trim().min(1).max(253),
+  ).min(1).max(100),
 }).strict().superRefine((value, context) => {
   if (value.absoluteBudgetMicros < value.estimatedCostMicros) {
     context.addIssue({
@@ -225,6 +248,18 @@ export function readLocalProductDataForSeoConfiguration(
     candidateLimit: positiveIntegerEnvironmentValue(
       environment,
       "DATAFORSEO_CANDIDATE_LIMIT",
+    ),
+    locationCode: requiredEnvironmentValue(
+      environment,
+      "DATAFORSEO_LOCATION_CODE",
+    ),
+    languageCode: requiredEnvironmentValue(
+      environment,
+      "DATAFORSEO_LANGUAGE_CODE",
+    ),
+    discoveryTargets: jsonArrayEnvironmentValue(
+      environment,
+      "DATAFORSEO_DISCOVERY_TARGETS_JSON",
     ),
   });
 }
@@ -758,15 +793,6 @@ async function mapConcurrent<T, R>(
   return Object.freeze(output);
 }
 
-function hostnameFromUrl(value: unknown): string | null {
-  if (typeof value !== "string" || value.trim().length === 0) return null;
-  try {
-    return createRecommendationDomainKey(new URL(value).hostname).hostnameAscii;
-  } catch {
-    return null;
-  }
-}
-
 export function createLocalProductDataForSeoRuntime(
   options: RuntimeOptions,
 ): LocalProductDataForSeoRuntime {
@@ -782,21 +808,6 @@ export function createLocalProductDataForSeoRuntime(
     configuration.credentialSecretRef,
     secretKinds.dataForSeoCredential,
   );
-  const provider = new DataForSeoAdapter(new DataForSeoClient(
-    {
-      DATAFORSEO_ENABLED: true,
-      DATAFORSEO_CREDENTIAL_SECRET_REF: configuration.credentialSecretRef,
-      DATAFORSEO_REQUEST_TIMEOUT_MS: configuration.timeoutMs,
-    },
-    async () => JSON.parse(await secretStore.resolve({
-      reference: credentialReference,
-      context: {
-        organizationId: "local-product",
-        subjectProvider: "dataforseo",
-      },
-    })) as unknown,
-    createOfficialDataForSeoRuntimeFactory(),
-  ), now);
 
   return Object.freeze({
     async execute(input) {
@@ -823,9 +834,6 @@ export function createLocalProductDataForSeoRuntime(
       );
 
       const providerClient = await options.pool.connect();
-      let providerResult:
-        Awaited<ReturnType<DataForSeoRequestService["execute"]>>;
-      let recommendationContext: LocalProductRecommendationContext;
       try {
         await setSessionTenant(providerClient, scope);
         const contextResult = await providerClient.query(
@@ -848,7 +856,8 @@ export function createLocalProductDataForSeoRuntime(
         if (contextRow === undefined) {
           throw new Error("BACKLINK_RECOMMENDATION_CONTEXT_NOT_FOUND");
         }
-        recommendationContext = parseLocalProductRecommendationContext(
+        const recommendationContext =
+          parseLocalProductRecommendationContext(
           contextRow,
         );
         const repository = createProviderAnalysisRepository(
@@ -938,179 +947,91 @@ export function createLocalProductDataForSeoRuntime(
           },
           reserveBudget: repository.reserveBudget,
         });
-        const service = new DataForSeoRequestService({
-          coordinator: repository,
+        let providerRuntime: ReturnType<
+          typeof createCommercialOfficialDataForSeoRuntime
+        > | null = null;
+        const provider = Object.freeze({
+          async execute(
+            call: Parameters<
+              ReturnType<
+                typeof createCommercialOfficialDataForSeoRuntime
+              >["execute"]
+            >[0],
+          ) {
+            if (providerRuntime === null) {
+              const credentials = dataForSeoCredentialSchema.parse(JSON.parse(
+                await secretStore.resolve({
+                  reference: credentialReference,
+                  context: {
+                    organizationId: "local-product",
+                    subjectProvider: "dataforseo",
+                  },
+                }),
+              ) as unknown);
+              providerRuntime = createCommercialOfficialDataForSeoRuntime({
+                credentials,
+                endpointAllowlist: configuration.endpointAllowlist,
+                timeoutMs: configuration.timeoutMs,
+              });
+            }
+            return providerRuntime.execute(call);
+          },
+        });
+        const commercial = await executeCommercialRecommendationDiscovery({
+          client: providerClient,
           provider,
           gate,
+          safeFetch,
+          scope,
+          contextVersionId: input.recommendationContextVersionId,
+          context: recommendationContext,
+          configuration,
+          requestedCount: input.requestedCount,
+          jobId: input.jobId,
+          actorId: input.actorId,
           now,
         });
-        providerResult = await service.execute({
-          context: {
-            ...scope,
-            requestId: input.jobId,
-            idempotencyKey: `dataforseo-refill:${input.jobId}`,
-            budgetReservationId: input.jobId,
-          },
-          request: {
-            target: recommendationContext.canonicalDomain,
-            targetType: "domain",
-            limit: configuration.candidateLimit,
-          },
-          intent: "DISCOVERY",
-          refreshMode: "CACHE_PREFERRED",
-          execution: "BACKGROUND",
-          locationCode: recommendationContext.countryCode,
-          languageCode: recommendationContext.locale,
-          responseSchemaVersion:
-            "dataforseo.backlinks-referring-domains.v1",
-          usagePurpose: "recommendation_refill",
-          projectContextVersion: recommendationContext.snapshotVersion,
-          cacheSchemaVersion: 1,
-          estimatedCostMicros: configuration.estimatedCostMicros,
+        const sourceReleaseId =
+          `commercial-dataforseo:${commercial.provider.requestFingerprint}`;
+        const projectTerms = Object.freeze([
+          ...recommendationContext.keywords,
+          ...recommendationContext.products,
+        ]);
+        const candidates = await mapConcurrent(
+          commercial.candidates,
+          websiteFetchConcurrency,
+          async (candidate) =>
+            buildLocalProductRecommendationEvidenceCandidate({
+              context: scope,
+              evidence: {
+                domain: candidate.hostnameAscii,
+                backlinkCount: candidate.provider.backlinkCount ?? 0,
+                rank: candidate.provider.rank,
+                spamScore: candidate.provider.spamScore,
+                countryCode: null,
+              },
+              sourceReleaseId,
+              acquiredAt: commercial.provider.acquiredAt,
+              locationCode: recommendationContext.countryCode,
+              languageCode: recommendationContext.locale,
+              projectTerms,
+              existingHostname: false,
+              existingBacklink: false,
+              previouslyExcluded: false,
+              duplicateDomain: false,
+              safeFetch,
+            }),
+        );
+        return Object.freeze({
+          candidates,
+          provider: Object.freeze(
+            commercial.provider satisfies RecommendationProviderExecutionSummary,
+          ),
         });
       } finally {
         await clearSessionTenant(providerClient).catch(() => undefined);
         providerClient.release();
       }
-
-      if (providerResult.source === "refresh-pending") {
-        throw new Error("DATAFORSEO_REFRESH_PENDING");
-      }
-      const sourceReleaseId =
-        `dataforseo:${providerResult.snapshot.payloadHash}`;
-      const providerSummary: RecommendationProviderExecutionSummary = {
-        source: providerResult.source,
-        acquiredAt: providerResult.snapshot.completedAt,
-        costMicros: providerResult.snapshot.costMicros,
-        requestFingerprint: providerResult.requestFingerprint,
-      };
-      const history = await withBacklinkTenantTransaction(
-        options.pool,
-        scope,
-        async (client) => {
-          const prospects = await client.query(
-            `SELECT p.hostname_ascii AS hostname,
-                    bool_or(
-                      r.status='excluded' OR inventory.status='rejected'
-                    ) AS "previouslyExcluded"
-               FROM backlink_prospects AS p
-               LEFT JOIN backlink_recommendations AS r
-                 ON (r.organization_id,r.workspace_id,r.website_project_id,
-                     r.prospect_id,r.recommendation_context_version_id)=
-                    (p.organization_id,p.workspace_id,p.website_project_id,
-                     p.id,p.recommendation_context_version_id)
-               LEFT JOIN backlink_recommendation_inventory AS inventory
-                 ON (inventory.organization_id,inventory.workspace_id,
-                     inventory.website_project_id,
-                     inventory.recommendation_id)=
-                    (r.organization_id,r.workspace_id,
-                     r.website_project_id,r.id)
-              WHERE p.organization_id=$1 AND p.workspace_id=$2
-                AND p.website_project_id=$3
-              GROUP BY p.hostname_ascii`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-            ],
-          );
-          const placements = await client.query(
-            `SELECT normalized_source_url AS "sourceUrl"
-               FROM backlink_placements
-              WHERE organization_id=$1 AND workspace_id=$2
-                AND website_project_id=$3`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-            ],
-          );
-          return {
-            prospects: new Map(prospects.rows.map((row) => [
-              String(row.hostname),
-              row.previouslyExcluded === true,
-            ])),
-            placementHostnames: new Set(placements.rows.flatMap((row) => {
-              const hostname = hostnameFromUrl(row.sourceUrl);
-              return hostname === null ? [] : [hostname];
-            })),
-          };
-        },
-      );
-      for (const targetUrl of recommendationContext.targetUrls) {
-        const hostname = hostnameFromUrl(targetUrl);
-        if (hostname !== null) history.placementHostnames.add(hostname);
-      }
-
-      const byRegistrableDomain = new Map<
-        string,
-        Readonly<{
-          hostname: string;
-          evidence: ReferringDomainEvidence;
-        }>
-      >();
-      for (const item of providerResult.snapshot.referringDomains) {
-        let key;
-        try {
-          key = createRecommendationDomainKey(item.domain);
-        } catch {
-          continue;
-        }
-        const prior = byRegistrableDomain.get(key.registrableDomain);
-        if (
-          prior === undefined
-          || (item.rank ?? 0) > (prior.evidence.rank ?? 0)
-          || (
-            (item.rank ?? 0) === (prior.evidence.rank ?? 0)
-            && item.backlinkCount > prior.evidence.backlinkCount
-          )
-        ) {
-          byRegistrableDomain.set(key.registrableDomain, {
-            hostname: key.hostnameAscii,
-            evidence: item,
-          });
-        }
-      }
-      const selected = [...byRegistrableDomain.values()]
-        .sort((left, right) =>
-          (right.evidence.rank ?? 0) - (left.evidence.rank ?? 0)
-          || right.evidence.backlinkCount - left.evidence.backlinkCount
-          || left.hostname.localeCompare(right.hostname)
-        )
-        .slice(0, Math.min(
-          configuration.candidateLimit,
-          Math.max(10, input.requestedCount * 4),
-        ));
-      const projectTerms = Object.freeze([
-        ...recommendationContext.keywords,
-        ...recommendationContext.products,
-      ]);
-      const candidates = await mapConcurrent(
-        selected,
-        websiteFetchConcurrency,
-        async (selectedCandidate) =>
-          buildLocalProductRecommendationEvidenceCandidate({
-            context: scope,
-            evidence: selectedCandidate.evidence,
-            sourceReleaseId,
-            acquiredAt: providerResult.snapshot.completedAt,
-            locationCode: recommendationContext.countryCode,
-            languageCode: recommendationContext.locale,
-            projectTerms,
-            existingHostname:
-              history.prospects.has(selectedCandidate.hostname),
-            existingBacklink:
-              history.placementHostnames.has(selectedCandidate.hostname),
-            previouslyExcluded:
-              history.prospects.get(selectedCandidate.hostname) === true,
-            duplicateDomain: false,
-            safeFetch,
-          }),
-      );
-      return Object.freeze({
-        candidates,
-        provider: Object.freeze(providerSummary),
-      });
     },
 
     async store(input) {
@@ -1169,6 +1090,54 @@ export function createLocalProductDataForSeoRuntime(
               ],
             );
             await client.query(
+              `UPDATE backlink_commercial_discovery_blueprints
+                  SET status='stale_context'
+                WHERE organization_id=$1 AND workspace_id=$2
+                  AND website_project_id=$3
+                  AND project_context_version_id=$4
+                  AND status='active'`,
+              [
+                scope.organizationId,
+                scope.workspaceId,
+                scope.websiteProjectId,
+                input.recommendationContextVersionId,
+              ],
+            );
+            await client.query(
+              `UPDATE backlink_commercial_discovery_batches
+                  SET status='stale_context',
+                      pause_reason='stale_context',
+                      finished_at=COALESCE(finished_at,now())
+                WHERE organization_id=$1 AND workspace_id=$2
+                  AND website_project_id=$3
+                  AND project_context_version_id=$4
+                  AND status IN (
+                    'running','completed','paused','unavailable'
+                  )`,
+              [
+                scope.organizationId,
+                scope.workspaceId,
+                scope.websiteProjectId,
+                input.recommendationContextVersionId,
+              ],
+            );
+            await client.query(
+              `UPDATE backlink_commercial_candidates
+                  SET state='stale_context',updated_at=now(),
+                      updated_by=$5,version=version+1
+                WHERE organization_id=$1 AND workspace_id=$2
+                  AND website_project_id=$3
+                  AND project_context_version_id=$4
+                  AND state NOT IN ('published','stale_context')`,
+              [
+                scope.organizationId,
+                scope.workspaceId,
+                scope.websiteProjectId,
+                input.recommendationContextVersionId,
+                input.actorId,
+              ],
+            );
+            await client.query(
               `UPDATE backlink_jobs
                   SET status='success',step='stale_context',
                       progress=100,result_summary=$5::jsonb,
@@ -1195,6 +1164,31 @@ export function createLocalProductDataForSeoRuntime(
           for (const recommendation of input.recommendations) {
             const domain = createRecommendationDomainKey(
               recommendation.hostnameAscii,
+            );
+            const commercialCandidate = await client.query(
+              `SELECT id,source_types AS "sourceTypes",
+                      static_assessment AS "staticAssessment",
+                      gate_decision AS "gateDecision",
+                      commercial_score AS "commercialScore",
+                      provider_collected_at AS "providerCollectedAt"
+                 FROM backlink_commercial_candidates
+                WHERE organization_id=$1 AND workspace_id=$2
+                  AND website_project_id=$3
+                  AND project_context_version_id=$4
+                  AND canonical_domain=$5
+                  AND state='candidate_ready'
+                LIMIT 1`,
+              [
+                scope.organizationId,
+                scope.workspaceId,
+                scope.websiteProjectId,
+                input.recommendationContextVersionId,
+                domain.registrableDomain,
+              ],
+            );
+            const commercialRow = commercialCandidate.rows[0];
+            const parsedCommercialScore = storedCommercialScoreSchema.safeParse(
+              commercialRow?.commercialScore,
             );
             const prospectId = randomUUID();
             const recommendationId = randomUUID();
@@ -1278,6 +1272,16 @@ export function createLocalProductDataForSeoRuntime(
               continue;
             }
             const storedRecommendationId = String(storedRecommendation.id);
+            const commercialScore = parsedCommercialScore.success
+              ? parsedCommercialScore.data
+              : null;
+            const score = commercialScore ?? recommendation.score;
+            const weights = commercialScore
+              ? Object.fromEntries(commercialScore.components.map((component) => [
+                  component.id,
+                  component.weight,
+                ]))
+              : recommendation.score.weights;
             const scoreEvidence = {
               sourceReleaseId: recommendation.sourceReleaseId,
               evidencePolicyVersion: recommendation.evidencePolicyVersion,
@@ -1290,6 +1294,15 @@ export function createLocalProductDataForSeoRuntime(
               },
               gateDecision: recommendation.gateDecision,
               missingEvidenceKeys: recommendation.missingEvidenceKeys,
+              commercial: commercialScore
+                ? {
+                    sourceTypes: commercialRow?.sourceTypes,
+                    staticAssessment: commercialRow?.staticAssessment,
+                    gateDecision: commercialRow?.gateDecision,
+                    hitGates: commercialScore.hitGates,
+                    missingEvidence: commercialScore.missingEvidence,
+                  }
+                : null,
             };
             await client.query(
               `INSERT INTO backlink_recommendation_scores (
@@ -1316,13 +1329,14 @@ export function createLocalProductDataForSeoRuntime(
                 storedRecommendationId,
                 storedProspectId,
                 input.recommendationContextVersionId,
-                recommendation.score.scoreModelVersion,
-                recommendation.score.ruleVersion,
-                recommendation.score.total,
-                JSON.stringify(recommendation.score.components),
-                JSON.stringify(recommendation.score.weights),
+                score.scoreModelVersion,
+                score.ruleVersion,
+                score.total,
+                JSON.stringify(score.components),
+                JSON.stringify(weights),
                 JSON.stringify(scoreEvidence),
-                input.provider.acquiredAt,
+                commercialRow?.providerCollectedAt
+                  ?? input.provider.acquiredAt,
                 input.actorId,
                 recommendation.sourceReleaseId,
               ],
@@ -1351,6 +1365,26 @@ export function createLocalProductDataForSeoRuntime(
               ],
             );
             if (inventory.rows[0] !== undefined) addedCount += 1;
+            if (commercialRow?.id !== undefined) {
+              await client.query(
+                `UPDATE backlink_commercial_candidates
+                    SET recommendation_id=$5,prospect_id=$6,
+                        state='contact_enrichment',updated_at=now(),
+                        updated_by=$7,version=version+1
+                  WHERE organization_id=$1 AND workspace_id=$2
+                    AND website_project_id=$3 AND id=$4
+                    AND state='candidate_ready'`,
+                [
+                  scope.organizationId,
+                  scope.workspaceId,
+                  scope.websiteProjectId,
+                  commercialRow.id,
+                  storedRecommendationId,
+                  storedProspectId,
+                  input.actorId,
+                ],
+              );
+            }
           }
           await client.query(
             `UPDATE backlink_jobs

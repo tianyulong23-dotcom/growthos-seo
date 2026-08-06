@@ -83,6 +83,7 @@ export const backlinksRuntimeContract = Object.freeze({
 } as const);
 
 type WorkflowIdInput = Readonly<{
+  organizationId: string;
   workspaceId: string;
   websiteProjectId: string;
   workflow: BacklinksWorkflowKind;
@@ -95,6 +96,7 @@ function validSegment(value: string): boolean {
 
 export function buildBacklinksWorkflowId(input: WorkflowIdInput): string {
   const segments = [
+    input.organizationId,
     input.workspaceId,
     input.websiteProjectId,
     input.workflow,
@@ -105,6 +107,7 @@ export function buildBacklinksWorkflowId(input: WorkflowIdInput): string {
   }
   return [
     backlinksRuntimeContract.moduleId,
+    input.organizationId,
     input.workspaceId,
     input.websiteProjectId,
     input.workflow,
@@ -115,13 +118,14 @@ export function buildBacklinksWorkflowId(input: WorkflowIdInput): string {
 
 export function isBacklinksWorkflowId(value: string): boolean {
   const segments = value.split(":");
-  return segments.length === 6 &&
+  return segments.length === 7 &&
     segments[0] === backlinksRuntimeContract.moduleId &&
     validSegment(segments[1] ?? "") &&
     validSegment(segments[2] ?? "") &&
-    workflowKinds.includes(segments[3] as BacklinksWorkflowKind) &&
-    segments[4] === "v1" &&
-    validSegment(segments[5] ?? "");
+    validSegment(segments[3] ?? "") &&
+    workflowKinds.includes(segments[4] as BacklinksWorkflowKind) &&
+    segments[5] === "v1" &&
+    validSegment(segments[6] ?? "");
 }
 
 export function assertBacklinksWorkflowId(value: string): void {

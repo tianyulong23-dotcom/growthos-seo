@@ -62,6 +62,17 @@ describe("BL-AI-072 contact discovery", () => {
       "0038_backlink_contact_enrichment.sql"]) {
       await client.query(await readFile(migration(name), "utf8"));
     }
+    await client.query(`
+      ALTER TABLE backlinks.backlink_contact_candidates
+        DROP CONSTRAINT backlink_contact_candidate_purpose_check,
+        ADD CONSTRAINT backlink_contact_candidate_purpose_check CHECK (
+          inferred_purpose IN (
+            'press','editorial','partnerships','advertising','business',
+            'marketing','site_owner','general','support','privacy','legal',
+            'abuse','security','billing','jobs','no_reply','unknown'
+          )
+        )
+    `);
     await client.query("SET search_path = backlinks, pg_catalog");
     await client.query(`
       INSERT INTO backlink_prospects (
@@ -108,12 +119,15 @@ describe("BL-AI-072 contact discovery", () => {
     `)).rows[0]).toEqual({
       email: "editor@example.com", relation: "same_registrable_domain", confidence: 90,
       observedRole: "editor", inferredPurpose: "editorial", purposeConfidence: 98,
-      purposeRuleVersion: "contact-purpose-rules.v1",
+      purposeRuleVersion: "contact-purpose-rules.v2",
       purposeEvidence: [expect.objectContaining({
         tier: "high", field: "email_local_part", matchedToken: "editor",
         ruleId: "editorial.editor",
       }), expect.objectContaining({
         tier: "high", field: "mailto_label", matchedToken: "editor",
+        ruleId: "editorial.editor",
+      }), expect.objectContaining({
+        tier: "medium", field: "nearby_text", matchedToken: "editor",
         ruleId: "editorial.editor",
       }), expect.objectContaining({
         tier: "low", field: "page_title", matchedToken: "contact",
@@ -124,7 +138,7 @@ describe("BL-AI-072 contact discovery", () => {
     });
   });
 
-  it("retains an unknown verified email as a candidate without promotion", async () => {
+  it("retains a restricted verified email as a candidate without promotion", async () => {
     expect(await service({ fetch: async () => unknownPage }).discover(input)).toEqual({
       candidateCount: 1, evidenceInserted: 1, evidenceMerged: 0,
     });
@@ -134,7 +148,7 @@ describe("BL-AI-072 contact discovery", () => {
         (SELECT count(*)::int FROM backlink_contacts) contacts
       FROM backlink_contact_candidates
     `)).rows[0]).toEqual({
-      email: "legal@elephtv.com", purpose: "unknown", confidence: 0, contacts: 0,
+      email: "legal@elephtv.com", purpose: "legal", confidence: 98, contacts: 0,
     });
   });
 });

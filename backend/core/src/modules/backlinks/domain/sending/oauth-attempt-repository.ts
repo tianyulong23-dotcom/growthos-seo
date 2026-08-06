@@ -17,7 +17,6 @@ export type NewOAuthAttempt = Readonly<{
 export type OAuthAttemptConsumeInput = Readonly<{
   organizationId: string;
   workspaceId: string;
-  websiteProjectId: string;
   initiatedByUserId: string;
   stateHash: string;
   sessionBindingHash: string;
@@ -34,6 +33,9 @@ export type OAuthAttemptCleanupInput = Readonly<{
 
 export type ConsumedOAuthAttempt = Readonly<{
   attemptId: string;
+  organizationId: string;
+  workspaceId: string;
+  websiteProjectId: string;
   pkceVerifier: string;
   requestedScopes: readonly string[];
   redirectUri: string;

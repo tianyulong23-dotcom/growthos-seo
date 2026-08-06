@@ -42,6 +42,7 @@ const contactCandidateSchema = z.object({
 }).strict();
 const contactJobSchema = z.object({
   id: z.uuid(),
+  batchId: z.uuid(),
   status: z.enum([
     "pending",
     "running",
@@ -49,12 +50,29 @@ const contactJobSchema = z.object({
     "partially_completed",
     "no_contact_found",
     "retry_scheduled",
+    "stale_context",
   ]),
   candidateCount: z.number().int().min(0),
   evidenceCount: z.number().int().min(0),
   pagesVisited: z.number().int().min(0),
   lastErrorCode: z.string().nullable(),
+  terminalReasonCode: z.enum([
+    "PUBLIC_EMAIL_FOUND",
+    "CONTACT_FORM_ONLY",
+    "LOGIN_REQUIRED",
+    "CAPTCHA_OR_BOT_CHALLENGE",
+    "ROBOTS_DISALLOWED",
+    "ACCESS_DENIED",
+    "NO_PUBLIC_EMAIL",
+    "SITE_UNREACHABLE",
+    "UNSUPPORTED_CONTENT",
+    "MANUAL_REVIEW_REQUIRED",
+    "COMPLETED_PARTIAL",
+  ]).nullable(),
+  method: z.enum(["none", "static", "browser", "static_and_browser"]),
+  lastErrorCategory: z.string().nullable(),
   retryAfter: z.string().datetime().nullable(),
+  completedAt: z.string().datetime().nullable(),
 }).strict();
 export const recommendationsParamsSchema =
   z.object({ websiteProjectKey: nonBlank }).strict();
@@ -65,6 +83,8 @@ export const recommendationsQuerySchema = z.object({
 }).strict();
 const itemSchema = z.object({
   id: nonBlank, hostname: nonBlank, score: z.number().min(0).max(100), status,
+  publicationStatus: z.literal("PUBLISHED"),
+  verifiedPublicEmailCount: z.number().int().min(1),
   recommendationContextVersionId: nonBlank, version: z.number().int().positive(),
   scoreModelVersion: nonBlank, ruleVersion: nonBlank,
   assessment: publicAssessmentSchema,
@@ -89,6 +109,37 @@ const itemSchema = z.object({
     "no_eligible_contact",
   ]).nullable(),
 }).strict();
+const inventoryStatusSchema = z.object({
+  candidateReadyCount: z.number().int().min(0),
+  publishedContactReadyCount: z.number().int().min(0),
+  historicalEmailHitRate: z.number().min(0).max(1),
+  candidateLowWatermark: z.number().int().min(0),
+  candidateHighWatermark: z.number().int().positive(),
+  publishedLowWatermark: z.number().int().min(0),
+  publishedHighWatermark: z.number().int().positive(),
+  blueprintVersion: z.number().int().positive().nullable(),
+  blueprintGenerator: z.enum(["AI", "DETERMINISTIC_FALLBACK"]).nullable(),
+  latestRefillAt: z.string().datetime().nullable(),
+  nextRefillAt: z.string().datetime().nullable(),
+  providerCollectedAt: z.string().datetime().nullable(),
+  pauseReason: z.string().nullable(),
+  refillInFlight: z.boolean(),
+  contactBatch: z.object({
+    id: z.uuid(),
+    status: z.enum(["running", "completed", "stale_context"]),
+    totalJobCount: z.number().int().min(0),
+    terminalJobCount: z.number().int().min(0),
+    publishedCount: z.number().int().min(0),
+    unpublishedCount: z.number().int().min(0),
+    retryableUnpublishedCount: z.number().int().min(0),
+    reasonCounts: z.array(z.object({
+      reasonCode: nonBlank,
+      count: z.number().int().min(0),
+    }).strict()),
+    startedAt: z.string().datetime(),
+    completedAt: z.string().datetime().nullable(),
+  }).strict().nullable(),
+}).strict();
 export const recommendationsResponseSchema = z.object({
   items: z.array(itemSchema), nextCursor: z.string().nullable(), hasMore: z.boolean(),
   meta: z.object({
@@ -110,6 +161,43 @@ function sendError(error: FastifyError, request: FastifyRequest,
 
 export function registerBacklinksRecommendationsRoute(app: FastifyInstance,
   options: Readonly<{ module: BacklinksModule<RecommendationsQuery> }>): void {
+  app.withTypeProvider<ZodTypeProvider>().get(
+    "/api/v1/projects/:websiteProjectKey/backlinks/recommendation-inventory",
+    { schema: {
+      operationId: "backlinksGetRecommendationInventoryV1",
+      params: recommendationsParamsSchema,
+      response: {
+        200: inventoryStatusSchema.extend({
+          meta: z.object({
+            organizationId: nonBlank,
+            workspaceId: nonBlank,
+            websiteProjectId: nonBlank,
+            requestId: nonBlank,
+            schemaVersion: z.literal("backlinks.v1"),
+            generatedAt: z.string().datetime(),
+          }).strict(),
+        }).strict(),
+        400: backlinkProblemDetailsSchema, 403: backlinkProblemDetailsSchema,
+        404: backlinkProblemDetailsSchema, 500: backlinkProblemDetailsSchema,
+      },
+    }, errorHandler: sendError },
+    async (request) => {
+      const context = await options.module.projectContext.resolve({
+        actor: request.actor,
+        websiteProjectKey: request.params.websiteProjectKey,
+      });
+      const statusResult =
+        await options.module.queries.getRecommendationInventoryStatus(context);
+      return { ...statusResult, meta: {
+        organizationId: context.tenant.organizationId,
+        workspaceId: context.tenant.workspaceId,
+        websiteProjectId: context.project.websiteProjectId,
+        requestId: request.id,
+        schemaVersion: "backlinks.v1" as const,
+        generatedAt: new Date().toISOString(),
+      } };
+    },
+  );
   app.withTypeProvider<ZodTypeProvider>().get(
     "/api/v1/projects/:websiteProjectKey/backlinks/recommendations",
     { schema: {

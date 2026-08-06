@@ -1,6 +1,6 @@
 import type {
   GmailConnectionReader,
-  GmailConnectionView,
+  GmailProjectMailboxState,
 } from "../gmail-connection.gateway.js";
 import {
   BacklinkError,
@@ -29,9 +29,9 @@ export function createGmailConnectionQuery(
   return {
     async getStatus(
       context: ResolvedProjectContext,
-    ): Promise<GmailConnectionView | null> {
+    ): Promise<GmailProjectMailboxState> {
       authorize(context);
-      return dependencies.reader.findVisibleConnection(context);
+      return dependencies.reader.findProjectMailboxState(context);
     },
   };
 }

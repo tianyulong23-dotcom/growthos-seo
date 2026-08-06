@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 from logging.config import fileConfig
 
@@ -11,9 +12,12 @@ from app.core.config import get_settings
 from app.db.base import Base
 
 config = context.config
+database_url = os.getenv("ALEMBIC_DATABASE_URL")
+if database_url is None:
+    database_url = get_settings().database_url
 config.set_main_option(
     "sqlalchemy.url",
-    get_settings().database_url.replace("%", "%%"),
+    database_url.replace("%", "%%"),
 )
 
 if config.config_file_name is not None:

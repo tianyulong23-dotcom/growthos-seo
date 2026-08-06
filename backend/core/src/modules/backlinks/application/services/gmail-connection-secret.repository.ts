@@ -36,6 +36,11 @@ export type GmailConnectionSecretPersistenceCreateInput = Readonly<{
   tokenExpiresAt: string;
 }>;
 
+export type GmailConnectionSecretPersistenceSaveResult = Readonly<{
+  view: GmailConnectionView;
+  retiredTokenSecretReference: SecretStoreReference | null;
+}>;
+
 export type GmailConnectionSecretPersistenceRefreshState = Readonly<{
   organizationId: string;
   connectionId: string;
@@ -68,9 +73,17 @@ type GmailConnectionSecretPersistenceReauthInput =
   }>;
 
 export interface GmailConnectionSecretPersistence {
-  createConnectionWithWorkspaceBinding(
+  findActiveConnectionIdBySubject(
+    input: Readonly<{
+      organizationId: string;
+      workspaceId: string;
+      websiteProjectId: string;
+      googleSubject: string;
+    }>,
+  ): Promise<string | null>;
+  saveAuthorizedConnectionWithBindings(
     input: GmailConnectionSecretPersistenceCreateInput,
-  ): Promise<GmailConnectionView>;
+  ): Promise<GmailConnectionSecretPersistenceSaveResult>;
   findRefreshState(
     input: GmailConnectionSecretPersistenceLookupInput,
   ): Promise<GmailConnectionSecretPersistenceRefreshState | null>;
@@ -179,39 +192,63 @@ implements GmailConnectionCompletionGateway {
   ): Promise<GmailConnectionView> {
     const identity = googleIdentitySchema.parse(input.identity);
     const tokens = googleAuthTokenSetSchema.parse(input.tokens);
-    const connectionId = this.#newId();
-    const context = tokenContext(
-      input.context.tenant.organizationId,
-      connectionId,
-    );
-    const tokenSecretReference = await this.#secretStore.create({
-      secretKind: secretKinds.gmailTokenSet,
-      plaintext: encodeTokens(tokens),
-      context,
-    });
+    return this.#refreshLock.withLock(
+      {
+        organizationId: input.context.organizationId,
+        connectionId: `google-subject:${identity.subject}`,
+      },
+      async () => {
+        const existingConnectionId =
+          await this.#persistence.findActiveConnectionIdBySubject({
+            organizationId: input.context.organizationId,
+            workspaceId: input.context.workspaceId,
+            websiteProjectId: input.context.websiteProjectId,
+            googleSubject: identity.subject,
+          });
+        const connectionId = existingConnectionId ?? this.#newId();
+        const context = tokenContext(
+          input.context.organizationId,
+          connectionId,
+        );
+        const tokenSecretReference = await this.#secretStore.create({
+          secretKind: secretKinds.gmailTokenSet,
+          plaintext: encodeTokens(tokens),
+          context,
+        });
 
-    try {
-      return await this.#persistence.createConnectionWithWorkspaceBinding({
-        connectionId,
-        organizationId: input.context.tenant.organizationId,
-        workspaceId: input.context.tenant.workspaceId,
-        websiteProjectId: input.context.project.websiteProjectId,
-        connectedByUserId: input.context.actor.userId,
-        googleSubject: identity.subject,
-        primaryEmail: identity.email.toLowerCase(),
-        displayName: identity.displayName ?? null,
-        hostedDomain: identity.hostedDomain ?? null,
-        grantedScopes: Object.freeze([...tokens.grantedScopes]),
-        tokenSecretReference,
-        tokenExpiresAt: tokens.expiresAt,
-      });
-    } catch (error) {
-      await this.#secretStore.destroy({
-        reference: tokenSecretReference,
-        context,
-      }).catch(() => undefined);
-      throw error;
-    }
+        let saved: GmailConnectionSecretPersistenceSaveResult;
+        try {
+          saved =
+            await this.#persistence.saveAuthorizedConnectionWithBindings({
+              connectionId,
+              organizationId: input.context.organizationId,
+              workspaceId: input.context.workspaceId,
+              websiteProjectId: input.context.websiteProjectId,
+              connectedByUserId: input.context.actorId,
+              googleSubject: identity.subject,
+              primaryEmail: identity.email.toLowerCase(),
+              displayName: identity.displayName ?? null,
+              hostedDomain: identity.hostedDomain ?? null,
+              grantedScopes: Object.freeze([...tokens.grantedScopes]),
+              tokenSecretReference,
+              tokenExpiresAt: tokens.expiresAt,
+            });
+        } catch (error) {
+          await this.#secretStore.destroy({
+            reference: tokenSecretReference,
+            context,
+          }).catch(() => undefined);
+          throw error;
+        }
+        if (saved.retiredTokenSecretReference !== null) {
+          await this.#secretStore.destroy({
+            reference: saved.retiredTokenSecretReference,
+            context,
+          }).catch(() => undefined);
+        }
+        return saved.view;
+      },
+    );
   }
 
   async refresh(

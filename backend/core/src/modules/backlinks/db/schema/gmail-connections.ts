@@ -167,8 +167,9 @@ export const backlinkGmailConnections = pg.pgTable(
       table.id,
     ),
     pg
-      .index("backlink_gmail_connection_subject_idx")
-      .on(table.organizationId, table.googleSubject),
+      .uniqueIndex("backlink_gmail_connection_active_subject_uq")
+      .on(table.organizationId, table.googleSubject)
+      .where(sql`${table.disconnectedAt} IS NULL`),
     pg.foreignKey({
       name: "backlink_gmail_connection_token_secret_fk",
       columns: [
@@ -191,7 +192,7 @@ export const backlinkGmailWorkspaceBindings = pg.pgTable(
     id: pg.uuid("id").primaryKey(),
     organizationId: pg.uuid("organization_id").notNull(),
     workspaceId: pg.uuid("workspace_id").notNull(),
-    websiteProjectId: pg.uuid("website_project_id").notNull(),
+    websiteProjectId: pg.uuid("website_project_id"),
     gmailConnectionId: pg.uuid("gmail_connection_id").notNull(),
     bindingStatus: pg.text("binding_status").notNull().default("ACTIVE"),
     isPrimary: pg.boolean("is_primary").notNull().default(true),
@@ -205,29 +206,68 @@ export const backlinkGmailWorkspaceBindings = pg.pgTable(
     pg.uniqueIndex("backlink_gmail_workspace_binding_identity_uq").on(
       table.organizationId,
       table.workspaceId,
-      table.websiteProjectId,
       table.gmailConnectionId,
     ),
-    pg
-      .uniqueIndex("backlink_gmail_workspace_primary_active_uq")
-      .on(
-        table.organizationId,
-        table.workspaceId,
-        table.websiteProjectId,
-      )
-      .where(
-        sql`${table.bindingStatus} = 'ACTIVE' AND ${table.isPrimary} = true`,
-      ),
-    pg
-      .uniqueIndex("backlink_gmail_connection_single_active_binding_uq")
-      .on(table.organizationId, table.gmailConnectionId)
-      .where(sql`${table.bindingStatus} = 'ACTIVE'`),
+    pg.uniqueIndex("backlink_gmail_workspace_binding_reference_uq").on(
+      table.organizationId,
+      table.workspaceId,
+      table.id,
+    ),
     pg.foreignKey({
       name: "backlink_gmail_workspace_binding_connection_fk",
       columns: [table.organizationId, table.gmailConnectionId],
       foreignColumns: [
         backlinkGmailConnections.organizationId,
         backlinkGmailConnections.id,
+      ],
+    }),
+  ],
+);
+
+export const backlinkWebsiteProjectMailboxBindings = pg.pgTable(
+  "backlink_website_project_mailbox_bindings",
+  {
+    id: pg.uuid("id").primaryKey(),
+    organizationId: pg.uuid("organization_id").notNull(),
+    workspaceId: pg.uuid("workspace_id").notNull(),
+    websiteProjectId: pg.uuid("website_project_id").notNull(),
+    gmailWorkspaceBindingId: pg.uuid("gmail_workspace_binding_id").notNull(),
+    bindingStatus: pg.text("binding_status").notNull().default("ACTIVE"),
+    isSelected: pg.boolean("is_selected").notNull().default(true),
+    version: pg.integer("version").notNull().default(1),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+    createdBy: pg.text("created_by").notNull(),
+    updatedBy: pg.text("updated_by").notNull(),
+  },
+  (table) => [
+    pg.uniqueIndex("backlink_project_mailbox_binding_identity_uq").on(
+      table.organizationId,
+      table.workspaceId,
+      table.websiteProjectId,
+      table.gmailWorkspaceBindingId,
+    ),
+    pg
+      .uniqueIndex("backlink_project_mailbox_selected_active_uq")
+      .on(
+        table.organizationId,
+        table.workspaceId,
+        table.websiteProjectId,
+      )
+      .where(
+        sql`${table.bindingStatus} = 'ACTIVE' AND ${table.isSelected} = true`,
+      ),
+    pg.foreignKey({
+      name: "backlink_project_mailbox_binding_workspace_fk",
+      columns: [
+        table.organizationId,
+        table.workspaceId,
+        table.gmailWorkspaceBindingId,
+      ],
+      foreignColumns: [
+        backlinkGmailWorkspaceBindings.organizationId,
+        backlinkGmailWorkspaceBindings.workspaceId,
+        backlinkGmailWorkspaceBindings.id,
       ],
     }),
   ],

@@ -27,6 +27,7 @@ export type OAuthAttemptContext = Readonly<{
   organizationId: string;
   workspaceId: string;
   websiteProjectId: string;
+  websiteProjectKey: string;
   initiatedByUserId: string;
   sessionBinding: string;
 }>;
@@ -44,7 +45,11 @@ export type BeginOAuthAttemptResult = Readonly<{
   expiresAt: Date;
 }>;
 
-export type ConsumeOAuthAttemptInput = OAuthAttemptContext & Readonly<{
+export type ConsumeOAuthAttemptInput = Readonly<{
+  organizationId: string;
+  workspaceId: string;
+  initiatedByUserId: string;
+  sessionBinding: string;
   state: string;
 }>;
 
@@ -94,11 +99,13 @@ export class OAuthAttemptService {
     this.assertContext(input);
     assertNonBlank("redirectUri", input.redirectUri);
     const returnPath = input.returnPath ?? null;
+    const allowedReturnPath =
+      `/projects/${encodeURIComponent(input.websiteProjectKey)}/backlinks/email`;
     if (
       returnPath !== null
-      && (!returnPath.startsWith("/") || returnPath.startsWith("//"))
+      && returnPath !== allowedReturnPath
     ) {
-      throw new TypeError("returnPath must be an application-relative path.");
+      throw new TypeError("returnPath is outside the Gmail callback allowlist.");
     }
 
     const createdAt = this.now();
@@ -142,7 +149,10 @@ export class OAuthAttemptService {
   async consume(
     input: ConsumeOAuthAttemptInput,
   ): Promise<ConsumedOAuthAttempt> {
-    this.assertContext(input);
+    assertNonBlank("organizationId", input.organizationId);
+    assertNonBlank("workspaceId", input.workspaceId);
+    assertNonBlank("initiatedByUserId", input.initiatedByUserId);
+    assertNonBlank("sessionBinding", input.sessionBinding);
     if (!oauthStatePattern.test(input.state)) {
       throw new InvalidOAuthStateError();
     }
@@ -150,7 +160,6 @@ export class OAuthAttemptService {
     const consumed = await this.repository.consume({
       organizationId: input.organizationId,
       workspaceId: input.workspaceId,
-      websiteProjectId: input.websiteProjectId,
       initiatedByUserId: input.initiatedByUserId,
       stateHash: sha256Hex(input.state),
       sessionBindingHash: sha256Hex(input.sessionBinding),
@@ -170,6 +179,7 @@ export class OAuthAttemptService {
     assertNonBlank("organizationId", context.organizationId);
     assertNonBlank("workspaceId", context.workspaceId);
     assertNonBlank("websiteProjectId", context.websiteProjectId);
+    assertNonBlank("websiteProjectKey", context.websiteProjectKey);
     assertNonBlank("initiatedByUserId", context.initiatedByUserId);
     assertNonBlank("sessionBinding", context.sessionBinding);
   }

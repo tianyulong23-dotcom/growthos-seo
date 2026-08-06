@@ -6,8 +6,16 @@ import {
 } from "../adapters/security/local-product-secret-store-client.js";
 import { secretKinds } from "../ports/secret-store.port.js";
 
+export const localProductDataForSeoEndpoints = Object.freeze([
+  "https://api.dataforseo.com/v3/serp/google/organic/task_post",
+  "https://api.dataforseo.com/v3/serp/google/organic/tasks_ready",
+  "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
+  "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
+  "https://api.dataforseo.com/v3/backlinks/competitors/live",
+  "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
+] as const);
 export const localProductDataForSeoEndpoint =
-  "https://api.dataforseo.com/v3/backlinks/referring_domains/live";
+  localProductDataForSeoEndpoints.at(-1) as string;
 const maximumBudgetMicros = 100_000_000;
 const projectKeySchema = z.string().trim().min(1).max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
@@ -61,11 +69,14 @@ const dataForSeoEndpointSchema = z.string().trim().url().max(2_048)
 export const localProductDataForSeoEndpointAllowlistSchema = z.array(
   dataForSeoEndpointSchema,
 ).min(1).max(16).superRefine((value, context) => {
-  if (!value.includes(localProductDataForSeoEndpoint)) {
-    context.addIssue({
-      code: "custom",
-      message: "DataForSEO endpoint allowlist must include the runtime endpoint.",
-    });
+  for (const endpoint of localProductDataForSeoEndpoints) {
+    if (!value.includes(endpoint)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "DataForSEO endpoint allowlist must include every commercial discovery endpoint.",
+      });
+    }
   }
 });
 export const localProductDataForSeoCredentialReferenceSchema = z.string()

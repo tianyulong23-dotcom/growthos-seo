@@ -149,12 +149,9 @@ export type OutreachApiFixtureSession = {
 
 export type OutreachApiFixtureOptions = Readonly<{
   contactMode?: "single" | "multiple" | "none"
+  gmailMode?: "selected" | "reusable"
   draftJobStatuses?: readonly (
-    | "QUEUED"
-    | "RUNNING"
-    | "SUCCEEDED"
-    | "FAILED"
-    | "REFUSED"
+    "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "REFUSED"
   )[]
 }>
 
@@ -173,6 +170,7 @@ export async function installOutreachApiFixtures(
   const capturedRequests: CapturedRequest[] = []
   const unexpectedNetwork: string[] = []
   const contactMode = options.contactMode ?? "single"
+  const gmailMode = options.gmailMode ?? "selected"
   const draftJobStatuses = options.draftJobStatuses ?? ["SUCCEEDED"]
   const draftQueuedAt = new Date().toISOString()
   const draftDeadlineAt = new Date(
@@ -181,28 +179,39 @@ export async function installOutreachApiFixtures(
   let draftApproved = false
   let draftJobStatusReads = 0
   let latestDraftJobStatus:
-    | "QUEUED"
-    | "RUNNING"
-    | "SUCCEEDED"
-    | "FAILED"
-    | "REFUSED"
-    | null = null
+    "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "REFUSED" | null = null
   let draftFinishedAt: string | null = null
   let sendIntentStatusReads = 0
   let manualCandidateCreated = false
   let manualContactConfirmed = false
-  let opportunityManagementStatus: "ACTIVE" | "PAUSED" | "ARCHIVED" =
-    "ACTIVE"
+  let opportunityManagementStatus: "ACTIVE" | "PAUSED" | "ARCHIVED" = "ACTIVE"
   let opportunityVersion = opportunityListItem.version
+  let selectedGmailConnectionId =
+    gmailMode === "selected" ? "gmail-connection-e2e" : null
+  const gmailAccount = {
+    connectionId: "gmail-connection-e2e",
+    version: 1,
+    primaryEmail: "owner@example.test",
+    displayName: "Owner",
+    hostedDomain: "example.test",
+    grantedScopes: [
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/gmail.readonly",
+    ],
+    connectionStatus: "CONNECTED",
+    sendAvailability: "AVAILABLE",
+    mailSyncCapability: true,
+    tokenExpiresAt: "2026-08-06T09:00:00.000Z",
+    connectedAt: now,
+    recentErrorCategory: null,
+  }
   const currentOpportunityListItem = () => ({
     ...opportunityListItem,
     managementStatus: opportunityManagementStatus,
     version: opportunityVersion,
     updatedAt: new Date().toISOString(),
   })
-  const draftJob = (
-    status: Exclude<typeof latestDraftJobStatus, null>
-  ) => {
+  const draftJob = (status: Exclude<typeof latestDraftJobStatus, null>) => {
     const started = status !== "QUEUED"
     const terminal =
       status === "SUCCEEDED" || status === "FAILED" || status === "REFUSED"
@@ -216,8 +225,7 @@ export async function installOutreachApiFixtures(
       contactId,
       contactVersion: 1,
       versionId: status === "SUCCEEDED" ? draftVersionId : null,
-      lastSuccessfulVersionId:
-        status === "SUCCEEDED" ? draftVersionId : null,
+      lastSuccessfulVersionId: status === "SUCCEEDED" ? draftVersionId : null,
       queuedAt: draftQueuedAt,
       startedAt: started ? draftQueuedAt : null,
       finishedAt: terminal ? draftFinishedAt : null,
@@ -227,9 +235,7 @@ export async function installOutreachApiFixtures(
       persistenceLatencyMs: terminal ? 15 : null,
       attemptCount: started ? 1 : 0,
       lastErrorCategory:
-        status === "FAILED" || status === "REFUSED"
-          ? "E2E_FAILURE"
-          : null,
+        status === "FAILED" || status === "REFUSED" ? "E2E_FAILURE" : null,
     }
   }
 
@@ -341,12 +347,10 @@ export async function installOutreachApiFixtures(
                   evidence: [
                     {
                       id: "contact-evidence-e2e",
-                      sourceUrl:
-                        "https://publisher.example.test/contact",
+                      sourceUrl: "https://publisher.example.test/contact",
                       observedAt: now,
                       extractionMethod: "visible_text",
-                      evidenceSnippet:
-                        "editor@publisher.example.test",
+                      evidenceSnippet: "editor@publisher.example.test",
                       confidence: 95,
                     },
                   ],
@@ -360,6 +364,42 @@ export async function installOutreachApiFixtures(
           ],
           nextCursor: null,
           hasMore: false,
+          meta,
+        })
+      }
+
+      if (
+        method === "GET" &&
+        pathname ===
+          `/api/v1/projects/${projectKey}/backlinks/recommendation-inventory`
+      ) {
+        return json(route, {
+          candidateReadyCount: 1,
+          publishedContactReadyCount: 1,
+          historicalEmailHitRate: 1,
+          candidateLowWatermark: 20,
+          candidateHighWatermark: 40,
+          publishedLowWatermark: 5,
+          publishedHighWatermark: 10,
+          blueprintVersion: "e2e-blueprint-v1",
+          blueprintGenerator: "local-e2e",
+          latestRefillAt: now,
+          nextRefillAt: null,
+          providerCollectedAt: now,
+          pauseReason: null,
+          refillInFlight: false,
+          contactBatch: {
+            id: "contact-batch-e2e",
+            status: "completed",
+            totalJobCount: 1,
+            terminalJobCount: 1,
+            publishedCount: 1,
+            unpublishedCount: 0,
+            retryableUnpublishedCount: 0,
+            reasonCounts: [{ reasonCode: "PUBLIC_EMAIL_FOUND", count: 1 }],
+            startedAt: now,
+            completedAt: now,
+          },
           meta,
         })
       }
@@ -587,22 +627,31 @@ export async function installOutreachApiFixtures(
           `/api/v1/projects/${projectKey}/backlinks/gmail-connections/status`
       ) {
         return json(route, {
-          connection: {
-            connectionId: "gmail-connection-e2e",
-            version: 1,
-            primaryEmail: "owner@example.test",
-            displayName: "Owner",
-            hostedDomain: "example.test",
-            grantedScopes: [
-              "https://www.googleapis.com/auth/gmail.send",
-              "https://www.googleapis.com/auth/gmail.readonly",
-            ],
-            connectionStatus: "CONNECTED",
-            sendAvailability: "AVAILABLE",
-            mailSyncCapability: true,
-            tokenExpiresAt: "2026-07-30T01:00:00.000Z",
-            connectedAt: now,
-          },
+          connection:
+            selectedGmailConnectionId === gmailAccount.connectionId
+              ? gmailAccount
+              : null,
+          accounts: [gmailAccount],
+          meta,
+        })
+      }
+
+      if (
+        method === "POST" &&
+        pathname ===
+          `/api/v1/projects/${projectKey}/backlinks/gmail-connections/select`
+      ) {
+        const body = request.postDataJSON() as { connectionId?: string }
+        selectedGmailConnectionId =
+          body.connectionId === gmailAccount.connectionId
+            ? gmailAccount.connectionId
+            : null
+        return json(route, {
+          connection:
+            selectedGmailConnectionId === gmailAccount.connectionId
+              ? gmailAccount
+              : null,
+          accounts: [gmailAccount],
           meta,
         })
       }

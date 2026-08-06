@@ -22,6 +22,7 @@
     "live:google-oauth:import": "tsx scripts/import-local-product-google-oauth-credentials.ts",
     "local-product:ai:import": "tsx scripts/import-local-product-ai-credential.ts",
     "local-product:dataforseo:import": "tsx scripts/import-local-product-dataforseo-credential.ts",
+    "local-product:commercial-gold-set": "tsx scripts/run-commercial-gold-set.ts",
     "test:backlinks:unit": "vitest run test/unit",
     "test:backlinks:api": "vitest run test/backlinks/api",
     "test:backlinks:contract": "vitest run test/contract",

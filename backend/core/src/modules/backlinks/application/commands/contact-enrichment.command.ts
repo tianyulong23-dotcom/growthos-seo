@@ -14,6 +14,9 @@ import type {
 import {
   buildBacklinksWorkflowId,
 } from "../../workflows/namespaces.js";
+import {
+  synchronizeRecommendationPublication,
+} from "../services/recommendation-publication.service.js";
 
 export const contactEnrichmentRequestedEventType =
   "backlinks.contact-enrichment.requested.v1";
@@ -24,10 +27,12 @@ export type ContactEnrichmentStatus =
   | "completed"
   | "partially_completed"
   | "no_contact_found"
-  | "retry_scheduled";
+  | "retry_scheduled"
+  | "stale_context";
 
 export type ContactEnrichmentJob = Readonly<{
   id: string;
+  batchId: string;
   recommendationId: string;
   prospectId: string;
   recommendationContextVersionId: string;
@@ -43,9 +48,25 @@ export type ContactEnrichmentJob = Readonly<{
   candidateCount: number;
   evidenceCount: number;
   lastErrorCode: string | null;
+  terminalReasonCode:
+    | "PUBLIC_EMAIL_FOUND"
+    | "CONTACT_FORM_ONLY"
+    | "LOGIN_REQUIRED"
+    | "CAPTCHA_OR_BOT_CHALLENGE"
+    | "ROBOTS_DISALLOWED"
+    | "ACCESS_DENIED"
+    | "NO_PUBLIC_EMAIL"
+    | "SITE_UNREACHABLE"
+    | "UNSUPPORTED_CONTENT"
+    | "MANUAL_REVIEW_REQUIRED"
+    | "COMPLETED_PARTIAL"
+    | null;
+  method: "none" | "static" | "browser" | "static_and_browser";
+  lastErrorCategory: string | null;
   retryAfter: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+  completedAt: string | null;
   version: number;
 }>;
 
@@ -101,6 +122,7 @@ function asIso(value: unknown): string | null {
 function mapJob(row: Record<string, unknown>): ContactEnrichmentJob {
   return {
     id: String(row.id),
+    batchId: String(row.batchId),
     recommendationId: String(row.recommendationId),
     prospectId: String(row.prospectId),
     recommendationContextVersionId: String(
@@ -119,14 +141,23 @@ function mapJob(row: Record<string, unknown>): ContactEnrichmentJob {
     evidenceCount: Number(row.evidenceCount),
     lastErrorCode:
       row.lastErrorCode === null ? null : String(row.lastErrorCode),
+    terminalReasonCode:
+      row.terminalReasonCode === null
+        ? null
+        : row.terminalReasonCode as ContactEnrichmentJob["terminalReasonCode"],
+    method: row.method as ContactEnrichmentJob["method"],
+    lastErrorCategory:
+      row.lastErrorCategory === null ? null : String(row.lastErrorCategory),
     retryAfter: asIso(row.retryAfter),
     startedAt: asIso(row.startedAt),
     finishedAt: asIso(row.finishedAt),
+    completedAt: asIso(row.completedAt),
     version: Number(row.version),
   };
 }
 
-const jobSelect = `SELECT id,recommendation_id "recommendationId",
+const jobSelect = `SELECT id,batch_id "batchId",
+recommendation_id "recommendationId",
 prospect_id "prospectId",
 recommendation_context_version_id "recommendationContextVersionId",
 root_url "rootUrl",status,attempt_count "attemptCount",
@@ -134,7 +165,10 @@ max_attempts "maxAttempts",max_pages "maxPages",max_depth "maxDepth",
 browser_allowed "browserAllowed",browser_used "browserUsed",
 pages_visited "pagesVisited",candidate_count "candidateCount",
 evidence_count "evidenceCount",last_error_code "lastErrorCode",
+terminal_reason_code "terminalReasonCode",method,
+last_error_category "lastErrorCategory",
 retry_after "retryAfter",started_at "startedAt",finished_at "finishedAt",
+completed_at "completedAt",
 version FROM backlink_contact_enrichment_jobs`;
 
 async function insertRequestedOutbox(
@@ -146,6 +180,7 @@ async function insertRequestedOutbox(
   }>,
 ): Promise<void> {
   const workflowId = buildBacklinksWorkflowId({
+    organizationId: input.scope.organizationId,
     workspaceId: input.scope.workspaceId,
     websiteProjectId: input.scope.websiteProjectId,
     workflow: "contact-enrichment",
@@ -193,6 +228,114 @@ export async function ensureReadyContactEnrichmentJobs(
     options: JobOptions;
   }>,
 ): Promise<number> {
+  const exhaustedRecovery = await client.query(
+    `UPDATE backlink_contact_enrichment_jobs
+        SET status='partially_completed',retry_after=NULL,finished_at=now(),
+            completed_at=now(),terminal_reason_code='COMPLETED_PARTIAL',
+            method=CASE
+              WHEN browser_used AND pages_visited>0 THEN 'static_and_browser'
+              WHEN browser_used THEN 'browser'
+              WHEN pages_visited>0 THEN 'static'
+              ELSE 'none'
+            END,
+            last_error_category='STALE_RUNNING_JOB',
+            last_error_code=COALESCE(last_error_code,'STALE_RUNNING_JOB'),
+            updated_at=now(),updated_by=$4,version=version+1
+      WHERE organization_id=$1 AND workspace_id=$2
+        AND website_project_id=$3 AND status='running'
+        AND updated_at<now()-interval '10 minutes'
+        AND attempt_count>=10
+      RETURNING prospect_id "prospectId",
+                recommendation_context_version_id
+                  "recommendationContextVersionId"`,
+    [
+      input.scope.organizationId,
+      input.scope.workspaceId,
+      input.scope.websiteProjectId,
+      input.actorId,
+    ],
+  );
+  for (const row of exhaustedRecovery.rows) {
+    await synchronizeRecommendationPublication(client, {
+      ...input.scope,
+      prospectId: String(row.prospectId),
+      recommendationContextVersionId:
+        String(row.recommendationContextVersionId),
+      actorId: input.actorId,
+    });
+  }
+  await client.query(
+    `UPDATE backlink_contact_enrichment_jobs
+        SET status='retry_scheduled',retry_after=now(),finished_at=NULL,
+            completed_at=NULL,terminal_reason_code=NULL,method='none',
+            last_error_category='STALE_RUNNING_JOB',
+            last_error_code=COALESCE(last_error_code,'STALE_RUNNING_JOB'),
+            max_attempts=LEAST(10,GREATEST(max_attempts,attempt_count+1)),
+            updated_at=now(),updated_by=$4,version=version+1
+      WHERE organization_id=$1 AND workspace_id=$2
+        AND website_project_id=$3 AND status='running'
+        AND updated_at<now()-interval '10 minutes'
+        AND attempt_count<10`,
+    [
+      input.scope.organizationId,
+      input.scope.workspaceId,
+      input.scope.websiteProjectId,
+      input.actorId,
+    ],
+  );
+  await client.query(
+    `UPDATE backlink_contact_enrichment_jobs AS job
+        SET status='stale_context',retry_after=NULL,finished_at=now(),
+            completed_at=now(),terminal_reason_code='COMPLETED_PARTIAL',
+            method=CASE
+              WHEN browser_used AND pages_visited>0 THEN 'static_and_browser'
+              WHEN browser_used THEN 'browser'
+              WHEN pages_visited>0 THEN 'static'
+              ELSE 'none'
+            END,
+            last_error_category='STALE_CONTEXT',
+            updated_at=now(),updated_by=$4,version=version+1
+      WHERE organization_id=$1 AND workspace_id=$2
+        AND website_project_id=$3
+        AND status IN ('pending','running','retry_scheduled')
+        AND recommendation_context_version_id IS DISTINCT FROM (
+          SELECT snapshot.id
+            FROM backlink_project_context_snapshots AS snapshot
+           WHERE snapshot.organization_id=$1
+             AND snapshot.workspace_id=$2
+             AND snapshot.website_project_id=$3
+           ORDER BY snapshot.snapshot_version DESC
+           LIMIT 1
+        )`,
+    [
+      input.scope.organizationId,
+      input.scope.workspaceId,
+      input.scope.websiteProjectId,
+      input.actorId,
+    ],
+  );
+  await client.query(
+    `UPDATE backlink_contact_enrichment_batches AS batch
+        SET status='stale_context',completed_at=COALESCE(completed_at,now()),
+            updated_at=now(),updated_by=$4,version=version+1
+      WHERE organization_id=$1 AND workspace_id=$2
+        AND website_project_id=$3 AND status='running'
+        AND recommendation_context_version_id IS DISTINCT FROM (
+          SELECT snapshot.id
+            FROM backlink_project_context_snapshots AS snapshot
+           WHERE snapshot.organization_id=$1
+             AND snapshot.workspace_id=$2
+             AND snapshot.website_project_id=$3
+           ORDER BY snapshot.snapshot_version DESC
+           LIMIT 1
+        )`,
+    [
+      input.scope.organizationId,
+      input.scope.workspaceId,
+      input.scope.websiteProjectId,
+      input.actorId,
+    ],
+  );
   const retries = await client.query(
     `${jobSelect}
       WHERE organization_id=$1 AND workspace_id=$2
@@ -210,6 +353,21 @@ export async function ensureReadyContactEnrichmentJobs(
   );
   let created = 0;
   for (const row of retries.rows) {
+    await client.query(
+      `UPDATE backlink_contact_enrichment_batches
+          SET status='running',completed_at=NULL,updated_at=now(),
+              updated_by=$5,version=version+1
+        WHERE (organization_id,workspace_id,website_project_id,id)=
+              ($1,$2,$3,$4)
+          AND status<>'running'`,
+      [
+        input.scope.organizationId,
+        input.scope.workspaceId,
+        input.scope.websiteProjectId,
+        row.batchId,
+        input.actorId,
+      ],
+    );
     await insertRequestedOutbox(client, {
       scope: input.scope,
       job: mapJob(row),
@@ -243,6 +401,15 @@ export async function ensureReadyContactEnrichmentJobs(
       WHERE (i.organization_id,i.workspace_id,i.website_project_id)=
             ($1,$2,$3)
         AND i.status IN ('ready','shown')
+        AND r.recommendation_context_version_id = (
+          SELECT snapshot.id
+            FROM backlink_project_context_snapshots AS snapshot
+           WHERE snapshot.organization_id=$1
+             AND snapshot.workspace_id=$2
+             AND snapshot.website_project_id=$3
+           ORDER BY snapshot.snapshot_version DESC
+           LIMIT 1
+        )
         AND j.id IS NULL
       ORDER BY i.created_at,i.id
       LIMIT $4`,
@@ -255,15 +422,30 @@ export async function ensureReadyContactEnrichmentJobs(
   );
   for (const row of source.rows) {
     const jobId = randomUUID();
+    const batchId = randomUUID();
     const inserted = await client.query(
-      `INSERT INTO backlink_contact_enrichment_jobs (
+      `WITH batch AS (
+         INSERT INTO backlink_contact_enrichment_batches (
+           id,organization_id,workspace_id,website_project_id,
+           recommendation_context_version_id,status,created_by,updated_by
+         ) VALUES ($14,$2,$3,$4,$7,'running',$13,$13)
+         ON CONFLICT (
+           organization_id,workspace_id,website_project_id,
+           recommendation_context_version_id
+         ) DO UPDATE SET
+           status='running',completed_at=NULL,updated_at=now(),
+           updated_by=EXCLUDED.updated_by,
+           version=backlink_contact_enrichment_batches.version+1
+         RETURNING id
+       )
+       INSERT INTO backlink_contact_enrichment_jobs (
          id,organization_id,workspace_id,website_project_id,
          recommendation_id,prospect_id,recommendation_context_version_id,
-         root_url,max_attempts,max_pages,max_depth,browser_allowed,
+         batch_id,root_url,max_attempts,max_pages,max_depth,browser_allowed,
          created_by,updated_by
-       ) VALUES (
-         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13
        )
+       SELECT $1,$2,$3,$4,$5,$6,$7,batch.id,$8,$9,$10,$11,$12,$13,$13
+         FROM batch
        ON CONFLICT (
          organization_id,workspace_id,website_project_id,
          recommendation_id,recommendation_context_version_id
@@ -283,6 +465,7 @@ export async function ensureReadyContactEnrichmentJobs(
         input.options.maxDepth,
         input.options.browserAllowed,
         input.actorId,
+        batchId,
       ],
     );
     if (inserted.rows[0] === undefined) continue;
@@ -378,15 +561,30 @@ export function createContactEnrichmentCommands(
         });
       }
       const jobId = randomUUID();
+      const batchId = randomUUID();
       const inserted = await client.query(
-        `INSERT INTO backlink_contact_enrichment_jobs (
+        `WITH batch AS (
+           INSERT INTO backlink_contact_enrichment_batches (
+             id,organization_id,workspace_id,website_project_id,
+             recommendation_context_version_id,status,created_by,updated_by
+           ) VALUES ($14,$2,$3,$4,$7,'running',$13,$13)
+           ON CONFLICT (
+             organization_id,workspace_id,website_project_id,
+             recommendation_context_version_id
+           ) DO UPDATE SET
+             status='running',completed_at=NULL,updated_at=now(),
+             updated_by=EXCLUDED.updated_by,
+             version=backlink_contact_enrichment_batches.version+1
+           RETURNING id
+         )
+         INSERT INTO backlink_contact_enrichment_jobs (
            id,organization_id,workspace_id,website_project_id,
            recommendation_id,prospect_id,recommendation_context_version_id,
-           root_url,max_attempts,max_pages,max_depth,browser_allowed,
+           batch_id,root_url,max_attempts,max_pages,max_depth,browser_allowed,
            created_by,updated_by
-         ) VALUES (
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13
          )
+         SELECT $1,$2,$3,$4,$5,$6,$7,batch.id,$8,$9,$10,$11,$12,$13,$13
+           FROM batch
          ON CONFLICT (
            organization_id,workspace_id,website_project_id,
            recommendation_id,recommendation_context_version_id
@@ -406,6 +604,7 @@ export function createContactEnrichmentCommands(
           options.maxDepth,
           options.browserAllowed,
           actor.userId,
+          batchId,
         ],
       );
       const replayed = inserted.rows[0] === undefined;
@@ -449,7 +648,12 @@ export function createContactEnrichmentCommands(
       const updated = await client.query(
         `UPDATE backlink_contact_enrichment_jobs
             SET status='retry_scheduled',retry_after=now(),
-                finished_at=NULL,last_error_code=NULL,
+                finished_at=NULL,completed_at=NULL,last_error_code=NULL,
+                terminal_reason_code=NULL,method='none',
+                last_error_category=NULL,browser_allowed=$6,
+                max_attempts=LEAST(10,GREATEST(
+                  max_attempts,attempt_count+1
+                )),
                 updated_at=now(),updated_by=$5,version=version+1
           WHERE organization_id=$1 AND workspace_id=$2
             AND website_project_id=$3 AND id=$4
@@ -457,14 +661,15 @@ export function createContactEnrichmentCommands(
               'completed','partially_completed','no_contact_found',
               'retry_scheduled'
             )
-            AND attempt_count < max_attempts
-          RETURNING id`,
+            AND attempt_count < 10
+          RETURNING id,batch_id "batchId"`,
         [
           tenant.organizationId,
           tenant.workspaceId,
           project.websiteProjectId,
           input.jobId,
           actor.userId,
+          options.browserAllowed,
         ],
       );
       if (updated.rows[0] === undefined) {
@@ -473,6 +678,20 @@ export function createContactEnrichmentCommands(
           message: "Contact enrichment job cannot be retried.",
         });
       }
+      await client.query(
+        `UPDATE backlink_contact_enrichment_batches
+            SET status='running',completed_at=NULL,updated_at=now(),
+                updated_by=$5,version=version+1
+          WHERE (organization_id,workspace_id,website_project_id,id)=
+                ($1,$2,$3,$4)`,
+        [
+          tenant.organizationId,
+          tenant.workspaceId,
+          project.websiteProjectId,
+          updated.rows[0].batchId,
+          actor.userId,
+        ],
+      );
       const job = await get(input.context, input.jobId);
       await insertRequestedOutbox(client, {
         scope: {
@@ -484,6 +703,94 @@ export function createContactEnrichmentCommands(
         actorId: actor.userId,
       });
       return job;
+    },
+
+    async retryUnpublished(
+      context: ResolvedProjectContext,
+    ): Promise<{ batchId: string | null; retriedJobCount: number }> {
+      authorize(context);
+      const { tenant, project, actor } = context;
+      const scope = {
+        organizationId: tenant.organizationId,
+        workspaceId: tenant.workspaceId,
+        websiteProjectId: project.websiteProjectId,
+      };
+      const updated = await client.query(
+        `UPDATE backlink_contact_enrichment_jobs AS job
+            SET status='retry_scheduled',retry_after=now(),
+                finished_at=NULL,completed_at=NULL,
+                terminal_reason_code=NULL,method='none',
+                last_error_category=NULL,last_error_code=NULL,
+                browser_allowed=$5,
+                max_attempts=LEAST(10,GREATEST(
+                  job.max_attempts,job.attempt_count+1
+                )),
+                updated_at=now(),updated_by=$4,version=job.version+1
+           FROM backlink_recommendation_inventory AS inventory
+          WHERE (job.organization_id,job.workspace_id,
+                 job.website_project_id)=($1,$2,$3)
+            AND (inventory.organization_id,inventory.workspace_id,
+                 inventory.website_project_id,
+                 inventory.recommendation_id,
+                 inventory.recommendation_context_version_id)=
+                (job.organization_id,job.workspace_id,
+                 job.website_project_id,job.recommendation_id,
+                 job.recommendation_context_version_id)
+            AND inventory.publication_status<>'PUBLISHED'
+            AND job.status IN (
+              'completed','partially_completed','no_contact_found',
+              'retry_scheduled'
+            )
+            AND job.attempt_count<10
+            AND job.recommendation_context_version_id=(
+              SELECT snapshot.id
+                FROM backlink_project_context_snapshots AS snapshot
+               WHERE (snapshot.organization_id,snapshot.workspace_id,
+                      snapshot.website_project_id)=($1,$2,$3)
+                 AND snapshot.project_status='ACTIVE'
+               ORDER BY snapshot.snapshot_version DESC
+               LIMIT 1
+            )
+          RETURNING job.id,job.batch_id "batchId"`,
+        [
+          scope.organizationId,
+          scope.workspaceId,
+          scope.websiteProjectId,
+          actor.userId,
+          options.browserAllowed,
+        ],
+      );
+      const batchId = updated.rows[0] === undefined
+        ? null
+        : String(updated.rows[0].batchId);
+      if (batchId !== null) {
+        await client.query(
+          `UPDATE backlink_contact_enrichment_batches
+              SET status='running',completed_at=NULL,updated_at=now(),
+                  updated_by=$5,version=version+1
+            WHERE (organization_id,workspace_id,website_project_id,id)=
+                  ($1,$2,$3,$4)`,
+          [
+            scope.organizationId,
+            scope.workspaceId,
+            scope.websiteProjectId,
+            batchId,
+            actor.userId,
+          ],
+        );
+      }
+      for (const row of updated.rows) {
+        const retried = await get(context, String(row.id));
+        await insertRequestedOutbox(client, {
+          scope,
+          job: retried,
+          actorId: actor.userId,
+        });
+      }
+      return {
+        batchId,
+        retriedJobCount: updated.rows.length,
+      };
     },
 
     async addManualCandidate(input: Readonly<{
@@ -621,6 +928,15 @@ export function createContactEnrichmentCommands(
           relation,
         ],
       );
+      await synchronizeRecommendationPublication(client, {
+        organizationId: tenant.organizationId,
+        workspaceId: tenant.workspaceId,
+        websiteProjectId: project.websiteProjectId,
+        prospectId: String(source.prospectId),
+        recommendationContextVersionId:
+          String(source.recommendationContextVersionId),
+        actorId: actor.userId,
+      });
       return {
         candidateId: persistedId,
         normalizedEmail,

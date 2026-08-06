@@ -51,6 +51,13 @@ const processSource = readFileSync(
   ),
   "utf8",
 );
+const initializeProjectSource = readFileSync(
+  new URL(
+    "../../../../ops/local-product/Initialize-GrowthOS-LocalProductProject.ps1",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const dataForSeoImportSource = readFileSync(
   new URL(
     "../../../../Import-GrowthOS-LocalProductDataForSeoCredential.ps1",
@@ -74,7 +81,7 @@ describe("LOCAL_PRODUCT process scripts", () => {
   });
 
   it("bypasses external proxies for local frontend readiness", () => {
-    expect(startSource).toContain('function Wait-HttpAvailable');
+    expect(startSource).toContain("function Wait-HttpAvailable");
     expect(startSource).toContain('--noproxy "*"');
     expect(startSource).toContain('--write-out "%{http_code}"');
   });
@@ -88,9 +95,7 @@ describe("LOCAL_PRODUCT process scripts", () => {
     expect(startSource).toContain(
       "$readinessDeadline = (Get-Date).AddSeconds(120)",
     );
-    expect(startSource).toContain(
-      "while ((Get-Date) -lt $readinessDeadline)",
-    );
+    expect(startSource).toContain("while ((Get-Date) -lt $readinessDeadline)");
     expect(startSource).toContain("-NoFail");
     expect(startSource).toContain(
       'throw "LOCAL_PRODUCT_STACK_READINESS_TIMEOUT"',
@@ -104,17 +109,11 @@ describe("LOCAL_PRODUCT process scripts", () => {
 
   it("bootstraps governance for every latest active Website Project", () => {
     expect(startSource).toContain("$governanceBootstrapSql");
-    expect(startSource).toContain(
-      "backlink_project_settings_versions",
-    );
-    expect(startSource).toContain(
-      "backlink_retention_policy_versions",
-    );
+    expect(startSource).toContain("backlink_project_settings_versions");
+    expect(startSource).toContain("backlink_retention_policy_versions");
     expect(startSource).toContain("'reportingTimezone','Asia/Shanghai'");
     expect(startSource).toContain("'category','operational'");
-    expect(startSource).toContain(
-      "SELECT DISTINCT ON (website_project_id)",
-    );
+    expect(startSource).toContain("SELECT DISTINCT ON (website_project_id)");
     expect(startSource).toContain("WHERE project_status='ACTIVE'");
     expect(startSource).toContain(
       "website_project_id=active.website_project_id",
@@ -135,63 +134,108 @@ describe("LOCAL_PRODUCT process scripts", () => {
 
   it("enables DataForSEO only through the explicit bounded switch", () => {
     expect(configurationSource).toContain("[switch]$EnableDataForSeo");
-    expect(configurationSource).toContain("function Assert-DataForSeoEnvironment");
+    expect(configurationSource).toContain(
+      "function Assert-DataForSeoEnvironment",
+    );
     expect(configurationSource).toContain(
       'DATAFORSEO_ENABLED = $(if ($EnableDataForSeo) { "true" } else { "false" })',
     );
     expect(configurationSource).toContain(
-      'Assert-LocalProductSecretReference `',
+      "Assert-LocalProductSecretReference `",
     );
-    expect(configurationSource).toContain(
-      '"dataforseo" `',
-    );
+    expect(configurationSource).toContain('"dataforseo" `');
     expect(configurationSource).toContain(
       "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
     );
     expect(configurationSource).toContain(
-      "LOCAL_PRODUCT_DATAFORSEO_CALL_LIMIT_INVALID",
+      "https://api.dataforseo.com/v3/serp/google/organic/task_post",
     );
     expect(configurationSource).toContain(
-      "$endpoints = @($parsedEndpoints)",
+      "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
     );
-    expect(processSource).toContain(
-      "$allowlist = @($parsedAllowlist)",
+    expect(dataForSeoImportSource).toContain(
+      "https://api.dataforseo.com/v3/backlinks/competitors/live",
     );
+    expect(configurationSource).toContain(
+      "LOCAL_PRODUCT_DATAFORSEO_CALL_LIMIT_INVALID",
+    );
+    expect(configurationSource).toContain("$endpoints = @($parsedEndpoints)");
+    expect(processSource).toContain("$allowlist = @($parsedAllowlist)");
     expect(configurationSource).toContain("DATAFORSEO_MAX_PAID_CALLS");
     expect(startSource).toContain("[switch]$EnableDataForSeo");
     expect(startSource).toContain('layer = "provider"');
     expect(startSource).toContain('provider = "dataforseo"');
   });
 
-  it("accepts the current project-context migration head", () => {
-    expect(startSource).toContain('$expectedBacklinks -ne "0042"');
+  it("accepts the current organization Gmail reuse migration head", () => {
+    expect(startSource).toContain('$expectedBacklinks -ne "0047"');
+    expect(startSource).toContain("Invoke-LocalProductAlembicUpgrade");
+    expect(startSource).toContain("ALEMBIC_DATABASE_URL");
+    expect(startSource).toContain("postgres-admin-password");
+    expect(configurationSource).toContain(
+      'if ($name -eq "backlinks-worker.env")',
+    );
+    expect(configurationSource).toContain('"LOCAL_PRODUCT_WEBSITE_PROJECT_ID"');
+    expect(configurationSource).toContain(
+      '"LOCAL_PRODUCT_WEBSITE_PROJECT_KEY"',
+    );
     expect(statusSource).toContain(
       '$projectRecommendationContextGateReady.Trim() -eq "true"',
     );
-    expect(statusSource).toContain('"0042"');
-    expect(startSource).toContain(
-      "provider_batch_request_worker_policy",
+    expect(statusSource).toContain(
+      '$projectScopeProviderGateReady.Trim() -eq "true"',
     );
-    expect(startSource).toContain(
-      "provider_fetch_lease_worker_policy",
+    expect(statusSource).toContain(
+      '$platformProjectAuthorityGateReady.Trim() -eq "true"',
     );
+    expect(statusSource).toContain(
+      '$commercialCandidateInventoryGateReady.Trim() -eq "true"',
+    );
+    expect(statusSource).toContain(
+      '$gmailOrganizationReuseGateReady.Trim() -eq "true"',
+    );
+    expect(statusSource).toContain('"0047"');
+    expect(startSource).toContain("provider_batch_request_worker_policy");
+    expect(startSource).toContain("provider_fetch_lease_worker_policy");
     expect(startSource).toContain("backlink_contact_enrichment_jobs");
-    expect(startSource).toContain(
-      "0039_backlink_opportunity_contact_gate.sql",
-    );
-    expect(startSource).toContain(
-      "0040_backlink_existing_placements.sql",
-    );
-    expect(startSource).toContain(
-      "0041_backlink_gmail_project_bindings.sql",
-    );
+    expect(startSource).toContain("0039_backlink_opportunity_contact_gate.sql");
+    expect(startSource).toContain("0040_backlink_existing_placements.sql");
+    expect(startSource).toContain("0041_backlink_gmail_project_bindings.sql");
     expect(startSource).toContain(
       "0042_backlink_project_recommendation_context.sql",
+    );
+    expect(startSource).toContain("0043_backlink_project_scope_provider.sql");
+    expect(startSource).toContain(
+      "0044_backlink_platform_project_authority.sql",
+    );
+    expect(startSource).toContain(
+      "0045_backlink_commercial_candidate_inventory.sql",
+    );
+    expect(startSource).toContain("0046_backlink_contact_publication_gate.sql");
+    expect(startSource).toContain("0047_backlink_gmail_organization_reuse.sql");
+    expect(startSource).toContain("backlink_commercial_discovery_blueprints");
+    expect(startSource).toContain("backlink_commercial_inventory_policies");
+    expect(startSource).toContain("backlink_contact_enrichment_batches");
+    expect(startSource).toContain("backlink_contact_evidence_snapshots");
+    expect(startSource).toContain("backlink_list_active_project_scopes");
+    expect(startSource).toContain(
+      "platform.backlink_list_active_website_projects",
     );
     expect(startSource).toContain("target_urls");
     expect(startSource).toContain("website_project_id");
     expect(startSource).toContain("source_contact_candidate_id");
     expect(startSource).toContain("contact_review_required");
+    expect(startSource).toContain("backlink_website_project_mailbox_bindings");
+  });
+
+  it("keeps one stable Gmail callback when projects are added or switched", () => {
+    const stableCallback =
+      "$publicBaseUrl/api/v1/backlinks/gmail-connections/callback";
+    expect(configurationSource).toContain(stableCallback);
+    expect(initializeProjectSource).toContain(stableCallback);
+    expect(initializeProjectSource).not.toContain(
+      "$publicBaseUrl/api/v1/projects/$ProjectKey/",
+    );
   });
 
   it("enables the shared browser worker through the explicit local switch", () => {
@@ -209,12 +253,8 @@ describe("LOCAL_PRODUCT process scripts", () => {
     expect(configurationSource).toContain("[switch]$EnableGmailSend");
     expect(configurationSource).toContain("[switch]$EnableGmailSync");
     expect(configurationSource).toContain("AI_PROVIDER_MAX_CALLS");
-    expect(configurationSource).toContain(
-      "GMAIL_ROLLING_24_HOUR_SEND_LIMIT",
-    );
-    expect(configurationSource).toContain(
-      "GMAIL_MINIMUM_INTERVAL_SECONDS",
-    );
+    expect(configurationSource).toContain("GMAIL_ROLLING_24_HOUR_SEND_LIMIT");
+    expect(configurationSource).toContain("GMAIL_MINIMUM_INTERVAL_SECONDS");
     expect(startSource).toContain('"AI_PROVIDER"');
     expect(startSource).toContain('"GMAIL_SEND"');
     expect(startSource).toContain('"GMAIL_SYNC"');
@@ -234,12 +274,8 @@ describe("LOCAL_PRODUCT process scripts", () => {
     expect(restartSource).toContain(
       "-KeepInfrastructure:(-not $RestartInfrastructure)",
     );
-    expect(restartSource).toContain(
-      '"Start-GrowthOS-LocalProduct.ps1"',
-    );
-    expect(restartSource).toContain(
-      "$previousState.dataForSeoEnabled",
-    );
+    expect(restartSource).toContain('"Start-GrowthOS-LocalProduct.ps1"');
+    expect(restartSource).toContain("$previousState.dataForSeoEnabled");
     expect(restartSource).toContain(
       "$previousState.gmailPollingIntervalSeconds",
     );
@@ -271,9 +307,7 @@ describe("LOCAL_PRODUCT process scripts", () => {
     expect(dataForSeoImportSource).toContain(
       "-CredentialSecretReference $CredentialSecretReference",
     );
-    expect(dataForSeoImportSource).toContain(
-      "-MaxPaidCalls $MaxPaidCalls",
-    );
+    expect(dataForSeoImportSource).toContain("-MaxPaidCalls $MaxPaidCalls");
     expect(dataForSeoImportSource).toContain("-Keywords $Keywords");
     expect(dataForSeoImportSource).toContain("-Products $Products");
     expect(dataForSeoImportSource).toContain("-TargetUrls $TargetUrls");

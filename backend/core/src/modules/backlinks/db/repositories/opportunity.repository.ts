@@ -93,19 +93,17 @@ versioned AS (
     FROM present
    WHERE version=$7
      AND status IN ('ready','shown')
+     AND publication_status='PUBLISHED'
+     AND verified_public_email_count>=1
+     AND contact_evidence_snapshot_id IS NOT NULL
+     AND default_contact_candidate_id=$6
 ),
 source AS (
   SELECT i.id inventory_id,i.recommendation_id,i.prospect_id,
          i.recommendation_context_version_id,p.hostname_ascii,
          p.registrable_domain,p.normalization_version,
          c.id contact_candidate_id,
-         (
-           c.domain_relation <> 'same_registrable_domain'
-           OR c.inferred_purpose='unknown'
-           OR c.confidence < 80
-           OR c.purpose_confidence < 70
-           OR c.guessed
-         ) contact_review_required
+         false contact_review_required
     FROM versioned i
     JOIN backlink_prospects p ON
       (p.organization_id,p.workspace_id,p.website_project_id,p.id,
@@ -117,8 +115,29 @@ source AS (
        c.prospect_id,c.recommendation_context_version_id)=
       (i.organization_id,i.workspace_id,i.website_project_id,$6,
        i.prospect_id,i.recommendation_context_version_id)
+    JOIN backlink_contact_evidence_snapshots snapshot ON
+      (snapshot.organization_id,snapshot.workspace_id,
+       snapshot.website_project_id,snapshot.id,
+       snapshot.recommendation_id,snapshot.prospect_id,
+       snapshot.recommendation_context_version_id,
+       snapshot.contact_candidate_id)=
+      (i.organization_id,i.workspace_id,i.website_project_id,
+       i.contact_evidence_snapshot_id,i.recommendation_id,i.prospect_id,
+       i.recommendation_context_version_id,c.id)
+    JOIN backlink_contact_evidence e ON
+      (e.organization_id,e.workspace_id,e.website_project_id,e.id,
+       e.candidate_id)=
+      (snapshot.organization_id,snapshot.workspace_id,
+       snapshot.website_project_id,snapshot.contact_evidence_id,c.id)
    WHERE c.status IN ('candidate','promoted')
      AND c.invalidated_at IS NULL
+     AND c.guessed=false
+     AND c.confidence>=80
+     AND c.purpose_confidence>=70
+     AND c.inferred_purpose IN (
+       'editorial','partnerships','advertising','business',
+       'marketing','site_owner','general'
+     )
      AND lower(c.normalized_email) ~
        '^[^[:space:]@]+@[a-z0-9.-]+[.][a-z]{2,}$'
      AND split_part(lower(c.normalized_email),'@',1) !~
@@ -127,18 +146,13 @@ source AS (
        'example.com','example.org','example.net'
      )
      AND c.email_domain_ascii NOT LIKE '%.invalid'
-     AND EXISTS (
-       SELECT 1
-         FROM backlink_contact_evidence e
-        WHERE (e.organization_id,e.workspace_id,e.website_project_id,
-               e.candidate_id)=
-              (c.organization_id,c.workspace_id,c.website_project_id,c.id)
-          AND e.invalidated_at IS NULL
-          AND e.expires_at > now()
-          AND e.extraction_method IN (
-            'mailto','visible_text','obfuscated_text','json_ld','manual'
-          )
+     AND e.invalidated_at IS NULL
+     AND e.expires_at > now()
+     AND e.confidence>=80
+     AND e.extraction_method IN (
+       'mailto','visible_text','obfuscated_text','json_ld'
      )
+     AND e.source_url=snapshot.source_url
 ),
 existing AS (
   SELECT o.id

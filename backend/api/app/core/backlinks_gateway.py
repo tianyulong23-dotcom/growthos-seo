@@ -208,6 +208,62 @@ class BacklinksGateway:
 
         return self._upstream_response(upstream)
 
+    async def forward_collection(
+        self,
+        request: Request,
+        *,
+        resolved: ResolvedPlatformCollectionContext,
+        query_params: Sequence[tuple[str, str]] | None = None,
+    ) -> Response:
+        try:
+            signed_context = issue_platform_request_context_v1(
+                resolved,
+                signing_key=self._require_signing_key(),
+                now=datetime.now(UTC),
+            )
+        except ValueError:
+            return problem_response(
+                status=503,
+                problem_type="urn:growthos:problem:platform:backlinks-gateway-misconfigured",
+                title="Backlinks gateway unavailable",
+                detail="The Backlinks gateway signing configuration is unavailable.",
+                code="BACKLINKS_GATEWAY_MISCONFIGURED",
+                request_id=resolved.correlation_id,
+                retryable=False,
+            )
+
+        browser_headers = strip_untrusted_platform_context_headers(dict(request.headers))
+        forwarded_headers = {
+            name: browser_headers[name]
+            for name in ("accept", "content-type")
+            if name in browser_headers
+        }
+        forwarded_headers["x-correlation-id"] = resolved.correlation_id
+        forwarded_headers.update(signed_context)
+        try:
+            upstream = await self._client.request(
+                request.method,
+                f"{self._base_url}{request.url.path}",
+                params=(
+                    list(request.query_params.multi_items())
+                    if query_params is None
+                    else list(query_params)
+                ),
+                headers=forwarded_headers,
+                content=await request.body(),
+            )
+        except httpx.RequestError:
+            return problem_response(
+                status=503,
+                problem_type="urn:growthos:problem:platform:backlinks-unavailable",
+                title="Backlinks service unavailable",
+                detail="The Backlinks service could not be reached.",
+                code="BACKLINKS_UNAVAILABLE",
+                request_id=resolved.correlation_id,
+                retryable=True,
+            )
+        return self._upstream_response(upstream)
+
     async def forward_gmail_push(self, request: Request) -> Response:
         browser_headers = strip_untrusted_platform_context_headers(dict(request.headers))
         forwarded_headers = {

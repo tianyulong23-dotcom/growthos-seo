@@ -2,12 +2,8 @@ import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
-import type {
-  BacklinksRuntimeFactoryContext,
-} from "../../src/index.js";
-import {
-  runtime,
-} from "../../src/modules/backlinks/runtime/production-runtime.js";
+import type { BacklinksRuntimeFactoryContext } from "../../src/index.js";
+import { runtime } from "../../src/modules/backlinks/runtime/production-runtime.js";
 import {
   createActorContext,
   createProjectContext,
@@ -56,6 +52,9 @@ describe("production Backlinks runtime", () => {
     expect(source).not.toMatch(
       /(?:test\/|fixtures?|\bfake\b|\bmock\b|in[- ]?memory|memoryrepository)/i,
     );
+    expect(source).not.toContain("LOCAL_PRODUCT_WEBSITE_PROJECT_ID");
+    expect(source).toContain("createPostgresqlProjectScopeProvider");
+    expect(source).toContain("runProjectScopedLane");
   });
 
   it("casts recommendation refill failure codes before building JSON", async () => {
@@ -79,8 +78,28 @@ describe("production Backlinks runtime", () => {
       "utf8",
     );
 
+    expect(source).toContain("reserveRecommendationRefillJob(client,");
+    expect(source).toContain("ensureCommercialRecommendationRefill(client,");
     expect(source).toContain(
-      "reserveRecommendationRefillJob(client,",
+      'event: "backlinks.commercial-inventory.refill.queued"',
+    );
+    expect(source).toContain("createRecommendationRefillOutboxRelay({");
+  });
+
+  it("runs a daily token-only Gmail health check without dispatching mail", async () => {
+    const source = await readFile(
+      new URL(
+        "../../src/modules/backlinks/runtime/production-runtime.ts",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+
+    expect(source).toContain('runLocalProjectLane("gmail-sync"');
+    expect(source).toContain("gmailSendRuntime.refreshTokenHealth({");
+    expect(source).toContain('event: "backlinks.gmail-token-health.checked"');
+    expect(source).toContain(
+      "nextGmailTokenHealthCheckAt = Date.now() + 86_400_000",
     );
   });
 

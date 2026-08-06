@@ -63,6 +63,20 @@ describe("BL-AI-069 robots policy adapter", () => {
       .resolves.toMatchObject({ decision });
   });
 
+  it("reuses one robots document for pages in the same project and origin", async () => {
+    const { adapter, fetch } = setup(response(
+      "User-agent: *\nDisallow: /private\nAllow: /public",
+    ));
+    await expect(adapter.evaluate(request)).resolves.toMatchObject({
+      decision: "disallow",
+    });
+    await expect(adapter.evaluate({
+      ...request,
+      targetUrl: "https://example.com/public/about",
+    })).resolves.toMatchObject({ decision: "allow" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     [new Error("offline"), "robots_unavailable"],
     [response("User-agent: *", 503), "robots_unavailable"],

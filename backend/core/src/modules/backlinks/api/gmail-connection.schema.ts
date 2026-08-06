@@ -12,6 +12,10 @@ export const gmailConnectionResourceParamsSchema =
     connectionId: z.uuid(),
   }).strict();
 
+export const gmailConnectionSelectionBodySchema = z.object({
+  connectionId: z.uuid(),
+}).strict();
+
 export const gmailConnectBodySchema = z.object({
   returnPath: z.string().max(2_048).refine(
     (value) => value.startsWith("/") && !value.startsWith("//"),
@@ -45,6 +49,7 @@ export const gmailConnectionViewSchema = z.object({
   mailSyncCapability: z.boolean(),
   tokenExpiresAt: timestamp,
   connectedAt: timestamp,
+  recentErrorCategory: nonBlank.max(255).nullable(),
 }).strict();
 
 export const gmailConnectionMetaSchema = z.object({
@@ -70,8 +75,11 @@ export const gmailCallbackResponseSchema = z.object({
 
 export const gmailStatusResponseSchema = z.object({
   connection: gmailConnectionViewSchema.nullable(),
+  accounts: z.array(gmailConnectionViewSchema),
   meta: gmailConnectionMetaSchema,
 }).strict();
+
+export const gmailSelectionResponseSchema = gmailStatusResponseSchema;
 
 export const gmailPollingSyncResponseSchema = z.object({
   status: z.literal("ACCEPTED"),

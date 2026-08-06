@@ -42,11 +42,11 @@ class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
     let cleaned = 0;
     for (const [stateHash, stored] of this.attempts) {
       if (
-        stored.creation.organizationId === input.organizationId
-        && stored.creation.workspaceId === input.workspaceId
-        && stored.creation.websiteProjectId === input.websiteProjectId
-        && stored.consumedAt === null
-        && stored.creation.expiresAt.getTime() <= input.expiredAt.getTime()
+        stored.creation.organizationId === input.organizationId &&
+        stored.creation.workspaceId === input.workspaceId &&
+        stored.creation.websiteProjectId === input.websiteProjectId &&
+        stored.consumedAt === null &&
+        stored.creation.expiresAt.getTime() <= input.expiredAt.getTime()
       ) {
         this.attempts.delete(stateHash);
         cleaned += 1;
@@ -60,14 +60,13 @@ class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
   ): Promise<ConsumedOAuthAttempt | null> {
     const stored = this.attempts.get(input.stateHash);
     if (
-      stored === undefined
-      || stored.creation.organizationId !== input.organizationId
-      || stored.creation.workspaceId !== input.workspaceId
-      || stored.creation.websiteProjectId !== input.websiteProjectId
-      || stored.creation.initiatedByUserId !== input.initiatedByUserId
-      || stored.creation.sessionBindingHash !== input.sessionBindingHash
-      || stored.consumedAt !== null
-      || stored.creation.expiresAt.getTime() <= input.consumedAt.getTime()
+      stored === undefined ||
+      stored.creation.organizationId !== input.organizationId ||
+      stored.creation.workspaceId !== input.workspaceId ||
+      stored.creation.initiatedByUserId !== input.initiatedByUserId ||
+      stored.creation.sessionBindingHash !== input.sessionBindingHash ||
+      stored.consumedAt !== null ||
+      stored.creation.expiresAt.getTime() <= input.consumedAt.getTime()
     ) {
       return null;
     }
@@ -75,6 +74,9 @@ class FakeOAuthAttemptRepository implements OAuthAttemptRepository {
     stored.consumedAt = new Date(input.consumedAt);
     return {
       attemptId: stored.creation.id,
+      organizationId: stored.creation.organizationId,
+      workspaceId: stored.creation.workspaceId,
+      websiteProjectId: stored.creation.websiteProjectId,
       pkceVerifier: stored.creation.pkceVerifier,
       requestedScopes: stored.creation.requestedScopes,
       redirectUri: stored.creation.redirectUri,
@@ -94,11 +96,13 @@ const context = {
   organizationId: id(1),
   workspaceId: id(2),
   websiteProjectId: id(3),
+  websiteProjectKey: "awol",
   initiatedByUserId: "user-100",
   sessionBinding: "browser-session-100",
 } as const;
-const redirectUri = "https://app.example.com/api/backlinks/gmail/callback";
-const returnPath = "/backlinks/settings/connections";
+const redirectUri =
+  "http://localhost:7200/api/v1/backlinks/gmail-connections/callback";
+const returnPath = "/projects/awol/backlinks/email";
 
 const setup = () => {
   const repository = new FakeOAuthAttemptRepository();
@@ -151,29 +155,31 @@ describe("BL-AI-100 OAuth attempt", () => {
       sha256Hex(context.sessionBinding),
     );
     expect(stored?.creation).not.toHaveProperty("sessionBinding");
-    expect(stored?.creation.pkceVerifier).toMatch(
-      /^[A-Za-z0-9_-]{43}$/u,
-    );
+    expect(stored?.creation.pkceVerifier).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(started.codeChallenge).toBe(
       sha256Base64Url(stored?.creation.pkceVerifier ?? ""),
     );
-    expect(repository.cleanupInputs).toEqual([{
-      organizationId: context.organizationId,
-      workspaceId: context.workspaceId,
-      websiteProjectId: context.websiteProjectId,
-      cleanedByUserId: context.initiatedByUserId,
-      expiredAt: new Date("2026-07-27T03:00:00.000Z"),
-    }]);
+    expect(repository.cleanupInputs).toEqual([
+      {
+        organizationId: context.organizationId,
+        workspaceId: context.workspaceId,
+        websiteProjectId: context.websiteProjectId,
+        cleanedByUserId: context.initiatedByUserId,
+        expiredAt: new Date("2026-07-27T03:00:00.000Z"),
+      },
+    ]);
   });
 
   it("rejects forged and replayed state with one non-secret error", async () => {
     const { service } = setup();
     const started = await begin(service);
 
-    await expectInvalidState(service.consume({
-      ...context,
-      state: "forged-oauth-state",
-    }));
+    await expectInvalidState(
+      service.consume({
+        ...context,
+        state: "forged-oauth-state",
+      }),
+    );
 
     const consumed = await service.consume({
       ...context,
@@ -181,10 +187,12 @@ describe("BL-AI-100 OAuth attempt", () => {
     });
     expect(consumed.pkceVerifier).toMatch(/^[A-Za-z0-9_-]{43}$/u);
 
-    await expectInvalidState(service.consume({
-      ...context,
-      state: started.state,
-    }));
+    await expectInvalidState(
+      service.consume({
+        ...context,
+        state: started.state,
+      }),
+    );
     expect(new InvalidOAuthStateError().message).not.toContain(started.state);
     expect(new InvalidOAuthStateError().message).not.toContain(
       consumed.pkceVerifier,
@@ -197,10 +205,12 @@ describe("BL-AI-100 OAuth attempt", () => {
 
     setNow("2026-07-27T03:10:00.000Z");
 
-    await expectInvalidState(service.consume({
-      ...context,
-      state: started.state,
-    }));
+    await expectInvalidState(
+      service.consume({
+        ...context,
+        state: started.state,
+      }),
+    );
   });
 
   it("rejects cross-tenant, cross-user, and cross-session callbacks", async () => {
@@ -209,45 +219,50 @@ describe("BL-AI-100 OAuth attempt", () => {
     const invalidContexts = [
       { ...context, organizationId: id(11) },
       { ...context, workspaceId: id(12) },
-      { ...context, websiteProjectId: id(13) },
       { ...context, initiatedByUserId: "user-101" },
       { ...context, sessionBinding: "browser-session-101" },
     ];
 
     for (const invalidContext of invalidContexts) {
-      await expectInvalidState(service.consume({
-        ...invalidContext,
-        state: started.state,
-      }));
+      await expectInvalidState(
+        service.consume({
+          ...invalidContext,
+          state: started.state,
+        }),
+      );
     }
 
-    await expect(service.consume({
-      ...context,
-      state: started.state,
-    })).resolves.toMatchObject({
+    await expect(
+      service.consume({
+        ...context,
+        state: started.state,
+      }),
+    ).resolves.toMatchObject({
       redirectUri,
       returnPath,
+      websiteProjectId: context.websiteProjectId,
       requestedScopes: gmailOAuthScopes,
     });
   });
 
   it("keeps parallel attempts independently consumable", async () => {
     const { repository, service } = setup();
-    const [first, second] = await Promise.all([
-      begin(service),
-      begin(service),
-    ]);
+    const [first, second] = await Promise.all([begin(service), begin(service)]);
 
     expect(first.state).not.toBe(second.state);
     expect(repository.attempts.size).toBe(2);
-    await expect(service.consume({
-      ...context,
-      state: first.state,
-    })).resolves.toBeDefined();
-    await expect(service.consume({
-      ...context,
-      state: second.state,
-    })).resolves.toBeDefined();
+    await expect(
+      service.consume({
+        ...context,
+        state: first.state,
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      service.consume({
+        ...context,
+        state: second.state,
+      }),
+    ).resolves.toBeDefined();
   });
 
   it("allows only one winner when the same state is consumed concurrently", async () => {
@@ -259,10 +274,11 @@ describe("BL-AI-100 OAuth attempt", () => {
       service.consume({ ...context, state: started.state }),
     ]);
 
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
     const rejected = results.filter(
-      (result): result is PromiseRejectedResult =>
-        result.status === "rejected",
+      (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     expect(rejected).toHaveLength(1);
     expect(rejected[0]?.reason).toBeInstanceOf(InvalidOAuthStateError);

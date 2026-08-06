@@ -5347,6 +5347,847 @@
         }
       }
     },
+    "/api/v1/projects/{websiteProjectKey}/backlinks/contact-enrichment-batches/current/retry-unpublished": {
+      "post": {
+        "operationId": "backlinksRetryUnpublishedContactsV1",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "in": "path",
+            "name": "websiteProjectKey",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "batchId": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "retriedJobCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "batchId",
+                    "retriedJobCount"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{websiteProjectKey}/backlinks/recommendations/{recommendationId}/contact-enrichment-jobs": {
       "post": {
         "operationId": "backlinksStartContactEnrichmentV1",
@@ -5384,6 +6225,11 @@
                       "format": "uuid",
                       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                     },
+                    "batchId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
                     "recommendationId": {
                       "type": "string",
                       "format": "uuid",
@@ -5411,7 +6257,8 @@
                         "completed",
                         "partially_completed",
                         "no_contact_found",
-                        "retry_scheduled"
+                        "retry_scheduled",
+                        "stale_context"
                       ]
                     },
                     "attemptCount": {
@@ -5461,6 +6308,36 @@
                       "nullable": true,
                       "type": "string"
                     },
+                    "terminalReasonCode": {
+                      "nullable": true,
+                      "type": "string",
+                      "enum": [
+                        "PUBLIC_EMAIL_FOUND",
+                        "CONTACT_FORM_ONLY",
+                        "LOGIN_REQUIRED",
+                        "CAPTCHA_OR_BOT_CHALLENGE",
+                        "ROBOTS_DISALLOWED",
+                        "ACCESS_DENIED",
+                        "NO_PUBLIC_EMAIL",
+                        "SITE_UNREACHABLE",
+                        "UNSUPPORTED_CONTENT",
+                        "MANUAL_REVIEW_REQUIRED",
+                        "COMPLETED_PARTIAL"
+                      ]
+                    },
+                    "method": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "static",
+                        "browser",
+                        "static_and_browser"
+                      ]
+                    },
+                    "lastErrorCategory": {
+                      "nullable": true,
+                      "type": "string"
+                    },
                     "retryAfter": {
                       "nullable": true,
                       "type": "string",
@@ -5479,6 +6356,12 @@
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
                     },
+                    "completedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                    },
                     "version": {
                       "type": "integer",
                       "minimum": 0,
@@ -5491,6 +6374,7 @@
                   },
                   "required": [
                     "id",
+                    "batchId",
                     "recommendationId",
                     "prospectId",
                     "recommendationContextVersionId",
@@ -5506,9 +6390,13 @@
                     "candidateCount",
                     "evidenceCount",
                     "lastErrorCode",
+                    "terminalReasonCode",
+                    "method",
+                    "lastErrorCategory",
                     "retryAfter",
                     "startedAt",
                     "finishedAt",
+                    "completedAt",
                     "version",
                     "replayed"
                   ],
@@ -6352,6 +7240,11 @@
                       "format": "uuid",
                       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                     },
+                    "batchId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
                     "recommendationId": {
                       "type": "string",
                       "format": "uuid",
@@ -6379,7 +7272,8 @@
                         "completed",
                         "partially_completed",
                         "no_contact_found",
-                        "retry_scheduled"
+                        "retry_scheduled",
+                        "stale_context"
                       ]
                     },
                     "attemptCount": {
@@ -6429,6 +7323,36 @@
                       "nullable": true,
                       "type": "string"
                     },
+                    "terminalReasonCode": {
+                      "nullable": true,
+                      "type": "string",
+                      "enum": [
+                        "PUBLIC_EMAIL_FOUND",
+                        "CONTACT_FORM_ONLY",
+                        "LOGIN_REQUIRED",
+                        "CAPTCHA_OR_BOT_CHALLENGE",
+                        "ROBOTS_DISALLOWED",
+                        "ACCESS_DENIED",
+                        "NO_PUBLIC_EMAIL",
+                        "SITE_UNREACHABLE",
+                        "UNSUPPORTED_CONTENT",
+                        "MANUAL_REVIEW_REQUIRED",
+                        "COMPLETED_PARTIAL"
+                      ]
+                    },
+                    "method": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "static",
+                        "browser",
+                        "static_and_browser"
+                      ]
+                    },
+                    "lastErrorCategory": {
+                      "nullable": true,
+                      "type": "string"
+                    },
                     "retryAfter": {
                       "nullable": true,
                       "type": "string",
@@ -6447,6 +7371,12 @@
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
                     },
+                    "completedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                    },
                     "version": {
                       "type": "integer",
                       "minimum": 0,
@@ -6456,6 +7386,7 @@
                   },
                   "required": [
                     "id",
+                    "batchId",
                     "recommendationId",
                     "prospectId",
                     "recommendationContextVersionId",
@@ -6471,9 +7402,13 @@
                     "candidateCount",
                     "evidenceCount",
                     "lastErrorCode",
+                    "terminalReasonCode",
+                    "method",
+                    "lastErrorCategory",
                     "retryAfter",
                     "startedAt",
                     "finishedAt",
+                    "completedAt",
                     "version"
                   ],
                   "additionalProperties": false
@@ -7316,6 +8251,11 @@
                       "format": "uuid",
                       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                     },
+                    "batchId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
                     "recommendationId": {
                       "type": "string",
                       "format": "uuid",
@@ -7343,7 +8283,8 @@
                         "completed",
                         "partially_completed",
                         "no_contact_found",
-                        "retry_scheduled"
+                        "retry_scheduled",
+                        "stale_context"
                       ]
                     },
                     "attemptCount": {
@@ -7393,6 +8334,36 @@
                       "nullable": true,
                       "type": "string"
                     },
+                    "terminalReasonCode": {
+                      "nullable": true,
+                      "type": "string",
+                      "enum": [
+                        "PUBLIC_EMAIL_FOUND",
+                        "CONTACT_FORM_ONLY",
+                        "LOGIN_REQUIRED",
+                        "CAPTCHA_OR_BOT_CHALLENGE",
+                        "ROBOTS_DISALLOWED",
+                        "ACCESS_DENIED",
+                        "NO_PUBLIC_EMAIL",
+                        "SITE_UNREACHABLE",
+                        "UNSUPPORTED_CONTENT",
+                        "MANUAL_REVIEW_REQUIRED",
+                        "COMPLETED_PARTIAL"
+                      ]
+                    },
+                    "method": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "static",
+                        "browser",
+                        "static_and_browser"
+                      ]
+                    },
+                    "lastErrorCategory": {
+                      "nullable": true,
+                      "type": "string"
+                    },
                     "retryAfter": {
                       "nullable": true,
                       "type": "string",
@@ -7411,6 +8382,12 @@
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
                     },
+                    "completedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                    },
                     "version": {
                       "type": "integer",
                       "minimum": 0,
@@ -7420,6 +8397,7 @@
                   },
                   "required": [
                     "id",
+                    "batchId",
                     "recommendationId",
                     "prospectId",
                     "recommendationContextVersionId",
@@ -7435,9 +8413,13 @@
                     "candidateCount",
                     "evidenceCount",
                     "lastErrorCode",
+                    "terminalReasonCode",
+                    "method",
+                    "lastErrorCategory",
                     "retryAfter",
                     "startedAt",
                     "finishedAt",
+                    "completedAt",
                     "version"
                   ],
                   "additionalProperties": false
@@ -10052,6 +11034,899 @@
         }
       }
     },
+    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-inventory": {
+      "get": {
+        "operationId": "backlinksGetRecommendationInventoryV1",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "in": "path",
+            "name": "websiteProjectKey",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "candidateReadyCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "publishedContactReadyCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "historicalEmailHitRate": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "candidateLowWatermark": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "candidateHighWatermark": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 9007199254740991
+                    },
+                    "publishedLowWatermark": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "publishedHighWatermark": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 9007199254740991
+                    },
+                    "blueprintVersion": {
+                      "nullable": true,
+                      "type": "integer",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 9007199254740991
+                    },
+                    "blueprintGenerator": {
+                      "nullable": true,
+                      "type": "string",
+                      "enum": [
+                        "AI",
+                        "DETERMINISTIC_FALLBACK"
+                      ]
+                    },
+                    "latestRefillAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                    },
+                    "nextRefillAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                    },
+                    "providerCollectedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                    },
+                    "pauseReason": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "refillInFlight": {
+                      "type": "boolean"
+                    },
+                    "contactBatch": {
+                      "nullable": true,
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "running",
+                            "completed",
+                            "stale_context"
+                          ]
+                        },
+                        "totalJobCount": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "terminalJobCount": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "publishedCount": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "unpublishedCount": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "retryableUnpublishedCount": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "reasonCounts": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "reasonCode": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "reasonCode",
+                              "count"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "startedAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                        },
+                        "completedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "status",
+                        "totalJobCount",
+                        "terminalJobCount",
+                        "publishedCount",
+                        "unpublishedCount",
+                        "retryableUnpublishedCount",
+                        "reasonCounts",
+                        "startedAt",
+                        "completedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "organizationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "workspaceId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "websiteProjectId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "requestId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "schemaVersion": {
+                          "type": "string",
+                          "enum": [
+                            "backlinks.v1"
+                          ]
+                        },
+                        "generatedAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                        }
+                      },
+                      "required": [
+                        "organizationId",
+                        "workspaceId",
+                        "websiteProjectId",
+                        "requestId",
+                        "schemaVersion",
+                        "generatedAt"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "candidateReadyCount",
+                    "publishedContactReadyCount",
+                    "historicalEmailHitRate",
+                    "candidateLowWatermark",
+                    "candidateHighWatermark",
+                    "publishedLowWatermark",
+                    "publishedHighWatermark",
+                    "blueprintVersion",
+                    "blueprintGenerator",
+                    "latestRefillAt",
+                    "nextRefillAt",
+                    "providerCollectedAt",
+                    "pauseReason",
+                    "refillInFlight",
+                    "contactBatch",
+                    "meta"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{websiteProjectKey}/backlinks/recommendations": {
       "get": {
         "operationId": "backlinksListRecommendationsV1",
@@ -10149,6 +12024,17 @@
                               "stale_context",
                               "accepted"
                             ]
+                          },
+                          "publicationStatus": {
+                            "type": "string",
+                            "enum": [
+                              "PUBLISHED"
+                            ]
+                          },
+                          "verifiedPublicEmailCount": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991
                           },
                           "recommendationContextVersionId": {
                             "type": "string",
@@ -10445,6 +12331,11 @@
                                 "format": "uuid",
                                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                               },
+                              "batchId": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
                               "status": {
                                 "type": "string",
                                 "enum": [
@@ -10453,7 +12344,8 @@
                                   "completed",
                                   "partially_completed",
                                   "no_contact_found",
-                                  "retry_scheduled"
+                                  "retry_scheduled",
+                                  "stale_context"
                                 ]
                               },
                               "candidateCount": {
@@ -10475,7 +12367,43 @@
                                 "nullable": true,
                                 "type": "string"
                               },
+                              "terminalReasonCode": {
+                                "nullable": true,
+                                "type": "string",
+                                "enum": [
+                                  "PUBLIC_EMAIL_FOUND",
+                                  "CONTACT_FORM_ONLY",
+                                  "LOGIN_REQUIRED",
+                                  "CAPTCHA_OR_BOT_CHALLENGE",
+                                  "ROBOTS_DISALLOWED",
+                                  "ACCESS_DENIED",
+                                  "NO_PUBLIC_EMAIL",
+                                  "SITE_UNREACHABLE",
+                                  "UNSUPPORTED_CONTENT",
+                                  "MANUAL_REVIEW_REQUIRED",
+                                  "COMPLETED_PARTIAL"
+                                ]
+                              },
+                              "method": {
+                                "type": "string",
+                                "enum": [
+                                  "none",
+                                  "static",
+                                  "browser",
+                                  "static_and_browser"
+                                ]
+                              },
+                              "lastErrorCategory": {
+                                "nullable": true,
+                                "type": "string"
+                              },
                               "retryAfter": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                              },
+                              "completedAt": {
                                 "nullable": true,
                                 "type": "string",
                                 "format": "date-time",
@@ -10484,12 +12412,17 @@
                             },
                             "required": [
                               "id",
+                              "batchId",
                               "status",
                               "candidateCount",
                               "evidenceCount",
                               "pagesVisited",
                               "lastErrorCode",
-                              "retryAfter"
+                              "terminalReasonCode",
+                              "method",
+                              "lastErrorCategory",
+                              "retryAfter",
+                              "completedAt"
                             ],
                             "additionalProperties": false
                           },
@@ -10637,6 +12570,8 @@
                           "hostname",
                           "score",
                           "status",
+                          "publicationStatus",
+                          "verifiedPublicEmailCount",
                           "recommendationContextVersionId",
                           "version",
                           "scoreModelVersion",
@@ -46786,7 +48721,7 @@
         }
       }
     },
-    "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/callback": {
+    "/api/v1/backlinks/gmail-connections/callback": {
       "get": {
         "operationId": "backlinksCompleteGmailConnectionV1",
         "parameters": [
@@ -46807,15 +48742,6 @@
             },
             "in": "query",
             "name": "state",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1
-            },
-            "in": "path",
-            "name": "websiteProjectKey",
             "required": true
           }
         ],
@@ -46897,6 +48823,12 @@
                           "type": "string",
                           "format": "date-time",
                           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "recentErrorCategory": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
                         }
                       },
                       "required": [
@@ -46910,7 +48842,999 @@
                         "sendAvailability",
                         "mailSyncCapability",
                         "tokenExpiresAt",
-                        "connectedAt"
+                        "connectedAt",
+                        "recentErrorCategory"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "returnPath": {
+                      "nullable": true,
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "organizationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "workspaceId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "websiteProjectId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "requestId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "schemaVersion": {
+                          "type": "string",
+                          "enum": [
+                            "backlinks.v1"
+                          ]
+                        },
+                        "generatedAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        }
+                      },
+                      "required": [
+                        "organizationId",
+                        "workspaceId",
+                        "websiteProjectId",
+                        "requestId",
+                        "schemaVersion",
+                        "generatedAt"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "connection",
+                    "returnPath",
+                    "meta"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/callback": {
+      "get": {
+        "operationId": "backlinksCompleteLegacyGmailConnectionV1",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "in": "query",
+            "name": "code",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            },
+            "in": "query",
+            "name": "state",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "in": "path",
+            "name": "websiteProjectKey",
+            "required": true
+          }
+        ],
+        "deprecated": true,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connection": {
+                      "type": "object",
+                      "properties": {
+                        "connectionId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "exclusiveMinimum": true,
+                          "maximum": 9007199254740991
+                        },
+                        "primaryEmail": {
+                          "type": "string",
+                          "format": "email",
+                          "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                        },
+                        "displayName": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
+                        },
+                        "hostedDomain": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
+                        },
+                        "grantedScopes": {
+                          "minItems": 1,
+                          "maxItems": 32,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2048
+                          }
+                        },
+                        "connectionStatus": {
+                          "type": "string",
+                          "enum": [
+                            "CONNECTING",
+                            "CONNECTED",
+                            "REAUTH_REQUIRED",
+                            "TOKEN_REVOKED",
+                            "DISCONNECTED"
+                          ]
+                        },
+                        "sendAvailability": {
+                          "type": "string",
+                          "enum": [
+                            "AVAILABLE",
+                            "PAUSED"
+                          ]
+                        },
+                        "mailSyncCapability": {
+                          "type": "boolean"
+                        },
+                        "tokenExpiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "connectedAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "recentErrorCategory": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
+                        }
+                      },
+                      "required": [
+                        "connectionId",
+                        "version",
+                        "primaryEmail",
+                        "displayName",
+                        "hostedDomain",
+                        "grantedScopes",
+                        "connectionStatus",
+                        "sendAvailability",
+                        "mailSyncCapability",
+                        "tokenExpiresAt",
+                        "connectedAt",
+                        "recentErrorCategory"
                       ],
                       "additionalProperties": false
                     },
@@ -47862,6 +50786,12 @@
                           "type": "string",
                           "format": "date-time",
                           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "recentErrorCategory": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
                         }
                       },
                       "required": [
@@ -47875,9 +50805,107 @@
                         "sendAvailability",
                         "mailSyncCapability",
                         "tokenExpiresAt",
-                        "connectedAt"
+                        "connectedAt",
+                        "recentErrorCategory"
                       ],
                       "additionalProperties": false
+                    },
+                    "accounts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "connectionId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "version": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true,
+                            "maximum": 9007199254740991
+                          },
+                          "primaryEmail": {
+                            "type": "string",
+                            "format": "email",
+                            "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                          },
+                          "displayName": {
+                            "nullable": true,
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255
+                          },
+                          "hostedDomain": {
+                            "nullable": true,
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255
+                          },
+                          "grantedScopes": {
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2048
+                            }
+                          },
+                          "connectionStatus": {
+                            "type": "string",
+                            "enum": [
+                              "CONNECTING",
+                              "CONNECTED",
+                              "REAUTH_REQUIRED",
+                              "TOKEN_REVOKED",
+                              "DISCONNECTED"
+                            ]
+                          },
+                          "sendAvailability": {
+                            "type": "string",
+                            "enum": [
+                              "AVAILABLE",
+                              "PAUSED"
+                            ]
+                          },
+                          "mailSyncCapability": {
+                            "type": "boolean"
+                          },
+                          "tokenExpiresAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          "connectedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          "recentErrorCategory": {
+                            "nullable": true,
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255
+                          }
+                        },
+                        "required": [
+                          "connectionId",
+                          "version",
+                          "primaryEmail",
+                          "displayName",
+                          "hostedDomain",
+                          "grantedScopes",
+                          "connectionStatus",
+                          "sendAvailability",
+                          "mailSyncCapability",
+                          "tokenExpiresAt",
+                          "connectedAt",
+                          "recentErrorCategory"
+                        ],
+                        "additionalProperties": false
+                      }
                     },
                     "meta": {
                       "type": "object",
@@ -47923,6 +50951,1092 @@
                   },
                   "required": [
                     "connection",
+                    "accounts",
+                    "meta"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "enum": [
+                            400
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            401
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            403
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            404
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            409
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            429
+                          ]
+                        },
+                        {
+                          "type": "number",
+                          "enum": [
+                            500
+                          ]
+                        }
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INVALID_REQUEST"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_AUTHENTICATION_REQUIRED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_ACCESS_DENIED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_NOT_FOUND"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_CONFLICT"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_RATE_LIMITED"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BACKLINK_INTERNAL_ERROR"
+                          ]
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "fieldErrors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "field": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/select": {
+      "post": {
+        "operationId": "backlinksSelectGmailConnectionV1",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "connectionId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "connectionId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "in": "path",
+            "name": "websiteProjectKey",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connection": {
+                      "nullable": true,
+                      "type": "object",
+                      "properties": {
+                        "connectionId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "exclusiveMinimum": true,
+                          "maximum": 9007199254740991
+                        },
+                        "primaryEmail": {
+                          "type": "string",
+                          "format": "email",
+                          "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                        },
+                        "displayName": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
+                        },
+                        "hostedDomain": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
+                        },
+                        "grantedScopes": {
+                          "minItems": 1,
+                          "maxItems": 32,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2048
+                          }
+                        },
+                        "connectionStatus": {
+                          "type": "string",
+                          "enum": [
+                            "CONNECTING",
+                            "CONNECTED",
+                            "REAUTH_REQUIRED",
+                            "TOKEN_REVOKED",
+                            "DISCONNECTED"
+                          ]
+                        },
+                        "sendAvailability": {
+                          "type": "string",
+                          "enum": [
+                            "AVAILABLE",
+                            "PAUSED"
+                          ]
+                        },
+                        "mailSyncCapability": {
+                          "type": "boolean"
+                        },
+                        "tokenExpiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "connectedAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "recentErrorCategory": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
+                        }
+                      },
+                      "required": [
+                        "connectionId",
+                        "version",
+                        "primaryEmail",
+                        "displayName",
+                        "hostedDomain",
+                        "grantedScopes",
+                        "connectionStatus",
+                        "sendAvailability",
+                        "mailSyncCapability",
+                        "tokenExpiresAt",
+                        "connectedAt",
+                        "recentErrorCategory"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "accounts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "connectionId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "version": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true,
+                            "maximum": 9007199254740991
+                          },
+                          "primaryEmail": {
+                            "type": "string",
+                            "format": "email",
+                            "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                          },
+                          "displayName": {
+                            "nullable": true,
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255
+                          },
+                          "hostedDomain": {
+                            "nullable": true,
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255
+                          },
+                          "grantedScopes": {
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2048
+                            }
+                          },
+                          "connectionStatus": {
+                            "type": "string",
+                            "enum": [
+                              "CONNECTING",
+                              "CONNECTED",
+                              "REAUTH_REQUIRED",
+                              "TOKEN_REVOKED",
+                              "DISCONNECTED"
+                            ]
+                          },
+                          "sendAvailability": {
+                            "type": "string",
+                            "enum": [
+                              "AVAILABLE",
+                              "PAUSED"
+                            ]
+                          },
+                          "mailSyncCapability": {
+                            "type": "boolean"
+                          },
+                          "tokenExpiresAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          "connectedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          "recentErrorCategory": {
+                            "nullable": true,
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255
+                          }
+                        },
+                        "required": [
+                          "connectionId",
+                          "version",
+                          "primaryEmail",
+                          "displayName",
+                          "hostedDomain",
+                          "grantedScopes",
+                          "connectionStatus",
+                          "sendAvailability",
+                          "mailSyncCapability",
+                          "tokenExpiresAt",
+                          "connectedAt",
+                          "recentErrorCategory"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "organizationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "workspaceId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "websiteProjectId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "requestId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "schemaVersion": {
+                          "type": "string",
+                          "enum": [
+                            "backlinks.v1"
+                          ]
+                        },
+                        "generatedAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        }
+                      },
+                      "required": [
+                        "organizationId",
+                        "workspaceId",
+                        "websiteProjectId",
+                        "requestId",
+                        "schemaVersion",
+                        "generatedAt"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "connection",
+                    "accounts",
                     "meta"
                   ],
                   "additionalProperties": false
@@ -48852,6 +52966,12 @@
                           "type": "string",
                           "format": "date-time",
                           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "recentErrorCategory": {
+                          "nullable": true,
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
                         }
                       },
                       "required": [
@@ -48865,7 +52985,8 @@
                         "sendAvailability",
                         "mailSyncCapability",
                         "tokenExpiresAt",
-                        "connectedAt"
+                        "connectedAt",
+                        "recentErrorCategory"
                       ],
                       "additionalProperties": false
                     },

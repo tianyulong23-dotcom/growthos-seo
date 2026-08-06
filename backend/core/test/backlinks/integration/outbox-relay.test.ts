@@ -66,6 +66,7 @@ describe("BL-AI-040 Outbox Relay", () => {
     const input: BacklinkProjectAnalysisInput = {
       ...scope, jobId: id(4, sequence),
       workflowId: buildBacklinksWorkflowId({
+        organizationId: scope.organizationId,
         workspaceId: scope.workspaceId,
         websiteProjectId: scope.websiteProjectId,
         workflow: "project-analysis",
@@ -164,6 +165,7 @@ describe("BL-AI-040 Outbox Relay", () => {
     const jobId = id(4, 30);
     const eventId = id(5, 30);
     const workflowId = buildBacklinksWorkflowId({
+      organizationId: scope.organizationId,
       workspaceId: scope.workspaceId,
       websiteProjectId: scope.websiteProjectId,
       workflow: "recommendation-refill",

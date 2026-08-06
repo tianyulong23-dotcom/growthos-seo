@@ -47,8 +47,14 @@ function Assert-DataForSeoProcessEnvironment {
     ) {
         throw "LOCAL_PRODUCT_DATAFORSEO_SECRET_REFERENCE_INVALID"
     }
-    $expectedEndpoint =
+    $expectedEndpoints = @(
+        "https://api.dataforseo.com/v3/serp/google/organic/task_post",
+        "https://api.dataforseo.com/v3/serp/google/organic/tasks_ready",
+        "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
+        "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
+        "https://api.dataforseo.com/v3/backlinks/competitors/live",
         "https://api.dataforseo.com/v3/backlinks/referring_domains/live"
+    )
     $parsedAllowlist = (
         Require-ProcessEnvironment "DATAFORSEO_ENDPOINT_ALLOWLIST"
     ) | ConvertFrom-Json
@@ -75,8 +81,10 @@ function Assert-DataForSeoProcessEnvironment {
             throw "LOCAL_PRODUCT_DATAFORSEO_ENDPOINT_ALLOWLIST_INVALID"
         }
     }
-    if ($expectedEndpoint -notin $allowlist) {
-        throw "LOCAL_PRODUCT_DATAFORSEO_ENDPOINT_ALLOWLIST_INVALID"
+    foreach ($expectedEndpoint in $expectedEndpoints) {
+        if ($expectedEndpoint -notin $allowlist) {
+            throw "LOCAL_PRODUCT_DATAFORSEO_ENDPOINT_ALLOWLIST_INVALID"
+        }
     }
     $maxPaidCalls = [int](
         Require-ProcessEnvironment "DATAFORSEO_MAX_PAID_CALLS"

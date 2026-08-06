@@ -574,7 +574,140 @@ SELECT ((
      AND is_nullable='NO'
 ) = 3)::text;
 "@
+            $projectScopeProviderGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regprocedure(
+    'backlinks.backlink_list_active_project_scopes(uuid,uuid,uuid,integer)'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid='backlinks.backlink_contact_enrichment_jobs'::regclass
+       AND conname='backlink_contact_enrichment_job_status_check'
+       AND position('stale_context' IN pg_get_constraintdef(oid)) > 0
+  )
+)::text;
+"@
+            $platformProjectAuthorityGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regprocedure(
+    'platform.backlink_list_active_website_projects(text,text)'
+  ) IS NOT NULL
+  AND position(
+    'platform.backlink_list_active_website_projects' IN
+    pg_get_functiondef(
+      'backlinks.backlink_list_active_project_scopes(uuid,uuid,uuid,integer)'::regprocedure
+    )
+  ) > 0
+)::text;
+"@
+            $commercialCandidateInventoryGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regclass(
+    'backlinks.backlink_commercial_discovery_blueprints'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_commercial_discovery_batches'
+  ) IS NOT NULL
+  AND to_regclass('backlinks.backlink_commercial_candidates') IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_commercial_discovery_artifacts'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_commercial_inventory_policies'
+  ) IS NOT NULL
+  AND to_regclass('backlinks.backlink_commercial_gold_sets') IS NOT NULL
+  AND to_regclass('backlinks.backlink_commercial_gold_labels') IS NOT NULL
+)::text;
+"@
+            $contactPublicationGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regclass(
+    'backlinks.backlink_contact_enrichment_batches'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_contact_evidence_snapshots'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_contact_enrichment_jobs'
+       AND column_name='terminal_reason_code'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_recommendation_inventory'
+       AND column_name='contact_evidence_snapshot_id'
+  )
+)::text;
+"@
+            $gmailOrganizationReuseGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regclass(
+    'backlinks.backlink_website_project_mailbox_bindings'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_gmail_workspace_bindings'
+       AND column_name='website_project_id'
+       AND is_nullable='YES'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid=
+       'backlinks.backlink_website_project_mailbox_bindings'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+)::text;
+"@
             $backlinksHead = if (
+                $LASTEXITCODE -eq 0 `
+                -and $gmailOrganizationReuseGateReady.Trim() -eq "true"
+            ) {
+                "0047"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and $contactPublicationGateReady.Trim() -eq "true"
+            ) {
+                "0046"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and $commercialCandidateInventoryGateReady.Trim() -eq "true"
+            ) {
+                "0045"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and $platformProjectAuthorityGateReady.Trim() -eq "true"
+            ) {
+                "0044"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and $projectScopeProviderGateReady.Trim() -eq "true"
+            ) {
+                "0043"
+            }
+            elseif (
                 $LASTEXITCODE -eq 0 `
                 -and $projectRecommendationContextGateReady.Trim() -eq "true"
             ) {

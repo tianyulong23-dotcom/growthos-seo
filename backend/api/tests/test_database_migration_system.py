@@ -10,6 +10,7 @@ BACKLINKS_MIGRATIONS = (
 )
 BOOTSTRAP = REPOSITORY_ROOT / "backend" / "database" / "roles" / "0001_growthos_schema_roles.sql"
 MANIFEST = REPOSITORY_ROOT / "backend" / "database" / "deployment-manifest.v1.json"
+ALEMBIC_ENV = REPOSITORY_ROOT / "backend" / "api" / "migrations" / "env.py"
 
 SOURCE_ALEMBIC_REVISIONS = [
     "20260720_0001_crawler_storage.py",
@@ -21,6 +22,9 @@ SOURCE_ALEMBIC_REVISIONS = [
 ]
 BRIDGE_REVISION = "20260724_0007_schema_ownership.py"
 PROJECT_AUTHORITY_REVISION = "20260805_0008_website_project_authority.py"
+BACKLINKS_PROJECT_AUTHORITY_REVISION = (
+    "20260806_0009_backlinks_project_scope_authority.py"
+)
 BACKLINKS_REVISIONS = [
     "0001_backlink_foundation.sql",
     "0002_backlink_provider_seo.sql",
@@ -57,6 +61,11 @@ BACKLINKS_REVISIONS = [
     "0040_backlink_existing_placements.sql",
     "0041_backlink_gmail_project_bindings.sql",
     "0042_backlink_project_recommendation_context.sql",
+    "0043_backlink_project_scope_provider.sql",
+    "0044_backlink_platform_project_authority.sql",
+    "0045_backlink_commercial_candidate_inventory.sql",
+    "0046_backlink_contact_publication_gate.sql",
+    "0047_backlink_gmail_organization_reuse.sql",
 ]
 
 
@@ -64,10 +73,18 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_alembic_supports_a_dedicated_migration_connection() -> None:
+    source = ALEMBIC_ENV.read_text(encoding="utf-8")
+
+    assert 'os.getenv("ALEMBIC_DATABASE_URL")' in source
+    assert "database_url = get_settings().database_url" in source
+
+
 def test_imports_the_frozen_source_chain_and_adds_owned_platform_revisions() -> None:
     expected = SOURCE_ALEMBIC_REVISIONS + [
         BRIDGE_REVISION,
         PROJECT_AUTHORITY_REVISION,
+        BACKLINKS_PROJECT_AUTHORITY_REVISION,
     ]
     actual = sorted(path.name for path in ALEMBIC_VERSIONS.glob("*.py"))
     assert actual == expected
@@ -97,6 +114,19 @@ def test_imports_the_frozen_source_chain_and_adds_owned_platform_revisions() -> 
     assert "ENABLE ROW LEVEL SECURITY" in project_authority
     assert "FORCE ROW LEVEL SECURITY" in project_authority
     assert "DROP TABLE" not in project_authority.upper()
+
+    backlinks_project_authority = (
+        ALEMBIC_VERSIONS / BACKLINKS_PROJECT_AUTHORITY_REVISION
+    ).read_text(encoding="utf-8")
+    assert 'down_revision: str | Sequence[str] | None = "20260805_0008"' in (
+        backlinks_project_authority
+    )
+    assert "platform.backlink_list_active_website_projects" in (
+        backlinks_project_authority
+    )
+    assert "SECURITY DEFINER" in backlinks_project_authority
+    assert "growthos_backlinks_owner" in backlinks_project_authority
+    assert "DROP FUNCTION" not in backlinks_project_authority.upper()
 
 
 def test_shared_bootstrap_declares_crawling_roles_and_schema() -> None:
@@ -132,7 +162,11 @@ def test_deployment_manifest_covers_both_heads_with_fixed_checksums() -> None:
         *{
             f"backend/api/migrations/versions/{name}"
             for name in SOURCE_ALEMBIC_REVISIONS
-            + [BRIDGE_REVISION, PROJECT_AUTHORITY_REVISION]
+            + [
+                BRIDGE_REVISION,
+                PROJECT_AUTHORITY_REVISION,
+                BACKLINKS_PROJECT_AUTHORITY_REVISION,
+            ]
         },
         *{
             "backend/core/src/modules/backlinks/db/migrations/" + name
@@ -154,8 +188,8 @@ def test_deployment_manifest_covers_both_heads_with_fixed_checksums() -> None:
         )
 
     assert manifest["heads"] == {
-        "alembic": "20260805_0008",
-        "backlinks": "0042",
+        "alembic": "20260806_0009",
+        "backlinks": "0047",
     }
 
 

@@ -11,19 +11,10 @@ export type RecommendationScoreComponentId =
   RecommendationAssessment["components"][number]["id"]
 export type CreateOpportunityResponse =
   BacklinksResponse<"backlinksCreateOpportunityV1">
-export type ContactEnrichmentJob =
-  BacklinksResponse<"backlinksGetContactEnrichmentJobV1">
-export type RecommendationRefillJob =
-  BacklinksResponse<"backlinksRequestRecommendationRefillV1">
-export type PublicContactRole =
-  BacklinksResponse<"backlinksAddPublicContactCandidateV1">["normalizedEmail"] extends string
-    ? | "press"
-      | "editorial"
-      | "partnerships"
-      | "advertising"
-      | "support"
-      | "general"
-    : never
+export type RecommendationInventoryStatus =
+  BacklinksResponse<"backlinksGetRecommendationInventoryV1">
+export type RetryUnpublishedContactsResponse =
+  BacklinksResponse<"backlinksRetryUnpublishedContactsV1">
 
 export function listRecommendations(
   websiteProjectKey: string,
@@ -52,69 +43,21 @@ export function createOpportunity(
   })
 }
 
-export function requestRecommendationRefill(
+export function getRecommendationInventory(
   websiteProjectKey: string,
-  recommendationContextVersionId: string,
-  idempotencyKey: string,
-  refillWindowKey: string
-) {
-  return requestBacklinks("backlinksRequestRecommendationRefillV1", {
-    path: { websiteProjectKey },
-    headers: { "idempotency-key": idempotencyKey },
-    body: {
-      expectedVersion: 0,
-      recommendationContextVersionId,
-      lowWatermark: 20,
-      highWatermark: 21,
-      refillWindowKey,
-    },
-  })
-}
-
-export function startContactEnrichment(
-  websiteProjectKey: string,
-  recommendationId: string
-) {
-  return requestBacklinks("backlinksStartContactEnrichmentV1", {
-    path: { websiteProjectKey, recommendationId },
-  })
-}
-
-export function getContactEnrichmentJob(
-  websiteProjectKey: string,
-  jobId: string,
   signal: AbortSignal
 ) {
   return requestBacklinks(
-    "backlinksGetContactEnrichmentJobV1",
+    "backlinksGetRecommendationInventoryV1",
     {
-      path: { websiteProjectKey, jobId },
+      path: { websiteProjectKey },
     },
     { signal }
   )
 }
 
-export function retryContactEnrichment(
-  websiteProjectKey: string,
-  jobId: string
-) {
-  return requestBacklinks("backlinksRetryContactEnrichmentV1", {
-    path: { websiteProjectKey, jobId },
-  })
-}
-
-export function addPublicContactCandidate(
-  websiteProjectKey: string,
-  recommendationId: string,
-  input: {
-    normalizedEmail: string
-    contactRole: PublicContactRole
-    sourceUrl: string
-    reason: string
-  }
-) {
-  return requestBacklinks("backlinksAddPublicContactCandidateV1", {
-    path: { websiteProjectKey, recommendationId },
-    body: input,
+export function retryUnpublishedContacts(websiteProjectKey: string) {
+  return requestBacklinks("backlinksRetryUnpublishedContactsV1", {
+    path: { websiteProjectKey },
   })
 }

@@ -21,6 +21,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
+import { GmailAccountSelector } from "@/features/outreach/gmail/gmail-account-selector"
 import type { GmailConnectionController } from "@/features/outreach/gmail/use-gmail-connection"
 
 const statusPresentation = (
@@ -47,7 +48,10 @@ const statusPresentation = (
   if (controller.connection === null) {
     return {
       label: "未连接",
-      detail: "没有可用于发送的 Gmail 身份",
+      detail:
+        controller.accounts.length > 0
+          ? "请为当前项目选择组织已有 Gmail 账号"
+          : "组织内还没有可用于发送的 Gmail 身份",
       variant: "outline",
     }
   }
@@ -154,11 +158,6 @@ export function GmailSafetyPanel({
   const canDisconnect =
     controller.connection !== null &&
     controller.connection.connectionStatus !== "DISCONNECTED"
-  const shouldConnect =
-    controller.connection === null ||
-    controller.connection.connectionStatus === "DISCONNECTED" ||
-    controller.connection.connectionStatus === "TOKEN_REVOKED" ||
-    controller.connection.connectionStatus === "REAUTH_REQUIRED"
   const needsReauthorization =
     controller.connection?.connectionStatus === "TOKEN_REVOKED" ||
     controller.connection?.connectionStatus === "REAUTH_REQUIRED"
@@ -191,6 +190,15 @@ export function GmailSafetyPanel({
               {status.detail} · 连接时间{" "}
               {formatConnectedAt(controller.connection?.connectedAt)}
             </div>
+            <GmailAccountSelector
+              controller={controller}
+              className="mt-3 max-w-sm"
+            />
+            {controller.connection?.recentErrorCategory && (
+              <div className="mt-2 text-xs text-destructive">
+                最近错误：{controller.connection.recentErrorCategory}
+              </div>
+            )}
           </div>
 
           <div className="grid flex-[2] gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -265,16 +273,19 @@ export function GmailSafetyPanel({
               <Info />
               升级条件
             </Button>
-            {shouldConnect && (
-              <Button
-                size="sm"
-                disabled={controller.busyAction !== null}
-                onClick={() => void controller.connect()}
-              >
-                <Mail />
-                {needsReauthorization ? "重新连接" : "连接 Gmail"}
-              </Button>
-            )}
+            <Button
+              size="sm"
+              variant={controller.accounts.length > 0 ? "outline" : "default"}
+              disabled={controller.busyAction !== null}
+              onClick={() => void controller.connect()}
+            >
+              <Mail />
+              {needsReauthorization
+                ? "重新授权当前账号"
+                : controller.accounts.length > 0
+                  ? "授权新账号"
+                  : "连接 Gmail"}
+            </Button>
             {canDisconnect && (
               <Button
                 variant="destructive"

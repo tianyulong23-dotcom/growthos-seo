@@ -1,42 +1,20 @@
 import { randomUUID } from "node:crypto";
 
-import {
-  createSendIntentCommands,
-} from "../application/commands/send-intent.command.js";
-import {
-  GmailSendActivity,
-} from "../application/activities/send-activity.js";
-import {
-  SecretBackedGmailConnectionRepository,
-} from "../application/services/gmail-connection-secret.repository.js";
-import {
-  PostgresqlSendAttemptRepository,
-} from "../application/services/send-attempt.repository.js";
-import {
-  PostgresqlSendIntentRepository,
-} from "../application/services/send-intent.repository.js";
-import {
-  GmailSendClientAdapter,
-} from "../adapters/gmail/send-client.js";
-import {
-  GoogleGmailProviderClient,
-} from "../adapters/gmail/google-gmail-provider-client.js";
-import {
-  buildGmailMimeMessage,
-} from "../adapters/gmail/message-builder.js";
-import {
-  GoogleAuthClientAdapter,
-} from "../adapters/gmail/auth-client.js";
-import {
-  GoogleAuthLibraryClient,
-} from "../adapters/gmail/google-auth-library-client.js";
+import { createSendIntentCommands } from "../application/commands/send-intent.command.js";
+import { GmailSendActivity } from "../application/activities/send-activity.js";
+import { SecretBackedGmailConnectionRepository } from "../application/services/gmail-connection-secret.repository.js";
+import { PostgresqlSendAttemptRepository } from "../application/services/send-attempt.repository.js";
+import { PostgresqlSendIntentRepository } from "../application/services/send-intent.repository.js";
+import { GmailSendClientAdapter } from "../adapters/gmail/send-client.js";
+import { GoogleGmailProviderClient } from "../adapters/gmail/google-gmail-provider-client.js";
+import { buildGmailMimeMessage } from "../adapters/gmail/message-builder.js";
+import { GoogleAuthClientAdapter } from "../adapters/gmail/auth-client.js";
+import { GoogleAuthLibraryClient } from "../adapters/gmail/google-auth-library-client.js";
 import {
   LocalProductSecretStoreClient,
   parseLocalProductSecretReference,
 } from "../adapters/security/local-product-secret-store-client.js";
-import {
-  SecretStoreClientAdapter,
-} from "../adapters/security/secret-store-client.js";
+import { SecretStoreClientAdapter } from "../adapters/security/secret-store-client.js";
 import {
   createActorContext,
   createProjectContext,
@@ -50,9 +28,7 @@ import {
   PostgresqlGmailConnectionRefreshLock,
   PostgresqlGmailConnectionRepository,
 } from "../db/repositories/gmail-connection.repository.js";
-import {
-  createOutboxRelayRepository,
-} from "../db/repositories/outbox.repository.js";
+import { createOutboxRelayRepository } from "../db/repositories/outbox.repository.js";
 import {
   withBacklinkTenantTransaction,
   type BacklinkTenantPool,
@@ -61,19 +37,13 @@ import type {
   GmailSendCommand,
   GmailSendPort,
 } from "../ports/gmail-send.port.js";
-import type {
-  ResolvedProjectContext,
-} from "../ports/project-context.port.js";
-import {
-  secretKinds,
-} from "../ports/secret-store.port.js";
+import type { ResolvedProjectContext } from "../ports/project-context.port.js";
+import { secretKinds } from "../ports/secret-store.port.js";
 import {
   createGmailSendOutboxRelay,
   createTemporalGmailSendConsumer,
 } from "../workflows/outbox-relay.js";
-import type {
-  BacklinksLiveCapabilities,
-} from "./live-capabilities.js";
+import type { BacklinksLiveCapabilities } from "./live-capabilities.js";
 
 export function createLocalProductSendIntentCommands(
   pool: BacklinkTenantPool,
@@ -84,18 +54,16 @@ export function createLocalProductSendIntentCommands(
     newId: randomUUID,
     now: () => new Date(),
     quotaProfile: {
-      rolling24HourSendLimit:
-        capabilities.gmailRolling24HourSendLimit,
-      minimumIntervalSeconds:
-        capabilities.gmailMinimumIntervalSeconds,
+      rolling24HourSendLimit: capabilities.gmailRolling24HourSendLimit,
+      minimumIntervalSeconds: capabilities.gmailMinimumIntervalSeconds,
     },
   });
 }
 
-type TemporalWorkflowClient =
-  Parameters<typeof createTemporalGmailSendConsumer>[0];
-type OutboxRelayClient =
-  Parameters<typeof createOutboxRelayRepository>[0];
+type TemporalWorkflowClient = Parameters<
+  typeof createTemporalGmailSendConsumer
+>[0];
+type OutboxRelayClient = Parameters<typeof createOutboxRelayRepository>[0];
 
 type SendRuntimeOptions = Readonly<{
   pool: BacklinkTenantPool;
@@ -110,10 +78,10 @@ export async function createLocalProductGmailSendRuntime(
 ) {
   const { capabilities, pool } = options;
   if (
-    !capabilities.gmailSendEnabled
-    || capabilities.secretStoreRoot === null
-    || capabilities.googleOauthClientId === null
-    || capabilities.googleOauthClientSecretReference === null
+    !capabilities.gmailSendEnabled ||
+    capabilities.secretStoreRoot === null ||
+    capabilities.googleOauthClientId === null ||
+    capabilities.googleOauthClientSecretReference === null
   ) {
     throw new Error("BACKLINK_LOCAL_PRODUCT_GMAIL_SEND_CONFIGURATION_INVALID");
   }
@@ -129,8 +97,8 @@ export async function createLocalProductGmailSendRuntime(
     config: {
       enabled: true,
       redirectUris: [
-        capabilities.googleOauthRedirectUri
-          ?? (() => {
+        capabilities.googleOauthRedirectUri ??
+          (() => {
             throw new Error("BACKLINK_GOOGLE_OAUTH_REDIRECT_URI_MISSING");
           })(),
       ],
@@ -149,29 +117,34 @@ export async function createLocalProductGmailSendRuntime(
       }),
     }),
   });
+  const connectionPersistence = new PostgresqlGmailConnectionRepository({
+    pool,
+  });
   const tokenRepository = new SecretBackedGmailConnectionRepository({
     secretStore,
     googleAuth,
-    persistence: new PostgresqlGmailConnectionRepository({ pool }),
+    persistence: connectionPersistence,
     refreshLock: new PostgresqlGmailConnectionRefreshLock(pool),
   });
   const contexts = new Map<string, ResolvedProjectContext>();
 
   const commandLoader = {
-    async load(input: Readonly<{
-      context: {
-        organizationId: string;
-        workspaceId: string;
-        websiteProjectId: string;
-        gmailConnectionId: string;
-        actorId: string;
-      };
-      attempt: {
-        attemptId: string;
-        sendIntentId: string;
-        rfcMessageId: string;
-      };
-    }>): Promise<GmailSendCommand> {
+    async load(
+      input: Readonly<{
+        context: {
+          organizationId: string;
+          workspaceId: string;
+          websiteProjectId: string;
+          gmailConnectionId: string;
+          actorId: string;
+        };
+        attempt: {
+          attemptId: string;
+          sendIntentId: string;
+          rfcMessageId: string;
+        };
+      }>,
+    ): Promise<GmailSendCommand> {
       const scope = {
         organizationId: input.context.organizationId,
         workspaceId: input.context.workspaceId,
@@ -225,9 +198,15 @@ export async function createLocalProductGmailSendRuntime(
              JOIN backlinks.backlink_gmail_workspace_bindings AS binding
                 ON binding.organization_id=intent.organization_id
                AND binding.workspace_id=intent.workspace_id
-               AND binding.website_project_id=intent.website_project_id
                AND binding.gmail_connection_id=intent.gmail_connection_id
               AND binding.binding_status='ACTIVE'
+             JOIN backlinks.backlink_website_project_mailbox_bindings AS project_binding
+               ON project_binding.organization_id=binding.organization_id
+              AND project_binding.workspace_id=binding.workspace_id
+              AND project_binding.website_project_id=intent.website_project_id
+              AND project_binding.gmail_workspace_binding_id=binding.id
+              AND project_binding.binding_status='ACTIVE'
+              AND project_binding.is_selected=true
              JOIN LATERAL (
                SELECT snapshot.*
                  FROM backlinks.backlink_project_context_snapshots AS snapshot
@@ -279,9 +258,10 @@ export async function createLocalProductGmailSendRuntime(
         organizationId: String(row.identityOrganizationId),
         gmailConnectionId: String(row.identityGmailConnectionId),
         emailAddress: String(row.identityEmailAddress),
-        displayName: row.identityDisplayName === null
-          ? null
-          : String(row.identityDisplayName),
+        displayName:
+          row.identityDisplayName === null
+            ? null
+            : String(row.identityDisplayName),
         isPrimary: row.identityIsPrimary === true,
         isDefault: row.identityIsDefault === true,
         verificationStatus: row.identityVerificationStatus,
@@ -295,8 +275,8 @@ export async function createLocalProductGmailSendRuntime(
         connection: {
           organizationId: scope.organizationId,
           gmailConnectionId: input.context.gmailConnectionId,
-          connectionStatus:
-            row.connectionStatus as "CONNECTED" | "DISCONNECTED",
+          connectionStatus: row.connectionStatus as
+            "CONNECTED" | "DISCONNECTED",
           sendAvailability: row.sendAvailability as "AVAILABLE" | "PAUSED",
         },
         identities,
@@ -343,15 +323,17 @@ export async function createLocalProductGmailSendRuntime(
   };
 
   const policyInputLoader = {
-    async load(input: Readonly<{
-      context: {
-        organizationId: string;
-        workspaceId: string;
-        websiteProjectId: string;
-        gmailConnectionId: string;
-      };
-      attempt: { sendIntentId: string };
-    }>) {
+    async load(
+      input: Readonly<{
+        context: {
+          organizationId: string;
+          workspaceId: string;
+          websiteProjectId: string;
+          gmailConnectionId: string;
+        };
+        attempt: { sendIntentId: string };
+      }>,
+    ) {
       const scope = {
         organizationId: input.context.organizationId,
         workspaceId: input.context.workspaceId,
@@ -446,29 +428,30 @@ export async function createLocalProductGmailSendRuntime(
           throw new Error("BACKLINK_LOCAL_PRODUCT_GMAIL_SEND_POLICY_MISSING");
         }
         const now = new Date();
-        const quota = row.reservationStatus === "RESERVED"
-          ? {
-              status: "RESERVED" as const,
-              eligibleAt: new Date(String(row.eligibleAt)).toISOString(),
-              expiresAt: new Date(String(row.expiresAt)).toISOString(),
-            }
-          : { status: "EXCEEDED" as const, retryAt: null };
+        const quota =
+          row.reservationStatus === "RESERVED"
+            ? {
+                status: "RESERVED" as const,
+                eligibleAt: new Date(String(row.eligibleAt)).toISOString(),
+                expiresAt: new Date(String(row.expiresAt)).toISOString(),
+              }
+            : { status: "EXCEEDED" as const, retryAt: null };
         return {
           evaluatedAt: now.toISOString(),
           draft: {
             status: row.draftStatus as
-              | "generating" | "draft" | "approved" | "rejected" | "sent",
-            approvedVersionId: row.approvedVersionId === null
-              ? null
-              : String(row.approvedVersionId),
+              "generating" | "draft" | "approved" | "rejected" | "sent",
+            approvedVersionId:
+              row.approvedVersionId === null
+                ? null
+                : String(row.approvedVersionId),
             requestedVersionId: String(row.requestedVersionId),
           },
           suppression: { suppressed: row.suppressed === true },
           connection: {
-            connectionStatus:
-              row.connectionStatus as "CONNECTED" | "DISCONNECTED",
-            sendAvailability:
-              row.sendAvailability as "AVAILABLE" | "PAUSED",
+            connectionStatus: row.connectionStatus as
+              "CONNECTED" | "DISCONNECTED",
+            sendAvailability: row.sendAvailability as "AVAILABLE" | "PAUSED",
           },
           quota,
           killSwitches: {
@@ -499,5 +482,21 @@ export async function createLocalProductGmailSendRuntime(
     ),
   });
 
-  return Object.freeze({ activity, relay });
+  return Object.freeze({
+    activity,
+    relay,
+    async findSelectedConnection(context: ResolvedProjectContext) {
+      return (await connectionPersistence.findProjectMailboxState(context))
+        .selectedConnection;
+    },
+    async refreshTokenHealth(
+      input: Readonly<{
+        context: ResolvedProjectContext;
+        connectionId: string;
+        expectedVersion: number;
+      }>,
+    ) {
+      return tokenRepository.refresh(input);
+    },
+  });
 }

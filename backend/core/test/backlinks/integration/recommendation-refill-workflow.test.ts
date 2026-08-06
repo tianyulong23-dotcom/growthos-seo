@@ -37,6 +37,7 @@ const input: BacklinkRecommendationRefillInput = {
   recommendationContextVersionId: "018f0000-0000-7000-8000-000000000004",
   jobId: "018f0000-0000-7000-8000-000000000005",
   workflowId: buildBacklinksWorkflowId({
+    organizationId: inputScope.organizationId,
     workspaceId: inputScope.workspaceId,
     websiteProjectId: inputScope.websiteProjectId,
     workflow: "recommendation-refill",

@@ -1,6 +1,5 @@
 import json
 from collections.abc import Sequence
-from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse, Response
@@ -47,6 +46,32 @@ async def _forward(
         request,
         resolved=resolved,
         website_project_key=website_project_key,
+        query_params=query_params,
+    )
+
+
+async def _forward_collection(
+    request: Request,
+    *,
+    query_params: Sequence[tuple[str, str]] | None = None,
+) -> Response:
+    resolver: PlatformContextResolver = request.app.state.platform_context_resolver
+    gateway: BacklinksGateway = request.app.state.backlinks_gateway
+    try:
+        resolved = await resolver.resolve_collection(request=request)
+    except PlatformContextResolutionError as error:
+        return problem_response(
+            status=error.status,
+            problem_type=f"urn:growthos:problem:platform:{error.code.lower().replace('_', '-')}",
+            title=error.title,
+            detail=error.detail,
+            code=error.code,
+            request_id=request.headers.get("x-request-id", "unresolved"),
+            retryable=False,
+        )
+    return await gateway.forward_collection(
+        request,
+        resolved=resolved,
         query_params=query_params,
     )
 
@@ -144,6 +169,18 @@ async def retry_backlinks_contact_enrichment(
 
 
 @router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/"
+    "contact-enrichment-batches/current/retry-unpublished",
+    include_in_schema=False,
+)
+async def retry_unpublished_backlinks_contacts(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
     "/api/v1/projects/{websiteProjectKey}/backlinks/recommendations/"
     "{recommendationId}/contacts/candidates",
     include_in_schema=False,
@@ -160,6 +197,17 @@ async def add_backlinks_public_contact_candidate(
     include_in_schema=False,
 )
 async def correct_backlinks_contact_candidate(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-inventory",
+    include_in_schema=False,
+)
+async def backlinks_recommendation_inventory(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:
@@ -577,21 +625,46 @@ async def connect_backlinks_gmail(
 
 
 @router.get(
+    "/api/v1/backlinks/gmail-connections/callback",
+    include_in_schema=False,
+)
+async def complete_backlinks_gmail_connection_stable(
+    request: Request,
+) -> Response:
+    callback_query = _google_oauth_callback_query(request)
+    if isinstance(callback_query, Response):
+        return callback_query
+    return _gmail_oauth_callback_response(
+        request,
+        await _forward_collection(request, query_params=callback_query),
+    )
+
+
+@router.get(
     "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/callback",
     include_in_schema=False,
 )
-async def complete_backlinks_gmail_connection(
+async def complete_backlinks_gmail_connection_legacy(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:
     callback_query = _google_oauth_callback_query(request)
     if isinstance(callback_query, Response):
         return callback_query
-    response = await _forward(
+    return _gmail_oauth_callback_response(
         request,
-        websiteProjectKey,
-        query_params=callback_query,
+        await _forward(
+            request,
+            websiteProjectKey,
+            query_params=callback_query,
+        ),
     )
+
+
+def _gmail_oauth_callback_response(
+    request: Request,
+    response: Response,
+) -> Response:
     frontend_origin = request.app.state.oauth_callback_frontend_origin
     if frontend_origin is None:
         return response
@@ -600,23 +673,18 @@ async def complete_backlinks_gmail_connection(
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
         return response
     if not 200 <= response.status_code < 300:
-        if (
-            response.status_code == 400
-            and payload.get("code") == "BACKLINK_INVALID_REQUEST"
-        ):
-            project_key = quote(websiteProjectKey, safe="")
-            return RedirectResponse(
-                url=(
-                    f"{frontend_origin}/projects/{project_key}/backlinks/email"
-                    "?gmailOAuth=invalid_or_expired"
-                ),
-                status_code=303,
-            )
         return response
     return_path = payload.get("returnPath")
-    if not isinstance(return_path, str):
-        return_path = "/"
-    if not return_path.startswith("/") or return_path.startswith("//"):
+    segments = return_path.split("/") if isinstance(return_path, str) else []
+    if (
+        len(segments) != 5
+        or segments[0] != ""
+        or segments[1] != "projects"
+        or not segments[2]
+        or segments[3:] != ["backlinks", "email"]
+        or "?" in return_path
+        or "#" in return_path
+    ):
         return problem_response(
             status=502,
             problem_type="urn:growthos:problem:platform:oauth-return-path-invalid",
@@ -637,9 +705,7 @@ def _google_oauth_callback_query(
 ) -> list[tuple[str, str]] | Response:
     query_items = list(request.query_params.multi_items())
     request_id = request.headers.get("x-request-id", "oauth-callback")
-    unsupported = sorted(
-        {name for name, _ in query_items} - _GOOGLE_OAUTH_CALLBACK_QUERY_KEYS
-    )
+    unsupported = sorted({name for name, _ in query_items} - _GOOGLE_OAUTH_CALLBACK_QUERY_KEYS)
     if unsupported:
         return problem_response(
             status=400,
@@ -679,9 +745,7 @@ def _google_oauth_callback_query(
 
     bounded_fields = {"scope": 8_192, "authuser": 32, "prompt": 128}
     if any(
-        len(values[name][0]) > maximum
-        for name, maximum in bounded_fields.items()
-        if name in values
+        len(values[name][0]) > maximum for name, maximum in bounded_fields.items() if name in values
     ):
         return problem_response(
             status=400,
@@ -693,11 +757,7 @@ def _google_oauth_callback_query(
             retryable=False,
         )
 
-    return [
-        (name, values[name][0])
-        for name in ("code", "state")
-        if name in values
-    ]
+    return [(name, values[name][0]) for name in ("code", "state") if name in values]
 
 
 @router.get(
@@ -705,6 +765,17 @@ def _google_oauth_callback_query(
     include_in_schema=False,
 )
 async def backlinks_gmail_connection_status(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/select",
+    include_in_schema=False,
+)
+async def select_backlinks_gmail_connection(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:

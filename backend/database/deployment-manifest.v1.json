@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-05",
+  "generatedAt": "2026-08-06",
   "postgresql": {
     "requiredMajor": 18,
     "image": "postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296"
@@ -13,8 +13,8 @@
     "backlinks": "ROLE-BACKLINKS"
   },
   "heads": {
-    "alembic": "20260805_0008",
-    "backlinks": "0042"
+    "alembic": "20260806_0009",
+    "backlinks": "0047"
   },
   "steps": [
     {
@@ -130,6 +130,18 @@
       "prerequisites": ["alembic-20260724-0007"],
       "recovery": "forward-only",
       "recoveryNote": "Website Project authority and immutable profile, promotion target, audit, and outbox facts are restored from backup or repaired with a reviewed forward migration."
+    },
+    {
+      "order": 28,
+      "migrationId": "alembic-20260806-0009",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0009_backlinks_project_scope_authority.py",
+      "sha256": "9c534474ea3d248cf3619749d588e596e01028da8bd72bc0493af45cee631033",
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": ["platform"],
+      "prerequisites": ["alembic-20260805-0008"],
+      "recovery": "forward-only",
+      "recoveryNote": "The narrow active Website Project read contract is restored from backup or repaired with a reviewed forward migration."
     },
     {
       "order": 30,
@@ -554,6 +566,66 @@
       "prerequisites": ["backlinks-0041"],
       "recovery": "forward-only",
       "recoveryNote": "Recommendation discovery and Draft generation read immutable products, keywords, and target URLs from the requested Website Project context."
+    },
+    {
+      "order": 65,
+      "migrationId": "backlinks-0043",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0043_backlink_project_scope_provider.sql",
+      "sha256": "58df200994f0a4e8ac9c8f4ed8a89cd49d4bb08b13c533a6e38240f49880c160",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0042"],
+      "recovery": "forward-only",
+      "recoveryNote": "The local Worker enumerates latest active Website Project contexts through one workspace-authorized provider and treats superseded contact jobs as stale."
+    },
+    {
+      "order": 66,
+      "migrationId": "backlinks-0044",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0044_backlink_platform_project_authority.sql",
+      "sha256": "2c0f22d0e55e89d203e872baa4e55ba1b086ae38b5b457606ec1ad4824ce6e3f",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["alembic-20260806-0009", "backlinks-0043"],
+      "recovery": "forward-only",
+      "recoveryNote": "Worker project enumeration intersects Platform ACTIVE authority with the matching latest Backlinks Project Context Snapshot."
+    },
+    {
+      "order": 67,
+      "migrationId": "backlinks-0045",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0045_backlink_commercial_candidate_inventory.sql",
+      "sha256": "e8496b30673e1e6a016258a1a94de64470d8ce8c9408eea6094bbf85fde85bcd",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0044"],
+      "recovery": "forward-only",
+      "recoveryNote": "Commercial discovery blueprints, provider artifacts, internal candidates, inventory watermarks, publication gates, and Gold Set labels remain tenant-scoped and auditable."
+    },
+    {
+      "order": 68,
+      "migrationId": "backlinks-0046",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0046_backlink_contact_publication_gate.sql",
+      "sha256": "555c082f27bb41d98b44f851fec773fd24cbed8865d95367e5daea62ef4ec5ee",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0045"],
+      "recovery": "forward-only",
+      "recoveryNote": "Automatic contact batches publish only evidence-backed public email recommendations and freeze the selected contact evidence for later Opportunity creation."
+    },
+    {
+      "order": 69,
+      "migrationId": "backlinks-0047",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0047_backlink_gmail_organization_reuse.sql",
+      "sha256": "edbc3a4c48b1145cf0f6659fc9e1562aad10c56e70a7bce499cad4f178f15327",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0046"],
+      "recovery": "forward-only",
+      "recoveryNote": "Organization Gmail credentials are reused through workspace bindings while project mailbox selections remain tokenless and project-scoped."
     }
   ]
 }

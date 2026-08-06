@@ -12,6 +12,9 @@ import {
   ContactDiscoveryService,
 } from "../application/services/contact-discovery.service.js";
 import {
+  synchronizeRecommendationPublication,
+} from "../application/services/recommendation-publication.service.js";
+import {
   createContactDiscoveryRepository,
 } from "../db/repositories/contact-discovery.repository.js";
 import {
@@ -34,15 +37,19 @@ export type ContactEnrichmentActivityResult = Readonly<{
     | "completed"
     | "partially_completed"
     | "no_contact_found"
-    | "retry_scheduled";
+    | "retry_scheduled"
+    | "stale_context";
   pagesVisited: number;
   candidateCount: number;
   evidenceCount: number;
   browserUsed: boolean;
+  terminalReasonCode: ContactTerminalReason | null;
+  method: ContactEnrichmentMethod;
 }>;
 
 type Job = Readonly<{
   id: string;
+  batchId: string;
   rootUrl: string;
   prospectId: string;
   recommendationContextVersionId: string;
@@ -53,6 +60,25 @@ type Job = Readonly<{
   maxDepth: number;
   browserAllowed: boolean;
 }>;
+
+export type ContactTerminalReason =
+  | "PUBLIC_EMAIL_FOUND"
+  | "CONTACT_FORM_ONLY"
+  | "LOGIN_REQUIRED"
+  | "CAPTCHA_OR_BOT_CHALLENGE"
+  | "ROBOTS_DISALLOWED"
+  | "ACCESS_DENIED"
+  | "NO_PUBLIC_EMAIL"
+  | "SITE_UNREACHABLE"
+  | "UNSUPPORTED_CONTENT"
+  | "MANUAL_REVIEW_REQUIRED"
+  | "COMPLETED_PARTIAL";
+
+type ContactEnrichmentMethod =
+  | "none"
+  | "static"
+  | "browser"
+  | "static_and_browser";
 
 type PageSource =
   | "homepage"
@@ -76,8 +102,53 @@ const commonPaths = [
   "/team",
   "/editorial",
   "/advertise",
+  "/advertising",
+  "/partnership",
+  "/partnerships",
+  "/write-for-us",
+  "/authors",
 ] as const;
 const decoder = new TextDecoder("utf-8", { fatal: false });
+const priorityPath =
+  /(?:contact|about|team|editor|advert|partner|write-for-us|author|press|media)/iu;
+
+type CrawlSignals = {
+  contactForm: boolean;
+  loginRequired: boolean;
+  challenge: boolean;
+  accessDenied: boolean;
+  robotsDisallowed: number;
+  unsupportedContent: number;
+  transportFailures: number;
+  parsedPages: number;
+};
+
+function inspectHtml(html: string): Readonly<{
+  contactForm: boolean;
+  loginRequired: boolean;
+  challenge: boolean;
+}> {
+  const $ = load(html);
+  const text = $("body").text().replace(/\s+/gu, " ").trim().toLowerCase();
+  return {
+    contactForm: $("form").filter((_, form) => {
+      const node = $(form);
+      return node.find(
+        "input[type='email'],input[name*='email'],textarea,button[type='submit']",
+      ).length > 0;
+    }).length > 0,
+    loginRequired:
+      $("input[type='password']").length > 0
+      || /\b(?:sign in|log in|login required|members only|subscribe to continue|paywall)\b/iu
+        .test(text),
+    challenge:
+      $(
+        ".g-recaptcha,.h-captcha,[data-sitekey],iframe[src*='recaptcha'],iframe[src*='hcaptcha']",
+      ).length > 0
+      || /\b(?:captcha|verify you are human|checking your browser|attention required|bot challenge|cloudflare ray id)\b/iu
+        .test(text),
+  };
+}
 
 function normalizePageUrl(value: string, base: string): string | null {
   try {
@@ -207,7 +278,7 @@ async function claimJob(
     const result = await client.query(
       `UPDATE backlink_contact_enrichment_jobs AS job
           SET status='running',attempt_count=attempt_count+1,
-              started_at=COALESCE(started_at,now()),retry_after=NULL,
+              started_at=now(),retry_after=NULL,
               updated_at=now(),updated_by=$5
         FROM backlink_prospects AS prospect
        WHERE (job.organization_id,job.workspace_id,
@@ -221,7 +292,7 @@ async function claimJob(
              (job.organization_id,job.workspace_id,
               job.website_project_id,job.prospect_id,
               job.recommendation_context_version_id)
-       RETURNING job.id,job.root_url "rootUrl",
+       RETURNING job.id,job.batch_id "batchId",job.root_url "rootUrl",
                  job.prospect_id "prospectId",
                  job.recommendation_context_version_id
                    "recommendationContextVersionId",
@@ -251,6 +322,7 @@ async function finishJob(
     failures: number;
     retryableFailures: number;
     lastErrorCode: string | null;
+    signals: Readonly<CrawlSignals>;
   }>,
 ): Promise<ContactEnrichmentActivityResult> {
   return withBacklinkTenantTransaction(pool, input, async (client) => {
@@ -262,7 +334,8 @@ async function finishJob(
                  ($1,$2,$3)
              AND c.prospect_id=$4
              AND c.recommendation_context_version_id=$5
-             AND c.status='candidate' AND c.invalidated_at IS NULL)
+             AND c.status IN ('candidate','promoted')
+             AND c.invalidated_at IS NULL)
            "candidateCount",
          (SELECT count(*)::integer
             FROM backlink_contact_evidence e
@@ -274,7 +347,34 @@ async function finishJob(
                  ($1,$2,$3)
              AND c.prospect_id=$4
              AND c.recommendation_context_version_id=$5
-             AND e.invalidated_at IS NULL) "evidenceCount"`,
+             AND e.invalidated_at IS NULL) "evidenceCount",
+         (SELECT count(DISTINCT c.id)::integer
+            FROM backlink_contact_candidates c
+            JOIN backlink_contact_evidence e ON
+              (e.organization_id,e.workspace_id,e.website_project_id,
+               e.candidate_id)=
+              (c.organization_id,c.workspace_id,c.website_project_id,c.id)
+           WHERE (c.organization_id,c.workspace_id,c.website_project_id)=
+                 ($1,$2,$3)
+             AND c.prospect_id=$4
+             AND c.recommendation_context_version_id=$5
+             AND c.status IN ('candidate','promoted')
+             AND c.invalidated_at IS NULL
+             AND c.guessed=false
+             AND c.confidence>=80
+             AND c.purpose_confidence>=70
+             AND c.inferred_purpose IN (
+               'editorial','partnerships','advertising','business',
+               'marketing','site_owner','general'
+             )
+             AND split_part(lower(c.normalized_email),'@',1)
+               !~ '^(no-?reply|do-?not-?reply|placeholder|example|sample|test|fake|dummy)$'
+             AND e.invalidated_at IS NULL
+             AND e.expires_at>now()
+             AND e.confidence>=80
+             AND e.extraction_method IN (
+               'mailto','visible_text','obfuscated_text','json_ld'
+             )) "eligibleCount"`,
       [
         input.organizationId,
         input.workspaceId,
@@ -285,7 +385,8 @@ async function finishJob(
     )).rows[0] ?? {};
     const candidateCount = Number(totals.candidateCount ?? 0);
     const evidenceCount = Number(totals.evidenceCount ?? 0);
-    const retry = candidateCount === 0
+    const eligibleCount = Number(totals.eligibleCount ?? 0);
+    const retry = eligibleCount === 0
       && outcome.retryableFailures > 0
       && job.attemptCount < job.maxAttempts;
     const status = retry
@@ -295,10 +396,47 @@ async function finishJob(
         : candidateCount > 0 || outcome.failures > 0
           ? "partially_completed" as const
           : "no_contact_found" as const;
+    const terminalReasonCode: ContactTerminalReason | null = retry
+      ? null
+      : eligibleCount > 0
+        ? "PUBLIC_EMAIL_FOUND"
+        : outcome.signals.challenge
+          ? "CAPTCHA_OR_BOT_CHALLENGE"
+          : outcome.signals.loginRequired
+            ? "LOGIN_REQUIRED"
+            : outcome.signals.accessDenied
+              ? "ACCESS_DENIED"
+              : outcome.signals.contactForm
+                ? "CONTACT_FORM_ONLY"
+                : outcome.signals.robotsDisallowed > 0
+                    && outcome.pagesVisited === 0
+                  ? "ROBOTS_DISALLOWED"
+                  : outcome.signals.unsupportedContent > 0
+                      && outcome.signals.parsedPages === 0
+                    ? "UNSUPPORTED_CONTENT"
+                    : outcome.signals.transportFailures > 0
+                        && outcome.pagesVisited === 0
+                      ? "SITE_UNREACHABLE"
+                      : candidateCount > 0
+                        ? "MANUAL_REVIEW_REQUIRED"
+                        : outcome.failures > 0
+                          ? "COMPLETED_PARTIAL"
+                          : "NO_PUBLIC_EMAIL";
+    const method: ContactEnrichmentMethod = outcome.browserUsed
+      ? outcome.pagesVisited > 0 ? "static_and_browser" : "browser"
+      : outcome.pagesVisited > 0 ? "static" : "none";
+    const lastErrorCategory = terminalReasonCode === null
+      || terminalReasonCode === "PUBLIC_EMAIL_FOUND"
+      || terminalReasonCode === "NO_PUBLIC_EMAIL"
+      || terminalReasonCode === "CONTACT_FORM_ONLY"
+      ? null
+      : terminalReasonCode;
     await client.query(
       `UPDATE backlink_contact_enrichment_jobs
           SET status=$5,pages_visited=$6,candidate_count=$7,
               evidence_count=$8,browser_used=$9,last_error_code=$10,
+              terminal_reason_code=$12,method=$13,last_error_category=$14,
+              completed_at=CASE WHEN $12::text IS NULL THEN NULL ELSE now() END,
               retry_after=CASE WHEN $5='retry_scheduled'
                 THEN now()+interval '30 seconds' ELSE NULL END,
               finished_at=CASE WHEN $5='retry_scheduled' THEN NULL ELSE now() END,
@@ -317,6 +455,52 @@ async function finishJob(
         outcome.browserUsed,
         outcome.lastErrorCode,
         input.actorId,
+        terminalReasonCode,
+        method,
+        lastErrorCategory,
+      ],
+    );
+    await synchronizeRecommendationPublication(client, {
+      organizationId: input.organizationId,
+      workspaceId: input.workspaceId,
+      websiteProjectId: input.websiteProjectId,
+      prospectId: job.prospectId,
+      recommendationContextVersionId: job.recommendationContextVersionId,
+      actorId: input.actorId,
+    });
+    await client.query(
+      `UPDATE backlink_contact_enrichment_batches AS batch
+          SET status=CASE WHEN EXISTS (
+                SELECT 1
+                  FROM backlink_contact_enrichment_jobs AS child
+                 WHERE (child.organization_id,child.workspace_id,
+                        child.website_project_id,child.batch_id)=
+                       (batch.organization_id,batch.workspace_id,
+                        batch.website_project_id,batch.id)
+                   AND child.status IN (
+                     'pending','running','retry_scheduled'
+                   )
+              ) THEN 'running' ELSE 'completed' END,
+              completed_at=CASE WHEN EXISTS (
+                SELECT 1
+                  FROM backlink_contact_enrichment_jobs AS child
+                 WHERE (child.organization_id,child.workspace_id,
+                        child.website_project_id,child.batch_id)=
+                       (batch.organization_id,batch.workspace_id,
+                        batch.website_project_id,batch.id)
+                   AND child.status IN (
+                     'pending','running','retry_scheduled'
+                   )
+              ) THEN NULL ELSE now() END,
+              updated_at=now(),updated_by=$5,version=version+1
+        WHERE (batch.organization_id,batch.workspace_id,
+               batch.website_project_id,batch.id)=($1,$2,$3,$4)`,
+      [
+        input.organizationId,
+        input.workspaceId,
+        input.websiteProjectId,
+        job.batchId,
+        input.actorId,
       ],
     );
     return {
@@ -326,6 +510,8 @@ async function finishJob(
       candidateCount,
       evidenceCount,
       browserUsed: outcome.browserUsed,
+      terminalReasonCode,
+      method,
     };
   });
 }
@@ -336,7 +522,6 @@ export function createContactEnrichmentActivity(options: Readonly<{
   fetchTimeoutMs: number;
 }>) {
   const safeFetch = new SafeFetchAdapter({ timeoutMs: options.fetchTimeoutMs });
-  const robots = new RobotsPolicyAdapter(safeFetch);
   const discovery = new ContactDiscoveryService({
     safeFetch,
     repository: createContactDiscoveryRepository(options.pool),
@@ -354,7 +539,8 @@ export function createContactEnrichmentActivity(options: Readonly<{
           `SELECT status,pages_visited "pagesVisited",
                   candidate_count "candidateCount",
                   evidence_count "evidenceCount",
-                  browser_used "browserUsed"
+                  browser_used "browserUsed",
+                  terminal_reason_code "terminalReasonCode",method
              FROM backlink_contact_enrichment_jobs
             WHERE (organization_id,workspace_id,website_project_id,id)=
                   ($1,$2,$3,$4)`,
@@ -374,9 +560,13 @@ export function createContactEnrichmentActivity(options: Readonly<{
         candidateCount: Number(existing.candidateCount),
         evidenceCount: Number(existing.evidenceCount),
         browserUsed: existing.browserUsed === true,
+        terminalReasonCode:
+          (existing.terminalReasonCode as ContactTerminalReason | null) ?? null,
+        method: existing.method as ContactEnrichmentMethod,
       };
     }
 
+    const robots = new RobotsPolicyAdapter(safeFetch);
     const queue: QueuedPage[] = [
       { url: job.rootUrl, depth: 0, source: "homepage" },
       ...commonPaths.map((path): QueuedPage => ({
@@ -419,7 +609,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
               if (url === null || !sameSite(url, job.rootUrl) || queued.has(url)) {
                 return;
               }
-              if (!/(?:contact|about|team|editor|advert|press|media)/iu.test(url)) {
+              if (!priorityPath.test(url)) {
                 return;
               }
               queued.add(url);
@@ -438,7 +628,18 @@ export function createContactEnrichmentActivity(options: Readonly<{
     let failures = 0;
     let retryableFailures = 0;
     let browserUsed = false;
+    let browserAttempted = false;
     let lastErrorCode: string | null = null;
+    const signals: CrawlSignals = {
+      contactForm: false,
+      loginRequired: false,
+      challenge: false,
+      accessDenied: false,
+      robotsDisallowed: 0,
+      unsupportedContent: 0,
+      transportFailures: 0,
+      parsedPages: 0,
+    };
     const browserAuthorized = job.browserAllowed
       && options.browserWorker !== null
       && await browserEnabledForProject(options.pool, input);
@@ -453,6 +654,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
         websiteProjectId: input.websiteProjectId,
       });
       if (policy.decision === "disallow") {
+        signals.robotsDisallowed += 1;
         await recordPage(options.pool, input, page, {
           status: "robots_disallowed",
           errorCode: "ROBOTS_DISALLOWED",
@@ -471,6 +673,12 @@ export function createContactEnrichmentActivity(options: Readonly<{
         if (fetched.status < 200 || fetched.status >= 300) {
           failures += 1;
           lastErrorCode = `HTTP_${fetched.status}`;
+          const pageSignals = inspectHtml(decoder.decode(fetched.body));
+          signals.challenge ||= pageSignals.challenge;
+          signals.loginRequired ||=
+            fetched.status === 401 || pageSignals.loginRequired;
+          signals.accessDenied ||= fetched.status === 403
+            && !pageSignals.challenge;
           await recordPage(options.pool, input, page, {
             status: "fetch_failed",
             httpStatus: fetched.status,
@@ -479,23 +687,42 @@ export function createContactEnrichmentActivity(options: Readonly<{
           continue;
         }
         pagesVisited += 1;
-        const discovered = await discovery.discoverFetched({
-          organizationId: input.organizationId,
-          workspaceId: input.workspaceId,
-          websiteProjectId: input.websiteProjectId,
-          recommendationContextVersionId:
-            job.recommendationContextVersionId,
-          prospectId: job.prospectId,
-          prospectRegistrableDomain: job.registrableDomain,
-          targetUrl: page.url,
-          actorId: input.actorId,
-        }, fetched);
         const html = decoder.decode(fetched.body);
+        const pageSignals = inspectHtml(html);
+        signals.contactForm ||= pageSignals.contactForm;
+        signals.loginRequired ||= pageSignals.loginRequired;
+        signals.challenge ||= pageSignals.challenge;
+        let discovered;
+        try {
+          discovered = await discovery.discoverFetched({
+            organizationId: input.organizationId,
+            workspaceId: input.workspaceId,
+            websiteProjectId: input.websiteProjectId,
+            recommendationContextVersionId:
+              job.recommendationContextVersionId,
+            prospectId: job.prospectId,
+            prospectRegistrableDomain: job.registrableDomain,
+            targetUrl: page.url,
+            actorId: input.actorId,
+          }, fetched);
+        } catch (error) {
+          signals.unsupportedContent += 1;
+          lastErrorCode = error instanceof Error
+            ? error.message.slice(0, 200)
+            : "UNSUPPORTED_CONTENT";
+          await recordPage(options.pool, input, page, {
+            status: "unsupported_content",
+            httpStatus: fetched.status,
+            errorCode: lastErrorCode,
+          });
+          continue;
+        }
         await recordPage(options.pool, input, page, {
           status: "fetched",
           httpStatus: fetched.status,
           candidateCount: discovered.candidateCount,
         });
+        signals.parsedPages += 1;
         if (page.depth < job.maxDepth) {
           const prioritized: QueuedPage[] = [];
           const remaining: QueuedPage[] = [];
@@ -505,9 +732,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
             if (
               link.source === "navigation"
               || link.source === "footer"
-              || /(?:contact|about|team|editor|advert|press|media)/iu.test(
-                link.url,
-              )
+              || priorityPath.test(link.url)
             ) {
               prioritized.push(link);
             } else {
@@ -520,9 +745,13 @@ export function createContactEnrichmentActivity(options: Readonly<{
         if (
           discovered.candidateCount === 0
           && browserAuthorized
+          && !browserAttempted
+          && !pageSignals.challenge
+          && !pageSignals.loginRequired
           && dynamicPage(html)
           && pagesVisited < job.maxPages
         ) {
+          browserAttempted = true;
           try {
             const rendered = await options.browserWorker.render({
               url: fetched.finalUrl,
@@ -566,6 +795,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
         }
       } catch (error) {
         failures += 1;
+        signals.transportFailures += 1;
         if (
           typeof error === "object"
           && error !== null
@@ -598,6 +828,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
       failures,
       retryableFailures,
       lastErrorCode,
+      signals,
     });
   };
 }

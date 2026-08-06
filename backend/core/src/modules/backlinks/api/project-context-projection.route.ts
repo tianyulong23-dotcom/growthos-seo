@@ -98,6 +98,12 @@ export function registerProjectContextProjectionRoute(
     },
     async (request) => {
       const context = request.platformContext;
+      if (context.project === null) {
+        throw new BacklinkError({
+          code: backlinkErrorCodes.accessDenied,
+          message: "A project-bound platform context is required.",
+        });
+      }
       return command.project({
         organizationId: context.tenant.organizationId,
         workspaceId: context.tenant.workspaceId,

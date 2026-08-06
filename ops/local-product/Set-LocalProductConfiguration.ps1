@@ -234,8 +234,14 @@ function Assert-DataForSeoEnvironment(
         $Values["DATAFORSEO_CREDENTIAL_SECRET_REF"] `
         "dataforseo" `
         "LOCAL_PRODUCT_DATAFORSEO_SECRET_REFERENCE_INVALID"
-    $expectedEndpoint =
+    $expectedEndpoints = @(
+        "https://api.dataforseo.com/v3/serp/google/organic/task_post",
+        "https://api.dataforseo.com/v3/serp/google/organic/tasks_ready",
+        "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
+        "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
+        "https://api.dataforseo.com/v3/backlinks/competitors/live",
         "https://api.dataforseo.com/v3/backlinks/referring_domains/live"
+    )
     $parsedEndpoints =
         $Values["DATAFORSEO_ENDPOINT_ALLOWLIST"] | ConvertFrom-Json
     $endpoints = @($parsedEndpoints)
@@ -261,8 +267,10 @@ function Assert-DataForSeoEnvironment(
             throw "LOCAL_PRODUCT_DATAFORSEO_ENDPOINT_ALLOWLIST_INVALID"
         }
     }
-    if ($expectedEndpoint -notin $endpoints) {
-        throw "LOCAL_PRODUCT_DATAFORSEO_ENDPOINT_ALLOWLIST_INVALID"
+    foreach ($expectedEndpoint in $expectedEndpoints) {
+        if ($expectedEndpoint -notin $endpoints) {
+            throw "LOCAL_PRODUCT_DATAFORSEO_ENDPOINT_ALLOWLIST_INVALID"
+        }
     }
     $maxPaidCalls = [int]$Values["DATAFORSEO_MAX_PAID_CALLS"]
     if ($maxPaidCalls -lt 1 -or $maxPaidCalls -gt 1000) {
@@ -341,12 +349,19 @@ if ($publicBaseUrl -ne "http://localhost:7200") {
     throw "LOCAL_PRODUCT_PUBLIC_BASE_URL_INVALID"
 }
 $expectedRedirectUri =
-    "$publicBaseUrl/api/v1/projects/$projectKey/backlinks/gmail-connections/callback"
+    "$publicBaseUrl/api/v1/backlinks/gmail-connections/callback"
+$configuredRedirectUri = Require-Text `
+    $manifest.google.redirectUri `
+    "google.redirectUri"
 if (
-    (Require-Text $manifest.google.redirectUri "google.redirectUri") -ne
-        $expectedRedirectUri
+    $configuredRedirectUri -ne $expectedRedirectUri `
+    -and $configuredRedirectUri -notmatch (
+        "^http://localhost:7200/api/v1/projects/" +
+        "[A-Za-z0-9][A-Za-z0-9._-]{0,127}/" +
+        "backlinks/gmail-connections/callback$"
+    )
 ) {
-    throw "LOCAL_PRODUCT_REDIRECT_URI_NOT_REGISTERED"
+    throw "LOCAL_PRODUCT_REDIRECT_URI_INVALID"
 }
 $clientId = Require-Text $manifest.google.oauthClientId `
     "google.oauthClientId"
@@ -443,6 +458,12 @@ foreach ($name in @("backlinks-api.env", "backlinks-worker.env")) {
         "GMAIL_CANARY_RECIPIENT_SECRET_REF",
         "DATAFORSEO_CANARY_MAX_PAID_CALLS"
     )
+    if ($name -eq "backlinks-worker.env") {
+        Remove-Values $values @(
+            "LOCAL_PRODUCT_WEBSITE_PROJECT_ID",
+            "LOCAL_PRODUCT_WEBSITE_PROJECT_KEY"
+        )
+    }
     if ($null -eq $loopbackProxy) {
         Remove-Values $values $proxyEnvironmentNames
     }

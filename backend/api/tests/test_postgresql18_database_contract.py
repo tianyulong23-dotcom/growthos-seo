@@ -37,6 +37,7 @@ GMAIL_AUTH_TABLES = {
     "backlink_gmail_connection_revocations",
     "backlink_gmail_connections",
     "backlink_gmail_send_identities",
+    "backlink_website_project_mailbox_bindings",
     "backlink_gmail_workspace_bindings",
     "backlink_oauth_attempts",
     "backlink_secret_references",
@@ -73,6 +74,15 @@ COST_CONTROL_TABLES = {
     "provider_batch_requests",
     "provider_fetch_leases",
     "workspace_evidence_projections",
+}
+COMMERCIAL_DISCOVERY_TABLES = {
+    "backlink_commercial_candidates",
+    "backlink_commercial_discovery_artifacts",
+    "backlink_commercial_discovery_batches",
+    "backlink_commercial_discovery_blueprints",
+    "backlink_commercial_gold_labels",
+    "backlink_commercial_gold_sets",
+    "backlink_commercial_inventory_policies",
 }
 CONTACT_PURPOSE_COLUMNS = {
     "observed_role",
@@ -141,6 +151,7 @@ def reset_session(connection: psycopg.Connection) -> None:
     connection.execute("RESET ROLE")
     connection.execute("RESET app.current_organization_id")
     connection.execute("RESET app.current_project_id")
+    connection.execute("RESET app.current_workspace_id")
 
 
 def set_backlinks_context(
@@ -167,7 +178,7 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     assert int(fetch_scalar(connection, "SHOW server_version_num")) // 10000 == 18
     assert (
         fetch_scalar(connection, "SELECT version_num FROM public.alembic_version")
-        == "20260805_0008"
+        == "20260806_0009"
     )
 
     rows = connection.execute(
@@ -198,7 +209,7 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     assert by_schema["platform"] == PLATFORM_TABLES
     assert by_schema["crawling"] == CRAWLING_TABLES
     assert by_schema["audit"] == AUDIT_TABLES
-    assert len(by_schema["backlinks"]) == 75
+    assert len(by_schema["backlinks"]) == 83
     assert ASSESSMENT_TABLES <= by_schema["backlinks"]
     assert DRAFT_TABLES <= by_schema["backlinks"]
     assert GMAIL_AUTH_TABLES <= by_schema["backlinks"]
@@ -206,6 +217,7 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     assert MAIL_SYNC_TABLES <= by_schema["backlinks"]
     assert PLACEMENT_TABLES <= by_schema["backlinks"]
     assert COST_CONTROL_TABLES <= by_schema["backlinks"]
+    assert COMMERCIAL_DISCOVERY_TABLES <= by_schema["backlinks"]
 
     for table in ("backlink_contact_candidates", "backlink_contacts"):
         columns = {
@@ -234,6 +246,23 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
         ).fetchall()
     }
     assert PROJECT_RECOMMENDATION_CONTEXT_COLUMNS <= project_context_columns
+    assert fetch_scalar(
+        connection,
+        """
+        SELECT to_regprocedure(
+          'backlinks.backlink_list_active_project_scopes(uuid,uuid,uuid,integer)'
+        ) IS NOT NULL
+        """,
+    )
+    project_scope_function = fetch_scalar(
+        connection,
+        """
+        SELECT pg_get_functiondef(
+          'backlinks.backlink_list_active_project_scopes(uuid,uuid,uuid,integer)'::regprocedure
+        )
+        """,
+    )
+    assert "platform.backlink_list_active_website_projects" in project_scope_function
 
     hardened_roles = connection.execute(
         """
@@ -364,6 +393,33 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
         )
         """,
     )
+    reset_session(connection)
+
+    connection.execute("SET ROLE growthos_backlinks_owner")
+    connection.execute(
+        "SELECT set_config('app.current_organization_id', %s, false)",
+        (ORGANIZATION_ID,),
+    )
+    connection.execute(
+        "SELECT set_config('app.current_workspace_id', %s, false)",
+        (WORKSPACE_ID,),
+    )
+    connection.execute(
+        "SELECT set_config('app.current_project_id', '', false)",
+    )
+    assert fetch_scalar(
+        connection,
+        """
+        SELECT count(*)
+          FROM platform.backlink_list_active_website_projects(
+            'seo4-int-004-organization',
+            'seo4-int-004-workspace'
+          )
+         WHERE website_project_id = 'seo4-int-004-project'
+           AND context_version = 1
+        """,
+    ) == 1
+    expect_sqlstate(connection, "SELECT count(*) FROM platform.projects")
     reset_session(connection)
 
     connection.execute("SET ROLE growthos_crawling_writer")

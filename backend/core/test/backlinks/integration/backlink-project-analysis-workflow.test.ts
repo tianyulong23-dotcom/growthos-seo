@@ -52,6 +52,7 @@ const workflowInput = {
   ...scope,
   jobId: uuid(10),
   workflowId: buildBacklinksWorkflowId({
+    organizationId: scope.organizationId,
     workspaceId: scope.workspaceId,
     websiteProjectId: scope.websiteProjectId,
     workflow: "project-analysis",

@@ -150,7 +150,7 @@ if ($projectKey -ne "live001-canary") {
     throw "LOCAL_PRODUCT_PROJECT_KEY_INVALID"
 }
 $expectedRedirectUri =
-    "http://localhost:7200/api/v1/projects/live001-canary/backlinks/gmail-connections/callback"
+    "http://localhost:7200/api/v1/backlinks/gmail-connections/callback"
 if ($redirectUri -ne $expectedRedirectUri) {
     throw "LOCAL_PRODUCT_REDIRECT_URI_INVALID"
 }

@@ -53,6 +53,7 @@ const errors = {
 };
 const job = z.object({
   id: z.uuid(),
+  batchId: z.uuid(),
   recommendationId: z.uuid(),
   prospectId: z.uuid(),
   recommendationContextVersionId: z.uuid(),
@@ -64,6 +65,7 @@ const job = z.object({
     "partially_completed",
     "no_contact_found",
     "retry_scheduled",
+    "stale_context",
   ]),
   attemptCount: z.number().int().min(0),
   maxAttempts: z.number().int().positive(),
@@ -75,9 +77,25 @@ const job = z.object({
   candidateCount: z.number().int().min(0),
   evidenceCount: z.number().int().min(0),
   lastErrorCode: z.string().nullable(),
+  terminalReasonCode: z.enum([
+    "PUBLIC_EMAIL_FOUND",
+    "CONTACT_FORM_ONLY",
+    "LOGIN_REQUIRED",
+    "CAPTCHA_OR_BOT_CHALLENGE",
+    "ROBOTS_DISALLOWED",
+    "ACCESS_DENIED",
+    "NO_PUBLIC_EMAIL",
+    "SITE_UNREACHABLE",
+    "UNSUPPORTED_CONTENT",
+    "MANUAL_REVIEW_REQUIRED",
+    "COMPLETED_PARTIAL",
+  ]).nullable(),
+  method: z.enum(["none", "static", "browser", "static_and_browser"]),
+  lastErrorCategory: z.string().nullable(),
   retryAfter: z.string().datetime().nullable(),
   startedAt: z.string().datetime().nullable(),
   finishedAt: z.string().datetime().nullable(),
+  completedAt: z.string().datetime().nullable(),
   version: z.number().int().positive(),
 }).strict();
 const startResponse = job.extend({
@@ -104,6 +122,10 @@ const correctionResponse = z.object({
   candidateId: z.uuid(),
   contactRole,
   version: z.number().int().positive(),
+}).strict();
+const retryUnpublishedResponse = z.object({
+  batchId: z.uuid().nullable(),
+  retriedJobCount: z.number().int().min(0),
 }).strict();
 
 function sendError(
@@ -143,6 +165,26 @@ export function registerBacklinksContactEnrichmentRoutes(
       actor: request.actor,
       websiteProjectKey,
     });
+
+  api.post(
+    "/api/v1/projects/:websiteProjectKey/backlinks/contact-enrichment-batches/current/retry-unpublished",
+    {
+      schema: {
+        operationId: "backlinksRetryUnpublishedContactsV1",
+        params: projectParams,
+        response: { 202: retryUnpublishedResponse, ...errors },
+      },
+      errorHandler: sendError,
+    },
+    async (request, reply) => {
+      const context = await resolve(
+        request,
+        request.params.websiteProjectKey,
+      );
+      const result = await options.commands.retryUnpublished(context);
+      return reply.code(202).send(result);
+    },
+  );
 
   api.post(
     "/api/v1/projects/:websiteProjectKey/backlinks/recommendations/:recommendationId/contact-enrichment-jobs",

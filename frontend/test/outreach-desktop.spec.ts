@@ -66,7 +66,7 @@ test("desktop outreach path composes from an opportunity, sends, syncs a reply, 
   await expect(page.getByText("gmail-message-e2e")).toBeVisible()
 
   await page.goto(`/projects/${projectKey}/backlinks/email`)
-  await expect(page.getByText("owner@example.test")).toBeVisible()
+  await expect(page.getByText("owner@example.test").first()).toBeVisible()
   await page.getByText("Re: E2E collaboration", { exact: true }).click()
   await expect(
     page.getByRole("heading", { name: "回信人工确认" })
@@ -127,6 +127,49 @@ test("desktop outreach path composes from an opportunity, sends, syncs a reply, 
   expect(session.unexpectedNetwork).toEqual([])
 })
 
+test("a new project reuses an organization Gmail account without OAuth", async ({
+  page,
+}) => {
+  const session = await installOutreachApiFixtures(page, {
+    gmailMode: "reusable",
+  })
+
+  await page.goto(`/projects/${projectKey}/backlinks/email`)
+  await expect(page.getByText("选择组织已有 Gmail 账号")).toBeVisible()
+
+  await page.getByLabel("当前项目发件账号").click()
+  await page.getByRole("option", { name: /owner@example\.test/ }).click()
+
+  await expect(page.getByText("owner@example.test").first()).toBeVisible()
+  await expect
+    .poll(
+      () =>
+        session.capturedRequests.filter(
+          (request) =>
+            request.method === "POST" &&
+            request.pathname.endsWith("/gmail-connections/select")
+        ).length
+    )
+    .toBe(1)
+
+  const selectRequest = session.capturedRequests.find(
+    (request) =>
+      request.method === "POST" &&
+      request.pathname.endsWith("/gmail-connections/select")
+  )
+  expect(selectRequest?.body).toEqual({
+    connectionId: "gmail-connection-e2e",
+  })
+  expect(
+    session.capturedRequests.some(
+      (request) =>
+        request.method === "POST" &&
+        request.pathname.endsWith("/gmail-connections/connect")
+    )
+  ).toBe(false)
+  expect(session.unexpectedNetwork).toEqual([])
+})
+
 test("an opportunity with no contact requires review and explicit confirmation", async ({
   page,
 }) => {
@@ -183,8 +226,7 @@ test("draft generation keeps polling and refresh recovers the same Job", async (
   const session = await installOutreachApiFixtures(page, {
     draftJobStatuses: ["RUNNING", "RUNNING", "SUCCEEDED"],
   })
-  const generationUrl =
-    `/projects/${projectKey}/backlinks/drafts/new?opportunityId=${opportunityId}`
+  const generationUrl = `/projects/${projectKey}/backlinks/drafts/new?opportunityId=${opportunityId}`
 
   await page.goto(generationUrl)
   await expect(page.getByRole("button", { name: "生成草稿" })).toBeEnabled()
@@ -205,9 +247,7 @@ test("draft generation keeps polling and refresh recovers the same Job", async (
   await expect(page.getByText("已耗时", { exact: true })).toBeVisible()
   await expect(page.getByText("最后成功查询", { exact: true })).toBeVisible()
   await expect(page.getByText("服务端查询次数", { exact: true })).toBeVisible()
-  await expect(
-    page.getByText("尚未成功查询", { exact: true })
-  ).toHaveCount(0)
+  await expect(page.getByText("尚未成功查询", { exact: true })).toHaveCount(0)
 
   await page.reload()
   await expect(page).toHaveURL(
@@ -218,9 +258,7 @@ test("draft generation keeps polling and refresh recovers the same Job", async (
   const createRequests = session.capturedRequests.filter(
     (request) =>
       request.method === "POST" &&
-      request.pathname.endsWith(
-        `/opportunities/${opportunityId}/draft-jobs`
-      )
+      request.pathname.endsWith(`/opportunities/${opportunityId}/draft-jobs`)
   )
   const statusRequests = session.capturedRequests.filter(
     (request) =>

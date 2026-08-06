@@ -17,6 +17,7 @@ export type GmailConnectionView = {
   mailSyncCapability: boolean
   tokenExpiresAt: string
   connectedAt: string
+  recentErrorCategory: string | null
 }
 
 export type GmailConnectionMeta = {
@@ -30,6 +31,7 @@ export type GmailConnectionMeta = {
 
 export type GmailStatusResponse = {
   connection: GmailConnectionView | null
+  accounts: GmailConnectionView[]
   meta: GmailConnectionMeta
 }
 

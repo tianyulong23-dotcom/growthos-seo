@@ -47,7 +47,9 @@ const manifest = {
 
 describe("local product OAuth bootstrap", () => {
   it("accepts only a Web client with the exact local callback", () => {
-    expect(localProductGoogleRedirectUri).toBe("http://localhost:7200");
+    expect(localProductGoogleRedirectUri).toBe(
+      "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
+    );
     expect(parseGoogleWebOAuthCredentials(credentials, redirectUri)).toEqual({
       clientId: credentials.web.client_id,
       clientSecret: credentials.web.client_secret,
@@ -64,7 +66,7 @@ describe("local product OAuth bootstrap", () => {
     }, redirectUri)).toThrow("GOOGLE_OAUTH_WEB_CREDENTIAL_FILE_INVALID");
   });
 
-  it("writes only the Secret Reference and current Project callback", () => {
+  it("writes only the Secret Reference and stable callback", () => {
     const updated = updateLocalProductOauthManifest(manifest, {
       clientId: credentials.web.client_id,
       projectId: credentials.web.project_id,

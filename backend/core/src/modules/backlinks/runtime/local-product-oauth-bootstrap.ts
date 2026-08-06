@@ -5,7 +5,7 @@ import {
 } from "../adapters/security/local-product-secret-store-client.js";
 
 export const localProductGoogleRedirectUri =
-  "http://localhost:7200";
+  "http://localhost:7200/api/v1/backlinks/gmail-connections/callback";
 const websiteProjectKeySchema = z.string().trim()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const boundedSendCallsSchema = z.coerce.number().int().min(1).max(1_000);
@@ -13,9 +13,8 @@ const boundedSendCallsSchema = z.coerce.number().int().min(1).max(1_000);
 export function buildLocalProductGoogleRedirectUri(
   websiteProjectKey: string,
 ): string {
-  return `${localProductGoogleRedirectUri}/api/v1/projects/${
-    websiteProjectKeySchema.parse(websiteProjectKey)
-  }/backlinks/gmail-connections/callback`;
+  websiteProjectKeySchema.parse(websiteProjectKey);
+  return localProductGoogleRedirectUri;
 }
 
 const googleWebCredentialSchema = z.object({

@@ -243,10 +243,7 @@ else {
 }
 
 $publicBaseUrl = "http://localhost:7200"
-$redirectUri = (
-    "$publicBaseUrl/api/v1/projects/$ProjectKey/" +
-    "backlinks/gmail-connections/callback"
-)
+$redirectUri = "$publicBaseUrl/api/v1/backlinks/gmail-connections/callback"
 $manifest.runtime.mode = "LOCAL_PRODUCT"
 $manifest.runtime.publicBaseUrl = $publicBaseUrl
 $manifest.runtime.websiteProjectKey = $ProjectKey

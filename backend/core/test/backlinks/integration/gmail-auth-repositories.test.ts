@@ -74,9 +74,7 @@ class InMemorySecretStore implements SecretStorePort {
       provider: "integration-secret-store",
       secretKind: input.secretKind,
       externalSecretId:
-        input.context.oauthAttemptId
-        ?? input.context.connectionId
-        ?? "unknown",
+        input.context.oauthAttemptId ?? input.context.connectionId ?? "unknown",
       externalSecretVersion: String(++this.version),
     } as const;
     this.values.set(referenceKey(reference), input.plaintext);
@@ -134,6 +132,7 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       "0012_backlink_gmail_connections.sql",
       "0015_backlink_gmail_sync_capabilities.sql",
       "0041_backlink_gmail_project_bindings.sql",
+      "0047_backlink_gmail_organization_reuse.sql",
     ]) {
       await client.query(await readFile(migration(name), "utf8"));
     }
@@ -164,8 +163,9 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       sessionBindingHash: "b".repeat(64),
       pkceVerifier: "pkce-verifier-pb-c1",
       requestedScopes: gmailOAuthScopes,
-      redirectUri: "https://app.example.test/oauth/google/callback",
-      returnPath: "/backlinks/settings",
+      redirectUri:
+        "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
+      returnPath: "/projects/awol/backlinks/email",
       createdAt,
       expiresAt: new Date(createdAt.getTime() + 10 * 60_000),
     };
@@ -192,7 +192,6 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
     const consumeInput = {
       organizationId,
       workspaceId,
-      websiteProjectId,
       initiatedByUserId: input.initiatedByUserId,
       stateHash: input.stateHash,
       sessionBindingHash: input.sessionBindingHash,
@@ -200,6 +199,7 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
     };
     await expect(repository.consume(consumeInput)).resolves.toMatchObject({
       attemptId: input.id,
+      websiteProjectId,
       pkceVerifier: input.pkceVerifier,
       requestedScopes: gmailOAuthScopes,
     });
@@ -212,7 +212,7 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
             WHERE id = $1`,
           [id(201)],
         )
-    ).rows,
+      ).rows,
     ).toEqual([{ status: "DESTROYED" }]);
   });
 
@@ -249,18 +249,21 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
         sessionBindingHash: "e".repeat(64),
         pkceVerifier: `pkce-${attempt.id}`,
         requestedScopes: gmailOAuthScopes,
-        redirectUri: "https://app.example.test/oauth/google/callback",
-        returnPath: "/backlinks/settings",
+        redirectUri:
+          "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
+        returnPath: "/projects/awol/backlinks/email",
       });
     }
 
-    await expect(repository.cleanupExpired({
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      cleanedByUserId: "user-pb-c1",
-      expiredAt,
-    })).resolves.toBe(1);
+    await expect(
+      repository.cleanupExpired({
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        cleanedByUserId: "user-pb-c1",
+        expiredAt,
+      }),
+    ).resolves.toBe(1);
     expect(secretStore.values.size).toBe(1);
     expect(secretStore.destroyed).toHaveLength(1);
     expect(
@@ -296,7 +299,7 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       externalSecretId: connectionId,
       externalSecretVersion: "1",
     } as const;
-    const created = await repository.createConnectionWithWorkspaceBinding({
+    const created = await repository.saveAuthorizedConnectionWithBindings({
       connectionId,
       organizationId,
       workspaceId,
@@ -311,13 +314,18 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       tokenExpiresAt: "2026-07-27T08:00:00.000Z",
     });
     expect(created).toMatchObject({
-      connectionId,
-      version: 1,
-      primaryEmail: "owner@example.test",
-      connectionStatus: "CONNECTED",
-      sendAvailability: "AVAILABLE",
+      view: {
+        connectionId,
+        version: 1,
+        primaryEmail: "owner@example.test",
+        connectionStatus: "CONNECTED",
+        sendAvailability: "AVAILABLE",
+      },
+      retiredTokenSecretReference: null,
     });
-    repositoryNow = new Date(new Date(created.connectedAt).getTime() + 1_000);
+    repositoryNow = new Date(
+      new Date(created.view.connectedAt).getTime() + 1_000,
+    );
     expect(
       (
         await client.query(
@@ -333,12 +341,14 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
           [connectionId],
         )
       ).rows,
-    ).toEqual([{
-      bindingStatus: "ACTIVE",
-      normalizedEmail: "owner@example.test",
-      verificationStatus: "accepted",
-      source: "OIDC_PRIMARY",
-    }]);
+    ).toEqual([
+      {
+        bindingStatus: "ACTIVE",
+        normalizedEmail: "owner@example.test",
+        verificationStatus: "accepted",
+        source: "OIDC_PRIMARY",
+      },
+    ]);
 
     const nextReference = {
       ...firstReference,
@@ -408,11 +418,13 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
           [connectionId],
         )
       ).rows,
-    ).toEqual([{
-      tokenReferenceId: null,
-      bindingStatus: "INACTIVE",
-      googleRevoked: false,
-    }]);
+    ).toEqual([
+      {
+        tokenReferenceId: null,
+        bindingStatus: "INACTIVE",
+        googleRevoked: false,
+      },
+    ]);
 
     await repository.markGoogleRevoked({
       organizationId,
@@ -420,12 +432,14 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       websiteProjectId,
       connectionId,
     });
-    await expect(repository.completeCredentialDeletion({
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      connectionId,
-    })).resolves.toMatchObject({
+    await expect(
+      repository.completeCredentialDeletion({
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        connectionId,
+      }),
+    ).resolves.toMatchObject({
       connectionId,
       connectionStatus: "DISCONNECTED",
       sendAvailability: "PAUSED",
@@ -443,7 +457,7 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
     ).toEqual([{ status: "DESTROYED" }]);
   });
 
-  it("requires a separate connection even when two projects authorize the same Gmail account", async () => {
+  it("reuses one organization Gmail connection across two project selections", async () => {
     let nextId = 800;
     const repository = new PostgresqlGmailConnectionRepository({
       pool,
@@ -451,7 +465,6 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
     });
     const secondProjectId = id(4);
     const firstConnectionId = id(110);
-    const secondConnectionId = id(111);
     const sharedIdentity = {
       connectedByUserId: "user-pb-c1",
       googleSubject: "shared-google-subject-pb-c1",
@@ -462,7 +475,7 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       tokenExpiresAt: "2026-07-27T10:00:00.000Z",
     } as const;
 
-    await repository.createConnectionWithWorkspaceBinding({
+    await repository.saveAuthorizedConnectionWithBindings({
       connectionId: firstConnectionId,
       organizationId,
       workspaceId,
@@ -475,8 +488,8 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
         externalSecretVersion: "1",
       },
     });
-    await repository.createConnectionWithWorkspaceBinding({
-      connectionId: secondConnectionId,
+    await repository.saveAuthorizedConnectionWithBindings({
+      connectionId: firstConnectionId,
       organizationId,
       workspaceId,
       websiteProjectId: secondProjectId,
@@ -484,8 +497,8 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       tokenSecretReference: {
         provider: "integration-secret-store",
         secretKind: secretKinds.gmailTokenSet,
-        externalSecretId: secondConnectionId,
-        externalSecretVersion: "1",
+        externalSecretId: firstConnectionId,
+        externalSecretVersion: "2",
       },
     });
 
@@ -507,30 +520,69 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
     });
 
     await expect(
-      repository.findVisibleConnection(
+      repository.findProjectMailboxState(
         contextFor(websiteProjectId, "first.example.test"),
       ),
-    ).resolves.toMatchObject({ connectionId: firstConnectionId });
+    ).resolves.toMatchObject({
+      accounts: [{ connectionId: firstConnectionId }],
+      selectedConnection: { connectionId: firstConnectionId },
+    });
     await expect(
-      repository.findVisibleConnection(
+      repository.findProjectMailboxState(
         contextFor(secondProjectId, "second.example.test"),
       ),
-    ).resolves.toMatchObject({ connectionId: secondConnectionId });
+    ).resolves.toMatchObject({
+      accounts: [{ connectionId: firstConnectionId }],
+      selectedConnection: { connectionId: firstConnectionId },
+    });
     expect(
       (
         await client.query(
-          `SELECT website_project_id AS "websiteProjectId",
-                  gmail_connection_id AS "connectionId"
-             FROM backlinks.backlink_gmail_workspace_bindings
-            WHERE gmail_connection_id = ANY($1::uuid[])
-            ORDER BY website_project_id`,
-          [[firstConnectionId, secondConnectionId]],
+          `SELECT project_binding.website_project_id AS "websiteProjectId",
+                  binding.gmail_connection_id AS "connectionId"
+             FROM backlinks.backlink_website_project_mailbox_bindings
+               AS project_binding
+             JOIN backlinks.backlink_gmail_workspace_bindings AS binding
+               ON binding.organization_id = project_binding.organization_id
+              AND binding.workspace_id = project_binding.workspace_id
+              AND binding.id =
+                project_binding.gmail_workspace_binding_id
+            WHERE binding.gmail_connection_id = $1
+            ORDER BY project_binding.website_project_id`,
+          [firstConnectionId],
         )
       ).rows,
     ).toEqual([
       { websiteProjectId, connectionId: firstConnectionId },
-      { websiteProjectId: secondProjectId, connectionId: secondConnectionId },
+      { websiteProjectId: secondProjectId, connectionId: firstConnectionId },
     ]);
+    expect(
+      (
+        await client.query(
+          `SELECT
+             (
+               SELECT count(*)::integer
+                 FROM backlinks.backlink_gmail_connections
+                WHERE organization_id = $1
+                  AND google_subject = $2
+                  AND disconnected_at IS NULL
+             ) AS connections,
+             (
+               SELECT count(*)::integer
+                 FROM backlinks.backlink_gmail_workspace_bindings
+                WHERE organization_id = $1
+                  AND workspace_id = $3
+                  AND gmail_connection_id = $4
+             ) AS "workspaceBindings"`,
+          [
+            organizationId,
+            sharedIdentity.googleSubject,
+            workspaceId,
+            firstConnectionId,
+          ],
+        )
+      ).rows,
+    ).toEqual([{ connections: 1, workspaceBindings: 1 }]);
   });
 
   it("serializes twenty refresh contenders with the PostgreSQL advisory lock", async () => {

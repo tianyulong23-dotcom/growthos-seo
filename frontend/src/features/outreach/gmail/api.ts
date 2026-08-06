@@ -24,7 +24,6 @@ export function startGmailConnection(
 }
 
 export function completeGmailConnection(
-  websiteProjectKey: string,
   code: string,
   state: string,
   signal?: AbortSignal
@@ -32,11 +31,20 @@ export function completeGmailConnection(
   return requestBacklinks(
     "backlinksCompleteGmailConnectionV1",
     {
-      path: { websiteProjectKey },
       query: { code, state },
     },
     { signal }
   )
+}
+
+export function selectGmailConnection(
+  websiteProjectKey: string,
+  connectionId: string
+) {
+  return requestBacklinks("backlinksSelectGmailConnectionV1", {
+    path: { websiteProjectKey },
+    body: { connectionId },
+  })
 }
 
 export function disconnectGmailConnection(

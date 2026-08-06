@@ -30,6 +30,7 @@ export function createTemporalDraftGenerationScheduler(
   return Object.freeze({
     async start(input) {
       const workflowId = buildBacklinksWorkflowId({
+        organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
         workflow: "draft-generation",

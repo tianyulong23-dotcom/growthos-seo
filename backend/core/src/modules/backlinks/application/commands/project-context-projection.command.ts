@@ -231,6 +231,32 @@ async function initializeProjectRuntimeGovernance(
   }
 }
 
+async function staleContactEnrichmentJobs(
+  client: BacklinkTransactionClient,
+  input: ProjectContextProjectionInput,
+): Promise<void> {
+  await client.query(
+    `UPDATE backlink_contact_enrichment_jobs
+        SET status='stale_context',retry_after=NULL,finished_at=now(),
+            updated_at=now(),updated_by=$5,version=version+1
+      WHERE organization_id=$1 AND workspace_id=$2
+        AND website_project_id=$3
+        AND status IN ('pending','retry_scheduled')
+        AND (
+          $6::text <> 'ACTIVE'
+          OR recommendation_context_version_id <> $4
+        )`,
+    [
+      input.organizationId,
+      input.workspaceId,
+      input.websiteProjectId,
+      input.snapshotId,
+      input.actorId,
+      input.projectStatus,
+    ],
+  );
+}
+
 function conflicts(
   latest: NonNullable<Awaited<ReturnType<
     ReturnType<typeof createProjectContextSnapshotRepository>["findLatest"]
@@ -322,6 +348,7 @@ export function createProjectContextProjectionCommand(
           input,
           capabilities,
         );
+        await staleContactEnrichmentJobs(client, input);
 
         if (!input.inputComplete || input.projectStatus !== "ACTIVE") {
           return {
@@ -334,6 +361,7 @@ export function createProjectContextProjectionCommand(
         }
 
         const workflowId = buildBacklinksWorkflowId({
+          organizationId: input.organizationId,
           workspaceId: input.workspaceId,
           websiteProjectId: input.websiteProjectId,
           workflow: "project-analysis",

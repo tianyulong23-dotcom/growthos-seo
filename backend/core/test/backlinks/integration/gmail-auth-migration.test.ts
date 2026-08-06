@@ -9,6 +9,7 @@ import {
   backlinkGmailWorkspaceBindings,
   backlinkOauthAttempts,
   backlinkSecretReferences,
+  backlinkWebsiteProjectMailboxBindings,
 } from "../../../src/modules/backlinks/db/schema/gmail-connections.js";
 import {
   startBacklinksPostgresHarness,
@@ -55,6 +56,7 @@ const expectCode = async (query: Promise<unknown>, code: string) => {
 describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
   let harness: BacklinksPostgresHarness;
   let client: Client;
+  let legacyUpgradeEvidence: Record<string, unknown>[];
 
   beforeAll(async () => {
     harness = await startBacklinksPostgresHarness();
@@ -77,10 +79,65 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
       "0011_backlink_contact_purpose_correction.sql",
       "0012_backlink_gmail_connections.sql",
       "0015_backlink_gmail_sync_capabilities.sql",
+      "0041_backlink_gmail_project_bindings.sql",
     ]) {
       await client.query(await readFile(migration(name), "utf8"));
     }
     await client.query("SET search_path = backlinks, pg_catalog");
+    await client.query(`
+      INSERT INTO backlink_secret_references (
+        id, organization_id, provider, secret_kind, external_secret_id,
+        external_secret_version, created_by, updated_by
+      ) VALUES (
+        '${id(901)}', '${organization}', 'gcp-secret-manager',
+        'GMAIL_TOKEN_SET', 'projects/test/secrets/legacy-gmail-token', '1',
+        'test', 'test'
+      );
+      INSERT INTO backlink_gmail_connections (
+        id, organization_id, connected_by_user_id, google_subject,
+        primary_email, granted_scopes, token_secret_reference_id,
+        token_expires_at, created_by, updated_by
+      ) VALUES (
+        '${id(902)}', '${organization}', 'user-1', 'legacy-google-subject',
+        'legacy-sender@example.test', ${scopes}, '${id(901)}',
+        statement_timestamp() + interval '1 hour', 'user-1', 'user-1'
+      );
+      INSERT INTO backlink_gmail_workspace_bindings (
+        id, organization_id, workspace_id, website_project_id,
+        gmail_connection_id, created_by, updated_by
+      ) VALUES (
+        '${id(903)}', '${organization}', '${workspace}', '${project}',
+        '${id(902)}', 'user-1', 'user-1'
+      );
+    `);
+    await client.query(
+      await readFile(
+        migration("0047_backlink_gmail_organization_reuse.sql"),
+        "utf8",
+      ),
+    );
+    legacyUpgradeEvidence = (
+      await client.query(`
+        SELECT
+          workspace_binding.website_project_id AS "workspaceProjectId",
+          project_binding.website_project_id AS "projectMailboxProjectId",
+          project_binding.gmail_workspace_binding_id AS "workspaceBindingId"
+        FROM backlink_gmail_workspace_bindings AS workspace_binding
+        JOIN backlink_website_project_mailbox_bindings AS project_binding
+          ON project_binding.gmail_workspace_binding_id = workspace_binding.id
+        WHERE workspace_binding.id = '${id(903)}'
+      `)
+    ).rows;
+    await client.query(`
+      DELETE FROM backlink_website_project_mailbox_bindings
+      WHERE id = '${id(903)}';
+      DELETE FROM backlink_gmail_workspace_bindings
+      WHERE id = '${id(903)}';
+      DELETE FROM backlink_gmail_connections
+      WHERE id = '${id(902)}';
+      DELETE FROM backlink_secret_references
+      WHERE id = '${id(901)}';
+    `);
     await client.query(`
       INSERT INTO backlink_secret_references (
         id, organization_id, provider, secret_kind, external_secret_id,
@@ -109,12 +166,23 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
     await harness?.stop();
   });
 
+  it("upgrades an existing project Gmail binding without losing its selection", () => {
+    expect(legacyUpgradeEvidence).toEqual([
+      {
+        workspaceProjectId: null,
+        projectMailboxProjectId: project,
+        workspaceBindingId: id(903),
+      },
+    ]);
+  });
+
   it("declares the integrated Gmail authorization persistence schemas", () => {
     const configs = [
       backlinkSecretReferences,
       backlinkOauthAttempts,
       backlinkGmailConnections,
       backlinkGmailWorkspaceBindings,
+      backlinkWebsiteProjectMailboxBindings,
       backlinkGmailSendIdentities,
       backlinkGmailConnectionRevocations,
     ].map(getTableConfig);
@@ -123,6 +191,7 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
       "backlink_oauth_attempts",
       "backlink_gmail_connections",
       "backlink_gmail_workspace_bindings",
+      "backlink_website_project_mailbox_bindings",
       "backlink_gmail_send_identities",
       "backlink_gmail_connection_revocations",
     ]);
@@ -134,6 +203,7 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
       "backlink_oauth_attempt_pkce_secret_fk",
       "backlink_gmail_connection_token_secret_fk",
       "backlink_gmail_workspace_binding_connection_fk",
+      "backlink_project_mailbox_binding_workspace_fk",
       "backlink_gmail_send_identity_connection_fk",
       "backlink_gmail_revocation_connection_fk",
       "backlink_gmail_revocation_token_secret_fk",
@@ -155,8 +225,10 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
       ) VALUES (
         '${attemptId}', '${organization}', '${workspace}', '${project}',
         'user-1', '${stateHash}', '${sessionHash}', '${secretReferenceId}',
-        ${scopes}, 'https://app.example.test/oauth/google/callback',
-        '/backlinks/settings', statement_timestamp() + interval '10 minutes',
+        ${scopes},
+        'http://localhost:7200/api/v1/backlinks/gmail-connections/callback',
+        '/projects/awol/backlinks/email',
+        statement_timestamp() + interval '10 minutes',
         'user-1', 'user-1'
       )
     `;
@@ -182,8 +254,10 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
     );
     await expectCode(
       client.query(`
-        ${attempt(id(204), id(101), "e".repeat(64), "f".repeat(64))
-          .replace(scopes, `'["openid","email","profile","https://www.googleapis.com/auth/gmail.modify"]'::jsonb`)}
+        ${attempt(id(204), id(101), "e".repeat(64), "f".repeat(64)).replace(
+          scopes,
+          `'["openid","email","profile","https://www.googleapis.com/auth/gmail.modify"]'::jsonb`,
+        )}
       `),
       "23514",
     );
@@ -244,6 +318,13 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
         '${id(401)}', '${organization}', '${workspace}', '${id(301)}',
         'user-1', 'user-1'
       );
+      INSERT INTO backlink_website_project_mailbox_bindings (
+        id, organization_id, workspace_id, website_project_id,
+        gmail_workspace_binding_id, created_by, updated_by
+      ) VALUES (
+        '${id(601)}', '${organization}', '${workspace}', '${project}',
+        '${id(401)}', 'user-1', 'user-1'
+      );
       INSERT INTO backlink_gmail_send_identities (
         id, organization_id, gmail_connection_id, normalized_email,
         is_primary, is_default, verification_status, treat_as_alias,
@@ -280,6 +361,12 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
         updated_at = statement_timestamp(), updated_by = 'user-1'
       WHERE id = '${id(401)}'
     `);
+    await client.query(`
+      UPDATE backlink_website_project_mailbox_bindings
+      SET binding_status = 'INACTIVE', is_selected = false, version = 2,
+        updated_at = statement_timestamp(), updated_by = 'user-1'
+      WHERE id = '${id(601)}'
+    `);
     await client.query(connection(id(302), organization));
     await client.query(`
       INSERT INTO backlink_gmail_workspace_bindings (
@@ -288,6 +375,13 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
       ) VALUES (
         '${id(402)}', '${organization}', '${workspace}', '${id(302)}',
         'user-1', 'user-1'
+      );
+      INSERT INTO backlink_website_project_mailbox_bindings (
+        id, organization_id, workspace_id, website_project_id,
+        gmail_workspace_binding_id, created_by, updated_by
+      ) VALUES (
+        '${id(602)}', '${organization}', '${workspace}', '${project}',
+        '${id(402)}', 'user-1', 'user-1'
       );
       INSERT INTO backlink_gmail_send_identities (
         id, organization_id, gmail_connection_id, normalized_email,
@@ -312,6 +406,7 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
             'backlink_oauth_attempts',
             'backlink_gmail_connections',
             'backlink_gmail_workspace_bindings',
+            'backlink_website_project_mailbox_bindings',
             'backlink_gmail_send_identities',
             'backlink_gmail_connection_revocations'
           )
@@ -342,6 +437,7 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
             'backlink_oauth_attempts',
             'backlink_gmail_connections',
             'backlink_gmail_workspace_bindings',
+            'backlink_website_project_mailbox_bindings',
             'backlink_gmail_send_identities',
             'backlink_gmail_connection_revocations'
           )
@@ -391,13 +487,18 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
         writer_rw: true,
         reporting_read: true,
       },
+      {
+        relname: "backlink_website_project_mailbox_bindings",
+        secure: true,
+        owner: "growthos_backlinks_owner",
+        writer_rw: true,
+        reporting_read: true,
+      },
     ]);
 
     await client.query("SET ROLE growthos_backlinks_writer");
     try {
-      await client.query(
-        `SET app.current_organization_id = '${organization}'`,
-      );
+      await client.query(`SET app.current_organization_id = '${organization}'`);
       await client.query(`SET app.current_workspace_id = '${workspace}'`);
       await client.query(`SET app.current_website_project_id = '${project}'`);
       expect(
@@ -410,11 +511,23 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
                 AS connections,
               (SELECT count(*)::integer FROM backlink_gmail_workspace_bindings)
                 AS bindings,
+              (
+                SELECT count(*)::integer
+                FROM backlink_website_project_mailbox_bindings
+              ) AS "projectBindings",
               (SELECT count(*)::integer FROM backlink_gmail_send_identities)
                 AS identities
           `)
         ).rows,
-      ).toEqual([{ attempts: 2, connections: 2, bindings: 2, identities: 2 }]);
+      ).toEqual([
+        {
+          attempts: 2,
+          connections: 2,
+          bindings: 2,
+          projectBindings: 2,
+          identities: 2,
+        },
+      ]);
 
       await client.query(`SET app.current_workspace_id = '${id(999)}'`);
       expect(
@@ -427,11 +540,23 @@ describe("BL-AI-099 Gmail connection and OAuth persistence", () => {
                 AS connections,
               (SELECT count(*)::integer FROM backlink_gmail_workspace_bindings)
                 AS bindings,
+              (
+                SELECT count(*)::integer
+                FROM backlink_website_project_mailbox_bindings
+              ) AS "projectBindings",
               (SELECT count(*)::integer FROM backlink_gmail_send_identities)
                 AS identities
           `)
         ).rows,
-      ).toEqual([{ attempts: 0, connections: 2, bindings: 0, identities: 2 }]);
+      ).toEqual([
+        {
+          attempts: 0,
+          connections: 2,
+          bindings: 0,
+          projectBindings: 0,
+          identities: 2,
+        },
+      ]);
     } finally {
       await client.query("RESET ROLE");
     }

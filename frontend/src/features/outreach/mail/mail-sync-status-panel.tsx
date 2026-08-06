@@ -8,6 +8,7 @@ import {
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { GmailAccountSelector } from "@/features/outreach/gmail/gmail-account-selector"
 import type { GmailConnectionController } from "@/features/outreach/gmail/use-gmail-connection"
 
 import { MailCenter } from "./mail-center"
@@ -29,7 +30,7 @@ function ConnectionStatus({
     !controller.connection.mailSyncCapability
 
   return (
-    <div className="flex flex-col gap-3 rounded-xl border bg-muted/20 px-4 py-3 sm:flex-row sm:items-center">
+    <div className="flex flex-col gap-3 rounded-md border bg-muted/20 px-4 py-3 lg:flex-row lg:items-center">
       <span
         className={
           isConnected
@@ -72,6 +73,11 @@ function ConnectionStatus({
         </p>
       </div>
 
+      <GmailAccountSelector
+        controller={controller}
+        className="w-full lg:w-auto"
+      />
+
       <div className="flex shrink-0 gap-2">
         {controller.status === "error" ? (
           <Button
@@ -84,10 +90,15 @@ function ConnectionStatus({
         ) : needsAuthorization && !isLoading ? (
           <Button
             size="sm"
+            variant={controller.accounts.length > 0 ? "outline" : "default"}
             disabled={controller.busyAction === "connect"}
             onClick={() => void controller.connect()}
           >
-            {controller.busyAction === "connect" ? "正在连接" : "连接 Gmail"}
+            {controller.busyAction === "connect"
+              ? "正在连接"
+              : controller.accounts.length > 0
+                ? "授权新账号"
+                : "连接 Gmail"}
           </Button>
         ) : isConnected ? (
           <Button
@@ -101,6 +112,11 @@ function ConnectionStatus({
           </Button>
         ) : null}
       </div>
+      {controller.connection?.recentErrorCategory && (
+        <div className="text-xs text-destructive lg:max-w-40">
+          最近错误：{controller.connection.recentErrorCategory}
+        </div>
+      )}
     </div>
   )
 }

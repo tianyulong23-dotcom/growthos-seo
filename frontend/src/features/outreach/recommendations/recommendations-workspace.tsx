@@ -6,9 +6,7 @@ import {
   LoaderCircle,
   Mail,
   RefreshCw,
-  ScanSearch,
   Search,
-  Sparkles,
 } from "lucide-react"
 import { useNavigate } from "react-router"
 
@@ -20,24 +18,14 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { backlinksProjectQueries } from "@/features/outreach/api/project-query"
 import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
 
 import {
-  addPublicContactCandidate,
   createOpportunity,
-  getContactEnrichmentJob,
-  retryContactEnrichment,
-  startContactEnrichment,
-  type ContactEnrichmentJob,
-  type PublicContactRole,
+  getRecommendationInventory,
+  retryUnpublishedContacts,
+  type RecommendationInventoryStatus,
   type RecommendationItem,
 } from "./api"
 import {
@@ -46,34 +34,18 @@ import {
 } from "./use-recommendation-refill"
 import { useRecommendations } from "./use-recommendations"
 
-type ContactFilter = "all" | RecommendationItem["contactStatus"]
-
-const activeJobStatuses = new Set<ContactEnrichmentJob["status"]>([
-  "pending",
-  "running",
-  "retry_scheduled",
-])
-
-const contactStatusMeta: Record<
-  RecommendationItem["contactStatus"],
-  {
-    label: string
-    variant: "default" | "secondary" | "outline" | "destructive"
-  }
-> = {
-  contactable: { label: "可联系", variant: "default" },
-  running: { label: "抓取中", variant: "secondary" },
-  review: { label: "需复核", variant: "outline" },
-  not_found: { label: "暂无联系人", variant: "destructive" },
-}
-
-const roleLabels: Record<PublicContactRole, string> = {
-  press: "媒体",
-  editorial: "编辑",
-  partnerships: "合作",
-  advertising: "广告",
-  support: "支持",
-  general: "通用",
+const reasonLabels: Record<string, string> = {
+  PUBLIC_EMAIL_FOUND: "公开邮箱已验证",
+  CONTACT_FORM_ONLY: "仅发现联系表单",
+  LOGIN_REQUIRED: "页面需要登录",
+  CAPTCHA_OR_BOT_CHALLENGE: "触发人机验证",
+  ROBOTS_DISALLOWED: "站点禁止自动访问",
+  ACCESS_DENIED: "页面拒绝访问",
+  NO_PUBLIC_EMAIL: "未发现公开邮箱",
+  SITE_UNREACHABLE: "站点无法访问",
+  UNSUPPORTED_CONTENT: "页面内容暂不支持",
+  MANUAL_REVIEW_REQUIRED: "需要人工复核",
+  COMPLETED_PARTIAL: "部分页面已完成",
 }
 
 function formatDate(value: string) {
@@ -107,52 +79,49 @@ function formatQueryTime(value: number | null) {
   }).format(new Date(value))
 }
 
-function RecommendationRefillView({
+function ContactBatchWaitView({
   project,
-  refill,
+  wait,
+  batch,
+  error,
+  retrying,
   onStart,
+  onRetry,
   onRefresh,
 }: {
   project: Project
-  refill: RecommendationRefillState
+  wait: RecommendationRefillState
+  batch: RecommendationInventoryStatus["contactBatch"]
+  error: string | null
+  retrying: boolean
   onStart: () => void
+  onRetry: () => void
   onRefresh: () => void
 }) {
-  const running = refill.status === "running"
-  const canStart = ["idle", "failed", "timed_out"].includes(refill.status)
-  const title =
-    refill.status === "idle"
-      ? "当前项目还没有推荐网站"
-      : refill.status === "failed"
-        ? "推荐补池任务未提交"
-        : refill.status === "timed_out"
-          ? "推荐补池仍未返回足够结果"
-          : `正在为 ${project.name} 生成推荐`
-
+  const running = wait.status === "running"
   return (
     <div
       className="flex min-h-64 flex-col items-center justify-center border-y bg-muted/20 px-4 py-8 text-center"
-      role={refill.status === "failed" ? "alert" : "status"}
+      role={wait.status === "failed" ? "alert" : "status"}
       aria-busy={running || undefined}
     >
       {running ? (
         <LoaderCircle className="mb-3 size-5 animate-spin text-muted-foreground" />
       ) : (
-        <Sparkles className="mb-3 size-5 text-muted-foreground" />
+        <Clock3 className="mb-3 size-5 text-muted-foreground" />
       )}
-      <h2 className="text-sm font-medium">{title}</h2>
+      <h2 className="text-sm font-medium">当前没有已发布的可联系推荐</h2>
       <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">
-        将依据 {project.domain}、{project.targetMarket}、
-        {project.keywords.join("、")} 与当前项目产品资料生成个性化外链网站。
-        页面刷新只恢复同一任务，不会重新提交 Provider 调用。
+        {project.name} 的候选网站会自动进入联系人发现批次。这里只显示具备公开证据、
+        已冻结默认联系人并通过发布门禁的网站。
       </p>
-      {refill.status !== "idle" && (
+      {wait.status !== "idle" && (
         <div className="mt-5 grid w-full max-w-2xl grid-cols-2 gap-3 text-left sm:grid-cols-4">
           {[
-            ["阶段", refill.phase],
-            ["已耗时", formatElapsed(refill.elapsedMs)],
-            ["轮询次数", String(refill.pollCount)],
-            ["最后查询", formatQueryTime(refill.lastQueryAt)],
+            ["阶段", wait.phase],
+            ["已耗时", formatElapsed(wait.elapsedMs)],
+            ["轮询次数", String(wait.pollCount)],
+            ["最后查询", formatQueryTime(wait.lastQueryAt)],
           ].map(([label, value]) => (
             <div key={label} className="min-w-0 border-l-2 pl-3">
               <div className="text-xs text-muted-foreground">{label}</div>
@@ -161,20 +130,53 @@ function RecommendationRefillView({
           ))}
         </div>
       )}
-      {refill.error && (
-        <p className="mt-4 text-sm text-destructive">{refill.error}</p>
+      {batch !== null && (
+        <>
+          <div className="mt-5 grid w-full max-w-2xl grid-cols-2 gap-3 text-left sm:grid-cols-4">
+            {[
+              ["候选网站", batch.totalJobCount],
+              ["已发布", batch.publishedCount],
+              ["未发布", batch.unpublishedCount],
+              ["已终态", `${batch.terminalJobCount}/${batch.totalJobCount}`],
+            ].map(([label, value]) => (
+              <div key={label} className="min-w-0 border-l-2 pl-3">
+                <div className="text-xs text-muted-foreground">{label}</div>
+                <div className="mt-1 text-sm font-medium">{value}</div>
+              </div>
+            ))}
+          </div>
+          {batch.reasonCounts.length > 0 && (
+            <div className="mt-4 flex max-w-2xl flex-wrap justify-center gap-2">
+              {batch.reasonCounts.map((reason) => (
+                <Badge key={reason.reasonCode} variant="outline">
+                  {reasonLabels[reason.reasonCode] ?? reason.reasonCode}{" "}
+                  {reason.count}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      {(wait.error || error) && (
+        <p className="mt-4 text-sm text-destructive">
+          {wait.error ?? error}
+        </p>
       )}
       <div className="mt-5 flex flex-wrap justify-center gap-2">
-        {canStart && (
-          <Button onClick={onStart}>
-            <Sparkles />
-            {refill.status === "idle" ? "生成推荐" : "重新提交"}
-          </Button>
-        )}
+        <Button onClick={onStart} disabled={running}>
+          {running ? <LoaderCircle className="animate-spin" /> : <Clock3 />}
+          等待本批可联系推荐
+        </Button>
         <Button variant="outline" onClick={onRefresh}>
           <RefreshCw />
           重新读取
         </Button>
+        {batch !== null && batch.retryableUnpublishedCount > 0 && (
+          <Button variant="outline" onClick={onRetry} disabled={retrying}>
+            <RefreshCw className={retrying ? "animate-spin" : undefined} />
+            仅重试未发布
+          </Button>
+        )}
       </div>
     </div>
   )
@@ -220,94 +222,76 @@ function ProjectRecommendationsWorkspace({
   const websiteProjectKey = project.id
   const navigate = useNavigate()
   const query = useRecommendations(websiteProjectKey, true)
-  const refill = useRecommendationRefill(project, query.poll)
-  const [search, setSearch] = React.useState("")
-  const [filter, setFilter] = React.useState<ContactFilter>("all")
-  const [selectedContacts, setSelectedContacts] = React.useState<
-    Record<string, string>
-  >({})
-  const [busyId, setBusyId] = React.useState<string | null>(null)
-  const [error, setError] = React.useState<string | null>(null)
-  const [manualId, setManualId] = React.useState<string | null>(null)
-  const [manualEmail, setManualEmail] = React.useState("")
-  const [manualSource, setManualSource] = React.useState("")
-  const [manualRole, setManualRole] =
-    React.useState<PublicContactRole>("editorial")
-
-  const selectedContact = React.useCallback(
-    (item: RecommendationItem) =>
-      selectedContacts[item.id] ??
-      item.recommendedContactCandidateId ??
-      item.contacts.find((contact) => contact.eligible)?.id ??
-      "",
-    [selectedContacts]
-  )
-
-  async function pollJob(job: ContactEnrichmentJob) {
-    let current = job
-    for (
-      let attempt = 0;
-      attempt < 90 && activeJobStatuses.has(current.status);
-      attempt += 1
-    ) {
-      await new Promise((resolve) => window.setTimeout(resolve, 2_000))
-      current = await getContactEnrichmentJob(
+  const refreshRecommendations = query.refresh
+  const pollInventory = React.useCallback(async () => {
+    try {
+      return await getRecommendationInventory(
         websiteProjectKey,
-        current.id,
         AbortSignal.timeout(10_000)
       )
+    } catch {
+      return null
     }
-    await query.refresh()
-  }
+  }, [websiteProjectKey])
+  const wait = useRecommendationRefill(project, pollInventory)
+  const [inventory, setInventory] =
+    React.useState<Awaited<ReturnType<typeof pollInventory>>>(null)
+  const [search, setSearch] = React.useState("")
+  const [busyId, setBusyId] = React.useState<string | null>(null)
+  const [retrying, setRetrying] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
 
-  async function discover(item: RecommendationItem) {
-    if (busyId) return
-    setBusyId(item.id)
+  const refreshAll = React.useCallback(async () => {
+    const [, nextInventory] = await Promise.all([
+      refreshRecommendations(),
+      pollInventory(),
+    ])
+    setInventory(nextInventory)
+  }, [pollInventory, refreshRecommendations])
+
+  React.useEffect(() => {
+    void pollInventory().then(setInventory)
+  }, [pollInventory])
+
+  React.useEffect(() => {
+    if (wait.status !== "succeeded") return
+    let active = true
+    queueMicrotask(() => {
+      if (active) void refreshAll()
+    })
+    return () => {
+      active = false
+    }
+  }, [refreshAll, wait.status])
+
+  async function retryUnpublished() {
+    if (retrying) return
+    setRetrying(true)
     setError(null)
     try {
-      const job = item.contactJob
-        ? await retryContactEnrichment(websiteProjectKey, item.contactJob.id)
-        : await startContactEnrichment(websiteProjectKey, item.id)
-      await pollJob(job)
+      const result = await retryUnpublishedContacts(websiteProjectKey)
+      wait.start(result.batchId)
     } catch {
-      setError("联系人抓取未完成，请查看当前状态后重试。")
+      setError("未能重试本批未发布网站，请重新读取批次状态。")
     } finally {
-      setBusyId(null)
-    }
-  }
-
-  async function addManual(item: RecommendationItem) {
-    if (!manualEmail.trim() || !manualSource.trim() || busyId) return
-    setBusyId(item.id)
-    setError(null)
-    try {
-      await addPublicContactCandidate(websiteProjectKey, item.id, {
-        normalizedEmail: manualEmail.trim(),
-        contactRole: manualRole,
-        sourceUrl: manualSource.trim(),
-        reason: "User verified public contact evidence.",
-      })
-      setManualId(null)
-      setManualEmail("")
-      setManualSource("")
-      await query.refresh()
-    } catch {
-      setError("人工联系人未保存。请检查邮箱格式和公开证据 URL。")
-    } finally {
-      setBusyId(null)
+      setRetrying(false)
     }
   }
 
   async function addOpportunity(item: RecommendationItem) {
-    const contactCandidateId = selectedContact(item)
-    if (!contactCandidateId || busyId) return
+    const contact = item.contacts.find(
+      (candidate) =>
+        candidate.id === item.recommendedContactCandidateId &&
+        candidate.eligible
+    )
+    if (!contact || busyId) return
     setBusyId(item.id)
     setError(null)
     try {
       const result = await createOpportunity(
         websiteProjectKey,
         item.id,
-        contactCandidateId,
+        contact.id,
         item.version
       )
       if (result.websiteProjectId !== result.meta.websiteProjectId) {
@@ -327,7 +311,7 @@ function ProjectRecommendationsWorkspace({
         `/projects/${websiteProjectKey}/backlinks/opportunities?opportunityId=${result.opportunityId}`
       )
     } catch {
-      setError("创建 Opportunity 失败。请刷新推荐，确认联系人仍有有效证据。")
+      setError("创建 Opportunity 失败。请刷新推荐，确认冻结联系人证据仍有效。")
     } finally {
       setBusyId(null)
     }
@@ -351,11 +335,15 @@ function ProjectRecommendationsWorkspace({
       )
     }
     return (
-      <RecommendationRefillView
+      <ContactBatchWaitView
         project={project}
-        refill={refill}
-        onStart={() => void refill.start()}
-        onRefresh={() => void query.refresh()}
+        wait={wait}
+        batch={wait.batch ?? inventory?.contactBatch ?? null}
+        error={error}
+        retrying={retrying}
+        onStart={() => wait.start()}
+        onRetry={() => void retryUnpublished()}
+        onRefresh={() => void refreshAll()}
       />
     )
   }
@@ -365,68 +353,62 @@ function ProjectRecommendationsWorkspace({
         state={query.status}
         title={
           query.status === "forbidden"
-              ? "当前账号无权查看该项目的推荐"
-              : query.status === "offline"
-                ? "推荐池当前离线"
-                : "推荐池加载失败"
+            ? "当前账号无权查看该项目的推荐"
+            : query.status === "offline"
+              ? "推荐池当前离线"
+              : "推荐池加载失败"
         }
         description="不会回退到演示数据或其他项目数据。"
-        onRetry={() => void query.refresh()}
+        onRetry={() => void refreshAll()}
         retryLabel="重新读取"
       />
     )
   }
 
-  const counts = query.items.reduce(
-    (result, item) => {
-      result[item.contactStatus] += 1
-      return result
-    },
-    { contactable: 0, running: 0, review: 0, not_found: 0 }
-  )
-  const rows = query.items.filter(
-    (item) =>
-      (filter === "all" || item.contactStatus === filter) &&
-      item.hostname.toLowerCase().includes(search.trim().toLowerCase())
+  const batch = wait.batch ?? inventory?.contactBatch ?? null
+  const rows = query.items.filter((item) =>
+    item.hostname.toLowerCase().includes(search.trim().toLowerCase())
   )
 
   return (
     <div>
-      {refill.status !== "idle" && (
+      {wait.status !== "idle" && (
         <div
-          className="mb-4 flex flex-col gap-3 border-l-2 border-primary bg-muted/30 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
+          className="mb-4 border-l-2 border-primary bg-muted/30 px-4 py-3 text-sm"
           role="status"
-          aria-busy={refill.status === "running" || undefined}
+          aria-busy={wait.status === "running" || undefined}
         >
           <div className="min-w-0">
             <div className="flex items-center gap-2 font-medium">
-              {refill.status === "running" ? (
+              {wait.status === "running" ? (
                 <LoaderCircle className="size-4 animate-spin" />
               ) : (
                 <Clock3 className="size-4" />
               )}
-              {refill.phase}
+              {wait.phase}
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
-              已耗时 {formatElapsed(refill.elapsedMs)} · 轮询{" "}
-              {refill.pollCount} 次 · 最后查询{" "}
-              {formatQueryTime(refill.lastQueryAt)}
+              已耗时 {formatElapsed(wait.elapsedMs)} · 轮询 {wait.pollCount} 次 ·
+              最后查询 {formatQueryTime(wait.lastQueryAt)}
             </div>
+            {wait.error && (
+              <div className="mt-1 text-xs text-destructive">{wait.error}</div>
+            )}
           </div>
-          {["failed", "timed_out"].includes(refill.status) && (
-            <Button size="sm" onClick={() => void refill.start()}>
-              <Sparkles />
-              重新提交
-            </Button>
-          )}
         </div>
       )}
+
       <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          ["推荐网站", query.items.length],
-          ["可直接联系", counts.contactable],
-          ["需要复核", counts.review],
-          ["暂无联系人", counts.not_found],
+          ["可联系推荐", query.items.length],
+          ["本批已发布", batch?.publishedCount ?? query.items.length],
+          ["本批未发布", batch?.unpublishedCount ?? 0],
+          [
+            "本批终态",
+            batch === null
+              ? "待读取"
+              : `${batch.terminalJobCount}/${batch.totalJobCount}`,
+          ],
         ].map(([label, value]) => (
           <Card key={label} size="sm">
             <CardContent>
@@ -446,47 +428,48 @@ function ProjectRecommendationsWorkspace({
               <Input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="搜索网站..."
+                placeholder="搜索已发布网站..."
                 className="pl-9 sm:max-w-sm"
               />
             </div>
-            <Button variant="outline" onClick={() => void query.refresh()}>
-              <RefreshCw />
-              刷新
-            </Button>
-            {query.items.length < refill.targetInventory &&
-              project.inputRequired.length === 0 && (
-                <Button
-                  onClick={() => void refill.start()}
-                  disabled={refill.status === "running"}
-                >
-                  {refill.status === "running" ? (
-                    <LoaderCircle className="animate-spin" />
-                  ) : (
-                    <Sparkles />
-                  )}
-                  {refill.status === "running" ? "补充中" : "补充推荐"}
-                </Button>
+            <Button onClick={() => wait.start()} disabled={wait.status === "running"}>
+              {wait.status === "running" ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <Clock3 />
               )}
-          </div>
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {[
-              ["all", "全部", query.items.length],
-              ["contactable", "有联系人", counts.contactable],
-              ["running", "抓取中", counts.running],
-              ["review", "需复核", counts.review],
-              ["not_found", "暂无联系人", counts.not_found],
-            ].map(([value, label, count]) => (
+              等待本批可联系推荐
+            </Button>
+            {batch !== null && batch.retryableUnpublishedCount > 0 && (
               <Button
-                key={value}
-                size="sm"
-                variant={filter === value ? "secondary" : "ghost"}
-                onClick={() => setFilter(value as ContactFilter)}
+                variant="outline"
+                onClick={() => void retryUnpublished()}
+                disabled={retrying}
               >
-                {label} {count}
+                <RefreshCw className={retrying ? "animate-spin" : undefined} />
+                仅重试未发布
               </Button>
-            ))}
+            )}
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => void refreshAll()}
+              title="重新读取"
+              aria-label="重新读取"
+            >
+              <RefreshCw />
+            </Button>
           </div>
+          {batch !== null && batch.reasonCounts.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {batch.reasonCounts.map((reason) => (
+                <Badge key={reason.reasonCode} variant="outline">
+                  {reasonLabels[reason.reasonCode] ?? reason.reasonCode}{" "}
+                  {reason.count}
+                </Badge>
+              ))}
+            </div>
+          )}
           {error && (
             <div role="alert" className="text-sm text-destructive">
               {error}
@@ -496,13 +479,12 @@ function ProjectRecommendationsWorkspace({
 
         <div className="divide-y">
           {rows.map((item) => {
-            const eligibleContacts = item.contacts.filter(
-              (contact) => contact.eligible
+            const contact = item.contacts.find(
+              (candidate) =>
+                candidate.id === item.recommendedContactCandidateId &&
+                candidate.eligible
             )
-            const selectedId = selectedContact(item)
-            const selected = eligibleContacts.find(
-              (contact) => contact.id === selectedId
-            )
+            const evidence = contact?.evidence[0]
             const isBusy = busyId === item.id
             return (
               <article
@@ -513,11 +495,7 @@ function ProjectRecommendationsWorkspace({
                   <WebsiteIdentity item={item} />
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="secondary">评分 {item.score}</Badge>
-                    <Badge
-                      variant={contactStatusMeta[item.contactStatus].variant}
-                    >
-                      {contactStatusMeta[item.contactStatus].label}
-                    </Badge>
+                    <Badge>公开邮箱已验证</Badge>
                     <span className="text-xs text-muted-foreground">
                       获取于 {formatDate(item.acquiredAt)}
                     </span>
@@ -555,123 +533,36 @@ function ProjectRecommendationsWorkspace({
                 </section>
 
                 <section className="min-w-0 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm font-medium">公开联系人</div>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        setManualId(manualId === item.id ? null : item.id)
-                      }
-                    >
-                      <Mail />
-                      人工补充
-                    </Button>
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <Mail className="size-4" />
+                    冻结默认联系人
                   </div>
-                  {eligibleContacts.length > 0 ? (
-                    <>
-                      <Select
-                        value={selectedId}
-                        onValueChange={(value) =>
-                          setSelectedContacts((current) => ({
-                            ...current,
-                            [item.id]: String(value),
-                          }))
-                        }
+                  {contact && evidence ? (
+                    <div className="space-y-2 rounded-md border p-3 text-xs">
+                      <div className="font-medium break-all">
+                        {contact.normalizedEmail}
+                      </div>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+                        <span>用途 {contact.inferredPurpose}</span>
+                        <span>联系人置信度 {contact.confidence}</span>
+                        <span>用途置信度 {contact.purposeConfidence}</span>
+                      </div>
+                      <a
+                        href={evidence.sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
                       >
-                        <SelectTrigger
-                          aria-label="选择公开联系人"
-                          className="w-full rounded-md border-border bg-background"
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {eligibleContacts.map((contact) => (
-                            <SelectItem key={contact.id} value={contact.id}>
-                              {contact.normalizedEmail}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {selected && (
-                        <div className="space-y-2 rounded-md border p-3 text-xs">
-                          <div className="font-medium break-all">
-                            {selected.normalizedEmail}
-                          </div>
-                          <div className="flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
-                            <span>用途 {selected.inferredPurpose}</span>
-                            <span>置信度 {selected.confidence}</span>
-                            <span>
-                              {selected.contactReviewRequired
-                                ? "创建后需人工复核"
-                                : "证据满足直接加入条件"}
-                            </span>
-                          </div>
-                          {selected.evidence[0] && (
-                            <a
-                              href={selected.evidence[0].sourceUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
-                            >
-                              <span className="truncate">
-                                查看公开证据 ·{" "}
-                                {selected.evidence[0].extractionMethod}
-                              </span>
-                              <ExternalLink className="size-3 shrink-0" />
-                            </a>
-                          )}
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">
-                      未发现符合语法和证据门禁的公开邮箱。
-                    </p>
-                  )}
-                  {manualId === item.id && (
-                    <div className="space-y-2 border-t pt-3">
-                      <Input
-                        type="email"
-                        value={manualEmail}
-                        onChange={(event) => setManualEmail(event.target.value)}
-                        placeholder="公开邮箱"
-                      />
-                      <Input
-                        type="url"
-                        value={manualSource}
-                        onChange={(event) =>
-                          setManualSource(event.target.value)
-                        }
-                        placeholder="公开证据 URL"
-                      />
-                      <Select
-                        value={manualRole}
-                        onValueChange={(value) =>
-                          setManualRole(value as PublicContactRole)
-                        }
-                      >
-                        <SelectTrigger className="w-full rounded-md border-border bg-background">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {Object.entries(roleLabels).map(([value, label]) => (
-                            <SelectItem key={value} value={value}>
-                              {label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <Button
-                        size="sm"
-                        onClick={() => void addManual(item)}
-                        disabled={
-                          isBusy || !manualEmail.trim() || !manualSource.trim()
-                        }
-                      >
-                        保存公开联系人
-                      </Button>
+                        <span className="truncate">
+                          查看公开证据 · {evidence.extractionMethod}
+                        </span>
+                        <ExternalLink className="size-3 shrink-0" />
+                      </a>
                     </div>
+                  ) : (
+                    <p className="text-sm text-destructive">
+                      已发布记录缺少冻结联系人证据，请刷新后重试。
+                    </p>
                   )}
                 </section>
 
@@ -681,63 +572,48 @@ function ProjectRecommendationsWorkspace({
                       已访问 {item.contactJob?.pagesVisited ?? 0} 页，证据{" "}
                       {item.contactJob?.evidenceCount ?? 0} 条
                     </div>
-                    {item.contactJob?.lastErrorCode && (
-                      <div>最近错误：{item.contactJob.lastErrorCode}</div>
-                    )}
+                    <div>
+                      方法 {item.contactJob?.method ?? "none"} · 终态{" "}
+                      {item.contactJob?.terminalReasonCode ?? "待同步"}
+                    </div>
                     {item.createBlockReason === "existing_opportunity" && (
                       <div>该域名已在当前项目的 Opportunity 中。</div>
                     )}
                   </div>
-                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                  {item.existingOpportunityId ? (
                     <Button
-                      variant="outline"
-                      onClick={() => void discover(item)}
+                      onClick={() =>
+                        navigate(
+                          `/projects/${websiteProjectKey}/backlinks/opportunities?opportunityId=${item.existingOpportunityId}`
+                        )
+                      }
+                    >
+                      打开 Opportunity
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={() => void addOpportunity(item)}
                       disabled={
-                        Boolean(busyId) || item.contactStatus === "running"
+                        Boolean(busyId) ||
+                        !item.canCreateOpportunity ||
+                        !contact
                       }
                     >
                       {isBusy ? (
                         <LoaderCircle className="animate-spin" />
                       ) : (
-                        <ScanSearch />
+                        <CirclePlus />
                       )}
-                      {item.contactJob ? "重新抓取" : "发现联系人"}
+                      加入 Opportunity
                     </Button>
-                    {item.existingOpportunityId ? (
-                      <Button
-                        onClick={() =>
-                          navigate(
-                            `/projects/${websiteProjectKey}/backlinks/opportunities?opportunityId=${item.existingOpportunityId}`
-                          )
-                        }
-                      >
-                        打开 Opportunity
-                      </Button>
-                    ) : (
-                      <Button
-                        onClick={() => void addOpportunity(item)}
-                        disabled={
-                          Boolean(busyId) ||
-                          !item.canCreateOpportunity ||
-                          !selectedId
-                        }
-                      >
-                        {isBusy ? (
-                          <LoaderCircle className="animate-spin" />
-                        ) : (
-                          <CirclePlus />
-                        )}
-                        加入 Opportunity
-                      </Button>
-                    )}
-                  </div>
+                  )}
                 </section>
               </article>
             )
           })}
           {rows.length === 0 && (
             <div className="p-10 text-center text-sm text-muted-foreground">
-              当前筛选条件下没有推荐网站。
+              当前搜索条件下没有已发布网站。
             </div>
           )}
         </div>

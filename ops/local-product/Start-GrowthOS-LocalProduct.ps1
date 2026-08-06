@@ -205,6 +205,79 @@ function Wait-ContainerHealthy([string]$Name) {
     throw "$Name did not become healthy"
 }
 
+function Invoke-LocalProductAlembicUpgrade {
+    $environmentPath = Join-Path $RuntimeRoot "fastapi.env"
+    $python = Join-Path $RuntimeRoot "python\Scripts\python.exe"
+    $adminPasswordPath = Join-Path $RuntimeRoot `
+        "secrets\postgres-admin-password"
+    if (-not (Test-Path -LiteralPath $environmentPath)) {
+        throw "LOCAL_PRODUCT_FASTAPI_ENVIRONMENT_MISSING"
+    }
+    if (-not (Test-Path -LiteralPath $python)) {
+        throw "LOCAL_PRODUCT_PYTHON_RUNTIME_MISSING"
+    }
+    if (-not (Test-Path -LiteralPath $adminPasswordPath)) {
+        throw "LOCAL_PRODUCT_POSTGRES_ADMIN_PASSWORD_MISSING"
+    }
+
+    $previousEnvironment = @{}
+    try {
+        foreach (
+            $rawLine in Get-Content -LiteralPath $environmentPath -Encoding UTF8
+        ) {
+            $line = $rawLine.Trim()
+            if ($line.Length -eq 0 -or $line.StartsWith("#")) {
+                continue
+            }
+            $parts = $line.Split("=", 2)
+            if ($parts.Length -ne 2 -or $parts[0].Trim().Length -eq 0) {
+                throw "Invalid environment line in $environmentPath"
+            }
+            $name = $parts[0].Trim()
+            $previousEnvironment[$name] =
+                [Environment]::GetEnvironmentVariable($name, "Process")
+            [Environment]::SetEnvironmentVariable(
+                $name,
+                $parts[1],
+                "Process"
+            )
+        }
+        $adminPassword = (
+            Get-Content -LiteralPath $adminPasswordPath -Raw -Encoding UTF8
+        ).Trim()
+        if ($adminPassword.Length -eq 0) {
+            throw "LOCAL_PRODUCT_POSTGRES_ADMIN_PASSWORD_EMPTY"
+        }
+        $previousEnvironment["ALEMBIC_DATABASE_URL"] =
+            [Environment]::GetEnvironmentVariable(
+                "ALEMBIC_DATABASE_URL",
+                "Process"
+            )
+        $encodedAdminPassword = [System.Uri]::EscapeDataString(
+            $adminPassword
+        )
+        [Environment]::SetEnvironmentVariable(
+            "ALEMBIC_DATABASE_URL",
+            "postgresql+psycopg://postgres:$encodedAdminPassword" +
+                "@127.0.0.1:55432/growthos_live001",
+            "Process"
+        )
+        Invoke-Checked `
+            $python `
+            @("-m", "alembic", "upgrade", "head") `
+            (Join-Path $RepositoryRoot "backend\api")
+    }
+    finally {
+        foreach ($entry in $previousEnvironment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable(
+                [string]$entry.Key,
+                $entry.Value,
+                "Process"
+            )
+        }
+    }
+}
+
 function Wait-HttpReady([string]$Uri, [uint32]$GroupPid) {
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
         Start-Sleep -Seconds 1
@@ -375,6 +448,7 @@ Invoke-Checked `
     $RepositoryRoot
 Wait-ContainerHealthy "growthos-live001-postgres"
 Wait-ContainerHealthy "growthos-live001-temporal"
+Invoke-LocalProductAlembicUpgrade
 
 $contactMigrationPath = Join-Path $RepositoryRoot `
     "backend\core\src\modules\backlinks\db\migrations\0038_backlink_contact_enrichment.sql"
@@ -616,6 +690,240 @@ if ($projectRecommendationContextMigrationRequired.Trim() -eq "true") {
     }
 }
 
+$projectScopeProviderMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0043_backlink_project_scope_provider.sql"
+$projectScopeProviderMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regprocedure(
+    'backlinks.backlink_list_active_project_scopes(uuid,uuid,uuid,integer)'
+  ) IS NULL
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($projectScopeProviderMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $projectScopeProviderMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $projectScopeProviderMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($projectScopeProviderMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_PROJECT_SCOPE_PROVIDER_MIGRATION_FAILED:$projectScopeProviderMigrationExitCode"
+    }
+}
+
+$platformProjectAuthorityMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0044_backlink_platform_project_authority.sql"
+$platformProjectAuthorityMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regprocedure(
+    'platform.backlink_list_active_website_projects(text,text)'
+  ) IS NULL
+  OR position(
+    'platform.backlink_list_active_website_projects' IN
+    pg_get_functiondef(
+      'backlinks.backlink_list_active_project_scopes(uuid,uuid,uuid,integer)'::regprocedure
+    )
+  ) = 0
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($platformProjectAuthorityMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $platformProjectAuthorityMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $platformProjectAuthorityMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($platformProjectAuthorityMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_PLATFORM_PROJECT_AUTHORITY_MIGRATION_FAILED:$platformProjectAuthorityMigrationExitCode"
+    }
+}
+
+$commercialCandidateInventoryMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0045_backlink_commercial_candidate_inventory.sql"
+$commercialCandidateInventoryMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        "SELECT (to_regclass('backlinks.backlink_commercial_discovery_blueprints') IS NULL)::text;"
+    ) `
+    $RepositoryRoot
+if ($commercialCandidateInventoryMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $commercialCandidateInventoryMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $commercialCandidateInventoryMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($commercialCandidateInventoryMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_COMMERCIAL_CANDIDATE_INVENTORY_MIGRATION_FAILED:$commercialCandidateInventoryMigrationExitCode"
+    }
+}
+
+$contactPublicationGateMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0046_backlink_contact_publication_gate.sql"
+$contactPublicationGateMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regclass('backlinks.backlink_contact_enrichment_batches') IS NULL
+  OR to_regclass('backlinks.backlink_contact_evidence_snapshots') IS NULL
+  OR NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_recommendation_inventory'
+       AND column_name='contact_evidence_snapshot_id'
+  )
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($contactPublicationGateMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $contactPublicationGateMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $contactPublicationGateMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($contactPublicationGateMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_CONTACT_PUBLICATION_GATE_MIGRATION_FAILED:$contactPublicationGateMigrationExitCode"
+    }
+}
+
+$gmailOrganizationReuseMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0047_backlink_gmail_organization_reuse.sql"
+$gmailOrganizationReuseMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regclass(
+    'backlinks.backlink_website_project_mailbox_bindings'
+  ) IS NULL
+  OR NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_gmail_workspace_bindings'
+       AND column_name='website_project_id'
+       AND is_nullable='YES'
+  )
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($gmailOrganizationReuseMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $gmailOrganizationReuseMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $gmailOrganizationReuseMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($gmailOrganizationReuseMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_GMAIL_ORGANIZATION_REUSE_MIGRATION_FAILED:$gmailOrganizationReuseMigrationExitCode"
+    }
+}
+
 $migrationManifest = Get-Content `
     -LiteralPath (Join-Path $RepositoryRoot `
         "backend\database\deployment-manifest.v1.json") `
@@ -624,7 +932,7 @@ $migrationManifest = Get-Content `
     ConvertFrom-Json
 $expectedAlembic = [string]$migrationManifest.heads.alembic
 $expectedBacklinks = [string]$migrationManifest.heads.backlinks
-if ($expectedBacklinks -ne "0042") {
+if ($expectedBacklinks -ne "0047") {
     throw "LOCAL_PRODUCT_BACKLINKS_MIGRATION_HEAD_UNSUPPORTED"
 }
 $databaseSql = @"
@@ -723,7 +1031,18 @@ SELECT (
      WHERE table_schema='backlinks'
        AND table_name='backlink_gmail_workspace_bindings'
        AND column_name='website_project_id'
-       AND is_nullable='NO'
+       AND is_nullable='YES'
+  )
+  AND to_regclass(
+    'backlinks.backlink_website_project_mailbox_bindings'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid=
+       'backlinks.backlink_website_project_mailbox_bindings'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
   )
   AND (
     SELECT count(*)
@@ -734,6 +1053,82 @@ SELECT (
        AND data_type='jsonb'
        AND is_nullable='NO'
   ) = 3
+  AND to_regprocedure(
+    'backlinks.backlink_list_active_project_scopes(uuid,uuid,uuid,integer)'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.backlink_list_active_website_projects(text,text)'
+  ) IS NOT NULL
+  AND position(
+    'platform.backlink_list_active_website_projects' IN
+    pg_get_functiondef(
+      'backlinks.backlink_list_active_project_scopes(uuid,uuid,uuid,integer)'::regprocedure
+    )
+  ) > 0
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid='backlinks.backlink_contact_enrichment_jobs'::regclass
+       AND conname='backlink_contact_enrichment_job_status_check'
+       AND position('stale_context' IN pg_get_constraintdef(oid)) > 0
+  )
+  AND to_regclass(
+    'backlinks.backlink_commercial_discovery_blueprints'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_commercial_discovery_batches'
+  ) IS NOT NULL
+  AND to_regclass('backlinks.backlink_commercial_candidates') IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_commercial_discovery_artifacts'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_commercial_inventory_policies'
+  ) IS NOT NULL
+  AND to_regclass('backlinks.backlink_commercial_gold_sets') IS NOT NULL
+  AND to_regclass('backlinks.backlink_commercial_gold_labels') IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid='backlinks.backlink_commercial_candidates'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND to_regclass(
+    'backlinks.backlink_contact_enrichment_batches'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_contact_evidence_snapshots'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_contact_enrichment_jobs'
+       AND column_name='terminal_reason_code'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_recommendation_inventory'
+       AND column_name='contact_evidence_snapshot_id'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_recommendation_inventory'::regclass
+       AND conname='backlink_rec_inventory_publication_gate_check'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid=
+       'backlinks.backlink_contact_evidence_snapshots'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
 )::text;
 "@
 $databaseCheck = Invoke-CheckedCapture `

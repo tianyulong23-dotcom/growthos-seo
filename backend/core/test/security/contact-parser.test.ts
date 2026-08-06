@@ -41,10 +41,10 @@ describe("BL-AI-070 contact Candidate parser", () => {
         confirmed: false,
         evidence: expect.objectContaining({ source: "mailto" }),
         purposeDecision: expect.objectContaining({
-          observedRole: "contact",
-          inferredPurpose: "general",
-          confidence: 72,
-          ruleVersion: "contact-purpose-rules.v1",
+          observedRole: "sales",
+          inferredPurpose: "business",
+          confidence: 98,
+          ruleVersion: "contact-purpose-rules.v2",
         }),
       }),
       expect.objectContaining({
@@ -102,7 +102,7 @@ describe("BL-AI-070 contact Candidate parser", () => {
       .toThrow("node limit");
   });
 
-  it("retains an unknown verified email without promoting short substrings", () => {
+  it("retains a restricted verified email without promoting short substrings", () => {
     const body = new TextEncoder().encode(`
       <title>No Smart TV? No Problem</title>
       <body><a href="mailto:legal@elephtv.com">Privacy</a></body>
@@ -115,8 +115,8 @@ describe("BL-AI-070 contact Candidate parser", () => {
         status: "candidate",
         confirmed: false,
         purposeDecision: expect.objectContaining({
-          inferredPurpose: "unknown",
-          confidence: 0,
+          inferredPurpose: "legal",
+          confidence: 98,
         }),
       }),
     ]);

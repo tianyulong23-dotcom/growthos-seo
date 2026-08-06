@@ -10,6 +10,7 @@ import { secretKinds } from "../ports/secret-store.port.js";
 import {
   localProductDataForSeoEndpointAllowlistSchema,
 } from "./local-product-dataforseo-bootstrap.js";
+import { localProductGoogleRedirectUri } from "./local-product-oauth-bootstrap.js";
 
 const booleanStringSchema = z.enum(["true", "false"]);
 const localProductStageSchema = z.enum(["LIVE-003", "LIVE-004"]);
@@ -140,7 +141,7 @@ const readSecretStoreConfiguration = (
 
 const readGoogleOauthConfiguration = (
   environment: NodeJS.ProcessEnv,
-  expectedRedirectUri: string,
+  expectedRedirectUri: string | null,
 ) => {
   const googleOauthClientId = requireEnvironmentText(
     environment,
@@ -165,7 +166,11 @@ const readGoogleOauthConfiguration = (
     environment,
     "GOOGLE_OAUTH_REDIRECT_URI",
   );
-  if (redirectUri !== expectedRedirectUri) {
+  if (
+    expectedRedirectUri === null
+      ? !isLocalProductGoogleRedirectUri(redirectUri)
+      : redirectUri !== expectedRedirectUri
+  ) {
     throw new Error("BACKLINKS_GOOGLE_OAUTH_REDIRECT_URI_INVALID");
   }
   return {
@@ -173,6 +178,26 @@ const readGoogleOauthConfiguration = (
     clientSecretReference,
     redirectUri,
   };
+};
+
+const isLocalProductGoogleRedirectUri = (value: string): boolean => {
+  let redirectUri: URL;
+  try {
+    redirectUri = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    redirectUri.protocol === "http:"
+    && redirectUri.hostname === "localhost"
+    && redirectUri.port === "7200"
+    && redirectUri.username.length === 0
+    && redirectUri.password.length === 0
+    && redirectUri.search.length === 0
+    && redirectUri.hash.length === 0
+    && /^\/api\/v1\/projects\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/backlinks\/gmail-connections\/callback$/u
+      .test(redirectUri.pathname)
+  );
 };
 
 const readDataForSeoInteger = (
@@ -428,17 +453,9 @@ export function readBacklinksLiveCapabilities(
     let clientSecretReference: string | null = null;
     let redirectUri: string | null = null;
     if (googleOauthEnabled) {
-      const projectKey = requireEnvironmentText(
-        environment,
-        "LOCAL_PRODUCT_WEBSITE_PROJECT_KEY",
-      );
-      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(projectKey)) {
-        throw new Error("BACKLINKS_LOCAL_PRODUCT_PROJECT_KEY_INVALID");
-      }
       const oauth = readGoogleOauthConfiguration(
         environment,
-        `http://localhost:7200/api/v1/projects/${projectKey}`
-          + "/backlinks/gmail-connections/callback",
+        localProductGoogleRedirectUri,
       );
       googleOauthClientId = oauth.googleOauthClientId;
       clientSecretReference = oauth.clientSecretReference;
@@ -531,8 +548,7 @@ export function readBacklinksLiveCapabilities(
     throw new Error(`BACKLINKS_LIVE_CAPABILITY_MATRIX_VIOLATION:${stage.data}`);
   }
 
-  const expectedRedirectUri =
-    "http://localhost:7200/api/v1/projects/live001-canary/backlinks/gmail-connections/callback";
+  const expectedRedirectUri = localProductGoogleRedirectUri;
   const {
     googleOauthClientId,
     clientSecretReference,

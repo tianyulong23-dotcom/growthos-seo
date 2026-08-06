@@ -15,6 +15,7 @@ import {
 } from "../../src/modules/backlinks/workflows/outbox-relay.js";
 
 const scope = {
+  organizationId: "10000000-0000-4000-8000-000000000006",
   workspaceId: "20000000-0000-4000-8000-000000000006",
   websiteProjectId: "30000000-0000-4000-8000-000000000006",
 } as const;
@@ -43,7 +44,8 @@ describe("BL-AI-ARCH-006 shared runtime namespaces", () => {
     });
 
     expect(workflowId).toBe(
-      "backlinks:20000000-0000-4000-8000-000000000006:" +
+      "backlinks:10000000-0000-4000-8000-000000000006:" +
+        "20000000-0000-4000-8000-000000000006:" +
         "30000000-0000-4000-8000-000000000006:project-analysis:v1:" +
         "40000000-0000-4000-8000-000000000006",
     );
@@ -60,7 +62,6 @@ describe("BL-AI-ARCH-006 shared runtime namespaces", () => {
       instanceId: "40000000-0000-4000-8000-000000000007",
     });
     const input = {
-      organizationId: "10000000-0000-4000-8000-000000000006",
       ...scope,
       jobId: "40000000-0000-4000-8000-000000000007",
       workflowId,
@@ -92,7 +93,6 @@ describe("BL-AI-ARCH-006 shared runtime namespaces", () => {
   it("reserves Placement workflow IDs and monitoring dispatch for the same queue", async () => {
     const start = vi.fn(async () => undefined);
     const input = {
-      organizationId: "10000000-0000-4000-8000-000000000006",
       ...scope,
       placementId: "40000000-0000-4000-8000-000000000008",
       monitorPolicyId: "40000000-0000-4000-8000-000000000009",
@@ -147,7 +147,6 @@ describe("BL-AI-ARCH-006 shared runtime namespaces", () => {
     );
 
     await consumer.consume({
-      organizationId: "10000000-0000-4000-8000-000000000006",
       ...scope,
       sourceOutboxEventId,
       requestedAt: new Date("2026-07-31T06:00:00.000Z"),

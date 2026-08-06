@@ -1,4 +1,9 @@
 import { BacklinkError, backlinkErrorCodes } from "../../domain/errors/backlink-error.js";
+import {
+  withBacklinkTenantTransaction,
+  type BacklinkTenantContext,
+  type BacklinkTenantPool,
+} from "../tenant-transaction.js";
 export type OutboxQueryClient = Readonly<{
   query(text: string, values?: readonly unknown[]): Promise<
     Readonly<{ rows: readonly Record<string, unknown>[] }>
@@ -193,6 +198,30 @@ export function createOutboxRelayRepository(client: OutboxQueryClient) {
         [input.eventId, input.workerId, outcome, retryAt],
       );
       return result.rows[0]?.marked === true;
+    },
+  };
+}
+
+export function createScopedOutboxRelayRepository(
+  pool: BacklinkTenantPool,
+  scope: BacklinkTenantContext,
+) {
+  return {
+    claim(input: Parameters<
+      ReturnType<typeof createOutboxRepository>["claim"]
+    >[0]) {
+      return withBacklinkTenantTransaction(
+        pool,
+        scope,
+        (client) => createOutboxRepository(client).claim(input),
+      );
+    },
+    mark(input: MarkOutboxInput) {
+      return withBacklinkTenantTransaction(
+        pool,
+        scope,
+        (client) => createOutboxRepository(client).mark(input),
+      );
     },
   };
 }

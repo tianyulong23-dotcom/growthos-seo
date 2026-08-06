@@ -1,5 +1,7 @@
 import type {
   GmailConnectionCompletionGateway,
+  GmailConnectionSelector,
+  GmailProjectMailboxState,
   GmailConnectionView,
 } from "../gmail-connection.gateway.js";
 import {
@@ -18,6 +20,10 @@ import {
   gmailOAuthScopes,
 } from "../../domain/sending/oauth-attempt.js";
 import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
+import type {
+  ActorContext,
+  TenantContext,
+} from "../../domain/context/index.js";
 import {
   GoogleAuthError,
   googleAuthFailureCodes,
@@ -29,12 +35,14 @@ type GmailConnectionCommandDependencies = Readonly<{
   oauthAttempts: OAuthAttemptService;
   googleAuth: GoogleAuthPort;
   completion: GmailConnectionCompletionGateway;
+  selector: GmailConnectionSelector;
   disconnectWorkflow: Pick<GmailConnectionDisconnectWorkflow, "disconnect">;
   redirectUri: string;
 }>;
 
 export type ConnectGmailInput = Readonly<{
   context: ResolvedProjectContext;
+  websiteProjectKey: string;
   returnPath?: string | null;
 }>;
 
@@ -44,7 +52,8 @@ export type ConnectGmailResult = Readonly<{
 }>;
 
 export type CompleteGmailConnectionInput = Readonly<{
-  context: ResolvedProjectContext;
+  actor: ActorContext;
+  tenant: TenantContext;
   authorizationCode: string;
   state: string;
 }>;
@@ -52,6 +61,12 @@ export type CompleteGmailConnectionInput = Readonly<{
 export type CompleteGmailConnectionResult = Readonly<{
   connection: GmailConnectionView;
   returnPath: string | null;
+  websiteProjectId: string;
+}>;
+
+export type SelectGmailConnectionInput = Readonly<{
+  context: ResolvedProjectContext;
+  connectionId: string;
 }>;
 
 export type DisconnectGmailConnectionInput = Readonly<{
@@ -71,13 +86,26 @@ function authorize(context: ResolvedProjectContext): void {
   }
 }
 
-const oauthContext = (context: ResolvedProjectContext) => ({
+const oauthContext = (
+  context: ResolvedProjectContext,
+  websiteProjectKey: string,
+) => ({
   organizationId: context.tenant.organizationId,
   workspaceId: context.tenant.workspaceId,
   websiteProjectId: context.project.websiteProjectId,
+  websiteProjectKey,
   initiatedByUserId: context.actor.userId,
   sessionBinding: context.actor.sessionId,
 });
+
+function authorizeActor(actor: ActorContext): void {
+  if (!actor.roles.some((role) => connectionRoles.has(role))) {
+    throw new BacklinkError({
+      code: backlinkErrorCodes.accessDenied,
+      message: "Gmail connection permission is required.",
+    });
+  }
+}
 
 function translateOAuthError(error: unknown): never {
   if (error instanceof InvalidOAuthStateError) {
@@ -158,7 +186,7 @@ export function createGmailConnectionCommands(
       authorize(input.context);
       try {
         const attemptContext = {
-          ...oauthContext(input.context),
+          ...oauthContext(input.context, input.websiteProjectKey),
           redirectUri: dependencies.redirectUri,
         };
         const attempt = await dependencies.oauthAttempts.begin(
@@ -185,10 +213,13 @@ export function createGmailConnectionCommands(
     async complete(
       input: CompleteGmailConnectionInput,
     ): Promise<CompleteGmailConnectionResult> {
-      authorize(input.context);
+      authorizeActor(input.actor);
       try {
         const attempt = await dependencies.oauthAttempts.consume({
-          ...oauthContext(input.context),
+          organizationId: input.tenant.organizationId,
+          workspaceId: input.tenant.workspaceId,
+          initiatedByUserId: input.actor.userId,
+          sessionBinding: input.actor.sessionId,
           state: input.state,
         });
         const authorized = await dependencies.googleAuth.callback({
@@ -202,17 +233,40 @@ export function createGmailConnectionCommands(
           authorized.tokens.grantedScopes,
         );
         const connection = await dependencies.completion.complete({
-          context: input.context,
+          context: {
+            organizationId: attempt.organizationId,
+            workspaceId: attempt.workspaceId,
+            websiteProjectId: attempt.websiteProjectId,
+            actorId: input.actor.userId,
+          },
           identity: authorized.identity,
           tokens: authorized.tokens,
         });
         return {
           connection,
           returnPath: attempt.returnPath,
+          websiteProjectId: attempt.websiteProjectId,
         };
       } catch (error) {
         translateOAuthError(error);
       }
+    },
+
+    async select(
+      input: SelectGmailConnectionInput,
+    ): Promise<GmailProjectMailboxState> {
+      authorize(input.context);
+      const selected = await dependencies.selector.selectForProject(
+        input.context,
+        input.connectionId,
+      );
+      if (selected === null) {
+        throw new BacklinkError({
+          code: backlinkErrorCodes.notFound,
+          message: "Gmail connection was not found.",
+        });
+      }
+      return selected;
     },
 
     async disconnect(

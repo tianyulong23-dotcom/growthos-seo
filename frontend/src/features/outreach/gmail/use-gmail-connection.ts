@@ -7,11 +7,13 @@ import {
 import {
   disconnectGmailConnection,
   getGmailConnectionStatus,
+  selectGmailConnection,
   startGmailConnection,
 } from "@/features/outreach/gmail/api"
 import type {
   GmailConnectionView,
   GmailDisconnectResponse,
+  GmailStatusResponse,
 } from "@/features/outreach/gmail/types"
 
 type GmailConnectionLoadStatus = "idle" | "loading" | "ready" | "error"
@@ -49,11 +51,12 @@ export function useGmailConnection(
   const [status, setStatus] = React.useState<GmailConnectionLoadStatus>("idle")
   const [connection, setConnection] =
     React.useState<GmailConnectionView | null>(null)
+  const [accounts, setAccounts] = React.useState<GmailConnectionView[]>([])
   const [errorMessage, setErrorMessage] = React.useState<string | null>(
     callbackError
   )
   const [busyAction, setBusyAction] = React.useState<
-    "connect" | "disconnect" | null
+    "connect" | "disconnect" | "select" | null
   >(null)
   const [lastDisconnect, setLastDisconnect] = React.useState<
     GmailDisconnectResponse["revocationStatus"] | null
@@ -64,7 +67,18 @@ export function useGmailConnection(
 
   const currentProjectLoaded = loadedProjectKey === websiteProjectKey
   const visibleConnection = currentProjectLoaded ? connection : null
+  const visibleAccounts = currentProjectLoaded ? accounts : []
   const visibleStatus = enabled && !currentProjectLoaded ? "loading" : status
+
+  const applyStatusResponse = React.useCallback(
+    (response: GmailStatusResponse) => {
+      setConnection(response.connection)
+      setAccounts(response.accounts)
+      setLoadedProjectKey(websiteProjectKey)
+      setStatus("ready")
+    },
+    [websiteProjectKey]
+  )
 
   React.useEffect(() => {
     if (callbackError !== null) {
@@ -85,16 +99,15 @@ export function useGmailConnection(
       const response = await backlinksProjectQueries.fetch(queryKey, (signal) =>
         getGmailConnectionStatus(websiteProjectKey, signal)
       )
-      setConnection(response.connection)
-      setLoadedProjectKey(websiteProjectKey)
-      setStatus("ready")
+      applyStatusResponse(response)
     } catch {
       setConnection(null)
+      setAccounts([])
       setLoadedProjectKey(websiteProjectKey)
       setStatus("error")
       setErrorMessage("无法读取 Gmail 连接状态；界面不会推断为已连接。")
     }
-  }, [enabled, websiteProjectKey])
+  }, [applyStatusResponse, enabled, websiteProjectKey])
 
   React.useEffect(() => {
     if (!enabled) return
@@ -111,14 +124,13 @@ export function useGmailConnection(
       .then(
         (response) => {
           if (cancelled) return
-          setConnection(response.connection)
-          setLoadedProjectKey(websiteProjectKey)
+          applyStatusResponse(response)
           setErrorMessage(callbackError)
-          setStatus("ready")
         },
         () => {
           if (cancelled) return
           setConnection(null)
+          setAccounts([])
           setLoadedProjectKey(websiteProjectKey)
           setErrorMessage("无法读取 Gmail 连接状态；界面不会推断为已连接。")
           setStatus("error")
@@ -128,7 +140,7 @@ export function useGmailConnection(
     return () => {
       cancelled = true
     }
-  }, [callbackError, enabled, websiteProjectKey])
+  }, [applyStatusResponse, callbackError, enabled, websiteProjectKey])
 
   const connect = React.useCallback(async () => {
     setBusyAction("connect")
@@ -147,6 +159,30 @@ export function useGmailConnection(
     }
   }, [websiteProjectKey])
 
+  const select = React.useCallback(
+    async (connectionId: string) => {
+      if (visibleConnection?.connectionId === connectionId) return
+      setBusyAction("select")
+      setErrorMessage(null)
+      try {
+        const response = await selectGmailConnection(
+          websiteProjectKey,
+          connectionId
+        )
+        backlinksProjectQueries.invalidate(
+          createProjectQueryKey(websiteProjectKey, "gmail-connection-status")
+        )
+        applyStatusResponse(response)
+        setLastDisconnect(null)
+      } catch {
+        setErrorMessage("未能为当前项目选择该 Gmail 账号，请刷新后重试。")
+      } finally {
+        setBusyAction(null)
+      }
+    },
+    [applyStatusResponse, visibleConnection?.connectionId, websiteProjectKey]
+  )
+
   const disconnect = React.useCallback(async () => {
     if (visibleConnection === null) return
     setBusyAction("disconnect")
@@ -160,24 +196,25 @@ export function useGmailConnection(
       backlinksProjectQueries.invalidate(
         createProjectQueryKey(websiteProjectKey, "gmail-connection-status")
       )
-      setConnection(response.connection)
       setLastDisconnect(response.revocationStatus)
-      setStatus("ready")
+      await refresh()
     } catch {
       setErrorMessage("断开请求未完成，发送保持暂停；请刷新后重试。")
     } finally {
       setBusyAction(null)
     }
-  }, [visibleConnection, websiteProjectKey])
+  }, [refresh, visibleConnection, websiteProjectKey])
 
   return {
     status: visibleStatus,
     connection: visibleConnection,
+    accounts: visibleAccounts,
     errorMessage,
     busyAction,
     lastDisconnect,
     refresh,
     connect,
+    select,
     disconnect,
   }
 }

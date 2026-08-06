@@ -29,11 +29,13 @@ import {
   gmailConnectBodySchema,
   gmailConnectionParamsSchema,
   gmailConnectionResourceParamsSchema,
+  gmailConnectionSelectionBodySchema,
   gmailConnectResponseSchema,
   gmailDisconnectBodySchema,
   gmailDisconnectResponseSchema,
   gmailPollingSyncResponseSchema,
   gmailPollingSyncStatusResponseSchema,
+  gmailSelectionResponseSchema,
   gmailStatusResponseSchema,
 } from "./gmail-connection.schema.js";
 
@@ -80,6 +82,19 @@ function sendGmailConnectionError(
 
 const meta = (
   request: FastifyRequest,
+  scope: Readonly<{
+    organizationId: string;
+    workspaceId: string;
+    websiteProjectId: string;
+  }>,
+) => ({
+  ...scope,
+  requestId: request.id,
+  schemaVersion: "backlinks.v1" as const,
+  generatedAt: new Date().toISOString(),
+});
+
+const projectScope = (
   context: Awaited<
     ReturnType<BacklinksModule["projectContext"]["resolve"]>
   >,
@@ -87,14 +102,15 @@ const meta = (
   organizationId: context.tenant.organizationId,
   workspaceId: context.tenant.workspaceId,
   websiteProjectId: context.project.websiteProjectId,
-  requestId: request.id,
-  schemaVersion: "backlinks.v1" as const,
-  generatedAt: new Date().toISOString(),
 });
 
 const serializeConnection = (
   connection: GmailConnectionView,
-) => ({ ...connection, grantedScopes: [...connection.grantedScopes] });
+) => ({
+  ...connection,
+  grantedScopes: [...connection.grantedScopes],
+  recentErrorCategory: connection.recentErrorCategory ?? null,
+});
 
 const serializeOptionalConnection = (
   connection: GmailConnectionView | null,
@@ -128,36 +144,62 @@ export function registerBacklinksGmailConnectionRoutes(
     });
     const result = await options.commands.connect(
       request.body.returnPath === undefined
-        ? { context }
-        : { context, returnPath: request.body.returnPath },
+        ? {
+            context,
+            websiteProjectKey: request.params.websiteProjectKey,
+          }
+        : {
+            context,
+            websiteProjectKey: request.params.websiteProjectKey,
+            returnPath: request.body.returnPath,
+          },
     );
-    return { ...result, meta: meta(request, context) };
+    return { ...result, meta: meta(request, projectScope(context)) };
   });
+
+  const complete = async (
+    request: FastifyRequest,
+  ) => {
+    const query = request.query as { code: string; state: string };
+    const result = await options.commands.complete({
+      actor: request.actor,
+      tenant: {
+        organizationId: request.platformContext.tenant.organizationId,
+        workspaceId: request.platformContext.tenant.workspaceId,
+      },
+      authorizationCode: query.code,
+      state: query.state,
+    });
+    return {
+      connection: serializeConnection(result.connection),
+      returnPath: result.returnPath,
+      meta: meta(request, {
+        organizationId: request.platformContext.tenant.organizationId,
+        workspaceId: request.platformContext.tenant.workspaceId,
+        websiteProjectId: result.websiteProjectId,
+      }),
+    };
+  };
+
+  api.get("/api/v1/backlinks/gmail-connections/callback", {
+    schema: {
+      operationId: "backlinksCompleteGmailConnectionV1",
+      querystring: gmailCallbackQuerySchema,
+      response: { 200: gmailCallbackResponseSchema, ...errorResponses },
+    },
+    errorHandler: sendGmailConnectionError,
+  }, complete);
 
   api.get(`${basePath}/callback`, {
     schema: {
-      operationId: "backlinksCompleteGmailConnectionV1",
+      operationId: "backlinksCompleteLegacyGmailConnectionV1",
+      deprecated: true,
       params: gmailConnectionParamsSchema,
       querystring: gmailCallbackQuerySchema,
       response: { 200: gmailCallbackResponseSchema, ...errorResponses },
     },
     errorHandler: sendGmailConnectionError,
-  }, async (request) => {
-    const context = await options.module.projectContext.resolve({
-      actor: request.actor,
-      websiteProjectKey: request.params.websiteProjectKey,
-    });
-    const result = await options.commands.complete({
-      context,
-      authorizationCode: request.query.code,
-      state: request.query.state,
-    });
-    return {
-      ...result,
-      connection: serializeConnection(result.connection),
-      meta: meta(request, context),
-    };
-  });
+  }, complete);
 
   api.get(`${basePath}/status`, {
     schema: {
@@ -171,11 +213,35 @@ export function registerBacklinksGmailConnectionRoutes(
       actor: request.actor,
       websiteProjectKey: request.params.websiteProjectKey,
     });
+    const state = await options.query.getStatus(context);
     return {
-      connection: serializeOptionalConnection(
-        await options.query.getStatus(context),
-      ),
-      meta: meta(request, context),
+      connection: serializeOptionalConnection(state.selectedConnection),
+      accounts: state.accounts.map(serializeConnection),
+      meta: meta(request, projectScope(context)),
+    };
+  });
+
+  api.post(`${basePath}/select`, {
+    schema: {
+      operationId: "backlinksSelectGmailConnectionV1",
+      params: gmailConnectionParamsSchema,
+      body: gmailConnectionSelectionBodySchema,
+      response: { 200: gmailSelectionResponseSchema, ...errorResponses },
+    },
+    errorHandler: sendGmailConnectionError,
+  }, async (request) => {
+    const context = await options.module.projectContext.resolve({
+      actor: request.actor,
+      websiteProjectKey: request.params.websiteProjectKey,
+    });
+    const state = await options.commands.select({
+      context,
+      connectionId: request.body.connectionId,
+    });
+    return {
+      connection: serializeOptionalConnection(state.selectedConnection),
+      accounts: state.accounts.map(serializeConnection),
+      meta: meta(request, projectScope(context)),
     };
   });
 
@@ -200,7 +266,7 @@ export function registerBacklinksGmailConnectionRoutes(
     return {
       ...result,
       connection: serializeConnection(result.connection),
-      meta: meta(request, context),
+      meta: meta(request, projectScope(context)),
     };
   });
 
@@ -222,7 +288,7 @@ export function registerBacklinksGmailConnectionRoutes(
     });
     return reply.code(202).send({
       ...result,
-      meta: meta(request, context),
+      meta: meta(request, projectScope(context)),
     });
   });
 
@@ -246,7 +312,7 @@ export function registerBacklinksGmailConnectionRoutes(
         context,
         connectionId: request.params.connectionId,
       }),
-      meta: meta(request, context),
+      meta: meta(request, projectScope(context)),
     };
   });
 }
