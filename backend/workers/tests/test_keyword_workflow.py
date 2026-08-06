@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 
 import pytest
 from temporalio.exceptions import ApplicationError
@@ -7,10 +8,15 @@ from seo_workers.keywords.workflow import (
     METERED_ACTIVITY_RETRY,
     SHORT_RETRY,
     KeywordBuildWorkflow,
+    KeywordCompetitorAnalysisWorkflow,
     KeywordMetricsRecoveryWorkflow,
     WorkflowFailure,
     workflow_error,
 )
+
+
+async def record_sleep(delays: list[timedelta], delay: timedelta) -> None:
+    delays.append(delay)
 
 
 @pytest.fixture(autouse=True)
@@ -73,8 +79,7 @@ async def test_initial_build_does_not_run_the_old_expansion_or_gap_branches(
     assert "keyword_fetch_competitor_gap" not in activity_calls
     assert "keyword_fail_run" not in activity_calls
     assert (
-        activity_options["keyword_prepare_topic_metrics"]["retry_policy"]
-        is METERED_ACTIVITY_RETRY
+        activity_options["keyword_prepare_topic_metrics"]["retry_policy"] is METERED_ACTIVITY_RETRY
     )
     assert METERED_ACTIVITY_RETRY.maximum_attempts == 1
     assert activity_options["keyword_commit_topics"]["retry_policy"] is SHORT_RETRY
@@ -128,6 +133,332 @@ async def test_initial_build_finishes_without_waiting_for_pending_metrics(
     assert result["pending_metrics_count"] == 3
     assert activity_calls[-1] == "keyword_commit_topics"
     assert "keyword_refresh_pending_metrics" not in activity_calls
+
+
+@pytest.mark.anyio
+async def test_competitor_analysis_fans_out_to_five_competitors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activity_calls: list[str] = []
+    opportunity_payloads: list[dict] = []
+
+    async def execute_activity(name: str, *args, **kwargs):
+        activity_calls.append(name)
+        if name == "keyword_competitor_analysis_start":
+            return None
+        if name == "keyword_competitor_discover":
+            return {
+                "status": "completed",
+                "competitors": [
+                    {"id": f"competitor-{index}", "domain": f"c{index}.example"}
+                    for index in range(1, 6)
+                ],
+            }
+        if name == "keyword_competitor_analysis_finalize":
+            return {
+                "status": "partial",
+                "raw_keyword_count": 390,
+                "unique_keyword_count": 280,
+            }
+        raise AssertionError(f"unexpected activity: {name}")
+
+    async def completed(value):
+        return value
+
+    def start_activity(name: str, payload: dict, **kwargs):
+        assert name == "keyword_competitor_opportunities"
+        opportunity_payloads.append(payload)
+        index = len(opportunity_payloads)
+        return asyncio.create_task(
+            completed(
+                {
+                    "status": "failed" if index == 5 else "completed",
+                    "count": 0 if index == 5 else 100,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.execute_activity",
+        execute_activity,
+    )
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.start_activity",
+        start_activity,
+    )
+    result = await KeywordCompetitorAnalysisWorkflow().run(
+        {
+            "organization_id": "local",
+            "project_id": "project-1",
+            "run_id": "analysis-1",
+            "competitor_limit": 5,
+            "keyword_limit": 100,
+        }
+    )
+
+    assert len(opportunity_payloads) == 5
+    assert {payload["competitor_domain"] for payload in opportunity_payloads} == {
+        "c1.example",
+        "c2.example",
+        "c3.example",
+        "c4.example",
+        "c5.example",
+    }
+    assert result["status"] == "partial"
+    assert activity_calls == [
+        "keyword_competitor_analysis_start",
+        "keyword_competitor_discover",
+        "keyword_competitor_analysis_finalize",
+    ]
+
+
+@pytest.mark.anyio
+async def test_manual_competitor_analysis_skips_automatic_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activity_calls: list[str] = []
+    opportunity_payloads: list[dict] = []
+
+    async def execute_activity(name: str, *args, **kwargs):
+        activity_calls.append(name)
+        if name == "keyword_competitor_analysis_start":
+            return None
+        if name == "keyword_competitor_prepare_manual":
+            return {
+                "status": "completed",
+                "competitors": [
+                    {"id": "manual-1", "domain": "manual-competitor.example"}
+                ],
+            }
+        if name == "keyword_competitor_analysis_finalize":
+            return {"status": "completed", "unique_keyword_count": 80}
+        raise AssertionError(f"unexpected activity: {name}")
+
+    async def completed(value):
+        return value
+
+    def start_activity(name: str, payload: dict, **kwargs):
+        assert name == "keyword_competitor_opportunities"
+        opportunity_payloads.append(payload)
+        return asyncio.create_task(completed({"status": "completed", "count": 100}))
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.execute_activity",
+        execute_activity,
+    )
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.start_activity",
+        start_activity,
+    )
+
+    result = await KeywordCompetitorAnalysisWorkflow().run(
+        {
+            "organization_id": "local",
+            "project_id": "project-1",
+            "run_id": "analysis-manual-1",
+            "analysis_mode": "manual",
+            "competitor_domains": ["manual-competitor.example"],
+            "competitor_limit": 1,
+            "keyword_limit": 100,
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert [payload["competitor_domain"] for payload in opportunity_payloads] == [
+        "manual-competitor.example"
+    ]
+    assert activity_calls == [
+        "keyword_competitor_analysis_start",
+        "keyword_competitor_prepare_manual",
+        "keyword_competitor_analysis_finalize",
+    ]
+
+
+@pytest.mark.anyio
+async def test_competitor_analysis_retries_only_the_transient_failed_competitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls_by_domain: dict[str, int] = {}
+    retry_delays: list[timedelta] = []
+
+    async def execute_activity(name: str, *args, **kwargs):
+        if name == "keyword_competitor_analysis_start":
+            return None
+        if name == "keyword_competitor_discover":
+            return {
+                "status": "completed",
+                "competitors": [
+                    {"id": f"competitor-{index}", "domain": f"c{index}.example"}
+                    for index in range(1, 6)
+                ],
+            }
+        if name == "keyword_competitor_analysis_finalize":
+            return {"status": "completed"}
+        raise AssertionError(f"unexpected activity: {name}")
+
+    async def completed(value):
+        return value
+
+    def start_activity(name: str, payload: dict, **kwargs):
+        assert name == "keyword_competitor_opportunities"
+        domain = str(payload["competitor_domain"])
+        calls_by_domain[domain] = calls_by_domain.get(domain, 0) + 1
+        transient_first_attempt = domain == "c5.example" and calls_by_domain[domain] == 1
+        return asyncio.create_task(
+            completed(
+                {
+                    "status": "failed" if transient_first_attempt else "completed",
+                    "retryable": transient_first_attempt,
+                    "domain": domain,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.execute_activity",
+        execute_activity,
+    )
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.start_activity",
+        start_activity,
+    )
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.sleep",
+        lambda delay: record_sleep(retry_delays, delay),
+    )
+
+    result = await KeywordCompetitorAnalysisWorkflow().run(
+        {
+            "organization_id": "local",
+            "project_id": "project-1",
+            "run_id": "analysis-1",
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert calls_by_domain == {
+        "c1.example": 1,
+        "c2.example": 1,
+        "c3.example": 1,
+        "c4.example": 1,
+        "c5.example": 2,
+    }
+    assert retry_delays == [timedelta(seconds=5)]
+
+
+@pytest.mark.anyio
+async def test_competitor_analysis_exhausts_discovery_with_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activity_calls: list[str] = []
+    retry_delays: list[timedelta] = []
+
+    async def execute_activity(name: str, *args, **kwargs):
+        activity_calls.append(name)
+        if name == "keyword_competitor_analysis_start":
+            return None
+        if name == "keyword_competitor_discover":
+            return {
+                "status": "failed",
+                "retryable": True,
+                "error_code": "dataforseo_http_error",
+                "error": "temporary",
+            }
+        if name == "keyword_competitor_analysis_fail":
+            return None
+        raise AssertionError(f"unexpected activity: {name}")
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.execute_activity",
+        execute_activity,
+    )
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.sleep",
+        lambda delay: record_sleep(retry_delays, delay),
+    )
+
+    result = await KeywordCompetitorAnalysisWorkflow().run({"run_id": "analysis-1"})
+
+    assert result["status"] == "failed"
+    assert activity_calls == [
+        "keyword_competitor_analysis_start",
+        "keyword_competitor_discover",
+        "keyword_competitor_discover",
+        "keyword_competitor_discover",
+        "keyword_competitor_analysis_fail",
+    ]
+    assert retry_delays == [timedelta(seconds=5), timedelta(seconds=15)]
+
+
+@pytest.mark.anyio
+async def test_competitor_analysis_preserves_specific_activity_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed_payloads: list[dict] = []
+
+    async def execute_activity(name: str, *args, **kwargs):
+        if name == "keyword_competitor_analysis_start":
+            return None
+        if name == "keyword_competitor_discover":
+            raise ApplicationError(
+                "请重新连接 Search Console",
+                type="gsc_reconnect_required",
+                non_retryable=True,
+            )
+        if name == "keyword_competitor_analysis_fail":
+            failed_payloads.append(args[0])
+            return None
+        raise AssertionError(f"unexpected activity: {name}")
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.execute_activity",
+        execute_activity,
+    )
+
+    result = await KeywordCompetitorAnalysisWorkflow().run({"run_id": "analysis-gsc-1"})
+
+    assert result["status"] == "failed"
+    assert failed_payloads[0]["code"] == "gsc_reconnect_required"
+    assert failed_payloads[0]["detail"] == "请重新连接 Search Console"
+
+
+@pytest.mark.anyio
+async def test_legacy_competitor_analysis_keeps_the_single_attempt_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activity_calls: list[str] = []
+
+    async def execute_activity(name: str, *args, **kwargs):
+        activity_calls.append(name)
+        if name == "keyword_competitor_analysis_start":
+            return None
+        if name == "keyword_competitor_discover":
+            return {"status": "failed", "retryable": True, "error": "temporary"}
+        raise AssertionError(f"unexpected activity: {name}")
+
+    async def unexpected_sleep(delay: timedelta) -> None:
+        raise AssertionError(f"legacy workflow must not sleep: {delay}")
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.patched",
+        lambda patch_id: False,
+    )
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.execute_activity",
+        execute_activity,
+    )
+    monkeypatch.setattr(
+        "seo_workers.keywords.workflow.workflow.sleep",
+        unexpected_sleep,
+    )
+
+    result = await KeywordCompetitorAnalysisWorkflow().run({"run_id": "analysis-1"})
+
+    assert result["status"] == "failed"
+    assert activity_calls == [
+        "keyword_competitor_analysis_start",
+        "keyword_competitor_discover",
+    ]
 
 
 @pytest.mark.anyio
@@ -607,6 +938,6 @@ def test_workflow_error_preserves_application_error_retryability() -> None:
 
     assert failure == WorkflowFailure(
         code="dataforseo_auth_failed",
-        detail="dataforseo_auth_failed: invalid credentials",
+        detail="invalid credentials",
         non_retryable=True,
     )

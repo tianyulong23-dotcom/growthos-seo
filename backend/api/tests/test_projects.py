@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -9,7 +11,10 @@ from app.api.routes.projects import get_project_service
 from app.core.config import Settings
 from app.main import app
 from app.modules.crawling.models import CrawlRun
-from app.modules.keywords.service import KeywordBootstrapRecord
+from app.modules.keywords.service import (
+    KeywordBootstrapRecord,
+    KeywordCompetitorAnalysisBootstrapRecord,
+)
 from app.modules.projects.schemas import (
     CreateProjectRequest,
     UpdateBusinessProfileRequest,
@@ -51,6 +56,7 @@ class FakeProjectRepository:
         self.dispatch_statuses: dict[str, str] = {}
         self.dispatch_errors: dict[str, str] = {}
         self.keyword_bootstraps: dict[str, KeywordBootstrapRecord] = {}
+        self.competitor_bootstraps: dict[str, KeywordCompetitorAnalysisBootstrapRecord] = {}
         self.keyword_workflow_ids: list[str] = []
 
     async def create_with_understanding_run(
@@ -59,12 +65,15 @@ class FakeProjectRepository:
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
         keyword_bootstrap: KeywordBootstrapRecord,
+        competitor_bootstrap: KeywordCompetitorAnalysisBootstrapRecord | None = None,
     ) -> None:
         self.projects.append(project)
         self.runs[run.run_id] = run
         self.dispatches[dispatch.run_id] = dispatch
         self.dispatch_statuses[dispatch.run_id] = "pending"
         self.keyword_bootstraps[keyword_bootstrap.run_id] = keyword_bootstrap
+        if competitor_bootstrap is not None:
+            self.competitor_bootstraps[competitor_bootstrap.run_id] = competitor_bootstrap
 
     async def mark_dispatch_succeeded(self, run_id: str) -> None:
         return None
@@ -315,6 +324,7 @@ def test_create_project_starts_site_understanding() -> None:
     assert keyword_bootstrap.kind == "initial"
     assert keyword_bootstrap.round_number == 1
     assert keyword_bootstrap.task_payload["project_id"] == response.id
+    assert repository.competitor_bootstraps == {}
 
 
 def test_create_project_normalizes_competitor_for_the_parallel_keyword_task() -> None:
@@ -343,6 +353,11 @@ def test_create_project_normalizes_competitor_for_the_parallel_keyword_task() ->
         "kind": "initial",
         "round_number": 1,
     }
+    [competitor_bootstrap] = repository.competitor_bootstraps.values()
+    assert competitor_bootstrap.analysis_mode == "manual"
+    assert competitor_bootstrap.competitor_domains == ["competitor.com"]
+    assert competitor_bootstrap.competitor_limit == 1
+    assert competitor_bootstrap.task_payload["analysis_mode"] == "manual"
 
 
 def test_sql_repository_flushes_project_before_keyword_run() -> None:
@@ -391,7 +406,7 @@ def test_sql_repository_flushes_project_before_keyword_run() -> None:
         )
     )
 
-    assert session.flush_count == 1
+    assert session.flush_count == 2
     assert session.committed is True
 
 

@@ -9,8 +9,8 @@ export const keywordsNavigation: NavigationItem = {
   icon: KeyRound,
   tabs: [
     { id: "library", label: "关键词库" },
-    { id: "opportunities", label: "机会发现" },
-    { id: "rankings", label: "排名跟踪" },
+    { id: "search-performance", label: "搜索表现" },
+    { id: "competitor-gap", label: "竞品差距" },
   ],
-  action: "添加关键词",
+  action: "",
 }

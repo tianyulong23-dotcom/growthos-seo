@@ -48,9 +48,7 @@ class KeywordBuildRun(Base):
             "uq_keyword_build_runs_active_project",
             "project_id",
             unique=True,
-            postgresql_where=text(
-                "status IN ('queued', 'running', 'waiting', 'blocked')"
-            ),
+            postgresql_where=text("status IN ('queued', 'running', 'waiting', 'blocked')"),
         ),
         Index(
             "ix_keyword_build_runs_project_created",
@@ -198,10 +196,7 @@ class KeywordMetricRefreshJob(Base):
     __tablename__ = "keyword_metric_refresh_jobs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ("
-            "'pending', 'dispatched', 'running', 'waiting', "
-            "'completed', 'exhausted'"
-            ")",
+            "status IN ('pending', 'dispatched', 'running', 'waiting', 'completed', 'exhausted')",
             name="ck_keyword_metric_refresh_jobs_status",
         ),
         CheckConstraint(
@@ -398,6 +393,7 @@ class KeywordIdea(Base):
     search_volume: Mapped[int | None] = mapped_column(Integer)
     cpc: Mapped[float | None] = mapped_column(Float)
     competition: Mapped[float | None] = mapped_column(Float)
+    competition_level: Mapped[str | None] = mapped_column(Text)
     keyword_difficulty: Mapped[int | None] = mapped_column(Integer)
     intent: Mapped[str | None] = mapped_column(Text)
     monthly_searches: Mapped[list] = mapped_column(
@@ -697,6 +693,10 @@ class KeywordExternalRequest(Base):
             "status",
             "lease_expires_at",
         ),
+        CheckConstraint(
+            "num_nonnulls(build_run_id, competitor_analysis_run_id) = 1",
+            name="ck_keyword_external_requests_single_owner",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -706,9 +706,12 @@ class KeywordExternalRequest(Base):
         nullable=False,
         index=True,
     )
-    build_run_id: Mapped[str] = mapped_column(
-        ForeignKey("keyword_build_runs.id", ondelete="CASCADE"),
-        nullable=False,
+    build_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("keyword_build_runs.id", ondelete="CASCADE")
+    )
+    competitor_analysis_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("keyword_competitor_analysis_runs.id", ondelete="CASCADE"),
+        index=True,
     )
     request_key: Mapped[str] = mapped_column(Text, nullable=False)
     provider: Mapped[str] = mapped_column(Text, nullable=False)
@@ -752,9 +755,7 @@ class KeywordExternalRequest(Base):
 
 class KeywordWorkerHeartbeat(Base):
     __tablename__ = "keyword_worker_heartbeats"
-    __table_args__ = (
-        Index("ix_keyword_worker_heartbeats_last_seen", "last_seen_at"),
-    )
+    __table_args__ = (Index("ix_keyword_worker_heartbeats_last_seen", "last_seen_at"),)
 
     worker_id: Mapped[str] = mapped_column(Text, primary_key=True)
     task_queue: Mapped[str] = mapped_column(Text, nullable=False)
@@ -833,4 +834,435 @@ class KeywordCompetitorGap(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+
+
+class KeywordCompetitorAnalysisRun(Base):
+    __tablename__ = "keyword_competitor_analysis_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'partial', 'completed', 'failed')",
+            name="ck_keyword_competitor_analysis_runs_status",
+        ),
+        CheckConstraint(
+            "progress BETWEEN 0 AND 100",
+            name="ck_keyword_competitor_analysis_runs_progress",
+        ),
+        CheckConstraint(
+            "competitor_limit BETWEEN 1 AND 5",
+            name="ck_keyword_competitor_analysis_runs_competitor_limit",
+        ),
+        CheckConstraint(
+            "keyword_limit BETWEEN 1 AND 100",
+            name="ck_keyword_competitor_analysis_runs_keyword_limit",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('manual', 'auto')",
+            name="ck_keyword_competitor_analysis_runs_mode",
+        ),
+        Index(
+            "uq_keyword_competitor_analysis_runs_active_project",
+            "project_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+        Index(
+            "ix_keyword_competitor_analysis_runs_project_created",
+            "project_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    workflow_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    target_domain: Mapped[str] = mapped_column(Text, nullable=False)
+    country: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str] = mapped_column(Text, nullable=False)
+    analysis_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="auto")
+    requested_competitor_domains: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    discovery_method: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="serp_competitors"
+    )
+    discovery_keywords: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    discovery_result_types: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    discovery_include_subdomains: Mapped[bool | None] = mapped_column(Boolean)
+    discovery_sort: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="traffic_estimate"
+    )
+    discovery_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="50")
+    discovery_offset: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    gsc_query_evidence: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    query_metrics: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    serp_snapshots: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    cost_breakdown: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    landscape_summary: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    directional_result: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    market_summary: Mapped[str | None] = mapped_column(Text)
+    local_market: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    stage: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    message: Mapped[str] = mapped_column(Text, nullable=False, server_default="正在准备竞争分析")
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    competitor_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="5")
+    keyword_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="100")
+    discovered_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    analyzed_competitor_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    completed_competitors: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    failed_competitors: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    raw_keyword_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    unique_keyword_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    discovery_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default="0"
+    )
+    total_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default="0"
+    )
+    error_code: Mapped[str | None] = mapped_column(Text)
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    recovery_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KeywordCompetitorAnalysisDispatch(Base):
+    __tablename__ = "keyword_competitor_analysis_dispatches"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'dispatching', 'dispatched')",
+            name="ck_keyword_competitor_analysis_dispatches_status",
+        ),
+        Index(
+            "ix_keyword_competitor_analysis_dispatches_pending",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("keyword_competitor_analysis_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    workflow_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    task_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KeywordCompetitorSiteVerification(Base):
+    __tablename__ = "keyword_competitor_site_verifications"
+    __table_args__ = (
+        Index(
+            "ix_keyword_competitor_site_verifications_expiry",
+            "organization_id",
+            "country",
+            "language",
+            "checked_at",
+        ),
+    )
+
+    organization_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    domain: Mapped[str] = mapped_column(Text, primary_key=True)
+    country: Mapped[str] = mapped_column(Text, primary_key=True)
+    language: Mapped[str] = mapped_column(Text, primary_key=True)
+    crawler_facts: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KeywordCompetitor(Base):
+    __tablename__ = "keyword_competitors"
+    __table_args__ = (
+        UniqueConstraint("analysis_run_id", "domain", name="uq_keyword_competitors_run_domain"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed', 'excluded')",
+            name="ck_keyword_competitors_status",
+        ),
+        CheckConstraint(
+            "domain_type IN ('direct_product_competitor', 'publisher_media', "
+            "'marketplace_directory', 'community_forum', 'documentation_resource')",
+            name="ck_keyword_competitors_domain_type",
+        ),
+        CheckConstraint(
+            "site_check_status IN ('not_checked', 'verified', 'redirected_related', "
+            "'redirected_unrelated', 'unverified_redirect', 'blocked', "
+            "'temporarily_unavailable', 'permanently_unavailable', 'non_html', "
+            "'unsafe_target', 'redirect_loop', 'platform_or_login')",
+            name="ck_keyword_competitors_site_check_status",
+        ),
+        CheckConstraint(
+            "site_relation IN ('related', 'unrelated', 'uncertain')",
+            name="ck_keyword_competitors_site_relation",
+        ),
+        Index("ix_keyword_competitors_project_run", "project_id", "analysis_run_id"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    analysis_run_id: Mapped[str] = mapped_column(
+        ForeignKey("keyword_competitor_analysis_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    domain: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    avg_position: Mapped[float | None] = mapped_column(Float)
+    intersections: Mapped[int | None] = mapped_column(Integer)
+    organic_keywords: Mapped[int | None] = mapped_column(Integer)
+    organic_traffic: Mapped[float | None] = mapped_column(Float)
+    selected_for_gap: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    site_check_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="not_checked"
+    )
+    site_relation: Mapped[str] = mapped_column(Text, nullable=False, server_default="uncertain")
+    site_verification: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    keywords_count: Mapped[int | None] = mapped_column(Integer)
+    median_position: Mapped[float | None] = mapped_column(Float)
+    rating: Mapped[float | None] = mapped_column(Float)
+    etv: Mapped[float | None] = mapped_column(Float)
+    visibility: Mapped[float | None] = mapped_column(Float)
+    relevant_serp_items: Mapped[int | None] = mapped_column(Integer)
+    keywords_positions: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    domain_type: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="documentation_resource"
+    )
+    is_seo_competitor: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    is_business_competitor: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    classification_confidence: Mapped[float | None] = mapped_column(Float)
+    why_they_matter: Mapped[str | None] = mapped_column(Text)
+    serp_evidence: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    domain_overview: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    ranked_keywords_evidence: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    backlinks_evidence: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    keyword_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
+    error_code: Mapped[str | None] = mapped_column(Text)
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    raw_payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KeywordCompetitorOpportunity(Base):
+    __tablename__ = "keyword_competitor_opportunities"
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_run_id",
+            "normalized_keyword",
+            name="uq_keyword_competitor_opportunities_run_keyword",
+        ),
+        CheckConstraint(
+            "status IN ('new', 'accepted', 'dismissed')",
+            name="ck_keyword_competitor_opportunities_status",
+        ),
+        Index(
+            "ix_keyword_competitor_opportunities_run_status_score",
+            "analysis_run_id",
+            "status",
+            "opportunity_score",
+        ),
+        Index(
+            "ix_keyword_competitor_opportunities_project_volume",
+            "project_id",
+            "search_volume",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    analysis_run_id: Mapped[str] = mapped_column(
+        ForeignKey("keyword_competitor_analysis_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    best_competitor_rank: Mapped[int | None] = mapped_column(Integer)
+    competitor_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    opportunity_score: Mapped[float | None] = mapped_column(Float)
+    search_volume: Mapped[int | None] = mapped_column(Integer)
+    cpc: Mapped[float | None] = mapped_column(Float)
+    competition: Mapped[float | None] = mapped_column(Float)
+    competition_level: Mapped[str | None] = mapped_column(Text)
+    keyword_difficulty: Mapped[int | None] = mapped_column(Integer)
+    intent: Mapped[str | None] = mapped_column(Text)
+    monthly_searches: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    metrics_fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="new")
+    keyword_id: Mapped[str | None] = mapped_column(
+        ForeignKey("keywords.id", ondelete="SET NULL"), index=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KeywordCompetitorOpportunityDecision(Base):
+    __tablename__ = "keyword_competitor_opportunity_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "project_id",
+            "country",
+            "language",
+            "normalized_keyword",
+            name="uq_keyword_competitor_opportunity_decisions_market_keyword",
+        ),
+        CheckConstraint(
+            "status IN ('new', 'accepted', 'dismissed')",
+            name="ck_keyword_competitor_opportunity_decisions_status",
+        ),
+        Index(
+            "ix_keyword_competitor_opportunity_decisions_keyword_id",
+            "keyword_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    country: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="new")
+    keyword_id: Mapped[str | None] = mapped_column(ForeignKey("keywords.id", ondelete="SET NULL"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KeywordCompetitorOpportunityRanking(Base):
+    __tablename__ = "keyword_competitor_opportunity_rankings"
+    __table_args__ = (
+        UniqueConstraint(
+            "competitor_id",
+            "opportunity_id",
+            name="uq_keyword_comp_opportunity_rankings_pair",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    analysis_run_id: Mapped[str] = mapped_column(
+        ForeignKey("keyword_competitor_analysis_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    competitor_id: Mapped[str] = mapped_column(
+        ForeignKey("keyword_competitors.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    opportunity_id: Mapped[str] = mapped_column(
+        ForeignKey("keyword_competitor_opportunities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    competitor_rank: Mapped[int | None] = mapped_column(Integer)
+    competitor_url: Mapped[str | None] = mapped_column(Text)
+    raw_payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

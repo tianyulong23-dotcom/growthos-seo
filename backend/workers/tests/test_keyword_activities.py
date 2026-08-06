@@ -1,31 +1,325 @@
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 from temporalio.exceptions import ApplicationError
 
-from seo_workers.keywords.activities import KeywordActivities
+from seo_workers.keywords.activities import (
+    KeywordActivities,
+    apply_related_redirect_domains,
+    classified_domains,
+    competitive_landscape_summary_evidence,
+    competitive_query_evidence,
+    crawler_site_verification_facts,
+    landscape_finding_mismatch,
+    local_competitor_item,
+    metric_from_candidate,
+    raw_keyword_evidence,
+    selected_gsc_queries,
+    site_verification_for_ai,
+)
 from seo_workers.keywords.config import KeywordWorkerSettings
-from seo_workers.keywords.domain import RawKeyword
+from seo_workers.keywords.domain import MergedCandidate, RawKeyword
 from seo_workers.keywords.providers import (
     AIProviderConfig,
     AIResult,
+    CompetitorGap,
     DataForSEOBilling,
     DataForSEOClient,
     DataForSEOProviderConfig,
+    DiscoveredCompetitor,
+    GSCProviderConfig,
+    GSCQueryRow,
     OpenAICompatibleClient,
+    ProviderError,
 )
 from seo_workers.keywords.repository import (
-    KeywordCommitResult,
+    CompetitorAnalysisContext,
     ExternalRequestRecord,
+    KeywordCommitResult,
     KeywordRepository,
     KeywordRunContext,
     ProfilePollResult,
     StagedKeyword,
+    gsc_site_matches_domain,
 )
 
 
 def approved_initial_filter_payload(candidate_count: int) -> dict[str, list[str]]:
     return {"decisions": ["keep"] * candidate_count}
+
+
+def test_metric_from_candidate_reads_nested_competition_level() -> None:
+    candidate = MergedCandidate(
+        keyword="solar panels",
+        normalized_keyword="solar panels",
+        rows=[
+            RawKeyword(
+                keyword="solar panels",
+                source="labs_site",
+                raw_payload={"keyword_data": {"keyword_info": {"competition_level": "HIGH"}}},
+            )
+        ],
+        relevance=1,
+    )
+
+    assert metric_from_candidate(candidate)["competition_level"] == "HIGH"
+
+
+def test_local_competitor_item_preserves_rating_and_review_evidence() -> None:
+    item = local_competitor_item(
+        {
+            "title": "Local business",
+            "website": "https://local.example/",
+            "rating": {"value": 4.7, "votes_count": 128},
+        }
+    )
+
+    assert item["domain"] == "local.example"
+    assert item["rating"] == 4.7
+    assert item["reviews_count"] == 128
+
+
+def test_raw_keyword_evidence_reads_nested_competition_level() -> None:
+    row = RawKeyword(
+        keyword="solar panels",
+        source="keyword_overview",
+        raw_payload={"keyword_data": {"keyword_info": {"competition_level": "HIGH"}}},
+    )
+
+    assert raw_keyword_evidence(row)["competition_level"] == "HIGH"
+
+
+def test_competitive_landscape_summary_matches_openseo_tool_columns() -> None:
+    evidence = competitive_landscape_summary_evidence(
+        {
+            "domain_type": "direct_product_competitor",
+            "why_they_matter": "recurring domain",
+            "domain_overview": {
+                "domain": "competitor.example",
+                "organic_traffic": 1200,
+                "organic_keywords": 80,
+                "has_data": True,
+                "raw": {"large": "provider payload"},
+            },
+            "ranked_keywords_evidence": [
+                {
+                    "keyword_data": {
+                        "keyword": "solar panels",
+                        "keyword_info": {"search_volume": 900, "cpc": 2.5},
+                        "search_intent_info": {"main_intent": "commercial"},
+                    },
+                    "ranked_serp_element": {
+                        "serp_item": {
+                            "rank_absolute": 3,
+                            "url": "https://competitor.example/solar",
+                            "etv": 120,
+                            "description": "large unused provider field",
+                        }
+                    },
+                }
+            ],
+            "backlinks_evidence": {
+                "summary": {
+                    "backlinks": 100,
+                    "referring_domains": 20,
+                    "referring_pages": 30,
+                    "rank": 42,
+                    "info": {"unused": True},
+                },
+                "referring_domains": [
+                    {
+                        "domain": "publisher.example",
+                        "backlinks": 4,
+                        "referring_pages": 2,
+                        "rank": 30,
+                        "referring_links_types": {"anchor": 4},
+                    }
+                ],
+            },
+        }
+    )
+
+    assert evidence["domain_overview"] == {
+        "domain": "competitor.example",
+        "organic_traffic": 1200,
+        "organic_keywords": 80,
+        "has_data": True,
+    }
+    assert evidence["ranked_keywords_evidence"] == [
+        {
+            "keyword": "solar panels",
+            "rank": 3,
+            "volume": 900,
+            "cpc": 2.5,
+            "url": "https://competitor.example/solar",
+            "intent": "commercial",
+            "etv": 120,
+        }
+    ]
+    assert evidence["backlinks_evidence"] == {
+        "summary": {
+            "backlinks": 100,
+            "referring_domains": 20,
+            "referring_pages": 30,
+            "rank": 42,
+        },
+        "referring_domains": [
+            {
+                "domain": "publisher.example",
+                "backlinks": 4,
+                "referring_pages": 2,
+                "rank": 30,
+            }
+        ],
+    }
+
+
+@pytest.mark.anyio
+async def test_competitor_paid_transform_failure_records_returned_cost() -> None:
+    repository = CompetitorOpportunityRepository()
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+
+    async def execute():
+        return [RawKeyword(keyword="solar", source="keyword_overview")], DataForSEOBilling(
+            cost_usd=0.0132,
+            path=["tasks", "0", "result"],
+        )
+
+    def fail_transform(_rows):
+        raise AttributeError("broken local transform")
+
+    with pytest.raises(ProviderError, match="broken local transform") as error:
+        await activities._competitor_paid_json(
+            context=repository.context,
+            phase="query-metrics",
+            endpoint=DataForSEOClient.KEYWORD_OVERVIEW_PATH,
+            request_payload={"keywords": ["solar"]},
+            execute=execute,
+            transform=fail_transform,
+        )
+
+    assert error.value.cost_usd == 0.0132
+    assert error.value.path == ["tasks", "0", "result"]
+    assert repository.failed_requests[0]["failure_status"] == "charged_failed"
+    assert repository.failed_requests[0]["cost_usd"] == 0.0132
+
+
+@pytest.mark.anyio
+async def test_competitor_paid_unresolved_request_preserves_original_error() -> None:
+    repository = CompetitorOpportunityRepository()
+
+    async def begin_unresolved(**kwargs):
+        return ExternalRequestRecord(
+            request_key=kwargs["request_key"],
+            status="uncertain",
+            build_run_id=None,
+            competitor_analysis_run_id=repository.context.run_id,
+            result_count=0,
+            response_metadata={"path": ["tasks", "0"]},
+            expires_at=None,
+            claim_token=None,
+            error_code="network_error",
+            error_detail="provider received request before disconnect",
+            cost_usd=0.0095,
+        )
+
+    repository.begin_competitor_external_request = begin_unresolved
+    execute = AsyncMock(side_effect=AssertionError("unresolved request must not execute"))
+
+    with pytest.raises(ProviderError) as error:
+        await KeywordActivities(repository, KeywordWorkerSettings())._competitor_paid_json(
+            context=repository.context,
+            phase="serp-1",
+            endpoint=DataForSEOClient.LIVE_SERP_PATH,
+            request_payload={"keyword": "solar"},
+            execute=execute,
+        )
+
+    assert error.value.code == "network_error"
+    assert error.value.failure_status == "uncertain"
+    assert error.value.cost_usd == 0.0095
+    assert error.value.path == ["tasks", "0"]
+    execute.assert_not_awaited()
+
+
+def test_competitive_query_evidence_combines_gsc_and_keyword_metrics() -> None:
+    [row] = gsc_rows(1)
+
+    evidence = competitive_query_evidence(
+        [row],
+        {row.query: {"intent": "commercial", "selection_reason": "core offer"}},
+        [
+            {
+                "keyword": row.query.upper(),
+                "search_volume": 1200,
+                "keyword_difficulty": 42,
+                "cpc": 3.5,
+                "competition": 0.7,
+                "competition_level": "HIGH",
+                "intent": "transactional",
+                "monthly_searches": [{"year": 2026, "month": 7, "search_volume": 1200}],
+            }
+        ],
+    )
+
+    assert evidence == [
+        {
+            "query": "market query 1",
+            "clicks": 99.0,
+            "impressions": 999.0,
+            "ctr": 0.1,
+            "position": 1.0,
+            "intent": "commercial",
+            "selection_reason": "core offer",
+            "search_volume": 1200,
+            "keyword_difficulty": 42,
+            "cpc": 3.5,
+            "competition": 0.7,
+            "competition_level": "HIGH",
+            "provider_intent": "transactional",
+            "monthly_searches": [{"year": 2026, "month": 7, "search_volume": 1200}],
+        }
+    ]
+
+
+def test_selected_gsc_queries_accepts_representatives_beyond_first_two_hundred() -> None:
+    rows = gsc_rows(1000)
+    payload = {
+        "queries": [
+            {
+                "id": f"q{index:03d}",
+                "intent": "commercial",
+                "reason": "lower-click business query",
+            }
+            for index in range(996, 1001)
+        ],
+        "directional": False,
+    }
+
+    selected, metadata = selected_gsc_queries(rows, payload)
+
+    assert [row.query for row in selected] == [
+        f"market query {index}" for index in range(996, 1001)
+    ]
+    assert metadata["market query 1000"]["selection_reason"] == ("lower-click business query")
+
+
+@pytest.mark.parametrize(
+    ("site_url", "domain", "expected"),
+    [
+        ("sc-domain:example.com", "example.com", True),
+        ("sc-domain:example.com", "www.example.com", True),
+        ("https://www.example.com/", "example.com", True),
+        ("https://shop.example.com/", "example.com", False),
+        ("sc-domain:unrelated.example", "example.com", False),
+    ],
+)
+def test_worker_rejects_gsc_properties_for_other_domains(
+    site_url: str, domain: str, expected: bool
+) -> None:
+    assert gsc_site_matches_domain(site_url, domain) is expected
 
 
 CONTEXT = KeywordRunContext(
@@ -42,6 +336,1098 @@ CONTEXT = KeywordRunContext(
     profile_source="",
     profile_version="",
 )
+
+
+class CompetitorOpportunityRepository:
+    def __init__(self) -> None:
+        self.context = CompetitorAnalysisContext(
+            organization_id="org-1",
+            project_id="project-1",
+            run_id="competitor-run-1",
+            domain="example.com",
+            country="US",
+            language="en",
+            competitor_limit=5,
+            keyword_limit=100,
+        )
+        self.saved_rows: list[CompetitorGap] = []
+        self.failed_requests: list[dict] = []
+        self.failed_competitors: list[dict] = []
+        self.failed_analyses: list[dict] = []
+        self.completed_metadata: dict = {}
+        self.saved_competitors: list[DiscoveredCompetitor] = []
+        self.discovery_configuration: dict = {}
+        self.landscape_evidence: dict = {}
+        self.completed_requests: list[dict] = []
+        self.gsc_reconnect_projects: list[str] = []
+        self.cached_site_verifications: dict[str, dict] = {}
+        self.cost_breakdown: dict[str, float] = {}
+
+    async def begin_competitor_external_request(self, **kwargs) -> ExternalRequestRecord:
+        return ExternalRequestRecord(
+            request_key=kwargs["request_key"],
+            status="prepared",
+            build_run_id=None,
+            competitor_analysis_run_id=self.context.run_id,
+            result_count=0,
+            response_metadata={},
+            expires_at=None,
+            claim_token="claim-1",
+        )
+
+    async def mark_external_request_submitted(self, *args, **kwargs) -> bool:
+        return True
+
+    async def complete_external_request(self, request_key: str, **kwargs) -> None:
+        self.completed_requests.append({"request_key": request_key, **kwargs})
+
+    async def load_competitor_analysis_context(self, task: dict) -> CompetitorAnalysisContext:
+        return self.context
+
+    async def load_gsc_config(self, context: CompetitorAnalysisContext) -> GSCProviderConfig:
+        return GSCProviderConfig(
+            project_id=context.project_id,
+            site_url="sc-domain:example.com",
+            refresh_token="refresh-token",
+            client_id="client-id",
+            client_secret="client-secret",
+        )
+
+    async def mark_gsc_reconnect_required(self, project_id: str) -> None:
+        self.gsc_reconnect_projects.append(project_id)
+
+    async def load_competitor_business_profile(self, context: CompetitorAnalysisContext) -> dict:
+        return {
+            "business_type": "SEO software",
+            "business_summary": "Keyword research software for marketing teams.",
+            "products_services": ["keyword research", "rank tracking"],
+        }
+
+    async def load_ai_config(self, organization_id: str) -> AIProviderConfig:
+        return AIProviderConfig(
+            base_url="https://ai.example/v1",
+            api_key="ai-key",
+            model="test-model",
+            timeout_seconds=30,
+            max_retries=0,
+        )
+
+    async def save_competitor_discovery_configuration(self, context, **kwargs) -> None:
+        self.discovery_configuration = kwargs
+
+    async def save_competitor_landscape_evidence(self, context, **kwargs) -> None:
+        self.landscape_evidence = kwargs
+
+    async def load_cached_competitor_site_verifications(self, context, domains) -> dict:
+        return dict(self.cached_site_verifications)
+
+    async def save_competitor_site_verifications(self, context, values) -> None:
+        self.cached_site_verifications.update(values)
+
+    async def save_competitor_cost_breakdown(self, run_id, values) -> None:
+        self.cost_breakdown = dict(values)
+
+    async def mark_competitor_started(self, *args) -> None:
+        return None
+
+    async def save_discovered_competitors(
+        self,
+        context: CompetitorAnalysisContext,
+        rows: list[DiscoveredCompetitor],
+        *,
+        cost_usd: float,
+    ) -> list[dict]:
+        self.saved_competitors = rows
+        return [
+            {"id": f"competitor-{index}", "domain": row.domain}
+            for index, row in enumerate(rows[: self.context.competitor_limit], start=1)
+            if row.raw_payload.get("_landscape", {}).get("selected_for_gap", True)
+        ]
+
+    async def save_discovered_competitors_and_complete_external_request(
+        self,
+        context: CompetitorAnalysisContext,
+        rows: list[DiscoveredCompetitor],
+        *,
+        cost_usd: float,
+        **kwargs,
+    ) -> list[dict]:
+        self.saved_competitors = rows
+        self.completed_metadata = dict(kwargs["metadata"])
+        return [
+            {"id": f"auto-{index}", "domain": row.domain}
+            for index, row in enumerate(rows[:5], start=1)
+        ]
+
+    async def load_dataforseo_config(self, organization_id: str) -> DataForSEOProviderConfig:
+        return DataForSEOProviderConfig(login="login", password="password")
+
+    async def save_competitor_opportunities_and_complete_external_request(
+        self,
+        context: CompetitorAnalysisContext,
+        competitor_id: str,
+        rows: list[CompetitorGap],
+        *,
+        cost_usd: float,
+        **kwargs,
+    ) -> int:
+        assert competitor_id == "competitor-1"
+        assert cost_usd == 0.024
+        self.saved_rows = rows
+        self.completed_metadata = dict(kwargs["metadata"])
+        return len(rows)
+
+    async def fail_external_request(self, request_key: str, **kwargs) -> bool:
+        self.failed_requests.append({"request_key": request_key, **kwargs})
+        return True
+
+    async def fail_competitor(self, context, competitor_id: str, **kwargs) -> None:
+        self.failed_competitors.append({"competitor_id": competitor_id, **kwargs})
+
+    async def fail_competitor_analysis(self, run_id: str, **kwargs) -> None:
+        self.failed_analyses.append({"run_id": run_id, **kwargs})
+
+
+def gsc_rows(count: int = 10) -> list[GSCQueryRow]:
+    return [
+        GSCQueryRow(
+            query=f"market query {index}",
+            clicks=float(100 - index),
+            impressions=float(1000 - index),
+            ctr=0.1,
+            position=float(index),
+            raw_payload={},
+        )
+        for index in range(1, count + 1)
+    ]
+
+
+def query_selection_result(count: int = 5) -> AIResult:
+    intents = [
+        "informational",
+        "commercial",
+        "comparison",
+        "transactional",
+        "informational",
+    ]
+    return AIResult(
+        payload={
+            "queries": [
+                {"id": f"q{index:03d}", "intent": intents[index - 1], "reason": "representative"}
+                for index in range(1, count + 1)
+            ],
+            "directional": False,
+        },
+        usage={},
+        model="test-model",
+    )
+
+
+async def stub_gsc_performance(client, **kwargs) -> list[GSCQueryRow]:
+    return gsc_rows()
+
+
+async def stub_query_selection(client, **kwargs) -> AIResult:
+    return query_selection_result()
+
+
+async def stub_keyword_overview(client, **kwargs):
+    return [], DataForSEOBilling(cost_usd=0, path=["keyword_overview"])
+
+
+async def stub_live_serp(client, **kwargs):
+    return [], DataForSEOBilling(cost_usd=0, path=["live_serp"])
+
+
+@pytest.mark.anyio
+async def test_competitor_analysis_requests_only_opportunity_keywords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CompetitorOpportunityRepository()
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+    captured: dict = {}
+
+    async def domain_intersection(client: DataForSEOClient, **kwargs):
+        captured.update(kwargs)
+        return (
+            [
+                CompetitorGap(
+                    keyword="solar opportunity",
+                    provider_rank=1,
+                    competitor_rank=4,
+                    own_rank=None,
+                    competitor_url="https://competitor.example/solar",
+                    own_url=None,
+                    search_volume=2400,
+                    cpc=4.2,
+                    competition=0.7,
+                    competition_level="HIGH",
+                    keyword_difficulty=42,
+                    intent="commercial",
+                    monthly_searches=[],
+                    raw_payload={},
+                )
+            ],
+            DataForSEOBilling(cost_usd=0.024, path=["domain_intersection"]),
+        )
+
+    monkeypatch.setattr(DataForSEOClient, "domain_intersection", domain_intersection)
+
+    result = await activities.fetch_competitor_opportunities(
+        {
+            "task": {
+                "organization_id": "org-1",
+                "project_id": "project-1",
+                "run_id": "competitor-run-1",
+            },
+            "competitor_id": "competitor-1",
+            "competitor_domain": "competitor.example",
+        }
+    )
+
+    assert captured["competitor_domain"] == "competitor.example"
+    assert captured["domain"] == "example.com"
+    assert captured["limit"] == 100
+    assert captured["intersections"] is False
+    assert result["count"] == 1
+    assert repository.saved_rows[0].own_rank is None
+    assert repository.saved_rows[0].competition_level == "HIGH"
+    assert repository.saved_rows[0].metrics_fetched_at is not None
+    assert repository.completed_metadata["rows"][0]["metrics_fetched_at"] == (
+        repository.saved_rows[0].metrics_fetched_at.isoformat()
+    )
+
+
+@pytest.mark.anyio
+async def test_manual_competitors_are_prepared_without_provider_discovery() -> None:
+    repository = CompetitorOpportunityRepository()
+    repository.context = CompetitorAnalysisContext(
+        **{
+            **repository.context.__dict__,
+            "analysis_mode": "manual",
+            "competitor_domains": ("one.example", "two.example"),
+            "competitor_limit": 2,
+        }
+    )
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+
+    result = await activities.prepare_manual_competitors({})
+
+    assert result["manual"] is True
+    assert result["cost_usd"] == 0
+    assert [row.domain for row in repository.saved_competitors] == [
+        "one.example",
+        "two.example",
+    ]
+    assert all(row.raw_payload == {"source": "manual"} for row in repository.saved_competitors)
+
+
+@pytest.mark.anyio
+async def test_cached_competitor_metrics_keep_original_snapshot_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_at = datetime.now(UTC) - timedelta(hours=1)
+
+    class CachedRepository(CompetitorOpportunityRepository):
+        async def begin_competitor_external_request(self, **kwargs) -> ExternalRequestRecord:
+            return ExternalRequestRecord(
+                request_key=kwargs["request_key"],
+                status="completed",
+                build_run_id=None,
+                competitor_analysis_run_id=self.context.run_id,
+                result_count=1,
+                response_metadata={
+                    "rows": [
+                        {
+                            "keyword": "cached solar opportunity",
+                            "provider_rank": 1,
+                            "competitor_rank": 5,
+                            "own_rank": None,
+                            "competitor_url": "https://competitor.example/cached",
+                            "own_url": None,
+                            "search_volume": 900,
+                            "cpc": 3.1,
+                            "competition": 0.6,
+                            "competition_level": "MEDIUM",
+                            "keyword_difficulty": None,
+                            "intent": None,
+                            "monthly_searches": [],
+                            "raw_payload": {},
+                            "metrics_fetched_at": snapshot_at.isoformat(),
+                        }
+                    ]
+                },
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+                claim_token=None,
+            )
+
+        async def save_competitor_opportunities(
+            self,
+            context: CompetitorAnalysisContext,
+            competitor_id: str,
+            rows: list[CompetitorGap],
+            *,
+            cost_usd: float,
+        ) -> int:
+            assert cost_usd == 0
+            self.saved_rows = rows
+            return len(rows)
+
+    repository = CachedRepository()
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+    provider_call = AsyncMock(side_effect=AssertionError("cache reuse must not call provider"))
+    monkeypatch.setattr(DataForSEOClient, "domain_intersection", provider_call)
+
+    result = await activities.fetch_competitor_opportunities(
+        {
+            "task": {
+                "organization_id": "org-1",
+                "project_id": "project-1",
+                "run_id": "competitor-run-1",
+            },
+            "competitor_id": "competitor-1",
+            "competitor_domain": "competitor.example",
+        }
+    )
+
+    assert result["cached"] is True
+    assert repository.saved_rows[0].metrics_fetched_at == snapshot_at
+    assert repository.saved_rows[0].keyword_difficulty is None
+    provider_call.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_competitor_analysis_marks_zero_cost_transient_failure_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CompetitorOpportunityRepository()
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+
+    async def domain_intersection(client: DataForSEOClient, **kwargs):
+        raise ProviderError("dataforseo_http_error", "temporary", transient=True)
+
+    monkeypatch.setattr(DataForSEOClient, "domain_intersection", domain_intersection)
+
+    result = await activities.fetch_competitor_opportunities(
+        {
+            "task": {
+                "organization_id": "org-1",
+                "project_id": "project-1",
+                "run_id": "competitor-run-1",
+            },
+            "competitor_id": "competitor-1",
+            "competitor_domain": "competitor.example",
+        }
+    )
+
+    assert result["status"] == "failed"
+    assert result["retryable"] is True
+    assert repository.failed_requests[0]["failure_status"] == "retryable_failed"
+    assert repository.failed_competitors[0]["competitor_id"] == "competitor-1"
+
+
+@pytest.mark.anyio
+async def test_competitor_analysis_does_not_retry_a_charged_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CompetitorOpportunityRepository()
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+
+    async def domain_intersection(client: DataForSEOClient, **kwargs):
+        raise ProviderError(
+            "dataforseo_task_failed",
+            "charged",
+            transient=True,
+            failure_status="charged_failed",
+            cost_usd=0.024,
+        )
+
+    monkeypatch.setattr(DataForSEOClient, "domain_intersection", domain_intersection)
+
+    result = await activities.fetch_competitor_opportunities(
+        {
+            "task": {
+                "organization_id": "org-1",
+                "project_id": "project-1",
+                "run_id": "competitor-run-1",
+            },
+            "competitor_id": "competitor-1",
+            "competitor_domain": "competitor.example",
+        }
+    )
+
+    assert result["status"] == "failed"
+    assert result["retryable"] is False
+    assert repository.failed_requests[0]["failure_status"] == "charged_failed"
+    assert repository.failed_competitors[0]["cost_usd"] == 0.024
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("retry_enabled", "failed_analysis_count"),
+    [(True, 0), (False, 1)],
+)
+async def test_competitor_discovery_preserves_legacy_failure_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    retry_enabled: bool,
+    failed_analysis_count: int,
+) -> None:
+    repository = CompetitorOpportunityRepository()
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.activities.GoogleSearchConsoleClient.query_performance",
+        stub_gsc_performance,
+    )
+    monkeypatch.setattr(
+        OpenAICompatibleClient,
+        "select_competitive_market_queries",
+        stub_query_selection,
+    )
+    monkeypatch.setattr(DataForSEOClient, "keyword_overview", stub_keyword_overview)
+    monkeypatch.setattr(DataForSEOClient, "live_serp", stub_live_serp)
+
+    async def serp_competitors(client: DataForSEOClient, **kwargs):
+        raise ProviderError("dataforseo_http_error", "temporary", transient=True)
+
+    monkeypatch.setattr(DataForSEOClient, "serp_competitors", serp_competitors)
+    task = {
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "run_id": "competitor-run-1",
+    }
+    if retry_enabled:
+        task["_competitor_request_retry_enabled"] = True
+
+    result = await activities.discover_competitors(task)
+
+    assert result["status"] == "failed"
+    assert result["retryable"] is True
+    assert len(repository.failed_analyses) == failed_analysis_count
+
+
+@pytest.mark.anyio
+async def test_competitor_discovery_uses_gsc_queries_and_keeps_all_openseo_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CompetitorOpportunityRepository()
+    repository.context = replace(
+        repository.context,
+        local_market={
+            "latitude": -26.2041,
+            "longitude": 28.0473,
+            "radius_km": 10,
+            "zoom": 12,
+            "search_type": "maps",
+            "device": "desktop",
+            "depth": 1,
+            "business_query": "video service",
+            "categories": ["media_company"],
+            "include_questions": True,
+            "questions_keyword": "Elephant TV",
+            "questions_depth": 12,
+        },
+    )
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+    captured: list[dict] = []
+    events: list[str] = []
+    ranked_domains: list[str] = []
+    overview_domains: list[str] = []
+    synthesis_snapshots: list[list[dict]] = []
+    selected_input_counts: list[int] = []
+    local_business_calls: list[dict] = []
+    local_serp_calls: list[dict] = []
+    question_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.activities.GoogleSearchConsoleClient.query_performance",
+        AsyncMock(return_value=gsc_rows(1000)),
+    )
+
+    async def select_queries(client: OpenAICompatibleClient, **kwargs):
+        selected_input_counts.append(len(kwargs["rows"]))
+        return query_selection_result()
+
+    monkeypatch.setattr(
+        OpenAICompatibleClient,
+        "select_competitive_market_queries",
+        select_queries,
+    )
+    monkeypatch.setattr(DataForSEOClient, "keyword_overview", stub_keyword_overview)
+
+    async def live_serp(client: DataForSEOClient, **kwargs):
+        keyword = kwargs["keyword"]
+        events.append(f"serp:{keyword}")
+        if keyword == "market query 3":
+            raise ProviderError(
+                "dataforseo_serp_unavailable",
+                "one representative SERP failed",
+                failure_status="charged_failed",
+                cost_usd=0.003,
+            )
+        return [
+            {
+                "type": "organic",
+                "rank": 1,
+                "domain": "competitor-11.example",
+                "url": f"https://competitor-11.example/{keyword.replace(' ', '-')}",
+            }
+        ], DataForSEOBilling(cost_usd=0, path=["live_serp"])
+
+    monkeypatch.setattr(DataForSEOClient, "live_serp", live_serp)
+
+    async def local_businesses(client: DataForSEOClient, **kwargs):
+        local_business_calls.append(kwargs)
+        return [], DataForSEOBilling(cost_usd=0, path=["local_businesses"])
+
+    async def local_serp(client: DataForSEOClient, **kwargs):
+        local_serp_calls.append(kwargs)
+        return [], DataForSEOBilling(cost_usd=0, path=["local_serp"])
+
+    async def business_questions(client: DataForSEOClient, **kwargs):
+        question_calls.append(kwargs)
+        return [{"question_text": "Do you offer installation?", "items": []}], DataForSEOBilling(
+            cost_usd=0, path=["business_questions"]
+        )
+
+    monkeypatch.setattr(DataForSEOClient, "local_businesses", local_businesses)
+    monkeypatch.setattr(DataForSEOClient, "local_serp", local_serp)
+    monkeypatch.setattr(DataForSEOClient, "business_questions", business_questions)
+
+    async def probe_sites(**kwargs):
+        return {
+            row.domain.casefold(): {
+                "domain": row.domain,
+                "requested_url": f"https://{row.domain}/",
+                "final_url": f"https://{row.domain}/",
+                "final_domain": row.domain,
+                "status": "ok",
+            }
+            for row in kwargs["rows"]
+        }
+
+    monkeypatch.setattr("seo_workers.keywords.activities.probe_competitor_sites", probe_sites)
+
+    async def serp_competitors(client: DataForSEOClient, **kwargs):
+        captured.append(kwargs)
+        events.append("serp_competitors")
+        rows = [
+            DiscoveredCompetitor(
+                domain=("example.com" if index == 0 else f"competitor-{index}.example"),
+                provider_rank=index + 1,
+                avg_position=float(index + 1),
+                median_position=float(index + 1),
+                rating=float(index),
+                etv=float(index * 100),
+                keywords_count=index,
+                visibility=float(index),
+                relevant_serp_items=index,
+                keywords_positions={},
+                raw_payload={"index": index},
+            )
+            for index in range(12)
+        ]
+        return rows, DataForSEOBilling(cost_usd=0.012, path=["serp_competitors"])
+
+    async def classify(client: OpenAICompatibleClient, **kwargs):
+        competitors = kwargs["competitors"]
+        return AIResult(
+            payload={
+                "domains": [
+                    {
+                        "id": f"d{index:03d}",
+                        "type": "direct_product_competitor",
+                        "is_seo_competitor": True,
+                        "is_business_competitor": True,
+                        "relevant_publisher": False,
+                        "confidence": 0.9,
+                        "why_they_matter": "recurs across representative SERPs",
+                        "site_relation": "related",
+                        "site_reason": "verified product website",
+                    }
+                    for index in range(1, len(competitors) + 1)
+                ]
+            },
+            usage={},
+            model="test-model",
+        )
+
+    async def domain_overview(client: DataForSEOClient, **kwargs):
+        overview_domains.append(kwargs["domain"])
+        return {"domain": kwargs["domain"], "organic_keywords": 100}, DataForSEOBilling(
+            cost_usd=0, path=["domain_overview"]
+        )
+
+    async def ranked_keywords(client: DataForSEOClient, **kwargs):
+        ranked_domains.append(kwargs["domain"])
+        return [], DataForSEOBilling(cost_usd=0, path=["ranked_keywords"])
+
+    async def assess_backlinks(client: OpenAICompatibleClient, **kwargs):
+        return AIResult(
+            payload={
+                "domains": [
+                    {
+                        "id": f"d{index:03d}",
+                        "needed": index == 1,
+                        "reason": "authority may explain the leader"
+                        if index == 1
+                        else "not needed",
+                    }
+                    for index in range(1, len(kwargs["competitors"]) + 1)
+                ]
+            },
+            usage={},
+            model="test-model",
+        )
+
+    async def backlinks_overview(client: DataForSEOClient, **kwargs):
+        raise ProviderError(
+            "dataforseo_backlinks_unavailable",
+            "backlinks subscription unavailable",
+            failure_status="charged_failed",
+            cost_usd=0.05,
+        )
+
+    async def synthesize(client: OpenAICompatibleClient, **kwargs):
+        synthesis_snapshots.append(kwargs["serp_snapshots"])
+        competitor_findings = [
+            {
+                "domain": row["domain"],
+                "type": row["domain_type"],
+                "why_they_matter": row["why_they_matter"],
+                "organic_footprint": "100 organic keywords",
+                "winning_themes": ["keyword research"],
+                "weakness_gap": "limited workflow content",
+            }
+            for row in kwargs["competitors"]
+        ]
+        return AIResult(
+            payload={
+                "market_read": "Directional market read",
+                "market_leaders": [],
+                "most_winnable_opportunity": "comparison content",
+                "biggest_barrier": "authority",
+                "content_formats": ["comparison pages"],
+                "winning_themes": ["keyword research"],
+                "keyword_theme_gaps": ["workflow templates"],
+                "backlink_authority_observations": [],
+                "competitor_findings": competitor_findings,
+                "recommended_workflows": ["competitor_analysis"],
+            },
+            usage={},
+            model="test-model",
+        )
+
+    monkeypatch.setattr(DataForSEOClient, "serp_competitors", serp_competitors)
+    monkeypatch.setattr(OpenAICompatibleClient, "classify_competitive_domains", classify)
+    monkeypatch.setattr(DataForSEOClient, "domain_overview", domain_overview)
+    monkeypatch.setattr(DataForSEOClient, "ranked_keywords", ranked_keywords)
+    monkeypatch.setattr(OpenAICompatibleClient, "assess_backlink_validation_need", assess_backlinks)
+    monkeypatch.setattr(DataForSEOClient, "backlinks_overview", backlinks_overview)
+    monkeypatch.setattr(OpenAICompatibleClient, "synthesize_competitive_landscape", synthesize)
+    result = await activities.discover_competitors(
+        {
+            "organization_id": "org-1",
+            "project_id": "project-1",
+            "run_id": "competitor-run-1",
+        }
+    )
+
+    assert len(captured) == 1
+    assert selected_input_counts == [1000]
+    assert events[0] == "serp_competitors"
+    assert captured[0] == {
+        "keywords": [f"market query {index}" for index in range(1, 6)],
+        "country": "US",
+        "language": "en",
+        "item_types": ["organic", "local_pack"],
+        "limit": 50,
+        "offset": 0,
+    }
+    assert repository.discovery_configuration == {
+        "keywords": [f"market query {index}" for index in range(1, 6)],
+        "result_types": ["organic", "local_pack"],
+        "include_subdomains": None,
+        "sort_by": "visibility",
+        "limit": 50,
+        "offset": 0,
+    }
+    assert len(repository.saved_competitors) == 11
+    assert repository.saved_competitors[0].domain == "competitor-11.example"
+    assert all(row.domain != "example.com" for row in repository.saved_competitors)
+    assert overview_domains == [f"competitor-{index}.example" for index in range(11, 6, -1)]
+    assert ranked_domains == overview_domains
+    assert len(result["competitors"]) == 5
+    assert result["status"] == "completed"
+    assert result["cost_usd"] == pytest.approx(0.065)
+    assert len(repository.landscape_evidence["gsc_query_evidence"]) == 5
+    assert len(repository.landscape_evidence["serp_snapshots"]) == 12
+    failed_snapshot = repository.landscape_evidence["serp_snapshots"][2]
+    assert failed_snapshot["ok"] is False
+    assert failed_snapshot["error_code"] == "dataforseo_serp_unavailable"
+    assert synthesis_snapshots[0][2] == failed_snapshot
+    assert local_business_calls[0]["query"] == "video service"
+    assert len(local_serp_calls) == 5
+    assert all(call["depth"] == 1 for call in local_serp_calls)
+    assert question_calls == [
+        {
+            "keyword": "Elephant TV",
+            "latitude": -26.2041,
+            "longitude": 28.0473,
+            "radius_km": 10.0,
+            "language": "en",
+            "depth": 12,
+        }
+    ]
+    assert any(
+        snapshot.get("source") == "google_business_questions" for snapshot in synthesis_snapshots[0]
+    )
+    assert repository.landscape_evidence["cost_breakdown"]["live_serps"] == 0.003
+    assert repository.landscape_evidence["cost_breakdown"]["backlinks"] == 0.05
+    assert (
+        repository.saved_competitors[0].raw_payload["_landscape"]["backlinks_evidence"]["available"]
+        is False
+    )
+
+
+@pytest.mark.anyio
+async def test_competitor_discovery_with_fewer_than_five_gsc_queries_is_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CompetitorOpportunityRepository()
+    paid_call = AsyncMock()
+    gsc_call = AsyncMock(return_value=gsc_rows(4))
+    monkeypatch.setattr(
+        "seo_workers.keywords.activities.GoogleSearchConsoleClient.query_performance",
+        gsc_call,
+    )
+    monkeypatch.setattr(DataForSEOClient, "serp_competitors", paid_call)
+
+    result = await KeywordActivities(repository, KeywordWorkerSettings()).discover_competitors(
+        {
+            "organization_id": "org-1",
+            "project_id": "project-1",
+            "run_id": "competitor-run-1",
+        }
+    )
+
+    paid_call.assert_not_awaited()
+    assert result["reason"] == "gsc_representative_queries_insufficient"
+    assert result["cost_usd"] == 0
+    assert repository.landscape_evidence["directional_result"] is True
+    assert "仅返回 4 个查询" in repository.landscape_evidence["landscape_summary"]["market_read"]
+    assert "未调用任何付费" in repository.landscape_evidence["landscape_summary"]["market_read"]
+
+
+@pytest.mark.anyio
+async def test_competitor_discovery_marks_revoked_gsc_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CompetitorOpportunityRepository()
+
+    async def revoked(client, **kwargs):
+        raise ProviderError("gsc_reconnect_required", "grant revoked")
+
+    monkeypatch.setattr(
+        "seo_workers.keywords.activities.GoogleSearchConsoleClient.query_performance",
+        revoked,
+    )
+
+    result = await KeywordActivities(repository, KeywordWorkerSettings()).discover_competitors(
+        {
+            "organization_id": "org-1",
+            "project_id": "project-1",
+            "run_id": "competitor-run-1",
+        }
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "gsc_reconnect_required"
+    assert repository.gsc_reconnect_projects == ["project-1"]
+
+
+def test_openseo_five_domain_types_and_gap_eligibility_are_preserved() -> None:
+    domain_types = [
+        "direct_product_competitor",
+        "publisher_media",
+        "marketplace_directory",
+        "community_forum",
+        "documentation_resource",
+    ]
+    rows = [
+        DiscoveredCompetitor(
+            domain=f"candidate-{index}.example",
+            provider_rank=index,
+            avg_position=None,
+            median_position=None,
+            rating=None,
+            etv=None,
+            keywords_count=None,
+            visibility=None,
+            relevant_serp_items=None,
+            keywords_positions={},
+            raw_payload={},
+        )
+        for index in range(1, 6)
+    ]
+    payload = {
+        "domains": [
+            {
+                "id": f"d{index:03d}",
+                "type": domain_type,
+                "is_seo_competitor": True,
+                "is_business_competitor": index == 1,
+                "relevant_publisher": index == 2,
+                "confidence": 0.8,
+                "why_they_matter": "recurring SERP domain",
+                "site_relation": "related",
+                "site_reason": "verified relevant website",
+            }
+            for index, domain_type in enumerate(domain_types, start=1)
+        ]
+    }
+
+    site_verifications = {
+        row.domain: {
+            "domain": row.domain,
+            "final_domain": row.domain,
+            "status": "ok",
+        }
+        for row in rows
+    }
+    classified = classified_domains(rows, payload, site_verifications)
+
+    assert [classified[row.domain]["domain_type"] for row in rows] == domain_types
+    assert classified[rows[0].domain]["selected_for_gap"] is True
+    assert classified[rows[1].domain]["selected_for_gap"] is True
+    assert classified[rows[2].domain]["selected_for_gap"] is False
+    assert classified[rows[3].domain]["selected_for_gap"] is False
+    assert classified[rows[4].domain]["selected_for_gap"] is False
+
+
+def test_site_verification_is_a_hard_paid_gap_gate() -> None:
+    rows = [
+        DiscoveredCompetitor(
+            domain="en.e-lephant.tv",
+            provider_rank=1,
+            avg_position=1,
+            median_position=1,
+            rating=None,
+            etv=None,
+            keywords_count=1,
+            visibility=1,
+            relevant_serp_items=1,
+            keywords_positions={},
+            raw_payload={},
+        ),
+        DiscoveredCompetitor(
+            domain="blocked.example",
+            provider_rank=2,
+            avg_position=2,
+            median_position=2,
+            rating=None,
+            etv=None,
+            keywords_count=1,
+            visibility=1,
+            relevant_serp_items=1,
+            keywords_positions={},
+            raw_payload={},
+        ),
+        DiscoveredCompetitor(
+            domain="related-old.example",
+            provider_rank=3,
+            avg_position=3,
+            median_position=3,
+            rating=None,
+            etv=None,
+            keywords_count=1,
+            visibility=1,
+            relevant_serp_items=1,
+            keywords_positions={},
+            raw_payload={},
+        ),
+    ]
+    payload = {
+        "domains": [
+            {
+                "id": "d001",
+                "type": "direct_product_competitor",
+                "is_seo_competitor": True,
+                "is_business_competitor": True,
+                "relevant_publisher": False,
+                "confidence": 0.99,
+                "why_they_matter": "namesake",
+                "site_relation": "unrelated",
+                "site_reason": "redirects to an unrelated education service",
+            },
+            {
+                "id": "d002",
+                "type": "direct_product_competitor",
+                "is_seo_competitor": True,
+                "is_business_competitor": True,
+                "relevant_publisher": False,
+                "confidence": 0.5,
+                "why_they_matter": "cannot verify",
+                "site_relation": "uncertain",
+                "site_reason": "access blocked",
+            },
+            {
+                "id": "d003",
+                "type": "direct_product_competitor",
+                "is_seo_competitor": True,
+                "is_business_competitor": True,
+                "relevant_publisher": False,
+                "confidence": 0.9,
+                "why_they_matter": "verified business migration",
+                "site_relation": "related",
+                "site_reason": "same product moved domains",
+            },
+        ]
+    }
+    verifications = {
+        "en.e-lephant.tv": {
+            "status": "redirected",
+            "final_domain": "eduone.jp",
+            "final_url": "https://eduone.jp/",
+        },
+        "blocked.example": {"status": "blocked", "final_domain": "blocked.example"},
+        "related-old.example": {
+            "status": "redirected",
+            "final_domain": "related-new.example",
+        },
+    }
+
+    classified = classified_domains(rows, payload, verifications)
+
+    assert classified["en.e-lephant.tv"]["site_check_status"] == "redirected_unrelated"
+    assert classified["en.e-lephant.tv"]["selected_for_gap"] is False
+    assert classified["blocked.example"]["site_check_status"] == "blocked"
+    assert classified["blocked.example"]["selected_for_gap"] is False
+    assert classified["related-old.example"]["selected_for_gap"] is True
+
+    attached = []
+    for row in rows:
+        row.raw_payload["_landscape"] = classified[row.domain]
+        attached.append(row)
+    redirected = apply_related_redirect_domains(attached)
+    assert [row.domain for row in redirected] == [
+        "en.e-lephant.tv",
+        "blocked.example",
+        "related-new.example",
+    ]
+
+
+def test_cached_site_verification_keeps_crawler_facts_only() -> None:
+    cached = {
+        "domain": "old.example",
+        "status": "redirected",
+        "final_domain": "new.example",
+        "checked_at": "2026-08-05T00:00:00Z",
+        "site_check_status": "redirected_related",
+        "site_relation": "related",
+        "site_reason": "previous AI conclusion",
+        "checks": [
+            {
+                "status": "ok",
+                "title": "New site",
+                "checked_at": "2026-08-05T00:00:00Z",
+                "site_relation": "related",
+            }
+        ],
+    }
+
+    facts = crawler_site_verification_facts(cached)
+    ai_evidence = site_verification_for_ai(cached)
+
+    assert facts["checked_at"] == "2026-08-05T00:00:00Z"
+    assert facts["checks"][0]["title"] == "New site"
+    assert "site_relation" not in facts
+    assert "site_reason" not in facts
+    assert "site_check_status" not in facts
+    assert "checked_at" not in ai_evidence
+    assert "checked_at" not in ai_evidence["checks"][0]
+
+
+def test_related_redirect_domains_merge_metrics_and_serp_evidence() -> None:
+    rows = []
+    for rank, domain, evidence_keyword in (
+        (1, "old.example", "first query"),
+        (2, "new.example", "second query"),
+    ):
+        landscape = {
+            "selected_for_gap": True,
+            "is_seo_competitor": True,
+            "is_business_competitor": True,
+            "classification_confidence": 0.8 + rank / 100,
+            "site_check_status": "redirected_related" if rank == 1 else "verified",
+            "site_verification": {
+                "original_domain": domain,
+                "final_domain": "new.example",
+            },
+            "serp_evidence": [{"keyword": evidence_keyword, "rank": rank}],
+        }
+        rows.append(
+            DiscoveredCompetitor(
+                domain=domain,
+                provider_rank=rank,
+                avg_position=float(rank),
+                median_position=float(rank),
+                rating=float(rank),
+                etv=float(rank * 10),
+                keywords_count=rank,
+                visibility=float(rank),
+                relevant_serp_items=rank,
+                keywords_positions={"top_10": rank},
+                raw_payload={"_landscape": landscape},
+            )
+        )
+
+    merged = apply_related_redirect_domains(rows)
+
+    assert len(merged) == 1
+    assert merged[0].domain == "new.example"
+    assert merged[0].etv == 30
+    assert merged[0].keywords_count == 3
+    assert merged[0].keywords_positions == {"top_10": 3}
+    landscape = merged[0].raw_payload["_landscape"]
+    assert [item["keyword"] for item in landscape["serp_evidence"]] == [
+        "first query",
+        "second query",
+    ]
+    assert len(landscape["related_redirect_sources"]) == 2
+
+
+def test_landscape_mismatch_reports_missing_and_duplicate_domains() -> None:
+    rows = [
+        DiscoveredCompetitor(
+            domain=domain,
+            provider_rank=index,
+            avg_position=None,
+            median_position=None,
+            rating=None,
+            etv=None,
+            keywords_count=None,
+            visibility=None,
+            relevant_serp_items=None,
+            keywords_positions={},
+            raw_payload={},
+        )
+        for index, domain in enumerate(["one.example", "two.example", "three.example"], 1)
+    ]
+
+    missing, duplicates = landscape_finding_mismatch(
+        rows,
+        {
+            "competitor_findings": [
+                {"domain": "one.example"},
+                {"domain": "ONE.EXAMPLE"},
+                {"domain": "three.example"},
+            ]
+        },
+    )
+
+    assert missing == ["two.example"]
+    assert duplicates == ["one.example"]
 
 
 class DiscoveryRepository:
@@ -417,9 +1803,7 @@ async def test_seed_preparation_never_loads_internal_profile_seeds(
     )
 
     async def select_topics(client, **kwargs) -> AIResult:
-        assert [candidate.keyword for candidate in kwargs["candidates"]] == [
-            "solar installation"
-        ]
+        assert [candidate.keyword for candidate in kwargs["candidates"]] == ["solar installation"]
         return AIResult(
             payload=approved_initial_filter_payload(1),
             usage={},
@@ -496,10 +1880,7 @@ async def test_invalid_seed_topic_response_keeps_all_mechanically_valid_candidat
     assert topic_calls == 1
     assert result["selected_topic_count"] == 25
     assert len(repository.submitted_requests) == 2
-    assert any(
-        failure.get("source") == "seed_topic_ai"
-        for failure in repository.partial_failures
-    )
+    assert any(failure.get("source") == "seed_topic_ai" for failure in repository.partial_failures)
     ledger_failure = next(
         failure["ledger_failure"]
         for failure in repository.partial_failures
@@ -742,7 +2123,7 @@ async def test_seed_preparation_supplements_large_irrelevant_labs_result(
 
 
 @pytest.mark.anyio
-async def test_seed_preparation_uses_valid_competitor_only_after_site_sources_are_empty(
+async def test_seed_preparation_does_not_use_competitor_when_site_sources_are_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class CompetitorFallbackRepository(SeedPreparationRepository):
@@ -814,16 +2195,16 @@ async def test_seed_preparation_uses_valid_competitor_only_after_site_sources_ar
         ),
     )
 
-    result = await activities.prepare_seeds({})
+    with pytest.raises(ApplicationError) as exc_info:
+        await activities.prepare_seeds({})
 
-    assert result["competitor_supplemented"] is True
-    assert result["competitor_status"] == "confirmed"
-    assert result["candidate_count"] == 1
-    assert result["selected_topic_count"] == 1
+    assert exc_info.value.type == "seed_candidates_empty"
+    activities.fetch_competitor_gap.assert_not_awaited()
+    activities.validate_competitor.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_seed_preparation_uses_valid_competitor_with_usable_site_keywords(
+async def test_seed_preparation_keeps_competitor_analysis_out_of_site_keywords(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class CompetitorSupplementRepository(SeedPreparationRepository):
@@ -891,12 +2272,12 @@ async def test_seed_preparation_uses_valid_competitor_with_usable_site_keywords(
 
     result = await activities.prepare_seeds({})
 
-    fetch.assert_awaited_once_with({})
-    validate.assert_awaited_once_with({})
-    assert result["competitor_supplemented"] is True
-    assert result["competitor_status"] == "confirmed"
-    assert result["candidate_count"] == 3
-    assert result["selected_topic_count"] == 3
+    fetch.assert_not_awaited()
+    validate.assert_not_awaited()
+    assert result["competitor_supplemented"] is False
+    assert result["competitor_status"] == "not_requested"
+    assert result["candidate_count"] == 2
+    assert result["selected_topic_count"] == 2
 
 
 class ExpansionRepository:
@@ -1185,6 +2566,76 @@ async def test_topic_metrics_are_staged_before_database_only_commit(
     assert repository.records[1]["metric"]["intent"] == "commercial"
     assert repository.records[1]["primary_seed_id"] == "seed-2"
     assert repository.completed_requests[0][0].endswith("keyword-overview:initial")
+
+
+@pytest.mark.anyio
+async def test_labs_null_metrics_do_not_trigger_paid_overview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = TopicCommitRepository()
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+
+    async def load_ideas(run_id: str, sources: list[str]) -> list[RawKeyword]:
+        return [
+            RawKeyword(keyword="headlight restoration", source="labs_site", provider_rank=1),
+            RawKeyword(keyword="car scratch remover", source="labs_site", provider_rank=2),
+        ]
+
+    overview = AsyncMock(side_effect=AssertionError("Labs nulls must not be re-fetched"))
+    monkeypatch.setattr(repository, "load_ideas", load_ideas)
+    monkeypatch.setattr(activities, "_keyword_overview_request", overview)
+
+    metrics_result = await activities.prepare_topic_metrics({})
+    commit_result = await activities.commit_topics({})
+
+    assert metrics_result["overview_requested_count"] == 0
+    assert metrics_result["pending_metrics_count"] == 0
+    assert metrics_result["failed_metrics_count"] == 0
+    assert commit_result["pending_metrics_count"] == 0
+    assert all(record["metrics_status"] == "fresh" for record in repository.records)
+    assert all(record["metric"]["keyword_difficulty"] is None for record in repository.records)
+    overview.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_overview_null_response_is_completed_without_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = TopicCommitRepository()
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+
+    async def keyword_overview(client: DataForSEOClient, **kwargs):
+        return (
+            [
+                RawKeyword(
+                    keyword="car scratch remover",
+                    source="keyword_overview",
+                    search_volume=6_600,
+                    keyword_difficulty=None,
+                    intent=None,
+                )
+            ],
+            DataForSEOBilling(cost_usd=0.01, path=["keyword_overview"]),
+        )
+
+    monkeypatch.setattr(DataForSEOClient, "keyword_overview", keyword_overview)
+
+    metrics_result = await activities.prepare_topic_metrics({})
+    commit_result = await activities.commit_topics({})
+
+    assert metrics_result["overview_requested_count"] == 1
+    assert metrics_result["overview_returned_count"] == 1
+    assert metrics_result["pending_metrics_count"] == 0
+    assert metrics_result["failed_metrics_count"] == 0
+    assert commit_result["pending_metrics_count"] == 0
+    null_record = next(
+        record
+        for record in repository.records
+        if record["candidate"].normalized_keyword == "car scratch remover"
+    )
+    assert null_record["metrics_status"] == "fresh"
+    assert null_record["metric"]["keyword_difficulty"] is None
+    assert null_record["metric"]["intent"] is None
 
 
 @pytest.mark.anyio

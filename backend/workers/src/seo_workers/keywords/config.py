@@ -20,6 +20,8 @@ class KeywordWorkerSettings(BaseSettings):
     keyword_initial_filter_ai_model: str = "gpt-5.6-luna"
     keyword_topic_dedup_ai_model: str = "gpt-5.6-terra"
     ai_settings_encryption_key: str = ""
+    google_gsc_client_id: str = ""
+    google_gsc_client_secret: str = ""
 
     keyword_profile_wait_seconds: int = 30
     keyword_profile_poll_seconds: int = 5
@@ -32,6 +34,8 @@ class KeywordWorkerSettings(BaseSettings):
     keyword_max_concurrent_activities: int = 8
     keyword_worker_health_host: str = "0.0.0.0"
     keyword_worker_health_port: int = 8090
+    keyword_crawler_probe_url: str = "http://localhost:8091"
+    keyword_crawler_probe_timeout_seconds: int = 300
 
     model_config = SettingsConfigDict(
         env_file=".env",

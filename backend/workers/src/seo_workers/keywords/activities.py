@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -33,21 +36,31 @@ from seo_workers.keywords.domain import (
     normalize_keyword,
     prepare_seed_candidates,
     priority_score,
+    raw_keyword_competition_level,
     resolve_bounded_topic_seed_selection,
     strong_seed_business_evidence,
-    validate_keyword_classifications,
     validate_initial_library_filter,
+    validate_keyword_classifications,
     volume_percentiles,
 )
 from seo_workers.keywords.providers import (
     CHARGED_FAILURE,
     RETRYABLE_FAILURE,
     UNCERTAIN_FAILURE,
+    AIResult,
     CompetitorGap,
+    DataForSEOBilling,
     DataForSEOClient,
+    DiscoveredCompetitor,
+    GoogleSearchConsoleClient,
     JsonHttpClient,
     OpenAICompatibleClient,
     ProviderError,
+    coordinate_value,
+    country_location_code,
+    is_same_domain,
+    provider_language_code,
+    sort_serp_competitors,
 )
 from seo_workers.keywords.repository import (
     ExternalRequestRecord,
@@ -74,11 +87,23 @@ KEYWORD_IDEAS_SOURCES = (
     DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE,
     DataForSEOClient.KEYWORD_IDEAS_CLOSE_SOURCE,
 )
+COMPLETE_METRIC_SOURCES = frozenset(
+    {
+        "labs_site",
+        "keyword_overview",
+        "keyword_overview_recovery",
+        "keyword_ideas",
+        DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE,
+        DataForSEOClient.KEYWORD_IDEAS_CLOSE_SOURCE,
+        "competitor_gap",
+    }
+)
 GAP_LIMIT = 200
 AI_CLASSIFICATION_BATCH = 100
 AI_CLASSIFICATION_CONCURRENCY = 3
 SEED_TOPIC_PROMPT_VERSION = "initial-library-general-filter-v20-single-request"
 SEED_TOPIC_SELECTION_PROMPT_VERSION = "topic-duplicate-confirmation-v14-all-pairs"
+COMPETITOR_PROBE_BATCH_SIZE = 5
 
 
 class KeywordActivities:
@@ -89,6 +114,137 @@ class KeywordActivities:
     ) -> None:
         self.repository = repository
         self.settings = settings
+
+    async def _competitor_paid_json(
+        self,
+        *,
+        context: Any,
+        phase: str,
+        endpoint: str,
+        request_payload: dict[str, Any],
+        execute: Callable[[], Awaitable[tuple[Any, DataForSEOBilling]]],
+        transform: Callable[[Any], Any] | None = None,
+        cache_hours: int = 12,
+    ) -> tuple[Any, float]:
+        request = await self.repository.begin_competitor_external_request(
+            context=context,
+            request_key=f"competitor-analysis:{context.run_id}:{phase}",
+            provider="dataforseo",
+            endpoint=endpoint,
+            request_hash=stable_hash(request_payload),
+        )
+        if request.reusable:
+            if "data" not in request.response_metadata:
+                raise ApplicationError(
+                    "缓存的竞争格局响应无法恢复",
+                    type="cached_competitive_landscape_response_invalid",
+                    non_retryable=True,
+                )
+            charged_to_run = (
+                request.cost_usd if request.competitor_analysis_run_id == context.run_id else 0.0
+            )
+            return request.response_metadata["data"], charged_to_run
+        if not request.should_execute:
+            raise ProviderError(
+                request.error_code or "external_request_unavailable",
+                request.error_detail or "相同付费请求正在处理或需要人工核对",
+                failure_status=(
+                    request.status
+                    if request.status in {CHARGED_FAILURE, UNCERTAIN_FAILURE}
+                    else CHARGED_FAILURE
+                ),
+                cost_usd=request.cost_usd,
+                path=list(request.response_metadata.get("path") or []),
+                metadata=request.response_metadata,
+            )
+        await submit_external_request(self.repository, request)
+        try:
+            data, billing = await execute()
+            if transform is not None:
+                try:
+                    data = transform(data)
+                except Exception as exc:  # noqa: BLE001 - preserve confirmed provider billing
+                    raise ProviderError(
+                        "invalid_provider_response",
+                        str(exc),
+                        failure_status=CHARGED_FAILURE,
+                        cost_usd=billing.cost_usd,
+                        path=billing.path,
+                        metadata={"request": request_payload},
+                    ) from exc
+            await self.repository.complete_external_request(
+                request.request_key,
+                claim_token=required_claim_token(request),
+                result_count=len(data) if isinstance(data, list) else int(bool(data)),
+                metadata={"request": request_payload, "data": data, "path": billing.path},
+                cost_usd=billing.cost_usd,
+                expires_at=datetime.now(UTC) + timedelta(hours=cache_hours),
+            )
+            return data, billing.cost_usd
+        except asyncio.CancelledError:
+            await mark_cancelled_external_request(self.repository, request)
+            raise
+        except Exception as exc:
+            await fail_external_request(self.repository, request, error=exc)
+            raise
+
+    async def _competitor_ai_json(
+        self,
+        *,
+        context: Any,
+        phase: str,
+        endpoint: str,
+        request_payload: dict[str, Any],
+        execute: Callable[[], Awaitable[AIResult]],
+    ) -> tuple[dict[str, Any], float]:
+        request = await self.repository.begin_competitor_external_request(
+            context=context,
+            request_key=f"competitor-analysis:{context.run_id}:{phase}",
+            provider="ai",
+            endpoint=endpoint,
+            request_hash=stable_hash(request_payload),
+        )
+        if request.reusable:
+            data = request.response_metadata.get("data")
+            if not isinstance(data, dict):
+                raise ApplicationError(
+                    "缓存的 AI 竞争格局响应无法恢复",
+                    type="cached_competitive_ai_response_invalid",
+                    non_retryable=True,
+                )
+            charged_to_run = (
+                request.cost_usd if request.competitor_analysis_run_id == context.run_id else 0.0
+            )
+            return data, charged_to_run
+        if not request.should_execute:
+            raise ApplicationError(
+                request.error_detail or "相同 AI 请求正在处理或需要人工核对",
+                type=request.error_code or "external_request_unavailable",
+                non_retryable=True,
+            )
+        await submit_external_request(self.repository, request)
+        try:
+            result = await execute()
+            await self.repository.complete_external_request(
+                request.request_key,
+                claim_token=required_claim_token(request),
+                result_count=1,
+                metadata={
+                    "request": request_payload,
+                    "data": result.payload,
+                    "model": result.model,
+                    "usage": result.usage,
+                },
+                cost_usd=result.cost_usd,
+                expires_at=datetime.now(UTC) + timedelta(hours=12),
+            )
+            return result.payload, result.cost_usd
+        except asyncio.CancelledError:
+            await mark_cancelled_external_request(self.repository, request)
+            raise
+        except Exception as exc:
+            await fail_external_request(self.repository, request, error=exc)
+            raise
 
     @activity.defn(name="keyword_mark_started")
     async def mark_started(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -251,8 +407,7 @@ class KeywordActivities:
                 )
         fallback_keyword_ideas_used = False
         should_supplement_keyword_ideas = (
-            not candidates
-            and DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE not in current_sources
+            not candidates and DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE not in current_sources
         )
         if should_supplement_keyword_ideas:
             query_seeds = fallback_query_seeds(
@@ -286,26 +441,6 @@ class KeywordActivities:
                         context.run_id,
                         list(DISCOVERY_SOURCES),
                     )
-                    candidates, excluded = prepare_seed_candidates(
-                        ideas,
-                        context.profile,
-                        context.language,
-                        limit=SEED_CANDIDATE_LIMIT,
-                        domain=context.domain,
-                    )
-        competitor_supplemented = False
-        competitor_status = "not_requested"
-        if context.competitor_domain:
-            gap_fetch = await self.fetch_competitor_gap(task)
-            competitor_status = str(gap_fetch.get("status") or "failed")
-            if competitor_status == "pending":
-                gap_validation = await self.validate_competitor(task)
-                competitor_status = str(gap_validation.get("status") or "failed")
-            if competitor_status == "confirmed":
-                gap_rows = await self.repository.load_confirmed_gap_keywords(context.run_id)
-                if gap_rows:
-                    competitor_supplemented = True
-                    ideas = [*ideas, *gap_rows]
                     candidates, excluded = prepare_seed_candidates(
                         ideas,
                         context.profile,
@@ -362,10 +497,7 @@ class KeywordActivities:
                     else []
                 )
                 reviewed_decisions.update(
-                    {
-                        decision.candidate.normalized_keyword: decision
-                        for decision in decisions
-                    }
+                    {decision.candidate.normalized_keyword: decision for decision in decisions}
                 )
                 usable_seed_count = sum(decision.selected for decision in decisions)
                 if usable_seed_count >= MIN_INITIAL_LIBRARY_KEYWORDS:
@@ -378,9 +510,7 @@ class KeywordActivities:
                         current_sources.add("google_ads_site")
                         supplemental_scope = "after-google-ads"
                         try:
-                            supplemental_rows = await self._google_ads_site_request(
-                                context
-                            )
+                            supplemental_rows = await self._google_ads_site_request(context)
                         except ApplicationError as exc:
                             await self.repository.record_partial_failure(
                                 context.run_id,
@@ -472,9 +602,7 @@ class KeywordActivities:
             excluded,
         )
         usable_seed_count = sum(decision.selected for decision in decisions)
-        duplicate_topic_count = sum(
-            len(group.drop_ids) for group in resolution.duplicate_groups
-        )
+        duplicate_topic_count = sum(len(group.drop_ids) for group in resolution.duplicate_groups)
         return {
             "business_model": infer_business_model(context.profile),
             "candidate_count": len(decisions),
@@ -486,8 +614,8 @@ class KeywordActivities:
             "selected_topic_count": len(seeds),
             "google_ads_supplemented": google_ads_supplemented,
             "fallback_keyword_ideas_used": fallback_keyword_ideas_used,
-            "competitor_supplemented": competitor_supplemented,
-            "competitor_status": competitor_status,
+            "competitor_supplemented": False,
+            "competitor_status": "not_requested",
             "topic_reused": all_topic_reused,
             "selection_reused": all_selection_reused,
             "reused": all_topic_reused and all_selection_reused,
@@ -543,9 +671,7 @@ class KeywordActivities:
                 topic_ids,
                 deterministic_pairs,
                 {
-                    "duplicate_pair_ids": [
-                        pair.pair_id for pair in deterministic_pairs
-                    ],
+                    "duplicate_pair_ids": [pair.pair_id for pair in deterministic_pairs],
                     "ranked": topic_ids,
                 },
                 active_limit=len(topic_ids),
@@ -750,8 +876,7 @@ class KeywordActivities:
         activity_heartbeat({"stage": "seed_selection_ai"})
         request_hash = stable_hash(request_payload)
         request_key = (
-            f"keyword:{context.run_id}:ai:{SEED_TOPIC_SELECTION_PROMPT_VERSION}:"
-            f"{request_hash[:16]}"
+            f"keyword:{context.run_id}:ai:{SEED_TOPIC_SELECTION_PROMPT_VERSION}:{request_hash[:16]}"
         )
         request = await self.repository.begin_external_request(
             context=context,
@@ -1005,6 +1130,1067 @@ class KeywordActivities:
         finally:
             await http.close()
 
+    @activity.defn(name="keyword_competitor_analysis_start")
+    async def start_competitor_analysis(self, task: dict[str, Any]) -> None:
+        analysis_mode = str(task.get("analysis_mode") or "auto")
+        await self.repository.mark_competitor_analysis_started(str(task["run_id"]), analysis_mode)
+
+    @activity.defn(name="keyword_competitor_prepare_manual")
+    async def prepare_manual_competitors(self, task: dict[str, Any]) -> dict[str, Any]:
+        context = await self.repository.load_competitor_analysis_context(task)
+        activity_heartbeat({"stage": "preparing_competitors"})
+        if context.analysis_mode != "manual" or not context.competitor_domains:
+            raise ApplicationError(
+                "手动竞争分析缺少竞争对手域名",
+                type="manual_competitors_missing",
+                non_retryable=True,
+            )
+        rows = [
+            DiscoveredCompetitor(
+                domain=domain,
+                provider_rank=index,
+                avg_position=None,
+                median_position=None,
+                rating=None,
+                etv=None,
+                keywords_count=None,
+                visibility=None,
+                relevant_serp_items=None,
+                keywords_positions={},
+                raw_payload={"source": "manual"},
+            )
+            for index, domain in enumerate(context.competitor_domains, start=1)
+        ]
+        competitors = await self.repository.save_discovered_competitors(
+            context,
+            rows,
+            cost_usd=0,
+        )
+        return {
+            "status": "completed",
+            "competitors": competitors,
+            "count": len(competitors),
+            "cost_usd": 0,
+            "manual": True,
+        }
+
+    @activity.defn(name="keyword_competitor_discover")
+    async def discover_competitors(self, task: dict[str, Any]) -> dict[str, Any]:
+        context = await self.repository.load_competitor_analysis_context(task)
+        if context.analysis_mode != "auto":
+            raise ApplicationError(
+                "手动竞争分析不能执行自动发现",
+                type="competitor_discovery_not_allowed",
+                non_retryable=True,
+            )
+        http: JsonHttpClient | None = None
+        ai_http: JsonHttpClient | None = None
+        cost_breakdown: dict[str, float] = {}
+
+        async def record_cost(name: str, cost: float) -> None:
+            cost_breakdown[name] = max(float(cost or 0), 0)
+            await self.repository.save_competitor_cost_breakdown(context.run_id, cost_breakdown)
+
+        try:
+            http = JsonHttpClient(
+                timeout_seconds=self.settings.keyword_http_timeout_seconds,
+                max_retries=self.settings.keyword_http_max_retries,
+            )
+            activity_heartbeat({"stage": "reading_gsc_queries"})
+            try:
+                gsc_config = await self.repository.load_gsc_config(context)
+            except RuntimeError as exc:
+                raise ApplicationError(
+                    str(exc), type="gsc_connection_required", non_retryable=True
+                ) from exc
+            try:
+                gsc_rows = await GoogleSearchConsoleClient(http, gsc_config).query_performance()
+            except ProviderError as exc:
+                if exc.code == "gsc_reconnect_required":
+                    await self.repository.mark_gsc_reconnect_required(context.project_id)
+                raise
+            profile = await self.repository.load_competitor_business_profile(context)
+            landscape_profile = dict(profile)
+            if context.local_market:
+                landscape_profile["local_market"] = dict(context.local_market)
+            if len(gsc_rows) < 5:
+                evidence = [gsc_query_evidence(row) for row in gsc_rows]
+                insufficient_summary = {
+                    "market_read": (
+                        "Google Search Console 最近 28 天仅返回 "
+                        f"{len(gsc_rows)} 个查询，少于 OpenSEO 代表性市场查询集所需的 5 个；"
+                        "本次未调用任何付费竞品接口。"
+                    ),
+                    "market_leaders": [],
+                    "most_winnable_opportunity": "",
+                    "biggest_barrier": "可用的一方搜索查询证据不足",
+                    "content_formats": [],
+                    "winning_themes": [],
+                    "keyword_theme_gaps": [],
+                    "backlink_authority_observations": [],
+                    "competitor_findings": [],
+                    "recommended_workflows": [],
+                }
+                await self.repository.save_competitor_discovery_configuration(
+                    context,
+                    keywords=[],
+                    result_types=["organic", "local_pack"],
+                    include_subdomains=None,
+                    sort_by="visibility",
+                    limit=50,
+                    offset=0,
+                )
+                await self.repository.save_competitor_landscape_evidence(
+                    context,
+                    gsc_query_evidence=evidence,
+                    query_metrics=[],
+                    serp_snapshots=[],
+                    cost_breakdown={},
+                    landscape_summary=insufficient_summary,
+                    directional_result=True,
+                )
+                competitors = await self.repository.save_discovered_competitors(
+                    context, [], cost_usd=0
+                )
+                return {
+                    "status": "completed",
+                    "competitors": competitors,
+                    "count": 0,
+                    "cost_usd": 0,
+                    "reason": "gsc_representative_queries_insufficient",
+                }
+
+            ai_config = await self.repository.load_ai_config(context.organization_id)
+            ai_http = JsonHttpClient(
+                timeout_seconds=ai_config.timeout_seconds,
+                max_retries=ai_config.max_retries,
+            )
+            ai = OpenAICompatibleClient(ai_http, ai_config)
+            selection_request = {
+                "gsc_rows": [gsc_query_evidence(row) for row in gsc_rows],
+                "profile": landscape_profile,
+                "country": context.country,
+                "language": context.language,
+                "model": ai_config.model,
+            }
+
+            async def select_queries() -> AIResult:
+                return await ai.select_competitive_market_queries(
+                    rows=gsc_rows,
+                    profile=landscape_profile,
+                    country=context.country,
+                    language=context.language,
+                )
+
+            selection_payload, selection_cost = await self._competitor_ai_json(
+                context=context,
+                phase="ai-query-selection",
+                endpoint=ai_config.base_url,
+                request_payload=selection_request,
+                execute=select_queries,
+            )
+            await record_cost("ai_query_selection", selection_cost)
+            selected_rows, selection_items = selected_gsc_queries(gsc_rows, selection_payload)
+            discovery_keywords = [row.query for row in selected_rows]
+            directional = bool(selection_payload.get("directional"))
+            await self.repository.save_competitor_discovery_configuration(
+                context,
+                keywords=discovery_keywords,
+                result_types=["organic", "local_pack"],
+                include_subdomains=None,
+                sort_by="visibility",
+                limit=50,
+                offset=0,
+            )
+            config = await require_dataforseo_config(self.repository, context.organization_id)
+            dfs = DataForSEOClient(config, http)
+
+            metrics_request = {
+                "keywords": discovery_keywords,
+                "location_code": country_location_code(context.country),
+                "language_code": provider_language_code(context.language),
+                "include_clickstream_data": False,
+                "include_serp_info": False,
+            }
+
+            async def fetch_metrics() -> tuple[list[RawKeyword], DataForSEOBilling]:
+                return await dfs.keyword_overview(
+                    keywords=discovery_keywords,
+                    country=context.country,
+                    language=context.language,
+                )
+
+            query_metrics, metric_cost = await self._competitor_paid_json(
+                context=context,
+                phase="query-metrics",
+                endpoint=DataForSEOClient.KEYWORD_OVERVIEW_PATH,
+                request_payload=metrics_request,
+                execute=fetch_metrics,
+                transform=lambda metric_rows: [raw_keyword_evidence(row) for row in metric_rows],
+            )
+            await record_cost("keyword_metrics", metric_cost)
+
+            discovery_request = {
+                "keywords": discovery_keywords,
+                "location_code": country_location_code(context.country),
+                "language_code": provider_language_code(context.language),
+                "item_types": ["organic", "local_pack"],
+                "include_subdomains": None,
+                "limit": 50,
+                "offset": 0,
+            }
+
+            async def fetch_discovery():
+                return await dfs.serp_competitors(
+                    keywords=discovery_keywords,
+                    country=context.country,
+                    language=context.language,
+                    item_types=["organic", "local_pack"],
+                    limit=50,
+                    offset=0,
+                )
+
+            discovered_data, discovery_cost = await self._competitor_paid_json(
+                context=context,
+                phase="discover",
+                endpoint=DataForSEOClient.SERP_COMPETITORS_PATH,
+                request_payload=discovery_request,
+                execute=fetch_discovery,
+                transform=lambda discovered: [
+                    discovered_competitor_metadata(row) for row in discovered
+                ],
+                cache_hours=24,
+            )
+            await record_cost("serp_competitors", discovery_cost)
+            rows = [
+                row
+                for raw in discovered_data
+                if (row := discovered_competitor_from_metadata(raw)) is not None
+                and not is_same_domain(row.domain, context.domain)
+            ]
+            rows = [
+                replace(row, provider_rank=index)
+                for index, row in enumerate(sort_serp_competitors(rows, "visibility"), start=1)
+            ]
+
+            activity_heartbeat({"stage": "inspecting_live_serps"})
+
+            async def fetch_serp_snapshot(index: int, keyword: str) -> tuple[dict[str, Any], float]:
+                activity_heartbeat(
+                    {
+                        "stage": "inspecting_live_serps",
+                        "keyword_index": index,
+                        "keyword_count": len(discovery_keywords),
+                    }
+                )
+                serp_request = {
+                    "keyword": keyword,
+                    "location_code": country_location_code(context.country),
+                    "language_code": provider_language_code(context.language),
+                    "device": "desktop",
+                    "os": "windows",
+                    "depth": 100,
+                }
+
+                async def fetch_serp():
+                    return await dfs.live_serp(
+                        keyword=keyword,
+                        country=context.country,
+                        language=context.language,
+                    )
+
+                try:
+                    items, item_cost = await self._competitor_paid_json(
+                        context=context,
+                        phase=f"serp-{index}",
+                        endpoint=DataForSEOClient.LIVE_SERP_PATH,
+                        request_payload=serp_request,
+                        execute=fetch_serp,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except ProviderError as exc:
+                    return (
+                        {
+                            "keyword": keyword,
+                            "ok": False,
+                            "items": [],
+                            "error_code": str(getattr(exc, "code", "serp_request_failed")),
+                            "error": str(exc),
+                        },
+                        max(float(exc.cost_usd or 0), 0),
+                    )
+                return {"keyword": keyword, "ok": True, "items": items}, item_cost
+
+            serp_results = await asyncio.gather(
+                *(
+                    fetch_serp_snapshot(index, keyword)
+                    for index, keyword in enumerate(discovery_keywords, start=1)
+                )
+            )
+            serp_snapshots = [snapshot for snapshot, _ in serp_results]
+            await record_cost("live_serps", sum(cost for _, cost in serp_results))
+            if context.local_market:
+                local_market = context.local_market
+                local_business_cost = 0.0
+                local_serp_cost = 0.0
+                local_snapshots: list[dict[str, Any]] = []
+                business_query = str(
+                    local_market.get("business_query") or discovery_keywords[0]
+                ).strip()
+                business_request = {
+                    "title": business_query,
+                    "categories": list(local_market.get("categories") or []),
+                    "location_coordinate": local_business_coordinate(local_market),
+                    "limit": 20,
+                }
+
+                async def fetch_local_businesses():
+                    return await dfs.local_businesses(
+                        latitude=float(local_market["latitude"]),
+                        longitude=float(local_market["longitude"]),
+                        radius_km=float(local_market.get("radius_km") or 10),
+                        query=business_query,
+                        categories=list(local_market.get("categories") or []),
+                        limit=20,
+                    )
+
+                try:
+                    local_businesses, local_business_cost = await self._competitor_paid_json(
+                        context=context,
+                        phase="local-businesses",
+                        endpoint=DataForSEOClient.BUSINESS_LISTINGS_PATH,
+                        request_payload=business_request,
+                        execute=fetch_local_businesses,
+                        cache_hours=24,
+                    )
+                    local_snapshots.append(
+                        {
+                            "keyword": business_query,
+                            "source": "local_businesses",
+                            "ok": True,
+                            "items": [
+                                local_competitor_item(item)
+                                for item in local_businesses
+                                if isinstance(item, dict)
+                            ],
+                        }
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except ProviderError as exc:  # local evidence is directional, not fatal
+                    directional = True
+                    local_business_cost += max(float(exc.cost_usd or 0), 0)
+                    local_snapshots.append(
+                        {
+                            "keyword": business_query,
+                            "source": "local_businesses",
+                            "ok": False,
+                            "items": [],
+                            "error_code": str(getattr(exc, "code", "local_businesses_failed")),
+                            "error": str(exc),
+                        }
+                    )
+                await record_cost("local_businesses", local_business_cost)
+
+                if bool(local_market.get("include_questions")):
+                    questions_keyword = str(
+                        local_market.get("questions_keyword") or business_query
+                    ).strip()
+                    questions_depth = int(local_market.get("questions_depth") or 20)
+                    questions_request = {
+                        "keyword": questions_keyword,
+                        "location_coordinate": local_questions_coordinate(local_market),
+                        "language_code": provider_language_code(context.language),
+                        "depth": questions_depth,
+                    }
+
+                    async def fetch_business_questions():
+                        return await dfs.business_questions(
+                            keyword=questions_keyword,
+                            latitude=float(local_market["latitude"]),
+                            longitude=float(local_market["longitude"]),
+                            radius_km=float(local_market.get("radius_km") or 10),
+                            language=context.language,
+                            depth=questions_depth,
+                        )
+
+                    try:
+                        questions, questions_cost = await self._competitor_paid_json(
+                            context=context,
+                            phase="business-questions",
+                            endpoint=DataForSEOClient.BUSINESS_QUESTIONS_PATH,
+                            request_payload=questions_request,
+                            execute=fetch_business_questions,
+                            cache_hours=24,
+                        )
+                        local_snapshots.append(
+                            {
+                                "keyword": questions_keyword,
+                                "source": "google_business_questions",
+                                "ok": True,
+                                "items": [item for item in questions if isinstance(item, dict)],
+                            }
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except ProviderError as exc:  # requested supporting evidence is directional
+                        directional = True
+                        questions_cost = max(float(exc.cost_usd or 0), 0)
+                        local_snapshots.append(
+                            {
+                                "keyword": questions_keyword,
+                                "source": "google_business_questions",
+                                "ok": False,
+                                "items": [],
+                                "error_code": str(
+                                    getattr(exc, "code", "business_questions_failed")
+                                ),
+                                "error": str(exc),
+                            }
+                        )
+                    await record_cost("business_questions", questions_cost)
+
+                async def fetch_local_snapshot(
+                    index: int, keyword: str
+                ) -> tuple[dict[str, Any], float]:
+                    search_type = str(local_market.get("search_type") or "maps")
+                    device = str(local_market.get("device") or "desktop")
+                    local_request = {
+                        "keyword": keyword,
+                        "location_coordinate": local_serp_coordinate(local_market),
+                        "language_code": provider_language_code(context.language),
+                        "search_type": search_type,
+                        "device": device,
+                        "depth": int(local_market.get("depth") or 20),
+                        "search_places": False if search_type == "maps" else None,
+                    }
+
+                    async def fetch_local():
+                        return await dfs.local_serp(
+                            keyword=keyword,
+                            latitude=float(local_market["latitude"]),
+                            longitude=float(local_market["longitude"]),
+                            zoom=int(local_market.get("zoom") or 12),
+                            language=context.language,
+                            search_type=search_type,
+                            device=device,
+                            depth=int(local_market.get("depth") or 20),
+                        )
+
+                    try:
+                        items, item_cost = await self._competitor_paid_json(
+                            context=context,
+                            phase=f"local-serp-{index}",
+                            endpoint=(
+                                DataForSEOClient.LOCAL_MAPS_PATH
+                                if search_type == "maps"
+                                else DataForSEOClient.LOCAL_FINDER_PATH
+                            ),
+                            request_payload=local_request,
+                            execute=fetch_local,
+                            cache_hours=24,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except ProviderError as exc:
+                        return (
+                            {
+                                "keyword": keyword,
+                                "source": f"local_{search_type}",
+                                "ok": False,
+                                "items": [],
+                                "error_code": str(getattr(exc, "code", "local_serp_failed")),
+                                "error": str(exc),
+                            },
+                            max(float(exc.cost_usd or 0), 0),
+                        )
+                    return (
+                        {
+                            "keyword": keyword,
+                            "source": f"local_{search_type}",
+                            "ok": True,
+                            "items": [
+                                local_competitor_item(item)
+                                for item in items
+                                if isinstance(item, dict)
+                            ],
+                        },
+                        item_cost,
+                    )
+
+                local_results = await asyncio.gather(
+                    *(
+                        fetch_local_snapshot(index, keyword)
+                        for index, keyword in enumerate(discovery_keywords, start=1)
+                    )
+                )
+                local_snapshots.extend(snapshot for snapshot, _ in local_results)
+                local_serp_cost = sum(cost for _, cost in local_results)
+                await record_cost("local_serps", local_serp_cost)
+                directional = directional or any(
+                    not bool(snapshot.get("ok")) for snapshot in local_snapshots
+                )
+                serp_snapshots.extend(local_snapshots)
+                rows = attach_local_competitor_evidence(
+                    rows,
+                    local_snapshots,
+                    target_domain=context.domain,
+                )[:50]
+            directional = (
+                directional
+                or any(not bool(snapshot.get("ok")) for snapshot in serp_snapshots)
+                or not rows
+            )
+
+            activity_heartbeat({"stage": "verifying_competitor_sites"})
+            cached_verifications = await self.repository.load_cached_competitor_site_verifications(
+                context,
+                [row.domain for row in rows],
+            )
+            site_verifications = dict(cached_verifications)
+            uncached_rows = [
+                row for row in rows if row.domain.casefold() not in cached_verifications
+            ]
+            for start in range(0, len(uncached_rows), COMPETITOR_PROBE_BATCH_SIZE):
+                probe_rows = uncached_rows[start : start + COMPETITOR_PROBE_BATCH_SIZE]
+                activity_heartbeat(
+                    {
+                        "stage": "verifying_competitor_sites",
+                        "completed": start,
+                        "total": len(uncached_rows),
+                    }
+                )
+                try:
+                    probed = await probe_competitor_sites(
+                        base_url=self.settings.keyword_crawler_probe_url,
+                        timeout_seconds=self.settings.keyword_crawler_probe_timeout_seconds,
+                        rows=probe_rows,
+                        serp_snapshots=serp_snapshots,
+                        country=context.country,
+                        language=context.language,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - fail closed per probe batch
+                    directional = True
+                    probed = {
+                        row.domain.casefold(): unavailable_site_verification(row.domain, exc)
+                        for row in probe_rows
+                    }
+                facts = {
+                    domain: crawler_site_verification_facts(verification)
+                    for domain, verification in probed.items()
+                }
+                if any(
+                    str(value.get("status") or "") == "temporarily_unavailable"
+                    for value in facts.values()
+                ):
+                    directional = True
+                site_verifications.update(facts)
+                await self.repository.save_competitor_site_verifications(context, facts)
+
+            ai_site_verifications = {
+                domain: site_verification_for_ai(verification)
+                for domain, verification in site_verifications.items()
+            }
+
+            classifications: dict[str, dict[str, Any]] = {}
+            if rows:
+                classification_request = {
+                    "competitors": [discovered_competitor_metadata(row) for row in rows],
+                    "serp_snapshots": serp_snapshots,
+                    "query_metrics": query_metrics,
+                    "profile": landscape_profile,
+                    "country": context.country,
+                    "language": context.language,
+                    "site_verifications": ai_site_verifications,
+                    "model": ai_config.model,
+                }
+
+                async def classify_domains() -> AIResult:
+                    return await ai.classify_competitive_domains(
+                        competitors=rows,
+                        serp_snapshots=serp_snapshots,
+                        query_metrics=list(query_metrics),
+                        profile=landscape_profile,
+                        country=context.country,
+                        language=context.language,
+                        site_verifications=ai_site_verifications,
+                    )
+
+                classification_payload, classification_cost = await self._competitor_ai_json(
+                    context=context,
+                    phase="ai-domain-classification",
+                    endpoint=ai_config.base_url,
+                    request_payload=classification_request,
+                    execute=classify_domains,
+                )
+                await record_cost("ai_domain_classification", classification_cost)
+                classifications = classified_domains(
+                    rows,
+                    classification_payload,
+                    site_verifications,
+                )
+            rows = attach_competitive_landscape(
+                rows,
+                classifications,
+                serp_snapshots,
+                site_verifications,
+            )
+            rows = apply_related_redirect_domains(rows)
+            strongest = [
+                row
+                for row in sorted(rows, key=lambda candidate: candidate.provider_rank)
+                if bool(row.raw_payload.get("_landscape", {}).get("is_seo_competitor"))
+                and row.raw_payload.get("_landscape", {}).get("site_relation") != "unrelated"
+            ][:5]
+            rows = sorted(
+                rows,
+                key=lambda row: (
+                    not bool(row.raw_payload.get("_landscape", {}).get("selected_for_gap")),
+                    row.provider_rank,
+                ),
+            )
+            overview_cost = 0.0
+            ranked_cost = 0.0
+            for row in strongest:
+                activity_heartbeat({"stage": "enriching_competitors", "competitor": row.domain})
+                landscape = dict(row.raw_payload.get("_landscape") or {})
+                overview_request = {
+                    "target": row.domain,
+                    "location_code": country_location_code(context.country),
+                    "language_code": provider_language_code(context.language),
+                    "limit": 1,
+                }
+
+                async def fetch_overview(domain: str = row.domain):
+                    return await dfs.domain_overview(
+                        domain=domain,
+                        country=context.country,
+                        language=context.language,
+                    )
+
+                overview, item_cost = await self._competitor_paid_json(
+                    context=context,
+                    phase=f"overview-{row.provider_rank}",
+                    endpoint=DataForSEOClient.DOMAIN_OVERVIEW_PATH,
+                    request_payload=overview_request,
+                    execute=fetch_overview,
+                )
+                overview_cost += item_cost
+                landscape["domain_overview"] = overview
+                row.raw_payload["_landscape"] = landscape
+
+            ranked_targets = [
+                row
+                for row in strongest
+                if (
+                    row.raw_payload.get("_landscape", {}).get("domain_type")
+                    == "direct_product_competitor"
+                    or (
+                        row.raw_payload.get("_landscape", {}).get("domain_type")
+                        == "publisher_media"
+                        and row.raw_payload.get("_landscape", {}).get("relevant_publisher")
+                    )
+                )
+            ]
+            for row in ranked_targets:
+                activity_heartbeat(
+                    {"stage": "validating_ranked_keywords", "competitor": row.domain}
+                )
+                landscape = dict(row.raw_payload.get("_landscape") or {})
+                ranked_request = {
+                    "target": row.domain,
+                    "location_code": country_location_code(context.country),
+                    "language_code": provider_language_code(context.language),
+                    "limit": 50,
+                    "order_by": ["keyword_data.keyword_info.search_volume,desc"],
+                    "item_types": ["organic"],
+                    "include_subdomains": True,
+                }
+
+                async def fetch_ranked(domain: str = row.domain):
+                    return await dfs.ranked_keywords(
+                        domain=domain,
+                        country=context.country,
+                        language=context.language,
+                        limit=50,
+                    )
+
+                ranked, item_cost = await self._competitor_paid_json(
+                    context=context,
+                    phase=f"ranked-{row.provider_rank}",
+                    endpoint=DataForSEOClient.RANKED_KEYWORDS_PATH,
+                    request_payload=ranked_request,
+                    execute=fetch_ranked,
+                )
+                ranked_cost += item_cost
+                landscape["ranked_keywords_evidence"] = ranked
+                row.raw_payload["_landscape"] = landscape
+            await record_cost("domain_overviews", overview_cost)
+            await record_cost("ranked_keywords", ranked_cost)
+
+            backlink_cost = 0.0
+            enriched = [
+                {
+                    "domain": row.domain,
+                    **dict(row.raw_payload.get("_landscape") or {}),
+                }
+                for row in strongest
+            ]
+            if enriched:
+                backlink_assessment_request = {
+                    "competitors": enriched,
+                    "profile": landscape_profile,
+                    "model": ai_config.model,
+                }
+
+                async def assess_backlinks() -> AIResult:
+                    return await ai.assess_backlink_validation_need(
+                        competitors=enriched,
+                        profile=landscape_profile,
+                    )
+
+                assessment_payload, assessment_cost = await self._competitor_ai_json(
+                    context=context,
+                    phase="ai-backlink-assessment",
+                    endpoint=ai_config.base_url,
+                    request_payload=backlink_assessment_request,
+                    execute=assess_backlinks,
+                )
+                await record_cost("ai_backlink_assessment", assessment_cost)
+                backlink_needs = assessed_backlink_domains(strongest, assessment_payload)
+                for row in strongest:
+                    if not backlink_needs.get(row.domain, False):
+                        continue
+                    activity_heartbeat({"stage": "validating_backlinks", "competitor": row.domain})
+                    backlinks_request = {
+                        "target": row.domain,
+                        "include_subdomains": True,
+                        "include_indirect_links": True,
+                        "exclude_internal_backlinks": True,
+                        "backlinks_status_type": "live",
+                        "rank_scale": "one_hundred",
+                        "hide_spam": True,
+                    }
+
+                    async def fetch_backlinks(domain: str = row.domain):
+                        return await dfs.backlinks_overview(domain=domain)
+
+                    try:
+                        backlinks, item_cost = await self._competitor_paid_json(
+                            context=context,
+                            phase=f"backlinks-{row.provider_rank}",
+                            endpoint="backlinks/summary+referring_domains/live",
+                            request_payload=backlinks_request,
+                            execute=fetch_backlinks,
+                        )
+                    except ProviderError as exc:
+                        backlink_cost += exc.cost_usd
+                        row.raw_payload["_landscape"]["backlinks_evidence"] = {
+                            "available": False,
+                            "error_code": exc.code,
+                            "error": str(exc),
+                        }
+                        continue
+                    backlink_cost += item_cost
+                    row.raw_payload["_landscape"]["backlinks_evidence"] = backlinks
+            await record_cost("backlinks", backlink_cost)
+
+            gsc_evidence = competitive_query_evidence(
+                selected_rows,
+                selection_items,
+                list(query_metrics),
+            )
+            summary_competitors = [
+                {
+                    "domain": row.domain,
+                    "provider_rank": row.provider_rank,
+                    "etv": row.etv,
+                    "visibility": row.visibility,
+                    **competitive_landscape_summary_evidence(
+                        dict(row.raw_payload.get("_landscape") or {})
+                    ),
+                }
+                for row in rows
+            ]
+            synthesis_request = {
+                "query_set": gsc_evidence,
+                "competitors": summary_competitors,
+                "serp_snapshots": serp_snapshots,
+                "directional": directional,
+                "profile": landscape_profile,
+                "model": ai_config.model,
+            }
+
+            async def synthesize_landscape() -> AIResult:
+                return await ai.synthesize_competitive_landscape(
+                    query_set=gsc_evidence,
+                    competitors=summary_competitors,
+                    serp_snapshots=serp_snapshots,
+                    directional=directional,
+                    profile=landscape_profile,
+                )
+
+            landscape_summary, synthesis_cost = await self._competitor_ai_json(
+                context=context,
+                phase="ai-landscape-synthesis",
+                endpoint=ai_config.base_url,
+                request_payload=synthesis_request,
+                execute=synthesize_landscape,
+            )
+            await record_cost("ai_landscape_synthesis", synthesis_cost)
+            try:
+                validate_landscape_competitor_findings(rows, landscape_summary)
+            except ProviderError as validation_error:
+                missing_domains, duplicate_domains = landscape_finding_mismatch(
+                    rows,
+                    landscape_summary,
+                )
+                repair_request = {
+                    **synthesis_request,
+                    "invalid_summary": landscape_summary,
+                    "missing_domains": missing_domains,
+                    "duplicate_domains": duplicate_domains,
+                }
+
+                async def repair_landscape() -> AIResult:
+                    return await ai.repair_competitive_landscape_summary(
+                        query_set=gsc_evidence,
+                        competitors=summary_competitors,
+                        serp_snapshots=serp_snapshots,
+                        directional=directional,
+                        profile=landscape_profile,
+                        invalid_summary=landscape_summary,
+                        missing_domains=missing_domains,
+                        duplicate_domains=duplicate_domains,
+                    )
+
+                repaired_summary, repair_cost = await self._competitor_ai_json(
+                    context=context,
+                    phase="ai-landscape-synthesis-repair",
+                    endpoint=ai_config.base_url,
+                    request_payload=repair_request,
+                    execute=repair_landscape,
+                )
+                synthesis_cost += repair_cost
+                await record_cost("ai_landscape_synthesis", synthesis_cost)
+                try:
+                    validate_landscape_competitor_findings(rows, repaired_summary)
+                except ProviderError:
+                    raise validation_error
+                landscape_summary = repaired_summary
+            if not rows:
+                no_candidates = (
+                    "SERP Competitors 在当前国家、语言和代表性查询集中未返回可重复排名的"
+                    "竞争域名；这表示本次没有足够的跨查询竞争证据，不等于不存在业务竞品。"
+                )
+                market_read = str(landscape_summary.get("market_read") or "").strip()
+                landscape_summary["market_read"] = (
+                    f"{no_candidates} {market_read}" if market_read else no_candidates
+                )
+            await record_cost("ai_landscape_synthesis", synthesis_cost)
+            total_cost = sum(cost_breakdown.values())
+            await self.repository.save_competitor_landscape_evidence(
+                context,
+                gsc_query_evidence=gsc_evidence,
+                query_metrics=list(query_metrics),
+                serp_snapshots=serp_snapshots,
+                cost_breakdown=cost_breakdown,
+                landscape_summary=landscape_summary,
+                directional_result=directional,
+            )
+            competitors = await self.repository.save_discovered_competitors(
+                context, rows, cost_usd=total_cost
+            )
+        except asyncio.CancelledError:
+            raise
+        except ProviderError as exc:
+            retryable = competitor_provider_error_retryable(exc)
+            if not retryable or not bool(task.get("_competitor_request_retry_enabled")):
+                await self.repository.fail_competitor_analysis(
+                    context.run_id,
+                    code=exc.code,
+                    detail=str(exc),
+                    cost_usd=sum(cost_breakdown.values()) + exc.cost_usd,
+                    cost_breakdown=cost_breakdown,
+                )
+            return {
+                "status": "failed",
+                "competitors": [],
+                "error": str(exc),
+                "error_code": exc.code,
+                "retryable": retryable,
+            }
+        finally:
+            if ai_http is not None:
+                await ai_http.close()
+            if http is not None:
+                await http.close()
+        return {
+            "status": "completed",
+            "competitors": competitors,
+            "count": len(competitors),
+            "cost_usd": total_cost,
+        }
+
+    @activity.defn(name="keyword_competitor_opportunities")
+    async def fetch_competitor_opportunities(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task = dict(payload["task"])
+        competitor_id = str(payload["competitor_id"])
+        competitor_domain = str(payload["competitor_domain"])
+        context = await self.repository.load_competitor_analysis_context(task)
+        activity_heartbeat({"stage": "fetching_opportunities", "competitor": competitor_domain})
+        await self.repository.mark_competitor_started(context, competitor_id)
+        config = await require_dataforseo_config(self.repository, context.organization_id)
+        request_payload = {
+            "target1": competitor_domain,
+            "target2": context.domain,
+            "intersections": False,
+            "country": context.country,
+            "language": context.language,
+            "limit": context.keyword_limit,
+            "item_types": ["organic"],
+            "include_serp_info": False,
+            "order_by": ["keyword_data.keyword_info.search_volume,desc"],
+            "filters": [["first_domain_serp_element.type", "=", "organic"]],
+        }
+        request = await self.repository.begin_competitor_external_request(
+            context=context,
+            request_key=f"competitor-analysis:{context.run_id}:{competitor_id}",
+            provider="dataforseo",
+            endpoint=DataForSEOClient.DOMAIN_INTERSECTION_PATH,
+            request_hash=stable_hash(request_payload),
+        )
+        cached_rows = request.response_metadata.get("rows")
+        if request.reusable:
+            rows = [
+                row
+                for raw in (cached_rows if isinstance(cached_rows, list) else [])
+                if (row := competitor_gap_from_metadata(raw)) is not None
+            ]
+            cached_fetched_at = (
+                request.expires_at - timedelta(days=1) if request.expires_at is not None else None
+            )
+            rows = [
+                replace(
+                    row,
+                    metrics_fetched_at=row.metrics_fetched_at or cached_fetched_at,
+                )
+                for row in rows
+            ]
+            if request.result_count > 0 and not rows:
+                detail = "缓存的机会缺口响应无法恢复"
+                await self.repository.fail_competitor(
+                    context,
+                    competitor_id,
+                    code="cached_opportunity_response_invalid",
+                    detail=detail,
+                )
+                return {"status": "failed", "error": detail}
+            count = await self.repository.save_competitor_opportunities(
+                context, competitor_id, rows, cost_usd=0
+            )
+            return {
+                "status": "completed",
+                "competitor_id": competitor_id,
+                "domain": competitor_domain,
+                "count": count,
+                "cost_usd": 0,
+                "cached": True,
+            }
+        if not request.should_execute:
+            detail = request.error_detail or "相同付费请求正在处理或需要人工核对"
+            await self.repository.fail_competitor(
+                context,
+                competitor_id,
+                code=request.error_code or "external_request_unavailable",
+                detail=detail,
+            )
+            return {
+                "status": "failed",
+                "competitor_id": competitor_id,
+                "domain": competitor_domain,
+                "error": detail,
+            }
+        await submit_external_request(self.repository, request)
+        http: JsonHttpClient | None = None
+        try:
+            http = JsonHttpClient(
+                timeout_seconds=self.settings.keyword_http_timeout_seconds,
+                max_retries=self.settings.keyword_http_max_retries,
+            )
+            rows, billing = await DataForSEOClient(config, http).domain_intersection(
+                competitor_domain=competitor_domain,
+                domain=context.domain,
+                country=context.country,
+                language=context.language,
+                limit=context.keyword_limit,
+                intersections=False,
+            )
+            metrics_fetched_at = datetime.now(UTC)
+            rows = [replace(row, metrics_fetched_at=metrics_fetched_at) for row in rows]
+            count = (
+                await self.repository.save_competitor_opportunities_and_complete_external_request(
+                    context,
+                    competitor_id,
+                    rows,
+                    request_key=request.request_key,
+                    claim_token=required_claim_token(request),
+                    metadata={
+                        "path": billing.path,
+                        "request": request_payload,
+                        "rows": [competitor_gap_metadata(row) for row in rows],
+                    },
+                    cost_usd=billing.cost_usd,
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+        except asyncio.CancelledError:
+            await mark_cancelled_external_request(self.repository, request)
+            raise
+        except ProviderError as exc:
+            await fail_external_request(self.repository, request, error=exc)
+            await self.repository.fail_competitor(
+                context,
+                competitor_id,
+                code=exc.code,
+                detail=str(exc),
+                cost_usd=exc.cost_usd,
+            )
+            return {
+                "status": "failed",
+                "competitor_id": competitor_id,
+                "domain": competitor_domain,
+                "error": str(exc),
+                "error_code": exc.code,
+                "retryable": competitor_provider_error_retryable(exc),
+            }
+        finally:
+            if http is not None:
+                await http.close()
+        return {
+            "status": "completed",
+            "competitor_id": competitor_id,
+            "domain": competitor_domain,
+            "count": count,
+            "cost_usd": billing.cost_usd,
+        }
+
+    @activity.defn(name="keyword_competitor_analysis_finalize")
+    async def finalize_competitor_analysis(self, task: dict[str, Any]) -> dict[str, Any]:
+        context = await self.repository.load_competitor_analysis_context(task)
+        return await self.repository.finalize_competitor_analysis(context)
+
+    @activity.defn(name="keyword_competitor_analysis_fail")
+    async def fail_competitor_analysis(self, payload: dict[str, Any]) -> None:
+        await self.repository.fail_competitor_analysis(
+            str(payload["task"]["run_id"]),
+            code=str(payload.get("code") or "competitor_analysis_failed"),
+            detail=str(payload.get("detail") or "竞争分析暂时未完成"),
+        )
+
     @activity.defn(name="keyword_validate_competitor")
     async def validate_competitor(self, task: dict[str, Any]) -> dict[str, Any]:
         context = await self.repository.load_context(task)
@@ -1175,7 +2361,7 @@ class KeywordActivities:
         missing_overview = [
             candidate.keyword
             for _, candidate in candidates
-            if overview_required(metric_from_candidate(candidate))
+            if overview_required(candidate, metric_from_candidate(candidate))
         ]
         overview_rows: list[RawKeyword] = []
         overview_failed = False
@@ -1211,12 +2397,11 @@ class KeywordActivities:
             if overview is not None:
                 candidate.rows.append(overview)
 
-        metrics_by_keyword = {
-            candidate.normalized_keyword: metric_from_candidate(candidate)
-            for _, candidate in candidates
-        }
-        for metric in metrics_by_keyword.values():
-            if not overview_required(metric):
+        metrics_by_keyword: dict[str, dict[str, Any]] = {}
+        for _, candidate in candidates:
+            metric = metric_from_candidate(candidate)
+            metrics_by_keyword[candidate.normalized_keyword] = metric
+            if not overview_required(candidate, metric):
                 metric["_status"] = "fresh"
             elif overview_failed and overview_retryable:
                 metric["_status"] = "pending"
@@ -1264,7 +2449,7 @@ class KeywordActivities:
             if staged is None:
                 raise RuntimeError(f"主题暂存数据缺失: {topic['keyword']}")
             metric = staged.metric or metric_from_candidate(staged.candidate)
-            if staged.metrics_status == "fresh" and not overview_required(metric):
+            if staged.metrics_status == "fresh" and not overview_required(staged.candidate, metric):
                 metrics_status = "fresh"
             elif staged.metrics_status == "failed":
                 metrics_status = "failed"
@@ -1935,7 +3120,9 @@ class KeywordActivities:
                 {
                     "candidate": candidate,
                     "metric": metric,
-                    "metrics_status": "fresh",
+                    "metrics_status": (
+                        "fresh" if not overview_required(candidate, metric) else "failed"
+                    ),
                     "business_topic": decision.business_topic,
                     "classification_confidence": decision.confidence,
                     "review_status": decision.review_status,
@@ -2539,6 +3726,12 @@ async def fail_external_request(
         )
 
 
+def competitor_provider_error_retryable(error: ProviderError) -> bool:
+    return bool(
+        error.transient and error.failure_status == RETRYABLE_FAILURE and error.cost_usd <= 0
+    )
+
+
 async def mark_cancelled_external_request(
     repository: Any,
     request: ExternalRequestRecord,
@@ -2752,9 +3945,7 @@ def deterministic_seed_topics(
                 "member_ids": (f"k{index:03d}",),
                 "business_relevance": 0.65 if has_business_evidence else 0.5,
                 "relevance_tier": (
-                    "rule_supported_fallback"
-                    if has_business_evidence
-                    else "uncertain_fallback"
+                    "rule_supported_fallback" if has_business_evidence else "uncertain_fallback"
                 ),
             }
         )
@@ -2959,8 +4150,12 @@ def accepted_gap_keywords(
 
 def metric_from_candidate(candidate: MergedCandidate) -> dict[str, Any]:
     source_priority = {
-        "keyword_overview": 4,
-        "labs_site": 3,
+        "keyword_overview_recovery": 7,
+        "keyword_overview": 6,
+        "labs_site": 5,
+        DataForSEOClient.KEYWORD_IDEAS_CLOSE_SOURCE: 4,
+        DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE: 3,
+        "keyword_ideas": 3,
         "google_ads_site": 2,
         "competitor_gap": 1,
     }
@@ -2983,10 +4178,8 @@ def metric_from_candidate(candidate: MergedCandidate) -> dict[str, Any]:
     for row in reversed(rows):
         raw_payload.update(row.raw_payload)
     for row in rows:
-        info = row.raw_payload.get("keyword_info")
-        info = info if isinstance(info, dict) else {}
-        if competition_level is None and info.get("competition_level") is not None:
-            competition_level = info.get("competition_level")
+        if competition_level is None:
+            competition_level = raw_keyword_competition_level(row.raw_payload)
         if not monthly_searches and row.monthly_searches:
             monthly_searches = list(row.monthly_searches)
 
@@ -3002,7 +4195,9 @@ def metric_from_candidate(candidate: MergedCandidate) -> dict[str, Any]:
     }
 
 
-def overview_required(metric: dict[str, Any]) -> bool:
+def overview_required(candidate: MergedCandidate, metric: dict[str, Any]) -> bool:
+    if any(row.source in COMPLETE_METRIC_SOURCES for row in candidate.rows):
+        return False
     return metric.get("keyword_difficulty") is None or metric.get("intent") is None
 
 
@@ -3019,6 +4214,867 @@ def raw_keyword_metadata(row: RawKeyword) -> dict[str, Any]:
         "monthly_searches": row.monthly_searches,
         "raw_payload": row.raw_payload,
     }
+
+
+def discovered_competitor_metadata(row: DiscoveredCompetitor) -> dict[str, Any]:
+    return {
+        "domain": row.domain,
+        "provider_rank": row.provider_rank,
+        "avg_position": row.avg_position,
+        "median_position": row.median_position,
+        "rating": row.rating,
+        "etv": row.etv,
+        "keywords_count": row.keywords_count,
+        "visibility": row.visibility,
+        "relevant_serp_items": row.relevant_serp_items,
+        "keywords_positions": row.keywords_positions,
+        "raw_payload": row.raw_payload,
+    }
+
+
+def gsc_query_evidence(row: Any) -> dict[str, Any]:
+    return {
+        "query": row.query,
+        "clicks": row.clicks,
+        "impressions": row.impressions,
+        "ctr": row.ctr,
+        "position": row.position,
+    }
+
+
+def selected_gsc_queries(
+    rows: list[Any], payload: dict[str, Any]
+) -> tuple[list[Any], dict[str, dict[str, Any]]]:
+    candidates = {f"q{index:03d}": row for index, row in enumerate(rows, start=1)}
+    raw_items = payload.get("queries")
+    items = raw_items if isinstance(raw_items, list) else []
+    selected: list[Any] = []
+    metadata: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        identifier = str(item.get("id") or "")
+        row = candidates.get(identifier)
+        if row is None or identifier in seen:
+            continue
+        seen.add(identifier)
+        selected.append(row)
+        metadata[row.query] = {
+            "intent": str(item.get("intent") or ""),
+            "selection_reason": str(item.get("reason") or ""),
+        }
+    if not 5 <= len(selected) <= 10:
+        raise ProviderError(
+            "competitive_query_selection_invalid",
+            "AI 没有从 GSC 数据中选出 5-10 个有效代表词",
+            failure_status=CHARGED_FAILURE,
+        )
+    return selected, metadata
+
+
+def raw_keyword_evidence(row: RawKeyword) -> dict[str, Any]:
+    return {
+        "keyword": row.keyword,
+        "search_volume": row.search_volume,
+        "keyword_difficulty": row.keyword_difficulty,
+        "cpc": row.cpc,
+        "competition": row.competition,
+        "competition_level": raw_keyword_competition_level(row.raw_payload),
+        "intent": row.intent,
+        "monthly_searches": row.monthly_searches,
+        "raw_payload": row.raw_payload,
+    }
+
+
+def competitive_landscape_summary_evidence(
+    landscape: dict[str, Any],
+) -> dict[str, Any]:
+    evidence = {
+        key: landscape.get(key)
+        for key in (
+            "domain_type",
+            "is_seo_competitor",
+            "is_business_competitor",
+            "relevant_publisher",
+            "confidence",
+            "why_they_matter",
+            "selected_for_gap",
+            "site_check_status",
+            "site_relation",
+            "site_reason",
+        )
+    }
+    overview = landscape.get("domain_overview")
+    if isinstance(overview, dict):
+        evidence["domain_overview"] = {
+            key: overview.get(key)
+            for key in (
+                "domain",
+                "organic_traffic",
+                "organic_keywords",
+                "has_data",
+            )
+        }
+    ranked = landscape.get("ranked_keywords_evidence")
+    if isinstance(ranked, list):
+        evidence["ranked_keywords_evidence"] = [
+            compact_ranked_keyword_evidence(row) for row in ranked if isinstance(row, dict)
+        ]
+    backlinks = landscape.get("backlinks_evidence")
+    if isinstance(backlinks, dict):
+        evidence["backlinks_evidence"] = compact_backlinks_evidence(backlinks)
+    return evidence
+
+
+def compact_ranked_keyword_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    keyword_data = row.get("keyword_data")
+    keyword_data = keyword_data if isinstance(keyword_data, dict) else {}
+    keyword_info = keyword_data.get("keyword_info")
+    keyword_info = keyword_info if isinstance(keyword_info, dict) else {}
+    intent_info = keyword_data.get("search_intent_info")
+    intent_info = intent_info if isinstance(intent_info, dict) else {}
+    ranked_element = row.get("ranked_serp_element")
+    ranked_element = ranked_element if isinstance(ranked_element, dict) else {}
+    serp_item = ranked_element.get("serp_item")
+    serp_item = serp_item if isinstance(serp_item, dict) else {}
+    return {
+        "keyword": keyword_data.get("keyword") or row.get("keyword"),
+        "rank": serp_item.get("rank_absolute")
+        or ranked_element.get("rank_absolute")
+        or row.get("rank_absolute"),
+        "volume": keyword_info.get("search_volume"),
+        "cpc": keyword_info.get("cpc"),
+        "url": serp_item.get("url") or ranked_element.get("url"),
+        "intent": intent_info.get("main_intent"),
+        "etv": serp_item.get("etv"),
+    }
+
+
+def compact_backlinks_evidence(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("available") is False:
+        return {
+            "available": False,
+            "error_code": value.get("error_code"),
+            "error": value.get("error"),
+        }
+    summary = value.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    referring_domains = value.get("referring_domains")
+    referring_domains = referring_domains if isinstance(referring_domains, list) else []
+    return {
+        "summary": {
+            key: summary.get(key)
+            for key in ("backlinks", "referring_domains", "referring_pages", "rank")
+        },
+        "referring_domains": [
+            {key: row.get(key) for key in ("domain", "backlinks", "referring_pages", "rank")}
+            for row in referring_domains
+            if isinstance(row, dict)
+        ],
+    }
+
+
+def competitive_query_evidence(
+    rows: list[Any],
+    selection_items: dict[str, dict[str, Any]],
+    query_metrics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    metrics_by_keyword = {
+        str(item.get("keyword") or "").strip().casefold(): item
+        for item in query_metrics
+        if isinstance(item, dict) and str(item.get("keyword") or "").strip()
+    }
+    evidence: list[dict[str, Any]] = []
+    for row in rows:
+        metric = metrics_by_keyword.get(str(row.query).strip().casefold(), {})
+        evidence.append(
+            {
+                **gsc_query_evidence(row),
+                **selection_items.get(row.query, {}),
+                "search_volume": metric.get("search_volume"),
+                "keyword_difficulty": metric.get("keyword_difficulty"),
+                "cpc": metric.get("cpc"),
+                "competition": metric.get("competition"),
+                "competition_level": metric.get("competition_level"),
+                "provider_intent": metric.get("intent"),
+                "monthly_searches": list(metric.get("monthly_searches") or []),
+            }
+        )
+    return evidence
+
+
+async def probe_competitor_sites(
+    *,
+    base_url: str,
+    timeout_seconds: int,
+    rows: list[DiscoveredCompetitor],
+    serp_snapshots: list[dict[str, Any]],
+    country: str,
+    language: str,
+) -> dict[str, dict[str, Any]]:
+    endpoint = base_url.rstrip("/") + "/v1/probe"
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        evidence = competitor_serp_evidence(row.domain, serp_snapshots)
+        urls = [str(item.get("url") or "") for item in evidence if item.get("url")]
+        candidates.append({"domain": row.domain, "urls": urls[:1]})
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(max(timeout_seconds, 10)),
+        trust_env=False,
+    ) as client:
+        response = await client.post(
+            endpoint,
+            json={
+                "country": country,
+                "language": language,
+                "candidates": candidates,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+    raw_results = payload.get("results") if isinstance(payload, dict) else None
+    results = raw_results if isinstance(raw_results, list) else []
+    mapped: dict[str, dict[str, Any]] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "").strip().casefold()
+        if domain and domain not in mapped:
+            mapped[domain] = dict(item)
+    for row in rows:
+        mapped.setdefault(
+            row.domain.casefold(),
+            unavailable_site_verification(
+                row.domain,
+                RuntimeError("crawler probe did not return this candidate"),
+            ),
+        )
+    return mapped
+
+
+def unavailable_site_verification(domain: str, error: Exception) -> dict[str, Any]:
+    return {
+        "domain": domain,
+        "status": "temporarily_unavailable",
+        "error": str(error)[:500],
+        "site_check_status": "temporarily_unavailable",
+        "site_relation": "uncertain",
+    }
+
+
+def site_verification_for_ai(value: dict[str, Any]) -> dict[str, Any]:
+    result = crawler_site_verification_facts(value)
+    result.pop("checked_at", None)
+    checks = result.get("checks")
+    if isinstance(checks, list):
+        result["checks"] = [
+            {key: item for key, item in check.items() if key != "checked_at"}
+            for check in checks
+            if isinstance(check, dict)
+        ]
+    return result
+
+
+CRAWLER_SITE_FACT_KEYS = frozenset(
+    {
+        "domain",
+        "requested_url",
+        "final_url",
+        "final_domain",
+        "status",
+        "status_code",
+        "content_type",
+        "title",
+        "description",
+        "h1",
+        "text_excerpt",
+        "canonical",
+        "language",
+        "rendered",
+        "redirects",
+        "error",
+        "checked_at",
+    }
+)
+
+
+def crawler_site_verification_facts(value: dict[str, Any]) -> dict[str, Any]:
+    result = {key: item for key, item in value.items() if key in CRAWLER_SITE_FACT_KEYS}
+    checks = value.get("checks")
+    if isinstance(checks, list):
+        result["checks"] = [
+            crawler_site_verification_facts(check) for check in checks if isinstance(check, dict)
+        ]
+    return result
+
+
+def competitor_serp_evidence(
+    domain: str,
+    serp_snapshots: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for snapshot in serp_snapshots:
+        for item in snapshot.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            item_domain = str(item.get("domain") or "")
+            if item_domain and (
+                is_same_domain(item_domain, domain)
+                or item_domain.casefold().endswith(f".{domain.casefold()}")
+            ):
+                evidence.append(
+                    {
+                        "keyword": snapshot.get("keyword"),
+                        "type": item.get("type"),
+                        "rank": item.get("rank"),
+                        "url": item.get("url"),
+                    }
+                )
+    return evidence
+
+
+def local_competitor_item(item: dict[str, Any]) -> dict[str, Any]:
+    website = str(item.get("website") or item.get("url") or "").strip()
+    domain = str(item.get("domain") or "").strip().casefold()
+    rating = item.get("rating")
+    rating_value = rating.get("value") if isinstance(rating, dict) else rating
+    reviews_count = item.get("reviews_count")
+    if reviews_count is None and isinstance(rating, dict):
+        reviews_count = rating.get("votes_count")
+    if not domain and website:
+        parsed = urlparse(website)
+        domain = parsed.hostname.casefold() if parsed.hostname else ""
+    return {
+        "type": str(item.get("type") or "local_business"),
+        "rank": item.get("rank_absolute") or item.get("rank_group") or item.get("rank"),
+        "title": item.get("title"),
+        "url": website or None,
+        "domain": domain or None,
+        "address": item.get("address"),
+        "category": item.get("category") or item.get("main_category"),
+        "rating": rating_value,
+        "reviews_count": reviews_count,
+        "place_id": item.get("place_id"),
+    }
+
+
+def local_questions_coordinate(local_market: dict[str, Any]) -> str:
+    radius_meters = max(
+        200,
+        min(round(float(local_market.get("radius_km") or 10) * 1000), 199999),
+    )
+    return (
+        f"{coordinate_value(float(local_market['latitude']))},"
+        f"{coordinate_value(float(local_market['longitude']))},{radius_meters}"
+    )
+
+
+def attach_local_competitor_evidence(
+    rows: list[DiscoveredCompetitor],
+    snapshots: list[dict[str, Any]],
+    *,
+    target_domain: str,
+) -> list[DiscoveredCompetitor]:
+    evidence_by_domain: dict[str, list[dict[str, Any]]] = {}
+    for snapshot in snapshots:
+        for item in snapshot.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            domain = str(item.get("domain") or "").strip().casefold()
+            if not domain or is_same_domain(domain, target_domain):
+                continue
+            evidence_by_domain.setdefault(domain, []).append(
+                {
+                    "keyword": snapshot.get("keyword"),
+                    "source": snapshot.get("source"),
+                    **item,
+                }
+            )
+    result: list[DiscoveredCompetitor] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = row.domain.casefold()
+        evidence = unique_dict_rows(evidence_by_domain.get(key, []))
+        raw_payload = dict(row.raw_payload)
+        if evidence:
+            raw_payload["_local_serp_evidence"] = evidence
+        ranks = [
+            int(item["rank"]) for item in evidence if isinstance(item.get("rank"), (int, float))
+        ]
+        result.append(
+            replace(
+                row,
+                avg_position=((sum(ranks) / len(ranks)) if ranks else row.avg_position),
+                relevant_serp_items=(row.relevant_serp_items or 0) + len(evidence),
+                raw_payload=raw_payload,
+            )
+        )
+        seen.add(key)
+    for domain, raw_evidence in evidence_by_domain.items():
+        if domain in seen:
+            continue
+        evidence = unique_dict_rows(raw_evidence)
+        ranks = [
+            int(item["rank"]) for item in evidence if isinstance(item.get("rank"), (int, float))
+        ]
+        result.append(
+            DiscoveredCompetitor(
+                domain=domain,
+                provider_rank=len(result) + 1,
+                avg_position=(sum(ranks) / len(ranks)) if ranks else None,
+                median_position=None,
+                rating=None,
+                etv=None,
+                keywords_count=len({str(item.get("keyword") or "") for item in evidence}),
+                visibility=float(len(evidence)),
+                relevant_serp_items=len(evidence),
+                keywords_positions={},
+                raw_payload={
+                    "source": "local_serp",
+                    "_local_serp_evidence": evidence,
+                },
+            )
+        )
+    result.sort(
+        key=lambda row: (
+            -len(row.raw_payload.get("_local_serp_evidence") or []),
+            row.provider_rank,
+        )
+    )
+    return [replace(row, provider_rank=index) for index, row in enumerate(result, start=1)]
+
+
+def coordinate_token(value: Any) -> str:
+    return f"{float(value):.7f}".rstrip("0").rstrip(".")
+
+
+def local_business_coordinate(local_market: dict[str, Any]) -> str:
+    return ",".join(
+        (
+            coordinate_token(local_market["latitude"]),
+            coordinate_token(local_market["longitude"]),
+            coordinate_token(local_market.get("radius_km") or 10),
+        )
+    )
+
+
+def local_serp_coordinate(local_market: dict[str, Any]) -> str:
+    return (
+        f"{coordinate_token(local_market['latitude'])},"
+        f"{coordinate_token(local_market['longitude'])},"
+        f"{max(4, min(int(local_market.get('zoom') or 12), 18))}z"
+    )
+
+
+def site_check_status(
+    domain: str,
+    verification: dict[str, Any],
+    relation: str,
+) -> str:
+    raw_status = str(verification.get("status") or "temporarily_unavailable")
+    if raw_status in {
+        "blocked",
+        "temporarily_unavailable",
+        "permanently_unavailable",
+        "non_html",
+        "unsafe_target",
+        "redirect_loop",
+        "platform_or_login",
+    }:
+        return raw_status
+    final_domain = str(verification.get("final_domain") or "").strip().casefold()
+    cross_domain = bool(final_domain) and not is_same_domain(final_domain, domain)
+    if raw_status == "redirected" and cross_domain:
+        if relation == "related":
+            return "redirected_related"
+        if relation == "unrelated":
+            return "redirected_unrelated"
+        return "unverified_redirect"
+    return "verified"
+
+
+def classified_domains(
+    rows: list[DiscoveredCompetitor],
+    payload: dict[str, Any],
+    site_verifications: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    candidates = {f"d{index:03d}": row for index, row in enumerate(rows, start=1)}
+    raw_items = payload.get("domains")
+    items = raw_items if isinstance(raw_items, list) else []
+    result: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        row = candidates.get(str(item.get("id") or ""))
+        if row is None or row.domain in result:
+            continue
+        is_seo = bool(item.get("is_seo_competitor"))
+        is_business = bool(item.get("is_business_competitor"))
+        relevant_publisher = bool(item.get("relevant_publisher"))
+        domain_type = str(item.get("type") or "documentation_resource")
+        relation = str(item.get("site_relation") or "uncertain")
+        if relation not in {"related", "unrelated", "uncertain"}:
+            relation = "uncertain"
+        verification = dict(site_verifications.get(row.domain.casefold()) or {})
+        check_status = site_check_status(row.domain, verification, relation)
+        eligible_surface = check_status in {"verified", "redirected_related"}
+        eligible_category = (domain_type == "direct_product_competitor" and is_business) or (
+            domain_type == "publisher_media" and relevant_publisher
+        )
+        verification.update(
+            {
+                "original_domain": row.domain,
+                "site_check_status": check_status,
+                "site_relation": relation,
+                "site_reason": str(item.get("site_reason") or ""),
+            }
+        )
+        result[row.domain] = {
+            "domain_type": domain_type,
+            "is_seo_competitor": is_seo,
+            "is_business_competitor": is_business,
+            "relevant_publisher": relevant_publisher,
+            "classification_confidence": item.get("confidence"),
+            "why_they_matter": str(item.get("why_they_matter") or ""),
+            "site_check_status": check_status,
+            "site_relation": relation,
+            "site_reason": str(item.get("site_reason") or ""),
+            "site_verification": verification,
+            "selected_for_gap": is_seo and eligible_surface and eligible_category,
+        }
+    if len(result) != len(rows):
+        raise ProviderError(
+            "competitive_domain_classification_invalid",
+            "AI 没有完整分类所有 SERP 竞争域名",
+            failure_status=CHARGED_FAILURE,
+        )
+    return result
+
+
+def attach_competitive_landscape(
+    rows: list[DiscoveredCompetitor],
+    classifications: dict[str, dict[str, Any]],
+    serp_snapshots: list[dict[str, Any]],
+    site_verifications: dict[str, dict[str, Any]],
+) -> list[DiscoveredCompetitor]:
+    result: list[DiscoveredCompetitor] = []
+    for row in rows:
+        evidence = competitor_serp_evidence(row.domain, serp_snapshots)
+        landscape = {
+            "site_check_status": "temporarily_unavailable",
+            "site_relation": "uncertain",
+            "site_verification": dict(site_verifications.get(row.domain.casefold()) or {}),
+            **classifications.get(row.domain, {}),
+            "serp_evidence": evidence,
+        }
+        raw_payload = dict(row.raw_payload)
+        raw_payload["_landscape"] = landscape
+        result.append(replace(row, raw_payload=raw_payload))
+    return result
+
+
+def apply_related_redirect_domains(
+    rows: list[DiscoveredCompetitor],
+) -> list[DiscoveredCompetitor]:
+    grouped: dict[str, list[DiscoveredCompetitor]] = {}
+    order: list[str] = []
+    for row in rows:
+        landscape = row.raw_payload.get("_landscape")
+        landscape = landscape if isinstance(landscape, dict) else {}
+        verification = landscape.get("site_verification")
+        verification = verification if isinstance(verification, dict) else {}
+        domain = row.domain
+        final_domain = str(verification.get("final_domain") or "").strip().casefold()
+        if (
+            landscape.get("site_check_status") == "redirected_related"
+            and final_domain
+            and not is_same_domain(final_domain, domain)
+        ):
+            domain = final_domain
+        key = domain.casefold()
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(replace(row, domain=domain))
+    result = [merge_redirected_competitor_rows(grouped[key], key) for key in order]
+    return [replace(row, provider_rank=index) for index, row in enumerate(result, start=1)]
+
+
+def merge_redirected_competitor_rows(
+    rows: list[DiscoveredCompetitor], canonical_domain: str
+) -> DiscoveredCompetitor:
+    if len(rows) == 1:
+        return rows[0]
+    primary = min(
+        rows,
+        key=lambda row: (
+            not bool(row.raw_payload.get("_landscape", {}).get("selected_for_gap")),
+            row.provider_rank,
+        ),
+    )
+    landscapes = [
+        value for row in rows if isinstance((value := row.raw_payload.get("_landscape")), dict)
+    ]
+    landscape = dict(primary.raw_payload.get("_landscape") or {})
+    landscape["selected_for_gap"] = any(bool(value.get("selected_for_gap")) for value in landscapes)
+    landscape["is_seo_competitor"] = any(
+        bool(value.get("is_seo_competitor")) for value in landscapes
+    )
+    landscape["is_business_competitor"] = any(
+        bool(value.get("is_business_competitor")) for value in landscapes
+    )
+    confidences = [
+        float(value["classification_confidence"])
+        for value in landscapes
+        if isinstance(value.get("classification_confidence"), (int, float))
+    ]
+    landscape["classification_confidence"] = max(confidences) if confidences else None
+    landscape["serp_evidence"] = unique_dict_rows(
+        item
+        for value in landscapes
+        for item in value.get("serp_evidence") or []
+        if isinstance(item, dict)
+    )
+    landscape["related_redirect_sources"] = [
+        {
+            "domain": str(
+                row.raw_payload.get("_landscape", {})
+                .get("site_verification", {})
+                .get("original_domain")
+                or row.domain
+            ),
+            "provider_rank": row.provider_rank,
+            "site_verification": row.raw_payload.get("_landscape", {}).get("site_verification", {}),
+        }
+        for row in rows
+    ]
+    raw_payload = dict(primary.raw_payload)
+    raw_payload["_landscape"] = landscape
+    raw_payload["_merged_domain_sources"] = [
+        {"domain": row.domain, "provider_rank": row.provider_rank} for row in rows
+    ]
+    weights = [max(row.relevant_serp_items or row.keywords_count or 1, 1) for row in rows]
+    positions = [
+        (row.avg_position, weight)
+        for row, weight in zip(rows, weights, strict=True)
+        if row.avg_position is not None
+    ]
+    return DiscoveredCompetitor(
+        domain=canonical_domain,
+        provider_rank=min(row.provider_rank for row in rows),
+        avg_position=(
+            sum(value * weight for value, weight in positions)
+            / sum(weight for _, weight in positions)
+            if positions
+            else None
+        ),
+        median_position=min(
+            (row.median_position for row in rows if row.median_position is not None),
+            default=None,
+        ),
+        rating=max((row.rating for row in rows if row.rating is not None), default=None),
+        etv=sum_optional(row.etv for row in rows),
+        keywords_count=sum_optional(row.keywords_count for row in rows),
+        visibility=sum_optional(row.visibility for row in rows),
+        relevant_serp_items=sum_optional(row.relevant_serp_items for row in rows),
+        keywords_positions=merge_numeric_mappings(row.keywords_positions for row in rows),
+        raw_payload=raw_payload,
+    )
+
+
+def sum_optional(values: Any) -> Any:
+    present = [value for value in values if isinstance(value, (int, float))]
+    return sum(present) if present else None
+
+
+def merge_numeric_mappings(values: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        for key, item in value.items():
+            current = result.get(key)
+            if isinstance(item, dict):
+                result[key] = merge_numeric_mappings(
+                    [current if isinstance(current, dict) else {}, item]
+                )
+            elif isinstance(item, (int, float)) and isinstance(current, (int, float)):
+                result[key] = current + item
+            elif key not in result:
+                result[key] = item
+    return result
+
+
+def unique_dict_rows(values: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in values:
+        marker = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(dict(value))
+    return result
+
+
+def assessed_backlink_domains(
+    rows: list[DiscoveredCompetitor], payload: dict[str, Any]
+) -> dict[str, bool]:
+    candidates = {f"d{index:03d}": row.domain for index, row in enumerate(rows, start=1)}
+    raw_items = payload.get("domains")
+    items = raw_items if isinstance(raw_items, list) else []
+    result: dict[str, bool] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        domain = candidates.get(str(item.get("id") or ""))
+        if domain is not None:
+            result[domain] = bool(item.get("needed"))
+    if len(result) != len(rows):
+        raise ProviderError(
+            "competitive_backlink_assessment_invalid",
+            "AI 没有完整判断外链验证需求",
+            failure_status=CHARGED_FAILURE,
+        )
+    return result
+
+
+def validate_landscape_competitor_findings(
+    rows: list[DiscoveredCompetitor], payload: dict[str, Any]
+) -> None:
+    expected = {row.domain.casefold() for row in rows}
+    raw_items = payload.get("competitor_findings")
+    items = raw_items if isinstance(raw_items, list) else []
+    actual = {
+        str(item.get("domain") or "").casefold()
+        for item in items
+        if isinstance(item, dict) and str(item.get("domain") or "").strip()
+    }
+    if len(items) != len(rows) or actual != expected:
+        raise ProviderError(
+            "competitive_landscape_summary_invalid",
+            "AI 没有为所有 SERP 竞争域名生成完整的 OpenSEO 对比行",
+            failure_status=CHARGED_FAILURE,
+        )
+
+
+def landscape_finding_mismatch(
+    rows: list[DiscoveredCompetitor],
+    payload: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    expected = [row.domain for row in rows]
+    raw_items = payload.get("competitor_findings")
+    items = raw_items if isinstance(raw_items, list) else []
+    actual = [
+        str(item.get("domain") or "").strip()
+        for item in items
+        if isinstance(item, dict) and str(item.get("domain") or "").strip()
+    ]
+    expected_keys = {domain.casefold() for domain in expected}
+    counts: dict[str, int] = {}
+    for domain in actual:
+        key = domain.casefold()
+        counts[key] = counts.get(key, 0) + 1
+    missing = [domain for domain in expected if counts.get(domain.casefold(), 0) == 0]
+    duplicates = sorted(
+        domain for domain, count in counts.items() if count > 1 and domain in expected_keys
+    )
+    return missing, duplicates
+
+
+def discovered_competitor_from_metadata(value: Any) -> DiscoveredCompetitor | None:
+    if not isinstance(value, dict):
+        return None
+    domain = str(value.get("domain") or "").strip().casefold()
+    provider_rank = optional_int(value.get("provider_rank"))
+    if not domain or provider_rank is None:
+        return None
+    return DiscoveredCompetitor(
+        domain=domain,
+        provider_rank=provider_rank,
+        avg_position=optional_float(value.get("avg_position")),
+        median_position=optional_float(value.get("median_position")),
+        rating=optional_float(value.get("rating")),
+        etv=optional_float(value.get("etv")),
+        keywords_count=optional_int(value.get("keywords_count")),
+        visibility=optional_float(value.get("visibility")),
+        relevant_serp_items=optional_int(value.get("relevant_serp_items")),
+        keywords_positions=(
+            dict(value["keywords_positions"])
+            if isinstance(value.get("keywords_positions"), dict)
+            else {}
+        ),
+        raw_payload=(
+            dict(value["raw_payload"]) if isinstance(value.get("raw_payload"), dict) else {}
+        ),
+    )
+
+
+def competitor_gap_metadata(row: CompetitorGap) -> dict[str, Any]:
+    return {
+        "keyword": row.keyword,
+        "provider_rank": row.provider_rank,
+        "competitor_rank": row.competitor_rank,
+        "own_rank": row.own_rank,
+        "competitor_url": row.competitor_url,
+        "own_url": row.own_url,
+        "search_volume": row.search_volume,
+        "cpc": row.cpc,
+        "competition": row.competition,
+        "competition_level": row.competition_level,
+        "keyword_difficulty": row.keyword_difficulty,
+        "intent": row.intent,
+        "monthly_searches": row.monthly_searches,
+        "raw_payload": row.raw_payload,
+        "metrics_fetched_at": (
+            row.metrics_fetched_at.isoformat() if row.metrics_fetched_at is not None else None
+        ),
+    }
+
+
+def competitor_gap_from_metadata(value: Any) -> CompetitorGap | None:
+    if not isinstance(value, dict):
+        return None
+    keyword = display_keyword(str(value.get("keyword") or ""))
+    provider_rank = optional_int(value.get("provider_rank"))
+    if not keyword or provider_rank is None:
+        return None
+    return CompetitorGap(
+        keyword=keyword,
+        provider_rank=provider_rank,
+        competitor_rank=optional_int(value.get("competitor_rank")),
+        own_rank=optional_int(value.get("own_rank")),
+        competitor_url=(str(value["competitor_url"]) if value.get("competitor_url") else None),
+        own_url=(str(value["own_url"]) if value.get("own_url") else None),
+        search_volume=optional_int(value.get("search_volume")),
+        cpc=optional_float(value.get("cpc")),
+        competition=optional_float(value.get("competition")),
+        competition_level=(display_keyword(str(value.get("competition_level") or "")) or None),
+        keyword_difficulty=optional_int(value.get("keyword_difficulty")),
+        intent=(display_keyword(str(value.get("intent") or "")) or None),
+        monthly_searches=(
+            list(value["monthly_searches"])
+            if isinstance(value.get("monthly_searches"), list)
+            else []
+        ),
+        raw_payload=(
+            dict(value["raw_payload"]) if isinstance(value.get("raw_payload"), dict) else {}
+        ),
+        metrics_fetched_at=optional_datetime(value.get("metrics_fetched_at")),
+    )
+
+
+def optional_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def raw_keyword_from_metadata(value: Any) -> RawKeyword | None:

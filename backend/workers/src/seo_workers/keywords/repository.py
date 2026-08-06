@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
+from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import asyncpg
@@ -18,12 +19,15 @@ from seo_workers.keywords.domain import (
     display_keyword,
     normalize_keyword,
     priority_score,
+    raw_keyword_competition_level,
     volume_percentiles,
 )
 from seo_workers.keywords.providers import (
     AIProviderConfig,
     CompetitorGap,
     DataForSEOProviderConfig,
+    DiscoveredCompetitor,
+    GSCProviderConfig,
 )
 
 
@@ -41,6 +45,24 @@ class KeywordRunContext:
     profile: dict[str, Any]
     profile_source: str
     profile_version: str
+
+
+@dataclass(frozen=True)
+class CompetitorAnalysisContext:
+    organization_id: str
+    project_id: str
+    run_id: str
+    domain: str
+    country: str
+    language: str
+    competitor_limit: int
+    keyword_limit: int
+    analysis_mode: str = "auto"
+    competitor_domains: tuple[str, ...] = ()
+    local_market: dict[str, Any] = field(default_factory=dict)
+
+
+SERP_DISCOVERY_LIMIT = 50
 
 
 @dataclass(frozen=True)
@@ -62,7 +84,7 @@ class ExternalRequestClaimLostError(RuntimeError):
 class ExternalRequestRecord:
     request_key: str
     status: str
-    build_run_id: str
+    build_run_id: str | None
     result_count: int
     response_metadata: dict[str, Any]
     expires_at: datetime | None
@@ -73,6 +95,8 @@ class ExternalRequestRecord:
     attempt_count: int = 1
     error_code: str | None = None
     error_detail: str | None = None
+    competitor_analysis_run_id: str | None = None
+    cost_usd: float = 0.0
 
     @property
     def reusable(self) -> bool:
@@ -91,7 +115,12 @@ def external_request_record(
     return ExternalRequestRecord(
         request_key=str(row["request_key"]),
         status=str(row["status"]),
-        build_run_id=str(row["build_run_id"]),
+        build_run_id=(str(row["build_run_id"]) if row["build_run_id"] else None),
+        competitor_analysis_run_id=(
+            str(row.get("competitor_analysis_run_id"))
+            if row.get("competitor_analysis_run_id")
+            else None
+        ),
         result_count=int(row["result_count"] or 0),
         response_metadata=dict(row["response_metadata"] or {}),
         expires_at=row["expires_at"],
@@ -102,6 +131,7 @@ def external_request_record(
         attempt_count=int(row["attempt_count"] or 1),
         error_code=row["error_code"],
         error_detail=row["error_detail"],
+        cost_usd=float(row.get("cost_usd") or 0),
     )
 
 
@@ -295,9 +325,9 @@ class KeywordRepository:
                     run.profile_version,
                     COALESCE(run.competitor_domain, project.competitor_domain)
                         AS competitor_domain,
-                    project.domain,
-                    project.country,
-                    project.language
+                    run.target_domain AS domain,
+                    run.country,
+                    run.language
                 FROM keyword_build_runs AS run
                 JOIN projects AS project ON project.id = run.project_id
                 WHERE run.id = $1
@@ -325,6 +355,867 @@ class KeywordRepository:
             profile_version=str(row["profile_version"] or ""),
         )
 
+    async def load_competitor_analysis_context(
+        self, task: dict[str, Any]
+    ) -> CompetitorAnalysisContext:
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT
+                    run.organization_id,
+                    run.project_id,
+                    run.id AS run_id,
+                    run.competitor_limit,
+                    run.keyword_limit,
+                    run.target_domain AS domain,
+                    run.country,
+                    run.language,
+                    run.analysis_mode,
+                    run.requested_competitor_domains,
+                    run.local_market
+                FROM keyword_competitor_analysis_runs AS run
+                WHERE run.id = $1
+                    AND run.project_id = $2
+                    AND run.organization_id = $3
+                """,
+                str(task["run_id"]),
+                str(task["project_id"]),
+                str(task["organization_id"]),
+            )
+        if row is None:
+            raise RuntimeError("竞争分析任务或项目不存在")
+        return CompetitorAnalysisContext(
+            organization_id=row["organization_id"],
+            project_id=row["project_id"],
+            run_id=row["run_id"],
+            domain=row["domain"],
+            country=row["country"],
+            language=row["language"],
+            competitor_limit=min(max(int(row["competitor_limit"]), 1), 5),
+            keyword_limit=min(max(int(row["keyword_limit"]), 1), 100),
+            analysis_mode=str(row["analysis_mode"] or "auto"),
+            competitor_domains=tuple(
+                str(value) for value in (row["requested_competitor_domains"] or [])
+            ),
+            local_market=dict(row["local_market"] or {}),
+        )
+
+    async def mark_competitor_analysis_started(self, run_id: str, analysis_mode: str) -> None:
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE keyword_competitor_analysis_runs
+                SET status = 'running',
+                    stage = CASE
+                        WHEN $2 = 'manual' THEN 'preparing_competitors'
+                        ELSE 'discovering_competitors'
+                    END,
+                    message = CASE
+                        WHEN $2 = 'manual' THEN '正在准备手动指定的竞争对手'
+                        ELSE '正在发现自然搜索竞争对手'
+                    END,
+                    progress = GREATEST(progress, 5),
+                    started_at = COALESCE(started_at, now()),
+                    error_code = NULL,
+                    error_detail = NULL,
+                    updated_at = now()
+                WHERE id = $1 AND status IN ('queued', 'running')
+                """,
+                run_id,
+                analysis_mode,
+            )
+
+    async def load_competitor_discovery_keywords(
+        self, context: CompetitorAnalysisContext
+    ) -> list[str]:
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                WITH latest_initial_run AS (
+                    SELECT id
+                    FROM keyword_build_runs
+                    WHERE organization_id = $1
+                        AND project_id = $2
+                        AND kind = 'initial'
+                        AND status IN ('completed', 'partial')
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                )
+                SELECT seed.keyword
+                FROM keyword_seeds AS seed
+                JOIN latest_initial_run AS run ON run.id = seed.initial_run_id
+                WHERE seed.organization_id = $1
+                    AND seed.project_id = $2
+                    AND seed.decision = 'selected'
+                ORDER BY seed.ai_rank NULLS LAST, seed.candidate_rank, seed.id
+                LIMIT 5
+                """,
+                context.organization_id,
+                context.project_id,
+            )
+        return [str(row["keyword"]) for row in rows if str(row["keyword"]).strip()]
+
+    async def save_competitor_discovery_configuration(
+        self,
+        context: CompetitorAnalysisContext,
+        *,
+        keywords: list[str],
+        result_types: list[str],
+        include_subdomains: bool | None,
+        sort_by: str,
+        limit: int,
+        offset: int,
+    ) -> None:
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE keyword_competitor_analysis_runs
+                SET discovery_method = 'serp_competitors',
+                    discovery_keywords = $2,
+                    discovery_result_types = $3,
+                    discovery_include_subdomains = $4,
+                    discovery_sort = $5,
+                    discovery_limit = $6,
+                    discovery_offset = $7,
+                    updated_at = now()
+                WHERE id = $1
+                """,
+                context.run_id,
+                keywords,
+                result_types,
+                include_subdomains,
+                sort_by,
+                limit,
+                offset,
+            )
+
+    async def save_competitor_landscape_evidence(
+        self,
+        context: CompetitorAnalysisContext,
+        *,
+        gsc_query_evidence: list[dict[str, Any]],
+        query_metrics: list[dict[str, Any]],
+        serp_snapshots: list[dict[str, Any]],
+        cost_breakdown: dict[str, float],
+        landscape_summary: dict[str, Any],
+        directional_result: bool,
+    ) -> None:
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE keyword_competitor_analysis_runs
+                SET gsc_query_evidence = $2,
+                    query_metrics = $3,
+                    serp_snapshots = $4,
+                    cost_breakdown = $5,
+                    landscape_summary = $6,
+                    market_summary = $7,
+                    directional_result = $8,
+                    updated_at = now()
+                WHERE id = $1
+                """,
+                context.run_id,
+                gsc_query_evidence,
+                query_metrics,
+                serp_snapshots,
+                cost_breakdown,
+                landscape_summary,
+                str(landscape_summary.get("market_read") or "") or None,
+                directional_result,
+            )
+
+    async def save_competitor_cost_breakdown(
+        self, run_id: str, cost_breakdown: dict[str, float]
+    ) -> None:
+        normalized = {str(key): max(float(value or 0), 0) for key, value in cost_breakdown.items()}
+        total = sum(normalized.values())
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE keyword_competitor_analysis_runs
+                SET cost_breakdown = $2,
+                    total_cost_usd = GREATEST(total_cost_usd, $3),
+                    updated_at = now()
+                WHERE id = $1
+                """,
+                run_id,
+                normalized,
+                Decimal(str(total)),
+            )
+
+    async def load_cached_competitor_site_verifications(
+        self,
+        context: CompetitorAnalysisContext,
+        domains: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        normalized = sorted({value.strip().casefold() for value in domains if value.strip()})
+        if not normalized:
+            return {}
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT lower(domain) AS domain, crawler_facts
+                FROM keyword_competitor_site_verifications
+                WHERE organization_id = $1
+                    AND lower(domain) = ANY($2::text[])
+                    AND country = $3
+                    AND language = $4
+                    AND checked_at >= now() - interval '24 hours'
+                    AND crawler_facts <> '{}'::jsonb
+                """,
+                context.organization_id,
+                normalized,
+                context.country,
+                context.language,
+            )
+        return {
+            str(row["domain"]): dict(row["crawler_facts"] or {})
+            for row in rows
+            if isinstance(row["crawler_facts"], dict)
+        }
+
+    async def save_competitor_site_verifications(
+        self,
+        context: CompetitorAnalysisContext,
+        verifications: dict[str, dict[str, Any]],
+    ) -> None:
+        stable = {
+            domain.strip().casefold(): dict(facts)
+            for domain, facts in verifications.items()
+            if domain.strip()
+            and isinstance(facts, dict)
+            and str(facts.get("status") or "") not in {"", "not_checked", "temporarily_unavailable"}
+        }
+        if not stable:
+            return
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                for domain, facts in stable.items():
+                    raw_checked_at = facts.get("checked_at")
+                    checked_at = datetime.now(UTC)
+                    if isinstance(raw_checked_at, str):
+                        try:
+                            checked_at = datetime.fromisoformat(
+                                raw_checked_at.replace("Z", "+00:00")
+                            )
+                        except ValueError:
+                            pass
+                    await connection.execute(
+                        """
+                        INSERT INTO keyword_competitor_site_verifications (
+                            organization_id, domain, country, language,
+                            crawler_facts, checked_at
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        ON CONFLICT (organization_id, domain, country, language)
+                        DO UPDATE SET crawler_facts = EXCLUDED.crawler_facts,
+                                      checked_at = EXCLUDED.checked_at,
+                                      updated_at = now()
+                        """,
+                        context.organization_id,
+                        domain,
+                        context.country,
+                        context.language,
+                        facts,
+                        checked_at,
+                    )
+
+    async def save_discovered_competitors(
+        self,
+        context: CompetitorAnalysisContext,
+        rows: list[DiscoveredCompetitor],
+        *,
+        cost_usd: float,
+    ) -> list[dict[str, Any]]:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                return await self._save_discovered_competitors(
+                    connection, context, rows, cost_usd=cost_usd
+                )
+
+    async def _save_discovered_competitors(
+        self,
+        connection: asyncpg.Connection,
+        context: CompetitorAnalysisContext,
+        rows: list[DiscoveredCompetitor],
+        *,
+        cost_usd: float,
+    ) -> list[dict[str, Any]]:
+        candidates = rows[:SERP_DISCOVERY_LIMIT]
+        await connection.execute(
+            "DELETE FROM keyword_competitors WHERE analysis_run_id = $1",
+            context.run_id,
+        )
+        values: list[dict[str, Any]] = []
+        for index, row in enumerate(candidates):
+            landscape = row.raw_payload.get("_landscape")
+            landscape = landscape if isinstance(landscape, dict) else {}
+            selected_for_gap = index < context.competitor_limit and bool(
+                landscape.get("selected_for_gap", True)
+            )
+            competitor_id = str(uuid5(NAMESPACE_URL, f"competitor:{context.run_id}:{row.domain}"))
+            await connection.execute(
+                """
+                INSERT INTO keyword_competitors (
+                    id, organization_id, project_id, analysis_run_id,
+                    domain, provider_rank, avg_position, status, raw_payload,
+                    selected_for_gap, keywords_count, median_position, rating,
+                    etv, visibility, relevant_serp_items, keywords_positions,
+                    domain_type, is_seo_competitor, is_business_competitor,
+                    classification_confidence, why_they_matter, serp_evidence,
+                    domain_overview, ranked_keywords_evidence, backlinks_evidence,
+                    site_check_status, site_relation, site_verification
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                        $21, $22, $23, $24, $25, $26, $27, $28, $29)
+                """,
+                competitor_id,
+                context.organization_id,
+                context.project_id,
+                context.run_id,
+                row.domain,
+                row.provider_rank,
+                row.avg_position,
+                "pending" if selected_for_gap else "excluded",
+                row.raw_payload,
+                selected_for_gap,
+                row.keywords_count,
+                row.median_position,
+                row.rating,
+                row.etv,
+                row.visibility,
+                row.relevant_serp_items,
+                row.keywords_positions,
+                str(landscape.get("domain_type") or "documentation_resource"),
+                bool(landscape.get("is_seo_competitor", True)),
+                bool(landscape.get("is_business_competitor", False)),
+                landscape.get("classification_confidence"),
+                str(landscape.get("why_they_matter") or "") or None,
+                list(landscape.get("serp_evidence") or []),
+                dict(landscape.get("domain_overview") or {}),
+                list(landscape.get("ranked_keywords_evidence") or []),
+                dict(landscape.get("backlinks_evidence") or {}),
+                str(landscape.get("site_check_status") or "not_checked"),
+                str(landscape.get("site_relation") or "uncertain"),
+                dict(landscape.get("site_verification") or {}),
+            )
+            if selected_for_gap:
+                values.append({"id": competitor_id, "domain": row.domain})
+        await connection.execute(
+            """
+            UPDATE keyword_competitor_analysis_runs
+            SET stage = 'fetching_opportunities',
+                message = '正在获取竞品机会缺口关键词',
+                discovery_method = CASE
+                    WHEN analysis_mode = 'manual' THEN 'manual'
+                    ELSE 'serp_competitors'
+                END,
+                progress = 20,
+                discovered_count = $2,
+                analyzed_competitor_count = $3,
+                discovery_cost_usd = $4,
+                total_cost_usd = $4,
+                updated_at = now()
+            WHERE id = $1
+            """,
+            context.run_id,
+            len(candidates),
+            len(values),
+            Decimal(str(max(cost_usd, 0))),
+        )
+        return values
+
+    async def save_discovered_competitors_and_complete_external_request(
+        self,
+        context: CompetitorAnalysisContext,
+        rows: list[DiscoveredCompetitor],
+        *,
+        request_key: str,
+        claim_token: str,
+        metadata: dict[str, Any],
+        cost_usd: float,
+        expires_at: datetime,
+    ) -> list[dict[str, Any]]:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                values = await self._save_discovered_competitors(
+                    connection, context, rows, cost_usd=cost_usd
+                )
+                completed = await self._complete_external_request(
+                    connection,
+                    request_key=request_key,
+                    claim_token=claim_token,
+                    result_count=len(rows),
+                    metadata=metadata,
+                    cost_usd=cost_usd,
+                    expires_at=expires_at,
+                )
+                if not completed:
+                    raise ExternalRequestClaimLostError("外部请求执行权已失效，拒绝保存过期结果")
+                return values
+
+    async def mark_competitor_started(
+        self, context: CompetitorAnalysisContext, competitor_id: str
+    ) -> None:
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE keyword_competitors
+                SET status = 'running', error_code = NULL, error_detail = NULL,
+                    updated_at = now()
+                WHERE id = $1 AND analysis_run_id = $2
+                  AND status IN ('pending', 'failed')
+                """,
+                competitor_id,
+                context.run_id,
+            )
+
+    async def save_competitor_opportunities(
+        self,
+        context: CompetitorAnalysisContext,
+        competitor_id: str,
+        rows: list[CompetitorGap],
+        *,
+        cost_usd: float,
+    ) -> int:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                return await self._save_competitor_opportunities(
+                    connection,
+                    context,
+                    competitor_id,
+                    rows,
+                    cost_usd=cost_usd,
+                )
+
+    async def save_competitor_opportunities_and_complete_external_request(
+        self,
+        context: CompetitorAnalysisContext,
+        competitor_id: str,
+        rows: list[CompetitorGap],
+        *,
+        request_key: str,
+        claim_token: str,
+        metadata: dict[str, Any],
+        cost_usd: float,
+        expires_at: datetime,
+    ) -> int:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                count = await self._save_competitor_opportunities(
+                    connection,
+                    context,
+                    competitor_id,
+                    rows,
+                    cost_usd=cost_usd,
+                )
+                completed = await self._complete_external_request(
+                    connection,
+                    request_key=request_key,
+                    claim_token=claim_token,
+                    result_count=len(rows),
+                    metadata=metadata,
+                    cost_usd=cost_usd,
+                    expires_at=expires_at,
+                )
+                if not completed:
+                    raise ExternalRequestClaimLostError("外部请求执行权已失效，拒绝保存过期结果")
+                return count
+
+    async def _save_competitor_opportunities(
+        self,
+        connection: asyncpg.Connection,
+        context: CompetitorAnalysisContext,
+        competitor_id: str,
+        rows: list[CompetitorGap],
+        *,
+        cost_usd: float,
+    ) -> int:
+        await connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            f"competitor-opportunities:{context.run_id}",
+        )
+        await connection.execute(
+            """
+            DELETE FROM keyword_competitor_opportunity_rankings
+            WHERE competitor_id = $1
+            """,
+            competitor_id,
+        )
+        for row in rows[: context.keyword_limit]:
+            normalized = normalize_keyword(row.keyword)
+            if not normalized:
+                continue
+            opportunity_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"competitor-opportunity:{context.run_id}:{normalized}",
+                )
+            )
+            ranking_id = str(
+                uuid5(NAMESPACE_URL, f"competitor-keyword:{competitor_id}:{normalized}")
+            )
+            await connection.execute(
+                """
+                WITH decision AS (
+                    SELECT status, keyword_id, decided_at
+                    FROM keyword_competitor_opportunity_decisions
+                    WHERE organization_id = $2
+                      AND project_id = $3
+                      AND country = $15
+                      AND language = $16
+                      AND normalized_keyword = $6
+                )
+                INSERT INTO keyword_competitor_opportunities (
+                    id, organization_id, project_id, analysis_run_id,
+                    keyword, normalized_keyword, search_volume, cpc,
+                    competition, competition_level, keyword_difficulty, intent,
+                    monthly_searches, metrics_fetched_at, status, keyword_id, decided_at
+                )
+                SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                       COALESCE((SELECT status FROM decision), 'new'),
+                       (SELECT keyword_id FROM decision),
+                       (SELECT decided_at FROM decision)
+                ON CONFLICT (analysis_run_id, normalized_keyword) DO UPDATE
+                SET keyword = EXCLUDED.keyword,
+                    search_volume = CASE
+                        WHEN EXCLUDED.metrics_fetched_at >=
+                            keyword_competitor_opportunities.metrics_fetched_at
+                        THEN EXCLUDED.search_volume
+                        ELSE keyword_competitor_opportunities.search_volume
+                    END,
+                    cpc = CASE
+                        WHEN EXCLUDED.metrics_fetched_at >=
+                            keyword_competitor_opportunities.metrics_fetched_at
+                        THEN EXCLUDED.cpc
+                        ELSE keyword_competitor_opportunities.cpc
+                    END,
+                    competition = CASE
+                        WHEN EXCLUDED.metrics_fetched_at >=
+                            keyword_competitor_opportunities.metrics_fetched_at
+                        THEN EXCLUDED.competition
+                        ELSE keyword_competitor_opportunities.competition
+                    END,
+                    competition_level = CASE
+                        WHEN EXCLUDED.metrics_fetched_at >=
+                            keyword_competitor_opportunities.metrics_fetched_at
+                        THEN EXCLUDED.competition_level
+                        ELSE keyword_competitor_opportunities.competition_level
+                    END,
+                    keyword_difficulty = CASE
+                        WHEN EXCLUDED.metrics_fetched_at >=
+                            keyword_competitor_opportunities.metrics_fetched_at
+                        THEN EXCLUDED.keyword_difficulty
+                        ELSE keyword_competitor_opportunities.keyword_difficulty
+                    END,
+                    intent = CASE
+                        WHEN EXCLUDED.metrics_fetched_at >=
+                            keyword_competitor_opportunities.metrics_fetched_at
+                        THEN EXCLUDED.intent
+                        ELSE keyword_competitor_opportunities.intent
+                    END,
+                    monthly_searches = CASE
+                        WHEN EXCLUDED.metrics_fetched_at >=
+                            keyword_competitor_opportunities.metrics_fetched_at
+                        THEN EXCLUDED.monthly_searches
+                        ELSE keyword_competitor_opportunities.monthly_searches
+                    END,
+                    metrics_fetched_at = GREATEST(
+                        keyword_competitor_opportunities.metrics_fetched_at,
+                        EXCLUDED.metrics_fetched_at
+                    ),
+                    updated_at = now()
+                """,
+                opportunity_id,
+                context.organization_id,
+                context.project_id,
+                context.run_id,
+                row.keyword,
+                normalized,
+                row.search_volume,
+                row.cpc,
+                row.competition,
+                row.competition_level,
+                row.keyword_difficulty,
+                row.intent,
+                row.monthly_searches,
+                row.metrics_fetched_at or datetime.now(UTC),
+                context.country,
+                context.language,
+            )
+            await connection.execute(
+                """
+                INSERT INTO keyword_competitor_opportunity_rankings (
+                    id, organization_id, project_id, analysis_run_id,
+                    competitor_id, opportunity_id, competitor_rank,
+                    competitor_url, raw_payload
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (competitor_id, opportunity_id) DO UPDATE
+                SET competitor_rank = EXCLUDED.competitor_rank,
+                    competitor_url = EXCLUDED.competitor_url,
+                    raw_payload = EXCLUDED.raw_payload
+                """,
+                ranking_id,
+                context.organization_id,
+                context.project_id,
+                context.run_id,
+                competitor_id,
+                opportunity_id,
+                row.competitor_rank,
+                row.competitor_url,
+                row.raw_payload,
+            )
+        await connection.execute(
+            """
+            DELETE FROM keyword_competitor_opportunities AS opportunity
+            WHERE opportunity.analysis_run_id = $1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM keyword_competitor_opportunity_rankings AS ranking
+                  WHERE ranking.opportunity_id = opportunity.id
+              )
+            """,
+            context.run_id,
+        )
+        await self._refresh_competitor_opportunity_rollups(connection, context.run_id)
+        count = int(
+            await connection.fetchval(
+                """
+                SELECT count(*)
+                FROM keyword_competitor_opportunity_rankings
+                WHERE competitor_id = $1
+                """,
+                competitor_id,
+            )
+            or 0
+        )
+        await connection.execute(
+            """
+            UPDATE keyword_competitors
+            SET status = 'completed', keyword_count = $3,
+                cost_usd = $4, error_code = NULL, error_detail = NULL,
+                updated_at = now()
+            WHERE id = $1 AND analysis_run_id = $2
+            """,
+            competitor_id,
+            context.run_id,
+            count,
+            Decimal(str(max(cost_usd, 0))),
+        )
+        await self._update_competitor_analysis_progress(connection, context.run_id)
+        return count
+
+    async def _refresh_competitor_opportunity_rollups(
+        self, connection: asyncpg.Connection, run_id: str
+    ) -> None:
+        await connection.execute(
+            """
+            WITH rollup AS (
+                SELECT opportunity_id,
+                       min(competitor_rank) AS best_rank,
+                       count(*)::int AS competitor_count
+                FROM keyword_competitor_opportunity_rankings
+                WHERE analysis_run_id = $1
+                GROUP BY opportunity_id
+            )
+            UPDATE keyword_competitor_opportunities AS opportunity
+            SET best_competitor_rank = rollup.best_rank,
+                competitor_count = rollup.competitor_count,
+                opportunity_score = LEAST(
+                    100,
+                    round((
+                        CASE
+                            WHEN COALESCE(opportunity.search_volume, 0) <= 0 THEN 0
+                            ELSE LEAST(
+                                45,
+                                ln(opportunity.search_volume + 1) / ln(100001) * 45
+                            )
+                        END
+                        + CASE
+                            WHEN opportunity.keyword_difficulty IS NULL THEN 15
+                            ELSE (100 - opportunity.keyword_difficulty) / 100.0 * 30
+                        END
+                        + LEAST(rollup.competitor_count, 5) / 5.0 * 15
+                        + CASE
+                            WHEN rollup.best_rank IS NULL THEN 0
+                            ELSE (101 - LEAST(rollup.best_rank, 100)) / 100.0 * 10
+                        END
+                    )::numeric, 2)
+                ),
+                updated_at = now()
+            FROM rollup
+            WHERE opportunity.id = rollup.opportunity_id
+            """,
+            run_id,
+        )
+
+    async def fail_competitor(
+        self,
+        context: CompetitorAnalysisContext,
+        competitor_id: str,
+        *,
+        code: str,
+        detail: str,
+        cost_usd: float = 0,
+    ) -> None:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    UPDATE keyword_competitors
+                    SET status = 'failed', keyword_count = 0, cost_usd = $3,
+                        error_code = $4, error_detail = $5, updated_at = now()
+                    WHERE id = $1 AND analysis_run_id = $2
+                    """,
+                    competitor_id,
+                    context.run_id,
+                    Decimal(str(max(cost_usd, 0))),
+                    code[:120],
+                    detail[:2000],
+                )
+                await self._update_competitor_analysis_progress(connection, context.run_id)
+
+    async def _update_competitor_analysis_progress(
+        self, connection: asyncpg.Connection, run_id: str
+    ) -> None:
+        await connection.execute(
+            """
+            UPDATE keyword_competitor_analysis_runs AS run
+            SET completed_competitors = counts.completed,
+                failed_competitors = counts.failed,
+                progress = LEAST(
+                    90,
+                    20 + CASE
+                        WHEN run.analyzed_competitor_count = 0 THEN 0
+                        ELSE ((counts.completed + counts.failed) * 70)
+                             / run.analyzed_competitor_count
+                    END
+                ),
+                updated_at = now()
+            FROM (
+                SELECT
+                    count(*) FILTER (WHERE status = 'completed')::int AS completed,
+                    count(*) FILTER (WHERE status = 'failed')::int AS failed
+                FROM keyword_competitors
+                WHERE analysis_run_id = $1
+            ) AS counts
+            WHERE run.id = $1
+            """,
+            run_id,
+        )
+
+    async def finalize_competitor_analysis(
+        self, context: CompetitorAnalysisContext
+    ) -> dict[str, Any]:
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                WITH competitor_counts AS (
+                    SELECT
+                        count(*) FILTER (WHERE status = 'completed')::int AS completed,
+                        count(*) FILTER (WHERE status = 'failed')::int AS failed,
+                        COALESCE(sum(cost_usd), 0) AS opportunity_cost
+                    FROM keyword_competitors
+                    WHERE analysis_run_id = $1
+                ), keyword_counts AS (
+                    SELECT
+                        (
+                            SELECT count(*)::int
+                            FROM keyword_competitor_opportunity_rankings
+                            WHERE analysis_run_id = $1
+                        ) AS raw_count,
+                        (
+                            SELECT count(*)::int
+                            FROM keyword_competitor_opportunities
+                            WHERE analysis_run_id = $1
+                        ) AS unique_count
+                )
+                UPDATE keyword_competitor_analysis_runs AS run
+                SET status = CASE
+                    WHEN run.analyzed_competitor_count = 0 THEN 'completed'
+                        WHEN cc.completed = 0 THEN 'failed'
+                        WHEN cc.failed > 0 THEN 'partial'
+                        ELSE 'completed'
+                    END,
+                    stage = CASE
+                        WHEN run.analyzed_competitor_count = 0 THEN 'completed'
+                        WHEN cc.completed = 0 THEN 'failed'
+                        WHEN cc.failed > 0 THEN 'partial'
+                        ELSE 'completed'
+                    END,
+                    message = CASE
+                        WHEN run.discovery_method = 'serp_competitors'
+                            AND jsonb_array_length(run.discovery_keywords) < 2
+                            THEN '没有可用于发现搜索竞争对手的目标业务关键词'
+                        WHEN run.discovered_count = 0
+                            THEN '业务关键词的搜索结果中没有发现竞争对手'
+                        WHEN cc.completed = 0 THEN '竞争对手关键词分析未完成'
+                        WHEN cc.failed > 0 THEN '竞争分析已完成，部分竞品暂时失败'
+                        ELSE '竞争分析已完成'
+                    END,
+                    progress = 100,
+                    completed_competitors = cc.completed,
+                    failed_competitors = cc.failed,
+                    raw_keyword_count = kc.raw_count,
+                    unique_keyword_count = kc.unique_count,
+                    total_cost_usd = run.discovery_cost_usd + cc.opportunity_cost,
+                    error_code = CASE
+                        WHEN run.analyzed_competitor_count = 0 THEN NULL
+                        WHEN cc.completed = 0 THEN 'opportunities_failed'
+                        ELSE NULL
+                    END,
+                    finished_at = now(),
+                    updated_at = now()
+                FROM competitor_counts cc, keyword_counts kc
+                WHERE run.id = $1
+                RETURNING run.status, run.raw_keyword_count,
+                          run.unique_keyword_count, run.total_cost_usd
+                """,
+                context.run_id,
+            )
+        if row is None:
+            raise RuntimeError("竞争分析任务不存在")
+        return {
+            **dict(row),
+            "total_cost_usd": float(row["total_cost_usd"] or 0),
+        }
+
+    async def fail_competitor_analysis(
+        self,
+        run_id: str,
+        *,
+        code: str,
+        detail: str,
+        cost_usd: float = 0,
+        cost_breakdown: dict[str, float] | None = None,
+    ) -> None:
+        normalized = {
+            str(key): max(float(value or 0), 0) for key, value in (cost_breakdown or {}).items()
+        }
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE keyword_competitor_analysis_runs
+                SET status = 'failed', stage = 'failed',
+                    message = '竞争分析暂时未完成', progress = 100,
+                    total_cost_usd = GREATEST(total_cost_usd, $2),
+                    error_code = $3, error_detail = $4,
+                    cost_breakdown = CASE
+                        WHEN $5 = '{}'::jsonb THEN cost_breakdown
+                        ELSE $5
+                    END,
+                    finished_at = now(), updated_at = now()
+                WHERE id = $1 AND status IN ('queued', 'running')
+                """,
+                run_id,
+                Decimal(str(max(cost_usd, 0))),
+                code[:120],
+                detail[:2000],
+                normalized,
+            )
+
     async def mark_started(self, run_id: str) -> None:
         async with self.pool.acquire() as connection:
             await connection.execute(
@@ -346,18 +1237,9 @@ class KeywordRepository:
                             WHERE projects.id = keyword_build_runs.project_id
                         )
                     ),
-                    gap_status = CASE
-                        WHEN COALESCE(
-                            competitor_domain,
-                            (
-                                SELECT competitor_domain
-                                FROM projects
-                                WHERE projects.id = keyword_build_runs.project_id
-                            )
-                        ) IS NULL THEN 'not_requested'
-                        WHEN gap_status = 'not_requested' THEN 'pending'
-                        ELSE gap_status
-                    END,
+                    gap_status = 'not_requested',
+                    gap_message = '',
+                    gap_count = 0,
                     updated_at = now()
                 WHERE id = $1
                     AND status IN ('queued', 'running', 'waiting')
@@ -1025,6 +1907,193 @@ class KeywordRepository:
             )
         return bool(submitted)
 
+    async def begin_competitor_external_request(
+        self,
+        *,
+        context: CompetitorAnalysisContext,
+        request_key: str,
+        provider: str,
+        endpoint: str,
+        request_hash: str,
+    ) -> ExternalRequestRecord:
+        now = datetime.now(UTC)
+        claim_token = str(uuid4())
+        lease_expires_at = now + timedelta(
+            seconds=max(self.settings.keyword_external_prepare_lease_seconds, 30)
+        )
+        columns = """
+            request_key, status, build_run_id, competitor_analysis_run_id,
+            request_hash, result_count, response_metadata, expires_at,
+            claim_token, lease_expires_at, submitted_at, attempt_count,
+            error_code, error_detail, cost_usd
+        """
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                lock_key = "|".join((context.organization_id, provider, endpoint, request_hash))
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    lock_key,
+                )
+                row = await connection.fetchrow(
+                    f"""
+                    SELECT {columns}
+                    FROM keyword_external_requests
+                    WHERE request_key = $1
+                    FOR UPDATE
+                    """,
+                    request_key,
+                )
+                if row is not None and str(row["request_hash"]) != request_hash:
+                    raise RuntimeError("外部请求键对应的请求内容发生变化")
+
+                if row is None:
+                    cached = await connection.fetchrow(
+                        f"""
+                        SELECT {columns}
+                        FROM keyword_external_requests
+                        WHERE organization_id = $1
+                          AND provider = $2
+                          AND endpoint = $3
+                          AND request_hash = $4
+                          AND status = 'completed'
+                          AND (expires_at IS NULL OR expires_at > $5)
+                        ORDER BY finished_at DESC NULLS LAST, id DESC
+                        LIMIT 1
+                        """,
+                        context.organization_id,
+                        provider,
+                        endpoint,
+                        request_hash,
+                        now,
+                    )
+                    if cached is not None:
+                        return external_request_record(cached, claimed=False)
+
+                    unresolved = await connection.fetchrow(
+                        f"""
+                        SELECT {columns}
+                        FROM keyword_external_requests
+                        WHERE organization_id = $1
+                          AND provider = $2
+                          AND endpoint = $3
+                          AND request_hash = $4
+                          AND status IN ('uncertain', 'charged_failed')
+                        ORDER BY finished_at DESC NULLS LAST, id DESC
+                        LIMIT 1
+                        """,
+                        context.organization_id,
+                        provider,
+                        endpoint,
+                        request_hash,
+                    )
+                    if unresolved is not None:
+                        return external_request_record(unresolved, claimed=False)
+
+                    row = await connection.fetchrow(
+                        f"""
+                        SELECT {columns}
+                        FROM keyword_external_requests
+                        WHERE organization_id = $1
+                          AND provider = $2
+                          AND endpoint = $3
+                          AND request_hash = $4
+                          AND status IN ('prepared', 'submitted')
+                        ORDER BY started_at, id
+                        LIMIT 1
+                        FOR UPDATE
+                        """,
+                        context.organization_id,
+                        provider,
+                        endpoint,
+                        request_hash,
+                    )
+                    if row is None:
+                        row = await connection.fetchrow(
+                            f"""
+                            INSERT INTO keyword_external_requests (
+                                organization_id, project_id, build_run_id,
+                                competitor_analysis_run_id, request_key, provider,
+                                endpoint, request_hash, status, claim_token,
+                                lease_expires_at
+                            )
+                            VALUES ($1, $2, NULL, $3, $4, $5, $6, $7,
+                                    'prepared', $8, $9)
+                            RETURNING {columns}
+                            """,
+                            context.organization_id,
+                            context.project_id,
+                            context.run_id,
+                            request_key,
+                            provider,
+                            endpoint,
+                            request_hash,
+                            claim_token,
+                            lease_expires_at,
+                        )
+                        if row is None:
+                            raise RuntimeError("无法创建竞争分析外部请求记录")
+                        return external_request_record(row, claimed=True)
+
+                if row is None:
+                    raise RuntimeError("无法读取竞争分析外部请求记录")
+                if (
+                    row["status"] == "submitted"
+                    and row["lease_expires_at"] is not None
+                    and row["lease_expires_at"] <= now
+                ):
+                    row = await connection.fetchrow(
+                        f"""
+                        UPDATE keyword_external_requests
+                        SET status = 'uncertain',
+                            error_code = 'external_request_outcome_unknown',
+                            error_detail = '外部请求提交后未能确认最终结果',
+                            finished_at = now(), lease_expires_at = NULL
+                        WHERE request_key = $1
+                        RETURNING {columns}
+                        """,
+                        row["request_key"],
+                    )
+                    if row is None:
+                        raise RuntimeError("无法更新竞争分析外部请求记录")
+                    return external_request_record(row, claimed=False)
+
+                reclaim = row["status"] == "retryable_failed" or (
+                    row["status"] == "prepared"
+                    and (row["lease_expires_at"] is None or row["lease_expires_at"] <= now)
+                )
+                if not reclaim:
+                    return external_request_record(row, claimed=False)
+                row = await connection.fetchrow(
+                    f"""
+                    UPDATE keyword_external_requests
+                    SET build_run_id = NULL,
+                        competitor_analysis_run_id = $2,
+                        request_hash = $3,
+                        status = 'prepared',
+                        attempt_count = attempt_count + 1,
+                        result_count = 0,
+                        response_metadata = '{{}}'::jsonb,
+                        error_code = NULL,
+                        error_detail = NULL,
+                        expires_at = NULL,
+                        claim_token = $4,
+                        lease_expires_at = $5,
+                        submitted_at = NULL,
+                        started_at = now(),
+                        finished_at = NULL
+                    WHERE request_key = $1
+                    RETURNING {columns}
+                    """,
+                    row["request_key"],
+                    context.run_id,
+                    request_hash,
+                    claim_token,
+                    lease_expires_at,
+                )
+                if row is None:
+                    raise RuntimeError("无法接管竞争分析外部请求记录")
+                return external_request_record(row, claimed=True)
+
     async def complete_external_request(
         self,
         request_key: str,
@@ -1062,7 +2131,8 @@ class KeywordRepository:
     ) -> bool:
         row = await connection.fetchrow(
             """
-            SELECT build_run_id, status, cost_usd, claim_token
+            SELECT build_run_id, competitor_analysis_run_id,
+                   status, cost_usd, claim_token
             FROM keyword_external_requests
             WHERE request_key = $1
             FOR UPDATE
@@ -1098,7 +2168,7 @@ class KeywordRepository:
             expires_at,
         )
         cost_delta = next_cost - previous_cost
-        if cost_delta > 0:
+        if cost_delta > 0 and row["build_run_id"] is not None:
             await connection.execute(
                 """
                 UPDATE keyword_build_runs
@@ -1134,6 +2204,7 @@ class KeywordRepository:
                     """
                     SELECT
                         build_run_id,
+                        competitor_analysis_run_id,
                         status,
                         cost_usd,
                         response_metadata,
@@ -1174,7 +2245,7 @@ class KeywordRepository:
                     detail[:2000],
                 )
                 cost_delta = next_cost - previous_cost
-                if cost_delta > 0:
+                if cost_delta > 0 and row["build_run_id"] is not None:
                     await connection.execute(
                         """
                         UPDATE keyword_build_runs
@@ -1635,6 +2706,70 @@ class KeywordRepository:
             password=self.settings.dataforseo_password,
         )
 
+    async def load_gsc_config(self, context: CompetitorAnalysisContext) -> GSCProviderConfig:
+        encryption_key = self.settings.ai_settings_encryption_key.strip()
+        if not encryption_key:
+            raise RuntimeError("服务器尚未配置设置加密密钥")
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT
+                    site_url,
+                    pgp_sym_decrypt(refresh_token_encrypted, $2)::text AS refresh_token,
+                    requires_reconnect
+                FROM gsc_connections
+                WHERE project_id = $1
+                    AND organization_id = $3
+                """,
+                context.project_id,
+                encryption_key,
+                context.organization_id,
+            )
+        if row is None or not str(row["site_url"] or "").strip():
+            raise RuntimeError("自动发现竞争对手前必须连接 Google Search Console 并选择 property")
+        if bool(row["requires_reconnect"]):
+            raise RuntimeError("Search Console 授权已失效，请重新连接")
+        site_url = str(row["site_url"])
+        if not gsc_site_matches_domain(site_url, context.domain):
+            raise RuntimeError("所选 Search Console property 与当前项目域名不匹配")
+        return GSCProviderConfig(
+            project_id=context.project_id,
+            site_url=site_url,
+            refresh_token=str(row["refresh_token"]),
+            client_id=self.settings.google_gsc_client_id,
+            client_secret=self.settings.google_gsc_client_secret,
+        )
+
+    async def mark_gsc_reconnect_required(self, project_id: str) -> None:
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE gsc_connections
+                SET requires_reconnect = true,
+                    updated_at = now()
+                WHERE project_id = $1
+                """,
+                project_id,
+            )
+
+    async def load_competitor_business_profile(
+        self, context: CompetitorAnalysisContext
+    ) -> dict[str, Any]:
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT profile_json, user_overrides
+                FROM site_profiles
+                WHERE project_id = $1
+                """,
+                context.project_id,
+            )
+        if row is None:
+            return {"domain": context.domain}
+        profile = dict(row["profile_json"] or {})
+        profile.update(dict(row["user_overrides"] or {}))
+        return profile
+
     async def set_gap_status(
         self,
         context: KeywordRunContext,
@@ -1728,6 +2863,9 @@ class KeywordRepository:
                 keyword=row["keyword"],
                 provider_rank=index,
                 competitor_rank=row["competitor_rank"],
+                own_rank=None,
+                competitor_url=None,
+                own_url=None,
                 search_volume=row["search_volume"],
                 cpc=row["cpc"],
                 competition=row["competition"],
@@ -2600,12 +3738,6 @@ class KeywordRepository:
                         candidate: MergedCandidate = record["candidate"]
                         metric = record.get("metric")
                         metrics_status = str(record["metrics_status"])
-                        if metrics_status == "fresh" and (
-                            not metric
-                            or metric.get("keyword_difficulty") is None
-                            or metric.get("intent") is None
-                        ):
-                            metrics_status = "failed"
                         keyword_id = deterministic_id(
                             "keyword",
                             context.project_id,
@@ -3083,11 +4215,7 @@ def keyword_idea_values(
                 "search_volume": row.search_volume,
                 "cpc": row.cpc,
                 "competition": row.competition,
-                "competition_level": (
-                    row.raw_payload.get("keyword_info", {}).get("competition_level")
-                    if isinstance(row.raw_payload.get("keyword_info"), dict)
-                    else None
-                ),
+                "competition_level": raw_keyword_competition_level(row.raw_payload),
                 "keyword_difficulty": row.keyword_difficulty,
                 "intent": row.intent,
                 "monthly_searches": row.monthly_searches,
@@ -3148,6 +4276,30 @@ def profile_is_usable(profile: dict[str, Any]) -> bool:
         or (isinstance(products, list) and products)
         or (isinstance(topics, list) and topics)
     )
+
+
+def gsc_site_matches_domain(site_url: str, domain: str) -> bool:
+    project_host = _normalized_host(domain)
+    if not project_host:
+        return False
+    value = site_url.strip()
+    if value.casefold().startswith("sc-domain:"):
+        property_host = _normalized_host(value.split(":", 1)[1])
+        return bool(
+            property_host
+            and (project_host == property_host or project_host.endswith(f".{property_host}"))
+        )
+    property_host = _normalized_host(value)
+    return bool(property_host and _without_www(project_host) == _without_www(property_host))
+
+
+def _normalized_host(value: str) -> str:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    return str(parsed.hostname or "").casefold().rstrip(".")
+
+
+def _without_www(value: str) -> str:
+    return value[4:] if value.startswith("www.") else value
 
 
 def parse_duration_seconds(value: str, *, default: int) -> int:

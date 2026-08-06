@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -16,6 +17,8 @@ from seo_workers.keywords.providers import (
     AIProviderConfig,
     DataForSEOClient,
     DataForSEOProviderConfig,
+    GSCProviderConfig,
+    GoogleSearchConsoleClient,
     JsonHttpClient,
     OpenAICompatibleClient,
     ProviderError,
@@ -31,7 +34,10 @@ from seo_workers.keywords.providers import (
     build_topic_active_selection_prompt,
     compact_seed_profile,
     completion_token_parameter,
+    host_matches_domain,
     initial_library_filter_schema,
+    is_same_domain,
+    sort_serp_competitors,
 )
 
 
@@ -62,6 +68,101 @@ async def mock_client(
         password="api-password",
     )
     return DataForSEOClient(config, http), http
+
+
+@pytest.mark.anyio
+async def test_gsc_query_performance_matches_openseo_date_and_query_contract() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": "access-token"})
+        return httpx.Response(
+            200,
+            json={
+                "rows": [
+                    {
+                        "keys": ["seo software"],
+                        "clicks": 20,
+                        "impressions": 400,
+                        "ctr": 0.05,
+                        "position": 6.2,
+                    }
+                ]
+            },
+        )
+
+    http = JsonHttpClient(timeout_seconds=10, max_retries=0)
+    await http.client.aclose()
+    http.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = GoogleSearchConsoleClient(
+        http,
+        GSCProviderConfig(
+            project_id="project-1",
+            site_url="sc-domain:example.com",
+            refresh_token="refresh-token",
+            client_id="client-id",
+            client_secret="client-secret",
+        ),
+    )
+    try:
+        rows = await client.query_performance(
+            now=datetime(2026, 6, 1, 12, tzinfo=UTC)
+        )
+    finally:
+        await http.close()
+
+    assert len(requests) == 2
+    assert requests[0].url.path == "/token"
+    token_body = requests[0].content.decode()
+    assert "grant_type=refresh_token" in token_body
+    assert requests[1].url.raw_path.decode().endswith(
+        "/sites/sc-domain%3Aexample.com/searchAnalytics/query"
+    )
+    assert json.loads(requests[1].content) == {
+        "startDate": "2026-05-01",
+        "endDate": "2026-05-29",
+        "dimensions": ["query"],
+        "rowLimit": 1000,
+        "type": "web",
+        "dataState": "all",
+    }
+    assert rows[0].query == "seo software"
+    assert rows[0].clicks == 20
+    assert rows[0].position == 6.2
+
+
+@pytest.mark.anyio
+async def test_gsc_revoked_refresh_token_requires_reconnect() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    http = JsonHttpClient(timeout_seconds=10, max_retries=0)
+    await http.client.aclose()
+    http.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = GoogleSearchConsoleClient(
+        http,
+        GSCProviderConfig(
+            project_id="project-1",
+            site_url="sc-domain:example.com",
+            refresh_token="revoked-token",
+            client_id="client-id",
+            client_secret="client-secret",
+        ),
+    )
+    try:
+        with pytest.raises(ProviderError) as caught:
+            await client.query_performance()
+    finally:
+        await http.close()
+
+    assert calls == 1
+    assert caught.value.code == "gsc_reconnect_required"
 
 
 @pytest.mark.anyio
@@ -170,6 +271,57 @@ async def test_dataforseo_no_search_results_is_a_billable_empty_success() -> Non
 
     assert rows == []
     assert billing.cost_usd == 0.02
+
+
+@pytest.mark.anyio
+async def test_backlink_partial_failure_keeps_all_confirmed_costs() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json=dataforseo_response([{"backlinks": 120}], cost=0.02),
+            )
+        return httpx.Response(
+            200,
+            json={
+                "status_code": 20000,
+                "status_message": "Ok.",
+                "tasks": [
+                    {
+                        "status_code": 50000,
+                        "status_message": "Internal provider error",
+                        "cost": 0.03,
+                        "path": ["v3", "backlinks", "referring_domains", "live"],
+                        "result": None,
+                    }
+                ],
+            },
+        )
+
+    client, http = await mock_client(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ProviderError) as caught:
+            await client.backlinks_overview(domain="competitor.example")
+    finally:
+        await http.close()
+
+    assert calls == 2
+    assert caught.value.cost_usd == pytest.approx(0.05)
+    assert caught.value.failure_status == CHARGED_FAILURE
+    assert caught.value.transient is False
+    assert caught.value.path == [
+        "v3",
+        "dataforseo_labs",
+        "google",
+        "v3",
+        "backlinks",
+        "referring_domains",
+        "live",
+    ]
 
 
 @pytest.mark.anyio
@@ -655,6 +807,7 @@ async def test_domain_intersection_keeps_only_organic_competitor_results() -> No
                     "search_volume": 720,
                     "cpc": 5.4,
                     "competition": 0.8,
+                    "competition_level": "HIGH",
                     "monthly_searches": [],
                 },
                 "keyword_properties": {"keyword_difficulty": 51},
@@ -704,14 +857,277 @@ async def test_domain_intersection_keeps_only_organic_competitor_results() -> No
         "location_name": "United States",
         "language_code": "en",
         "limit": 200,
+        "item_types": ["organic"],
         "include_serp_info": False,
+        "order_by": ["keyword_data.keyword_info.search_volume,desc"],
         "filters": [["first_domain_serp_element.type", "=", "organic"]],
     }
     assert billing.cost_usd == 0.036
     assert len(rows) == 1
     assert rows[0].keyword == "solar installation company"
     assert rows[0].competitor_rank == 8
+    assert rows[0].competition_level == "HIGH"
     assert rows[0].keyword_difficulty == 51
+
+
+@pytest.mark.anyio
+async def test_serp_competitors_preserves_openseo_request_and_response_granularity() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=dataforseo_response(
+                [
+                    {
+                        "items": [
+                            {
+                                "domain": "competitor.example",
+                                "avg_position": 12.5,
+                                "median_position": 8,
+                                "rating": 42,
+                                "etv": 18000.5,
+                                "keywords_count": 4,
+                                "visibility": 17.25,
+                                "relevant_serp_items": 6,
+                                "keywords_positions": {"1": 1, "2_3": 2},
+                            }
+                        ]
+                    }
+                ],
+                cost=0.0126,
+            ),
+        )
+
+    client, http = await mock_client(httpx.MockTransport(handler))
+    try:
+        rows, billing = await client.serp_competitors(
+            keywords=["business keyword", "second keyword"],
+            country="US",
+            language="en",
+            limit=50,
+        )
+    finally:
+        await http.close()
+
+    body = json.loads(requests[0].content)[0]
+    assert requests[0].url.path.endswith("/dataforseo_labs/google/serp_competitors/live")
+    assert body == {
+        "keywords": ["business keyword", "second keyword"],
+        "location_code": 2840,
+        "language_code": "en",
+        "limit": 50,
+    }
+    assert billing.cost_usd == 0.0126
+    assert rows[0].domain == "competitor.example"
+    assert rows[0].keywords_count == 4
+    assert rows[0].median_position == 8
+    assert rows[0].rating == 42
+    assert rows[0].etv == 18000.5
+    assert rows[0].visibility == 17.25
+    assert rows[0].relevant_serp_items == 6
+    assert rows[0].keywords_positions == {"1": 1, "2_3": 2}
+
+
+@pytest.mark.anyio
+async def test_local_market_requests_match_openseo_contracts() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/business_data/google/questions_and_answers/live"):
+            return httpx.Response(
+                200,
+                json=dataforseo_response(
+                    [
+                        {
+                            "items": [{"question_text": "Answered question"}],
+                            "items_without_answers": [
+                                {"question_text": "Unanswered question"}
+                            ],
+                        }
+                    ],
+                    cost=0.004,
+                ),
+            )
+        return httpx.Response(
+            200,
+            json=dataforseo_response(
+                [{"items": [{"title": "Local competitor", "domain": "local.example"}]}],
+                cost=0.004,
+            ),
+        )
+
+    client, http = await mock_client(httpx.MockTransport(handler))
+    try:
+        businesses, business_billing = await client.local_businesses(
+            latitude=-26.2041,
+            longitude=28.0473,
+            radius_km=10,
+            query="video service",
+            categories=["media_company"],
+        )
+        local_rows, local_billing = await client.local_serp(
+            keyword="video service johannesburg",
+            latitude=-26.2041,
+            longitude=28.0473,
+            zoom=12,
+            language="en",
+            search_type="maps",
+            device="desktop",
+            depth=1,
+        )
+        questions, questions_billing = await client.business_questions(
+            keyword="Elephant TV",
+            latitude=-26.2041,
+            longitude=28.0473,
+            radius_km=10,
+            language="en",
+            depth=12,
+        )
+    finally:
+        await http.close()
+
+    business_body = json.loads(requests[0].content)[0]
+    assert requests[0].url.path.endswith("/business_data/business_listings/search/live")
+    assert business_body == {
+        "location_coordinate": "-26.2041,28.0473,10",
+        "limit": 20,
+        "title": "video service",
+        "categories": ["media_company"],
+    }
+    local_body = json.loads(requests[1].content)[0]
+    assert requests[1].url.path.endswith("/serp/google/maps/live/advanced")
+    assert local_body == {
+        "keyword": "video service johannesburg",
+        "location_coordinate": "-26.2041,28.0473,12z",
+        "language_code": "en",
+        "device": "desktop",
+        "os": "windows",
+        "depth": 1,
+        "search_places": False,
+    }
+    questions_body = json.loads(requests[2].content)[0]
+    assert requests[2].url.path.endswith("/business_data/google/questions_and_answers/live")
+    assert questions_body == {
+        "keyword": "Elephant TV",
+        "location_coordinate": "-26.2041,28.0473,10000",
+        "language_code": "en",
+        "depth": 12,
+    }
+    assert businesses[0]["domain"] == "local.example"
+    assert local_rows[0]["title"] == "Local competitor"
+    assert [question["question_text"] for question in questions] == [
+        "Answered question",
+        "Unanswered question",
+    ]
+    assert business_billing.cost_usd == 0.004
+    assert local_billing.cost_usd == 0.004
+    assert questions_billing.cost_usd == 0.004
+
+
+def test_serp_competitor_sorting_and_explicit_domain_matching_match_openseo() -> None:
+    from seo_workers.keywords.providers import DiscoveredCompetitor
+
+    rows = [
+        DiscoveredCompetitor(
+            domain="low.example",
+            provider_rank=1,
+            avg_position=3,
+            median_position=2,
+            rating=1,
+            etv=10,
+            keywords_count=5,
+            visibility=2,
+            relevant_serp_items=5,
+            keywords_positions={},
+            raw_payload={},
+        ),
+        DiscoveredCompetitor(
+            domain="high.example",
+            provider_rank=2,
+            avg_position=9,
+            median_position=8,
+            rating=2,
+            etv=100,
+            keywords_count=20,
+            visibility=8,
+            relevant_serp_items=20,
+            keywords_positions={},
+            raw_payload={},
+        ),
+    ]
+    assert [row.domain for row in sort_serp_competitors(rows, "visibility")] == [
+        "high.example",
+        "low.example",
+    ]
+    assert [row.domain for row in sort_serp_competitors(rows, "traffic_estimate")] == [
+        "high.example",
+        "low.example",
+    ]
+    assert [row.domain for row in sort_serp_competitors(rows, "keyword_count")] == [
+        "high.example",
+        "low.example",
+    ]
+    assert [row.domain for row in sort_serp_competitors(rows, "avg_position")] == [
+        "low.example",
+        "high.example",
+    ]
+    assert host_matches_domain("www.example.com", "example.com")
+    assert host_matches_domain("shop.example.com", "example.com")
+    assert not host_matches_domain("directory.example", "example.com")
+    assert is_same_domain("www.example.com", "example.com")
+    assert not is_same_domain("shop.example.com", "example.com")
+
+
+@pytest.mark.anyio
+async def test_domain_intersection_fetches_one_hundred_opportunity_keywords() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        item = {
+            "keyword_data": {
+                "keyword": "solar panel installation",
+                "keyword_info": {"search_volume": 2400, "monthly_searches": []},
+                "keyword_properties": {"keyword_difficulty": 42},
+                "search_intent_info": {"main_intent": "commercial"},
+            },
+            "first_domain_serp_element": {
+                "type": "organic",
+                "rank_absolute": 4,
+                "url": "https://competitor.example/solar",
+            },
+            "second_domain_serp_element": None,
+        }
+        return httpx.Response(
+            200,
+            json=dataforseo_response([{"items": [item]}], cost=0.024),
+        )
+
+    client, http = await mock_client(httpx.MockTransport(handler))
+    try:
+        rows, _ = await client.domain_intersection(
+            competitor_domain="competitor.example",
+            domain="example.com",
+            country="US",
+            language="en",
+            limit=100,
+            intersections=False,
+        )
+    finally:
+        await http.close()
+
+    body = json.loads(requests[0].content)[0]
+    assert body["limit"] == 100
+    assert body["intersections"] is False
+    assert body["order_by"] == ["keyword_data.keyword_info.search_volume,desc"]
+    assert body["filters"] == [["first_domain_serp_element.type", "=", "organic"]]
+    assert rows[0].competitor_rank == 4
+    assert rows[0].own_rank is None
+    assert rows[0].competitor_url == "https://competitor.example/solar"
+    assert rows[0].own_url is None
 
 
 def test_provider_config_does_not_expose_the_password() -> None:

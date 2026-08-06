@@ -1,6 +1,8 @@
+import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 
 from app.modules.settings.data_sources import (
     DataForSEOSettingsService,
@@ -12,6 +14,16 @@ from app.modules.settings.data_sources import (
     build_dataforseo_settings_service,
     build_google_ads_settings_service,
 )
+from app.modules.settings.gsc import (
+    GSCError,
+    GSCNotConfiguredError,
+    GSCNotConnectedError,
+    GSCReconnectRequiredError,
+    GSCService,
+    GSCUpstreamError,
+    GSCValidationError,
+    build_gsc_service,
+)
 from app.modules.settings.schemas import (
     DataForSEOSettingsResponse,
     GoogleAdsSettingsResponse,
@@ -21,9 +33,16 @@ from app.modules.settings.schemas import (
     TestGoogleAdsSettingsResponse,
     UpdateDataForSEOSettingsRequest,
     UpdateGoogleAdsSettingsRequest,
+    GSCConnectionResponse,
+    GSCPerformanceResponse,
+    GSCOAuthStartRequest,
+    GSCOAuthStartResponse,
+    GSCSelectSiteRequest,
+    GSCSiteListResponse,
 )
 
 router = APIRouter(tags=["settings"])
+logger = logging.getLogger(__name__)
 
 
 def get_google_ads_settings_service() -> GoogleAdsSettingsService:
@@ -32,6 +51,10 @@ def get_google_ads_settings_service() -> GoogleAdsSettingsService:
 
 def get_dataforseo_settings_service() -> DataForSEOSettingsService:
     return build_dataforseo_settings_service()
+
+
+def get_gsc_service() -> GSCService:
+    return build_gsc_service()
 
 
 def handle_data_source_error(exc: Exception) -> None:
@@ -56,6 +79,138 @@ def handle_data_source_error(exc: Exception) -> None:
             detail=str(exc),
         ) from exc
     raise exc
+
+
+def handle_gsc_error(exc: Exception) -> None:
+    if isinstance(exc, GSCValidationError):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+    if isinstance(exc, (GSCNotConnectedError, GSCReconnectRequiredError)):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    if isinstance(exc, GSCNotConfiguredError):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    if isinstance(exc, GSCUpstreamError):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+    if isinstance(exc, GSCError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    raise exc
+
+
+@router.get(
+    "/api/v1/projects/{project_id}/gsc/connection",
+    response_model=GSCConnectionResponse,
+)
+async def get_gsc_connection(
+    project_id: str,
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+) -> GSCConnectionResponse:
+    try:
+        return await service.status(project_id)
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
+
+
+@router.post(
+    "/api/v1/projects/{project_id}/gsc/oauth/start",
+    response_model=GSCOAuthStartResponse,
+)
+async def start_gsc_oauth(
+    project_id: str,
+    request: GSCOAuthStartRequest,
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+) -> GSCOAuthStartResponse:
+    try:
+        return GSCOAuthStartResponse(
+            authorization_url=await service.authorization_url(project_id, request.callback_url)
+        )
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
+
+
+@router.get("/api/v1/gsc/oauth/callback", include_in_schema=False)
+async def gsc_oauth_callback(
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+    state_value: Annotated[str, Query(alias="state", min_length=1)],
+    code: Annotated[str | None, Query(min_length=1)] = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    try:
+        callback_path = await service.handle_callback(code=code, state=state_value, error=error)
+    except Exception as exc:
+        try:
+            callback_path = service.failed_callback_path(state_value)
+        except GSCValidationError:
+            handle_gsc_error(exc)
+            raise
+        logger.exception("Google Search Console OAuth callback failed")
+    return RedirectResponse(
+        service.settings.gsc_frontend_origin.rstrip("/") + callback_path,
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.get(
+    "/api/v1/projects/{project_id}/gsc/sites",
+    response_model=GSCSiteListResponse,
+)
+async def list_gsc_sites(
+    project_id: str,
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+) -> GSCSiteListResponse:
+    try:
+        return await service.list_sites(project_id)
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
+
+
+@router.put(
+    "/api/v1/projects/{project_id}/gsc/connection",
+    response_model=GSCConnectionResponse,
+)
+async def select_gsc_site(
+    project_id: str,
+    request: GSCSelectSiteRequest,
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+) -> GSCConnectionResponse:
+    try:
+        return await service.select_site(project_id, request.site_url)
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
+
+
+@router.delete(
+    "/api/v1/projects/{project_id}/gsc/connection",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def disconnect_gsc(
+    project_id: str,
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+) -> None:
+    try:
+        await service.disconnect(project_id)
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
+
+
+@router.get(
+    "/api/v1/projects/{project_id}/gsc/performance",
+    response_model=GSCPerformanceResponse,
+)
+async def get_gsc_performance(
+    project_id: str,
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+    days: Annotated[int, Query(ge=7, le=90)] = 28,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 250,
+) -> GSCPerformanceResponse:
+    try:
+        return await service.performance(project_id, days=days, limit=limit)
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
 
 
 @router.get(

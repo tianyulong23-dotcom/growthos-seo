@@ -15,6 +15,7 @@ from seo_workers.keywords.config import KeywordWorkerSettings
 from seo_workers.keywords.repository import KeywordRepository, create_pool
 from seo_workers.keywords.workflow import (
     KeywordBuildWorkflow,
+    KeywordCompetitorAnalysisWorkflow,
     KeywordMetricsRecoveryWorkflow,
 )
 
@@ -107,7 +108,11 @@ async def run_keyword_worker() -> None:
             1,
             min(settings.keyword_max_concurrent_activities, 32),
         ),
-        workflows=[KeywordBuildWorkflow, KeywordMetricsRecoveryWorkflow],
+        workflows=[
+            KeywordBuildWorkflow,
+            KeywordCompetitorAnalysisWorkflow,
+            KeywordMetricsRecoveryWorkflow,
+        ],
         activities=[
             activities.mark_started,
             activities.discover_seeds,
@@ -115,6 +120,12 @@ async def run_keyword_worker() -> None:
             activities.prepare_seeds,
             activities.fetch_competitor_gap,
             activities.validate_competitor,
+            activities.start_competitor_analysis,
+            activities.prepare_manual_competitors,
+            activities.discover_competitors,
+            activities.fetch_competitor_opportunities,
+            activities.finalize_competitor_analysis,
+            activities.fail_competitor_analysis,
             activities.prepare_topic_metrics,
             activities.commit_topics,
             activities.refresh_pending_metrics,

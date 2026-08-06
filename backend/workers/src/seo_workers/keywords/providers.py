@@ -4,7 +4,9 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import pycountry
@@ -94,9 +96,32 @@ class DataForSEOProviderConfig:
 
 
 @dataclass(frozen=True)
+class GSCProviderConfig:
+    project_id: str
+    site_url: str
+    refresh_token: str = field(repr=False)
+    client_id: str
+    client_secret: str = field(repr=False)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.site_url and self.refresh_token and self.client_id and self.client_secret)
+
+
+@dataclass(frozen=True)
 class DataForSEOBilling:
     cost_usd: float
     path: list[str]
+
+
+@dataclass(frozen=True)
+class GSCQueryRow:
+    query: str
+    clicks: float
+    impressions: float
+    ctr: float
+    position: float
+    raw_payload: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -112,12 +137,32 @@ class CompetitorGap:
     keyword: str
     provider_rank: int
     competitor_rank: int | None
+    own_rank: int | None
+    competitor_url: str | None
+    own_url: str | None
     search_volume: int | None
     cpc: float | None
     competition: float | None
     keyword_difficulty: int | None
     intent: str | None
     monthly_searches: list[dict[str, Any]]
+    raw_payload: dict[str, Any]
+    competition_level: str | None = None
+    metrics_fetched_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class DiscoveredCompetitor:
+    domain: str
+    provider_rank: int
+    avg_position: float | None
+    median_position: float | None
+    rating: float | None
+    etv: float | None
+    keywords_count: int | None
+    visibility: float | None
+    relevant_serp_items: int | None
+    keywords_positions: dict[str, Any]
     raw_payload: dict[str, Any]
 
 
@@ -299,6 +344,148 @@ def competitor_validation_schema(row_count: int) -> dict[str, Any]:
                 enum=gap_ids,
                 max_items=len(gap_ids),
             ),
+        }
+    )
+
+
+def competitive_query_selection_schema(candidate_count: int) -> dict[str, Any]:
+    ids = [f"q{index:03d}" for index in range(1, candidate_count + 1)]
+    return strict_object_schema(
+        {
+            "queries": {
+                "type": "array",
+                "minItems": 5,
+                "maxItems": 10,
+                "items": strict_object_schema(
+                    {
+                        "id": {"type": "string", "enum": ids},
+                        "intent": {
+                            "type": "string",
+                            "enum": [
+                                "informational",
+                                "commercial",
+                                "comparison",
+                                "transactional",
+                                "navigational",
+                            ],
+                        },
+                        "reason": {"type": "string"},
+                    }
+                ),
+            },
+            "directional": {"type": "boolean"},
+        }
+    )
+
+
+def competitive_domain_classification_schema(candidate_count: int) -> dict[str, Any]:
+    ids = [f"d{index:03d}" for index in range(1, candidate_count + 1)]
+    return strict_object_schema(
+        {
+            "domains": {
+                "type": "array",
+                "minItems": candidate_count,
+                "maxItems": candidate_count,
+                "items": strict_object_schema(
+                    {
+                        "id": {"type": "string", "enum": ids},
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "direct_product_competitor",
+                                "publisher_media",
+                                "marketplace_directory",
+                                "community_forum",
+                                "documentation_resource",
+                            ],
+                        },
+                        "is_seo_competitor": {"type": "boolean"},
+                        "is_business_competitor": {"type": "boolean"},
+                        "relevant_publisher": {"type": "boolean"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "why_they_matter": {"type": "string"},
+                        "site_relation": {
+                            "type": "string",
+                            "enum": ["related", "unrelated", "uncertain"],
+                        },
+                        "site_reason": {"type": "string"},
+                    }
+                ),
+            }
+        }
+    )
+
+
+def backlink_validation_schema(candidate_count: int) -> dict[str, Any]:
+    ids = [f"d{index:03d}" for index in range(1, candidate_count + 1)]
+    return strict_object_schema(
+        {
+            "domains": {
+                "type": "array",
+                "minItems": candidate_count,
+                "maxItems": candidate_count,
+                "items": strict_object_schema(
+                    {
+                        "id": {"type": "string", "enum": ids},
+                        "needed": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                    }
+                ),
+            }
+        }
+    )
+
+
+def competitive_landscape_summary_schema(domains: list[str]) -> dict[str, Any]:
+    domain_schema: dict[str, Any] = {"type": "string"}
+    if domains:
+        domain_schema["enum"] = domains
+    return strict_object_schema(
+        {
+            "market_read": {"type": "string"},
+            "market_leaders": {
+                "type": "array",
+                "items": strict_object_schema(
+                    {"domain": {"type": "string"}, "why": {"type": "string"}}
+                ),
+            },
+            "most_winnable_opportunity": {"type": "string"},
+            "biggest_barrier": {"type": "string"},
+            "content_formats": string_array_schema(),
+            "winning_themes": string_array_schema(),
+            "keyword_theme_gaps": string_array_schema(),
+            "backlink_authority_observations": string_array_schema(),
+            "competitor_findings": {
+                "type": "array",
+                "minItems": len(domains),
+                "maxItems": len(domains),
+                "items": strict_object_schema(
+                    {
+                        "domain": domain_schema,
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "direct_product_competitor",
+                                "publisher_media",
+                                "marketplace_directory",
+                                "community_forum",
+                                "documentation_resource",
+                            ],
+                        },
+                        "why_they_matter": {"type": "string"},
+                        "organic_footprint": {"type": "string"},
+                        "winning_themes": string_array_schema(),
+                        "weakness_gap": {"type": "string"},
+                    }
+                ),
+            },
+            "recommended_workflows": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["competitor_analysis", "keyword_clustering", "content_brief"],
+                },
+            },
         }
     )
 
@@ -767,8 +954,7 @@ def build_initial_library_filter_prompt(
     language: str,
 ) -> str:
     candidate_payload = [
-        [f"k{index:03d}", candidate.keyword]
-        for index, candidate in enumerate(candidates, start=1)
+        [f"k{index:03d}", candidate.keyword] for index, candidate in enumerate(candidates, start=1)
     ]
     profile_payload = compact_seed_profile(profile)
     business_model = str(profile_payload.get("model") or "mixed")
@@ -1250,6 +1436,7 @@ class JsonHttpClient:
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
         json_body: Any = None,
+        form_body: dict[str, Any] | None = None,
         auth: httpx.Auth | None = None,
         max_retries: int | None = None,
         paid_request: bool = False,
@@ -1263,6 +1450,7 @@ class JsonHttpClient:
                     headers=headers,
                     params=params,
                     json=json_body,
+                    data=form_body,
                     auth=auth,
                 )
             except (httpx.ConnectTimeout, httpx.ConnectError, httpx.PoolTimeout) as exc:
@@ -1312,6 +1500,80 @@ class JsonHttpClient:
                 )
             return payload, response
         raise AssertionError("unreachable")
+
+
+class GoogleSearchConsoleClient:
+    TOKEN_URL = "https://oauth2.googleapis.com/token"
+    API_BASE = "https://www.googleapis.com/webmasters/v3"
+
+    def __init__(self, http: JsonHttpClient, config: GSCProviderConfig) -> None:
+        self.http = http
+        self.config = config
+
+    async def query_performance(self, *, now: datetime | None = None) -> list[GSCQueryRow]:
+        if not self.config.configured:
+            raise ProviderError("gsc_not_connected", "Google Search Console 尚未连接")
+        token_payload, token_response = await self.http.request(
+            "POST",
+            self.TOKEN_URL,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            form_body={
+                "client_id": self.config.client_id,
+                "client_secret": self.config.client_secret,
+                "refresh_token": self.config.refresh_token,
+                "grant_type": "refresh_token",
+            },
+            max_retries=0,
+        )
+        if token_response.status_code in {400, 401, 403}:
+            raise ProviderError(
+                "gsc_reconnect_required",
+                "Search Console 授权已失效，请重新连接",
+            )
+        if token_response.status_code >= 400 or not isinstance(token_payload, dict):
+            raise ProviderError(
+                "gsc_token_error",
+                f"Google OAuth 返回 HTTP {token_response.status_code}",
+                transient=token_response.status_code >= 500,
+            )
+        access_token = str(token_payload.get("access_token") or "")
+        if not access_token:
+            raise ProviderError("gsc_reconnect_required", "Search Console 没有返回访问令牌")
+
+        today = (now or datetime.now(UTC)).astimezone(UTC)
+        end = today - timedelta(days=3)
+        start = end - timedelta(days=28)
+        payload, response = await self.http.request(
+            "POST",
+            f"{self.API_BASE}/sites/{quote(self.config.site_url, safe='')}/searchAnalytics/query",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json_body={
+                "startDate": start.date().isoformat(),
+                "endDate": end.date().isoformat(),
+                "dimensions": ["query"],
+                "rowLimit": 1000,
+                "type": "web",
+                "dataState": "all",
+            },
+            max_retries=1,
+        )
+        if response.status_code in {401, 403}:
+            raise ProviderError(
+                "gsc_reconnect_required",
+                "Search Console 无权读取所选 property，请重新连接",
+            )
+        if response.status_code >= 400 or not isinstance(payload, dict):
+            raise ProviderError(
+                "gsc_api_error",
+                f"Google Search Console 返回 HTTP {response.status_code}",
+                transient=response.status_code == 429 or response.status_code >= 500,
+            )
+        rows = payload.get("rows")
+        return [
+            parsed
+            for raw in (rows if isinstance(rows, list) else [])
+            if isinstance(raw, dict) and (parsed := parse_gsc_query_row(raw)) is not None
+        ]
 
 
 class OpenAICompatibleClient:
@@ -1615,6 +1877,203 @@ class OpenAICompatibleClient:
             response_schema=competitor_validation_schema(len(rows)),
         )
 
+    async def select_competitive_market_queries(
+        self,
+        *,
+        rows: list[GSCQueryRow],
+        profile: dict[str, Any],
+        country: str,
+        language: str,
+    ) -> AIResult:
+        candidates = rows
+        payload = [
+            {
+                "id": f"q{index:03d}",
+                "query": row.query,
+                "clicks": row.clicks,
+                "impressions": row.impressions,
+                "ctr": row.ctr,
+                "position": row.position,
+            }
+            for index, row in enumerate(candidates, start=1)
+        ]
+        prompt = (
+            "Follow the OpenSEO competitive-landscape workflow exactly. Select 5-10 "
+            "representative market queries from the supplied first-party Search Console rows. "
+            "Use only supplied ids. Cover informational, commercial, comparison, and "
+            "transactional/tool terms when those intents exist in the evidence. Prefer queries "
+            "that represent the site's actual products, services, audience and market, not brand "
+            "navigation or accidental traffic. Mark directional=true when the available query set "
+            "is too small or too concentrated for a firm market conclusion. When local_market is "
+            "present in the business profile, include city, neighborhood or service-area queries "
+            "that actually occur in the supplied GSC evidence.\n\n"
+            f"Country: {country}\nLanguage: {language}\n"
+            f"Business profile: {json.dumps(profile, ensure_ascii=False)}\n"
+            f"GSC query rows: {json.dumps(payload, ensure_ascii=False)}"
+        )
+        return await self._completion(
+            prompt,
+            max_tokens=5000,
+            schema_name="competitive_market_queries",
+            response_schema=competitive_query_selection_schema(len(candidates)),
+        )
+
+    async def classify_competitive_domains(
+        self,
+        *,
+        competitors: list[DiscoveredCompetitor],
+        serp_snapshots: list[dict[str, Any]],
+        query_metrics: list[dict[str, Any]],
+        profile: dict[str, Any],
+        country: str,
+        language: str,
+        site_verifications: dict[str, dict[str, Any]],
+    ) -> AIResult:
+        payload = [
+            {
+                "id": f"d{index:03d}",
+                "domain": row.domain,
+                "keywords_count": row.keywords_count,
+                "avg_position": row.avg_position,
+                "etv": row.etv,
+                "visibility": row.visibility,
+                "site_verification": site_verifications.get(row.domain.casefold(), {}),
+            }
+            for index, row in enumerate(competitors, start=1)
+        ]
+        prompt = (
+            "Follow the OpenSEO competitive-landscape domain grouping exactly. Classify every "
+            "candidate into one of: direct product competitors, publishers/media, "
+            "marketplaces/directories, communities/forums, or documentation/resources. "
+            "Explicitly distinguish an SEO competitor from a business competitor. A publisher "
+            "can be a relevant SEO competitor without being a product competitor. Use recurring "
+            "live SERP evidence, query intent, the business profile and provider metrics; do not "
+            "infer from a domain name alone. Return each supplied id exactly once.\n\n"
+            "Website verification evidence is authoritative for reachability, redirects and "
+            "page identity. Set site_relation=unrelated when the fetched site is a namesake or "
+            "cross-domain redirect unrelated to the supplied business profile. Set uncertain "
+            "when the site was blocked or temporarily unavailable. A direct product competitor "
+            "must have is_business_competitor=true; never label an app store, social profile, "
+            "login surface, parked domain or unrelated redirect as a direct competitor. When "
+            "local_market is present, weigh Maps or Local Finder recurrence, categories, address, "
+            "rating and review evidence separately from national organic visibility.\n\n"
+            f"Country: {country}\nLanguage: {language}\n"
+            f"Business profile: {json.dumps(profile, ensure_ascii=False)}\n"
+            f"Query metrics: {json.dumps(query_metrics, ensure_ascii=False)}\n"
+            f"Candidates: {json.dumps(payload, ensure_ascii=False)}\n"
+            f"Live SERP snapshots: {json.dumps(serp_snapshots, ensure_ascii=False)}"
+        )
+        return await self._completion(
+            prompt,
+            max_tokens=8000,
+            schema_name="competitive_domain_classification",
+            response_schema=competitive_domain_classification_schema(len(competitors)),
+        )
+
+    async def assess_backlink_validation_need(
+        self,
+        *,
+        competitors: list[dict[str, Any]],
+        profile: dict[str, Any],
+    ) -> AIResult:
+        payload = [
+            {
+                "id": f"d{index:03d}",
+                "domain": row.get("domain"),
+                "domain_type": row.get("domain_type"),
+                "why_they_matter": row.get("why_they_matter"),
+                "domain_overview": row.get("domain_overview"),
+            }
+            for index, row in enumerate(competitors, start=1)
+        ]
+        prompt = (
+            "Apply the OpenSEO competitive-landscape backlink guardrail exactly. For every "
+            "candidate, set needed=true only when backlink authority appears important to "
+            "explaining why that domain wins. Do not request backlinks merely to enrich the "
+            "record. Return every supplied id exactly once.\n\n"
+            f"Business profile: {json.dumps(profile, ensure_ascii=False)}\n"
+            f"Candidates: {json.dumps(payload, ensure_ascii=False)}"
+        )
+        return await self._completion(
+            prompt,
+            max_tokens=4000,
+            schema_name="competitive_backlink_validation",
+            response_schema=backlink_validation_schema(len(competitors)),
+        )
+
+    async def synthesize_competitive_landscape(
+        self,
+        *,
+        query_set: list[dict[str, Any]],
+        competitors: list[dict[str, Any]],
+        serp_snapshots: list[dict[str, Any]],
+        directional: bool,
+        profile: dict[str, Any],
+    ) -> AIResult:
+        prompt = (
+            "Produce the OpenSEO competitive-landscape output exactly from the supplied evidence. "
+            "Start with the market read: market leaders, most winnable opportunity, and biggest "
+            "barrier to ranking. Then identify content formats, winning themes, keyword/theme "
+            "gaps, backlink or authority observations, and recommended next workflows. Include "
+            "exactly one competitor_findings row per supplied domain with domain, type, why they "
+            "matter, organic footprint, winning themes, and weakness/gap. Keep SEO "
+            "competitors distinct from business competitors. Do not overstate estimated traffic. "
+            "For a local_market report, explicitly distinguish Maps/Local Finder winners from "
+            "national organic-page winners and use only the supplied local evidence. "
+            "If directional=true, explicitly say the small or concentrated query set makes the "
+            "result directional. Do not invent evidence.\n\n"
+            f"Directional: {directional}\n"
+            f"Business profile: {json.dumps(profile, ensure_ascii=False)}\n"
+            f"Query set: {json.dumps(query_set, ensure_ascii=False)}\n"
+            f"Live SERP snapshots: {json.dumps(serp_snapshots, ensure_ascii=False)}\n"
+            f"Competitor evidence: {json.dumps(competitors, ensure_ascii=False)}"
+        )
+        return await self._completion(
+            prompt,
+            max_tokens=16000,
+            schema_name="competitive_landscape_summary",
+            response_schema=competitive_landscape_summary_schema(
+                [str(row.get("domain") or "") for row in competitors]
+            ),
+        )
+
+    async def repair_competitive_landscape_summary(
+        self,
+        *,
+        query_set: list[dict[str, Any]],
+        competitors: list[dict[str, Any]],
+        serp_snapshots: list[dict[str, Any]],
+        directional: bool,
+        profile: dict[str, Any],
+        invalid_summary: dict[str, Any],
+        missing_domains: list[str],
+        duplicate_domains: list[str],
+    ) -> AIResult:
+        prompt = (
+            "Repair the supplied OpenSEO competitive-landscape output without changing its "
+            "evidence basis. The competitor_findings array failed structural validation. Return "
+            "the complete report with exactly one competitor_findings row for every supplied "
+            "competitor domain, no omissions and no duplicates. Preserve valid conclusions where "
+            "supported, and use only the supplied business profile, query, SERP and competitor "
+            "evidence. Do not invent facts.\n\n"
+            f"Missing domains: {json.dumps(missing_domains, ensure_ascii=False)}\n"
+            f"Duplicate domains: {json.dumps(duplicate_domains, ensure_ascii=False)}\n"
+            f"Directional: {directional}\n"
+            f"Business profile: {json.dumps(profile, ensure_ascii=False)}\n"
+            f"Query set: {json.dumps(query_set, ensure_ascii=False)}\n"
+            f"Live SERP snapshots: {json.dumps(serp_snapshots, ensure_ascii=False)}\n"
+            f"Competitor evidence: {json.dumps(competitors, ensure_ascii=False)}\n"
+            f"Invalid report to repair: {json.dumps(invalid_summary, ensure_ascii=False)}"
+        )
+        return await self._completion(
+            prompt,
+            max_tokens=16000,
+            schema_name="competitive_landscape_summary_repair",
+            response_schema=competitive_landscape_summary_schema(
+                [str(row.get("domain") or "") for row in competitors]
+            ),
+        )
+
     async def _completion(
         self,
         prompt: str,
@@ -1753,6 +2212,16 @@ class DataForSEOClient:
     KEYWORD_IDEAS_BROAD_SOURCE = "keyword_ideas_broad"
     KEYWORD_IDEAS_CLOSE_SOURCE = "keyword_ideas_close"
     DOMAIN_INTERSECTION_PATH = "dataforseo_labs/google/domain_intersection/live"
+    SERP_COMPETITORS_PATH = "dataforseo_labs/google/serp_competitors/live"
+    DOMAIN_OVERVIEW_PATH = "dataforseo_labs/google/domain_rank_overview/live"
+    RANKED_KEYWORDS_PATH = "dataforseo_labs/google/ranked_keywords/live"
+    LIVE_SERP_PATH = "serp/google/organic/live/advanced"
+    BUSINESS_LISTINGS_PATH = "business_data/business_listings/search/live"
+    BUSINESS_QUESTIONS_PATH = "business_data/google/questions_and_answers/live"
+    LOCAL_MAPS_PATH = "serp/google/maps/live/advanced"
+    LOCAL_FINDER_PATH = "serp/google/local_finder/live/advanced"
+    BACKLINKS_SUMMARY_PATH = "backlinks/summary/live"
+    REFERRING_DOMAINS_PATH = "backlinks/referring_domains/live"
 
     def __init__(self, config: DataForSEOProviderConfig, http: JsonHttpClient) -> None:
         self.config = config
@@ -1884,27 +2353,327 @@ class DataForSEOClient:
         country: str,
         language: str,
         limit: int = 200,
+        intersections: bool = False,
     ) -> tuple[list[CompetitorGap], DataForSEOBilling]:
         task, billing = await self._request(
             self.DOMAIN_INTERSECTION_PATH,
             {
                 "target1": competitor_domain,
                 "target2": domain,
-                "intersections": False,
+                "intersections": intersections,
                 "location_name": country_display_name(country),
                 "language_code": provider_language_code(language),
                 "limit": max(1, min(limit, 1000)),
+                "item_types": ["organic"],
                 "include_serp_info": False,
+                "order_by": ["keyword_data.keyword_info.search_volume,desc"],
                 "filters": [
                     ["first_domain_serp_element.type", "=", "organic"],
+                    *(
+                        [
+                            "and",
+                            ["second_domain_serp_element.type", "=", "organic"],
+                        ]
+                        if intersections
+                        else []
+                    ),
                 ],
             },
         )
         rows = [
-            parse_competitor_gap(raw, rank=index)
+            parse_competitor_gap(raw, rank=index, require_second=intersections)
             for index, raw in enumerate(labs_items(task), start=1)
         ]
         return deduplicate_gaps([row for row in rows if row is not None]), billing
+
+    async def serp_competitors(
+        self,
+        *,
+        keywords: list[str],
+        country: str,
+        language: str,
+        item_types: list[str] | None = None,
+        include_subdomains: bool | None = None,
+        limit: int = 50,
+        offset: int | None = None,
+    ) -> tuple[list[DiscoveredCompetitor], DataForSEOBilling]:
+        cleaned_keywords = [value.strip() for value in keywords if value.strip()]
+        if not 1 <= len(cleaned_keywords) <= 100:
+            raise ProviderError(
+                "dataforseo_serp_competitor_keywords_invalid",
+                "SERP Competitors 需要 1-100 个关键词",
+            )
+        if any(len(value) > 120 for value in cleaned_keywords):
+            raise ProviderError(
+                "dataforseo_serp_competitor_keyword_too_long",
+                "SERP Competitors 单个关键词不能超过 120 个字符",
+            )
+        allowed_types = {"organic", "paid", "featured_snippet", "local_pack"}
+        if item_types is not None and (
+            not item_types or any(value not in allowed_types for value in item_types)
+        ):
+            raise ProviderError(
+                "dataforseo_serp_competitor_item_types_invalid",
+                "SERP Competitors result types 无效",
+            )
+        request: dict[str, Any] = {
+            "keywords": cleaned_keywords,
+            "location_code": country_location_code(country),
+            "language_code": provider_language_code(language),
+            "limit": max(1, min(limit, 100)),
+        }
+        if item_types is not None:
+            request["item_types"] = item_types
+        if include_subdomains is not None:
+            request["include_subdomains"] = include_subdomains
+        if offset is not None:
+            request["offset"] = max(0, min(offset, 1000))
+        task, billing = await self._request(
+            self.SERP_COMPETITORS_PATH,
+            request,
+        )
+        rows = [
+            parse_discovered_competitor(raw, rank=index)
+            for index, raw in enumerate(labs_items(task), start=1)
+        ]
+        return [row for row in rows if row is not None], billing
+
+    async def live_serp(
+        self,
+        *,
+        keyword: str,
+        country: str,
+        language: str,
+    ) -> tuple[list[dict[str, Any]], DataForSEOBilling]:
+        task, billing = await self._request(
+            self.LIVE_SERP_PATH,
+            {
+                "keyword": keyword,
+                "location_code": country_location_code(country),
+                "language_code": provider_language_code(language),
+                "device": "desktop",
+                "os": "windows",
+                "depth": 100,
+            },
+        )
+        return [
+            {
+                "type": str(item.get("type") or ""),
+                "rank": integer(item.get("rank_absolute")) or integer(item.get("rank_group")),
+                "title": clean_string(item.get("title")),
+                "url": clean_string(item.get("url")),
+                "domain": clean_string(item.get("domain")),
+                "description": clean_string(item.get("description")),
+            }
+            for item in labs_items(task)[:20]
+        ], billing
+
+    async def local_businesses(
+        self,
+        *,
+        latitude: float,
+        longitude: float,
+        radius_km: float,
+        query: str | None,
+        categories: list[str],
+        limit: int = 20,
+    ) -> tuple[list[dict[str, Any]], DataForSEOBilling]:
+        request: dict[str, Any] = {
+            "location_coordinate": (
+                f"{coordinate_value(latitude)},{coordinate_value(longitude)},"
+                f"{coordinate_value(radius_km)}"
+            ),
+            "limit": max(1, min(limit, 50)),
+        }
+        if query and query.strip():
+            request["title"] = query.strip()
+        if categories:
+            request["categories"] = [value.strip() for value in categories[:10] if value.strip()]
+        task, billing = await self._request(self.BUSINESS_LISTINGS_PATH, request)
+        return labs_items(task), billing
+
+    async def local_serp(
+        self,
+        *,
+        keyword: str,
+        latitude: float,
+        longitude: float,
+        zoom: int,
+        language: str,
+        search_type: str = "maps",
+        device: str = "desktop",
+        depth: int = 20,
+    ) -> tuple[list[dict[str, Any]], DataForSEOBilling]:
+        if search_type not in {"maps", "local_finder"}:
+            raise ProviderError(
+                "dataforseo_local_search_type_invalid",
+                "本地 SERP 类型必须是 maps 或 local_finder",
+            )
+        if device not in {"desktop", "mobile"}:
+            raise ProviderError(
+                "dataforseo_local_device_invalid",
+                "本地 SERP 设备必须是 desktop 或 mobile",
+            )
+        path = self.LOCAL_MAPS_PATH if search_type == "maps" else self.LOCAL_FINDER_PATH
+        request = {
+            "keyword": keyword.strip(),
+            "location_coordinate": (
+                f"{coordinate_value(latitude)},{coordinate_value(longitude)},"
+                f"{max(4, min(int(zoom), 18))}z"
+            ),
+            "language_code": provider_language_code(language),
+            "device": device,
+            "os": "windows" if device == "desktop" else "android",
+            "depth": max(1, min(int(depth), 100)),
+        }
+        if search_type == "maps":
+            request["search_places"] = False
+        task, billing = await self._request(path, request)
+        return labs_items(task), billing
+
+    async def business_questions(
+        self,
+        *,
+        keyword: str,
+        latitude: float,
+        longitude: float,
+        radius_km: float,
+        language: str,
+        depth: int = 20,
+    ) -> tuple[list[dict[str, Any]], DataForSEOBilling]:
+        radius_meters = max(200, min(round(float(radius_km) * 1000), 199999))
+        task, billing = await self._request(
+            self.BUSINESS_QUESTIONS_PATH,
+            {
+                "keyword": keyword.strip(),
+                "location_coordinate": (
+                    f"{coordinate_value(latitude)},{coordinate_value(longitude)},{radius_meters}"
+                ),
+                "language_code": provider_language_code(language),
+                "depth": max(1, min(int(depth), 100)),
+            },
+        )
+        results = task.get("result")
+        questions: list[dict[str, Any]] = []
+        for result in results if isinstance(results, list) else []:
+            if not isinstance(result, dict):
+                continue
+            for key in ("items", "items_without_answers"):
+                values = result.get(key)
+                questions.extend(item for item in values or [] if isinstance(item, dict))
+        return questions, billing
+
+    async def domain_overview(
+        self,
+        *,
+        domain: str,
+        country: str,
+        language: str,
+    ) -> tuple[dict[str, Any], DataForSEOBilling]:
+        task, billing = await self._request(
+            self.DOMAIN_OVERVIEW_PATH,
+            {
+                "target": domain,
+                "location_code": country_location_code(country),
+                "language_code": provider_language_code(language),
+                "limit": 1,
+            },
+        )
+        item = labs_items(task)
+        raw = item[0] if item else {}
+        metrics = raw.get("metrics") if isinstance(raw, dict) else {}
+        organic = metrics.get("organic") if isinstance(metrics, dict) else {}
+        return {
+            "domain": domain,
+            "organic_traffic": number(organic.get("etv")) if isinstance(organic, dict) else None,
+            "organic_keywords": integer(organic.get("count"))
+            if isinstance(organic, dict)
+            else None,
+            "has_data": bool(
+                isinstance(organic, dict) and (integer(organic.get("count")) or 0) > 0
+            ),
+            "raw": raw,
+        }, billing
+
+    async def ranked_keywords(
+        self,
+        *,
+        domain: str,
+        country: str,
+        language: str,
+        limit: int = 50,
+    ) -> tuple[list[dict[str, Any]], DataForSEOBilling]:
+        task, billing = await self._request(
+            self.RANKED_KEYWORDS_PATH,
+            {
+                "target": domain,
+                "location_code": country_location_code(country),
+                "language_code": provider_language_code(language),
+                "limit": max(1, min(limit, 1000)),
+                "order_by": ["keyword_data.keyword_info.search_volume,desc"],
+                "item_types": ["organic"],
+                "include_subdomains": True,
+            },
+        )
+        return labs_items(task), billing
+
+    async def backlinks_overview(
+        self,
+        *,
+        domain: str,
+    ) -> tuple[dict[str, Any], DataForSEOBilling]:
+        summary_task, summary_billing = await self._request(
+            self.BACKLINKS_SUMMARY_PATH,
+            {
+                "target": domain,
+                "include_subdomains": True,
+                "include_indirect_links": True,
+                "exclude_internal_backlinks": True,
+                "backlinks_status_type": "live",
+                "rank_scale": "one_hundred",
+            },
+        )
+        try:
+            referring_task, referring_billing = await self._request(
+                self.REFERRING_DOMAINS_PATH,
+                {
+                    "target": domain,
+                    "include_subdomains": True,
+                    "include_indirect_links": True,
+                    "exclude_internal_backlinks": True,
+                    "backlinks_status_type": "live",
+                    "rank_scale": "one_hundred",
+                    "limit": 100,
+                    "order_by": ["backlinks,desc"],
+                    "filters": [["backlinks_spam_score", "<=", 45]],
+                },
+            )
+        except ProviderError as exc:
+            confirmed_cost = summary_billing.cost_usd + exc.cost_usd
+            raise ProviderError(
+                exc.code,
+                str(exc),
+                transient=exc.transient and confirmed_cost <= 0,
+                failure_status=(CHARGED_FAILURE if confirmed_cost > 0 else exc.failure_status),
+                cost_usd=confirmed_cost,
+                path=summary_billing.path + exc.path,
+                metadata=exc.metadata,
+            ) from exc
+        summary_results = summary_task.get("result")
+        summary = (
+            summary_results[0]
+            if isinstance(summary_results, list)
+            and summary_results
+            and isinstance(summary_results[0], dict)
+            else {}
+        )
+        return {
+            "summary": summary,
+            "referring_domains": labs_items(referring_task),
+        }, DataForSEOBilling(
+            cost_usd=summary_billing.cost_usd + referring_billing.cost_usd,
+            path=summary_billing.path + referring_billing.path,
+        )
 
     async def _request(
         self,
@@ -2044,7 +2813,9 @@ def parse_google_ads_keyword(raw: Any, *, rank: int) -> RawKeyword | None:
     )
 
 
-def parse_competitor_gap(raw: Any, *, rank: int) -> CompetitorGap | None:
+def parse_competitor_gap(
+    raw: Any, *, rank: int, require_second: bool = False
+) -> CompetitorGap | None:
     parsed = parse_labs_keyword(raw, source="competitor_gap", rank=rank)
     if parsed is None:
         return None
@@ -2055,17 +2826,100 @@ def parse_competitor_gap(raw: Any, *, rank: int) -> CompetitorGap | None:
     if result_type and result_type.casefold() != "organic":
         return None
     competitor_rank = find_rank(first_domain)
+    second_domain = raw.get("second_domain_serp_element") if isinstance(raw, dict) else None
+    if require_second:
+        if not isinstance(second_domain, dict):
+            return None
+        second_type = clean_string(second_domain.get("type"))
+        if second_type and second_type.casefold() != "organic":
+            return None
+    keyword_data = raw.get("keyword_data") if isinstance(raw, dict) else None
+    keyword_data = keyword_data if isinstance(keyword_data, dict) else raw
+    keyword_info = keyword_data.get("keyword_info") if isinstance(keyword_data, dict) else None
+    keyword_info = keyword_info if isinstance(keyword_info, dict) else {}
     return CompetitorGap(
         keyword=parsed.keyword,
         provider_rank=rank,
         competitor_rank=competitor_rank,
+        own_rank=find_rank(second_domain),
+        competitor_url=clean_string(first_domain.get("url")),
+        own_url=(
+            clean_string(second_domain.get("url")) if isinstance(second_domain, dict) else None
+        ),
         search_volume=parsed.search_volume,
         cpc=parsed.cpc,
         competition=parsed.competition,
+        competition_level=clean_string(keyword_info.get("competition_level")),
         keyword_difficulty=parsed.keyword_difficulty,
         intent=parsed.intent,
         monthly_searches=parsed.monthly_searches,
         raw_payload=raw,
+    )
+
+
+def parse_discovered_competitor(raw: Any, *, rank: int) -> DiscoveredCompetitor | None:
+    if not isinstance(raw, dict):
+        return None
+    value = clean_string(raw.get("domain"))
+    if value is None:
+        return None
+    domain = value.casefold().rstrip(".")
+    if not domain or "." not in domain:
+        return None
+    positions = raw.get("keywords_positions")
+    return DiscoveredCompetitor(
+        domain=domain,
+        provider_rank=rank,
+        avg_position=number(raw.get("avg_position")),
+        median_position=number(raw.get("median_position")),
+        rating=number(raw.get("rating")),
+        etv=number(raw.get("etv")),
+        keywords_count=integer(raw.get("keywords_count")),
+        visibility=number(raw.get("visibility")),
+        relevant_serp_items=integer(raw.get("relevant_serp_items")),
+        keywords_positions=dict(positions) if isinstance(positions, dict) else {},
+        raw_payload=raw,
+    )
+
+
+def parse_gsc_query_row(raw: dict[str, Any]) -> GSCQueryRow | None:
+    keys = raw.get("keys")
+    query = str(keys[0] if isinstance(keys, list) and keys else "").strip()
+    if not query or len(query) > 120:
+        return None
+    return GSCQueryRow(
+        query=query,
+        clicks=number(raw.get("clicks")) or 0.0,
+        impressions=number(raw.get("impressions")) or 0.0,
+        ctr=number(raw.get("ctr")) or 0.0,
+        position=number(raw.get("position")) or 0.0,
+        raw_payload=raw,
+    )
+
+
+def host_matches_domain(host: str, domain: str) -> bool:
+    normalized_host = host.removeprefix("www.").casefold()
+    normalized_domain = domain.removeprefix("www.").casefold()
+    return normalized_host == normalized_domain or normalized_host.endswith(f".{normalized_domain}")
+
+
+def is_same_domain(host: str, domain: str) -> bool:
+    return host.removeprefix("www.").casefold() == domain.removeprefix("www.").casefold()
+
+
+def sort_serp_competitors(
+    rows: list[DiscoveredCompetitor], sort_by: str = "visibility"
+) -> list[DiscoveredCompetitor]:
+    field = {
+        "avg_position": "avg_position",
+        "keyword_count": "keywords_count",
+        "traffic_estimate": "etv",
+    }.get(sort_by, "visibility")
+    reverse = sort_by != "avg_position"
+    return sorted(
+        rows,
+        key=lambda row: float(getattr(row, field) or 0),
+        reverse=reverse,
     )
 
 
@@ -2078,6 +2932,10 @@ def labs_items(task: dict[str, Any]) -> list[dict[str, Any]]:
         items = first.get("items")
         return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     return []
+
+
+def coordinate_value(value: float) -> str:
+    return f"{float(value):.7f}".rstrip("0").rstrip(".")
 
 
 def find_rank(value: Any) -> int | None:
@@ -2145,6 +3003,13 @@ def country_display_name(country: str) -> str:
     if value is None:
         raise ProviderError("unsupported_country", f"不支持国家 {country}")
     return str(value.name)
+
+
+def country_location_code(country: str) -> int:
+    value = pycountry.countries.get(alpha_2=country.strip().upper())
+    if value is None or not value.numeric:
+        raise ProviderError("unsupported_country", f"不支持国家 {country}")
+    return 2000 + int(value.numeric)
 
 
 def assert_dataforseo_ok(payload: dict[str, Any]) -> None:

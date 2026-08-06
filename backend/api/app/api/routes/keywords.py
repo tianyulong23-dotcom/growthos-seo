@@ -6,7 +6,13 @@ from app.modules.keywords.schemas import (
     KeywordBatchStatusRequest,
     KeywordBatchStatusResponse,
     KeywordBuildRunResponse,
-    KeywordCompetitorGapListResponse,
+    KeywordCompetitorAnalysisRequest,
+    KeywordCompetitorAnalysisRunResponse,
+    KeywordCompetitorAnalysisRunListResponse,
+    KeywordCompetitorListResponse,
+    KeywordCompetitorOpportunityBatchRequest,
+    KeywordCompetitorOpportunityBatchResponse,
+    KeywordCompetitorOpportunityListResponse,
     KeywordCostSummaryResponse,
     KeywordExternalIssueListResponse,
     KeywordExternalIssueResponse,
@@ -17,7 +23,10 @@ from app.modules.keywords.schemas import (
 )
 from app.modules.keywords.service import (
     KeywordBuildAlreadyRunningError,
+    KeywordCompetitorAnalysisAlreadyRunningError,
+    KeywordCompetitorOpportunityUnavailableError,
     KeywordExternalIssueUnavailableError,
+    KeywordGSCRequiredError,
     KeywordProjectNotFoundError,
     KeywordRetryUnavailableError,
     KeywordService,
@@ -145,23 +154,162 @@ async def list_keywords(
         ) from exc
 
 
-@router.get("/gaps", response_model=KeywordCompetitorGapListResponse)
-async def list_keyword_competitor_gaps(
+@router.post(
+    "/competitor-analysis",
+    response_model=KeywordCompetitorAnalysisRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_keyword_competitor_analysis(
+    project_id: str,
+    request: KeywordCompetitorAnalysisRequest,
+    service: Annotated[KeywordService, Depends(get_keyword_service)],
+) -> KeywordCompetitorAnalysisRunResponse:
+    try:
+        return await service.start_competitor_analysis(project_id, request)
+    except KeywordProjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在",
+        ) from exc
+    except KeywordCompetitorAnalysisAlreadyRunningError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="竞争分析正在进行中",
+        ) from exc
+    except KeywordGSCRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/competitor-analysis/status",
+    response_model=KeywordCompetitorAnalysisRunResponse | None,
+)
+async def get_keyword_competitor_analysis_status(
+    project_id: str,
+    service: Annotated[KeywordService, Depends(get_keyword_service)],
+) -> KeywordCompetitorAnalysisRunResponse | None:
+    try:
+        return await service.competitor_analysis_status(project_id)
+    except KeywordProjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在",
+        ) from exc
+
+
+@router.get(
+    "/competitor-analysis/competitors",
+    response_model=KeywordCompetitorListResponse,
+)
+async def list_keyword_competitors(
+    project_id: str,
+    service: Annotated[KeywordService, Depends(get_keyword_service)],
+    include_evidence: bool = False,
+) -> KeywordCompetitorListResponse:
+    try:
+        return await service.list_competitors(project_id, include_evidence=include_evidence)
+    except KeywordProjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在",
+        ) from exc
+
+
+@router.get(
+    "/competitor-analysis/opportunities",
+    response_model=KeywordCompetitorOpportunityListResponse,
+)
+async def list_keyword_competitor_opportunities(
     project_id: str,
     service: Annotated[KeywordService, Depends(get_keyword_service)],
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 50,
-) -> KeywordCompetitorGapListResponse:
+    search: str = "",
+    competitor_domain: str = "",
+    intent: str = "",
+    opportunity_status: Literal["new", "accepted", "dismissed", "all"] = "new",
+    min_volume: Annotated[int | None, Query(ge=0)] = None,
+    max_difficulty: Annotated[int | None, Query(ge=0, le=100)] = None,
+    in_library: bool | None = None,
+    sort: Literal[
+        "keyword",
+        "opportunity_score",
+        "search_volume",
+        "difficulty",
+        "best_rank",
+        "competitor_count",
+        "updated_at",
+    ] = "opportunity_score",
+    order: Literal["asc", "desc"] = "desc",
+) -> KeywordCompetitorOpportunityListResponse:
     try:
-        return await service.list_competitor_gaps(
+        return await service.list_competitor_opportunities(
             project_id,
             page=page,
             page_size=page_size,
+            search=search,
+            competitor_domain=competitor_domain,
+            intent=intent,
+            opportunity_status=opportunity_status,
+            min_volume=min_volume,
+            max_difficulty=max_difficulty,
+            in_library=in_library,
+            sort=sort,
+            order=order,
         )
     except KeywordProjectNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="项目不存在",
+        ) from exc
+
+
+@router.get(
+    "/competitor-analysis/runs",
+    response_model=KeywordCompetitorAnalysisRunListResponse,
+)
+async def list_keyword_competitor_analysis_runs(
+    project_id: str,
+    service: Annotated[KeywordService, Depends(get_keyword_service)],
+    limit: Annotated[int, Query(ge=1, le=20)] = 10,
+) -> KeywordCompetitorAnalysisRunListResponse:
+    try:
+        return await service.competitor_analysis_runs(project_id, limit=limit)
+    except KeywordProjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在",
+        ) from exc
+
+
+@router.patch(
+    "/competitor-analysis/opportunities",
+    response_model=KeywordCompetitorOpportunityBatchResponse,
+)
+async def update_keyword_competitor_opportunities(
+    project_id: str,
+    request: KeywordCompetitorOpportunityBatchRequest,
+    service: Annotated[KeywordService, Depends(get_keyword_service)],
+) -> KeywordCompetitorOpportunityBatchResponse:
+    try:
+        return await service.batch_competitor_opportunities(project_id, request)
+    except KeywordProjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在",
+        ) from exc
+    except KeywordCompetitorOpportunityUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="机会缺口已失效，或关键词库尚未完成初始化",
         ) from exc
 
 

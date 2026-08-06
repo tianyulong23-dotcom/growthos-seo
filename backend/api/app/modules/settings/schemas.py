@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 import re
 from typing import Literal
 from urllib.parse import urlsplit
@@ -184,3 +184,53 @@ class TestDataForSEOSettingsResponse(BaseModel):
     success: bool
     message: str
     balance: float | None = None
+
+
+class GSCConnectionResponse(BaseModel):
+    oauth_configured: bool
+    oauth_redirect_uri: str
+    grant_connected: bool
+    property_connected: bool
+    site_url: str | None = None
+    connected_account_email: str | None = None
+    requires_reconnect: bool = False
+
+
+class GSCOAuthStartRequest(BaseModel):
+    callback_url: str = Field(min_length=1, max_length=2048)
+
+
+class GSCOAuthStartResponse(BaseModel):
+    authorization_url: str
+
+
+class GSCSiteResponse(BaseModel):
+    site_url: str
+    permission_level: str
+
+
+class GSCSiteListResponse(BaseModel):
+    items: list[GSCSiteResponse] = Field(default_factory=list)
+
+
+class GSCSelectSiteRequest(BaseModel):
+    site_url: str = Field(min_length=1, max_length=2048)
+
+
+class GSCPerformanceTotals(BaseModel):
+    clicks: float = 0
+    impressions: float = 0
+    ctr: float = 0
+    position: float = 0
+
+
+class GSCPerformanceRow(GSCPerformanceTotals):
+    query: str
+
+
+class GSCPerformanceResponse(BaseModel):
+    site_url: str
+    start_date: date
+    end_date: date
+    totals: GSCPerformanceTotals
+    rows: list[GSCPerformanceRow] = Field(default_factory=list)

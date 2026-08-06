@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -146,6 +148,33 @@ func Run(ctx context.Context) error {
 			config.BrowserExecutable,
 		)
 	}
+	probeService, closeProbeService, err := crawler.NewProbeService(config)
+	if err != nil {
+		return err
+	}
+	defer closeProbeService()
+	probeListener, err := net.Listen("tcp", config.ProbeListenAddress)
+	if err != nil {
+		return err
+	}
+	probeServer := &http.Server{
+		Handler:           probeService,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       30 * time.Second,
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = probeServer.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		if serveErr := probeServer.Serve(probeListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			slog.Error("crawler probe server stopped", "error", serveErr)
+		}
+	}()
+	slog.Info("crawler probe server started", "address", config.ProbeListenAddress)
 	store, err := crawler.NewProductionStore(ctx, config)
 	if err != nil {
 		return err

@@ -57,6 +57,7 @@ type Config struct {
 	BusinessProfileAITimeout        time.Duration
 	BusinessProfileAIMaxRetries     int
 	AISettingsEncryptionKey         string
+	ProbeListenAddress              string
 }
 
 func LoadConfig() Config {
@@ -145,6 +146,10 @@ func LoadConfig() Config {
 			1,
 		),
 		AISettingsEncryptionKey: os.Getenv("AI_SETTINGS_ENCRYPTION_KEY"),
+		ProbeListenAddress: envString(
+			"CRAWLER_PROBE_LISTEN_ADDRESS",
+			":8091",
+		),
 	}
 }
 

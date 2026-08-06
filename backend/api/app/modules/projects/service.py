@@ -27,10 +27,19 @@ from app.modules.audit.service import (
     progress_percentage,
 )
 from app.modules.crawling.models import CrawlRun, Page
-from app.modules.keywords.models import KeywordBuildRun, KeywordWorkflowDispatch
+from app.modules.keywords.models import (
+    KeywordBuildRun,
+    KeywordCompetitorAnalysisDispatch,
+    KeywordCompetitorAnalysisRun,
+    KeywordWorkflowDispatch,
+)
 from app.modules.keywords.service import (
     KeywordBootstrapRecord,
+    KeywordCompetitorAnalysisBootstrapRecord,
+    build_competitor_analysis_bootstrap,
     build_initial_keyword_bootstrap,
+    competitor_analysis_dispatch_from_bootstrap,
+    competitor_analysis_run_from_bootstrap,
     keyword_dispatch_from_bootstrap,
     keyword_run_from_bootstrap,
 )
@@ -160,6 +169,7 @@ class ProjectRepository(Protocol):
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
         keyword_bootstrap: KeywordBootstrapRecord,
+        competitor_bootstrap: KeywordCompetitorAnalysisBootstrapRecord | None = None,
     ) -> None: ...
 
     async def list(self, organization_id: str) -> list[ProjectRecord]: ...
@@ -241,6 +251,7 @@ class SQLAlchemyProjectRepository:
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
         keyword_bootstrap: KeywordBootstrapRecord,
+        competitor_bootstrap: KeywordCompetitorAnalysisBootstrapRecord | None = None,
     ) -> None:
         async with self.sessions() as session:
             session.add(
@@ -281,8 +292,13 @@ class SQLAlchemyProjectRepository:
                 )
             )
             session.add(keyword_run_from_bootstrap(keyword_bootstrap))
-            session.add(keyword_dispatch_from_bootstrap(keyword_bootstrap))
+            if competitor_bootstrap is not None:
+                session.add(competitor_analysis_run_from_bootstrap(competitor_bootstrap))
             try:
+                await session.flush()
+                session.add(keyword_dispatch_from_bootstrap(keyword_bootstrap))
+                if competitor_bootstrap is not None:
+                    session.add(competitor_analysis_dispatch_from_bootstrap(competitor_bootstrap))
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
@@ -595,7 +611,20 @@ class SQLAlchemyProjectRepository:
                     KeywordWorkflowDispatch.status == "dispatched",
                 )
             )
-            return list(workflow_ids.all())
+            competitor_workflow_ids = await session.scalars(
+                select(KeywordCompetitorAnalysisDispatch.workflow_id)
+                .join(
+                    KeywordCompetitorAnalysisRun,
+                    KeywordCompetitorAnalysisRun.id == KeywordCompetitorAnalysisDispatch.run_id,
+                )
+                .where(
+                    KeywordCompetitorAnalysisRun.organization_id == organization_id,
+                    KeywordCompetitorAnalysisRun.project_id == project_id,
+                    KeywordCompetitorAnalysisRun.status.in_(("queued", "running")),
+                    KeywordCompetitorAnalysisDispatch.status == "dispatched",
+                )
+            )
+            return [*workflow_ids.all(), *competitor_workflow_ids.all()]
 
     async def delete(
         self,
@@ -709,11 +738,27 @@ class ProjectService:
             project_id=project.id,
             created_at=created_at,
         )
+        competitor_bootstrap = (
+            build_competitor_analysis_bootstrap(
+                organization_id=project.organization_id,
+                project_id=project.id,
+                target_domain=project.domain,
+                country=project.country,
+                language=project.language,
+                analysis_mode="manual",
+                competitor_domains=[competitor_domain],
+                local_market={},
+                created_at=created_at,
+            )
+            if competitor_domain
+            else None
+        )
         await self.repository.create_with_understanding_run(
             project,
             run,
             dispatch,
             keyword_bootstrap,
+            competitor_bootstrap,
         )
         await self._dispatch(dispatch)
         current = await self.repository.get(project.organization_id, project.id)

@@ -12,6 +12,8 @@ from app.modules.keywords.schemas import (
 )
 from app.modules.keywords.service import (
     KeywordActiveWorkflowRecord,
+    KeywordCompetitorAnalysisActiveWorkflowRecord,
+    KeywordCompetitorAnalysisDispatchRecord,
     KeywordDispatchRecord,
     KeywordMetricActiveWorkflowRecord,
     KeywordMetricDispatchRecord,
@@ -67,6 +69,8 @@ class RecoveryRepository:
         self.active_workflows: list[KeywordActiveWorkflowRecord] = []
         self.pending_metric_dispatches: list[KeywordMetricDispatchRecord] = []
         self.active_metric_workflows: list[KeywordMetricActiveWorkflowRecord] = []
+        self.active_competitor_workflows: list[KeywordCompetitorAnalysisActiveWorkflowRecord] = []
+        self.pending_competitor_dispatches: list[KeywordCompetitorAnalysisDispatchRecord] = []
         self.retry_calls: list[tuple[str, str]] = []
         self.requeue_calls: list[tuple[str, str]] = []
         self.checked_calls: list[tuple[str, str]] = []
@@ -76,6 +80,10 @@ class RecoveryRepository:
         self.metric_dispatch_failures: list[tuple[str, str, str]] = []
         self.metric_requeue_calls: list[tuple[str, str]] = []
         self.metric_checked_calls: list[tuple[str, str]] = []
+        self.competitor_requeue_calls: list[tuple[str, str]] = []
+        self.competitor_checked_calls: list[tuple[str, str]] = []
+        self.competitor_dispatch_successes: list[tuple[str, str]] = []
+        self.competitor_dispatch_failures: list[tuple[str, str, str]] = []
         self.resume_calls: list[str] = []
         self.stale_settlements = 0
         self.cleanup_calls: list[int] = []
@@ -110,6 +118,28 @@ class RecoveryRepository:
     ) -> list[KeywordMetricDispatchRecord]:
         return self.pending_metric_dispatches[:limit]
 
+    async def claim_pending_competitor_analysis_dispatches(
+        self, limit: int
+    ) -> list[KeywordCompetitorAnalysisDispatchRecord]:
+        return self.pending_competitor_dispatches[:limit]
+
+    async def mark_competitor_analysis_dispatch_succeeded(
+        self,
+        run_id: str,
+        *,
+        expected_workflow_id: str,
+    ) -> None:
+        self.competitor_dispatch_successes.append((run_id, expected_workflow_id))
+
+    async def record_competitor_analysis_dispatch_failure(
+        self,
+        run_id: str,
+        *,
+        expected_workflow_id: str,
+        message: str,
+    ) -> None:
+        self.competitor_dispatch_failures.append((run_id, expected_workflow_id, message))
+
     async def resume_ready_blocked_runs(
         self,
         organization_id: str,
@@ -139,9 +169,7 @@ class RecoveryRepository:
         expected_workflow_id: str,
         message: str,
     ) -> None:
-        self.metric_dispatch_failures.append(
-            (run_id, expected_workflow_id, message)
-        )
+        self.metric_dispatch_failures.append((run_id, expected_workflow_id, message))
 
     async def list_active_workflows(
         self,
@@ -158,6 +186,14 @@ class RecoveryRepository:
     ) -> list[KeywordMetricActiveWorkflowRecord]:
         assert organization_id == "test-org"
         return self.active_metric_workflows[:limit]
+
+    async def list_active_competitor_analysis_workflows(
+        self,
+        organization_id: str,
+        limit: int,
+    ) -> list[KeywordCompetitorAnalysisActiveWorkflowRecord]:
+        assert organization_id == "test-org"
+        return self.active_competitor_workflows[:limit]
 
     async def requeue_orphaned_workflow(
         self,
@@ -194,6 +230,25 @@ class RecoveryRepository:
         expected_workflow_id: str,
     ) -> None:
         self.metric_checked_calls.append((run_id, expected_workflow_id))
+
+    async def requeue_orphaned_competitor_analysis_workflow(
+        self,
+        run_id: str,
+        *,
+        expected_workflow_id: str,
+        max_recoveries: int,
+    ) -> bool:
+        assert max_recoveries == 3
+        self.competitor_requeue_calls.append((run_id, expected_workflow_id))
+        return True
+
+    async def mark_competitor_analysis_workflow_checked(
+        self,
+        run_id: str,
+        *,
+        expected_workflow_id: str,
+    ) -> None:
+        self.competitor_checked_calls.append((run_id, expected_workflow_id))
 
     async def settle_stale_external_requests(self) -> int:
         self.stale_settlements += 1
@@ -241,12 +296,16 @@ class RecoveryLauncher:
         self.state_calls: list[str] = []
         self.start_calls: list[tuple[dict[str, Any], str]] = []
         self.metric_start_calls: list[tuple[dict[str, Any], str]] = []
+        self.competitor_start_calls: list[tuple[dict[str, Any], str]] = []
 
     async def start(self, task: dict[str, Any], workflow_id: str) -> None:
         self.start_calls.append((task, workflow_id))
 
     async def start_metrics(self, task: dict[str, Any], workflow_id: str) -> None:
         self.metric_start_calls.append((task, workflow_id))
+
+    async def start_competitor_analysis(self, task: dict[str, Any], workflow_id: str) -> None:
+        self.competitor_start_calls.append((task, workflow_id))
 
     async def cancel(self, workflow_id: str) -> None:
         return None
@@ -310,12 +369,8 @@ async def test_reconcile_requeues_confirmed_orphaned_workflows(
     reconciled = await service.reconcile_active_runs()
 
     assert reconciled == 1
-    assert repository.requeue_calls == [
-        ("run-1", "keywords:build:run-1")
-    ]
-    assert repository.checked_calls == [
-        ("run-1", "keywords:build:run-1")
-    ]
+    assert repository.requeue_calls == [("run-1", "keywords:build:run-1")]
+    assert repository.checked_calls == [("run-1", "keywords:build:run-1")]
     assert launcher.start_calls == []
 
 
@@ -339,9 +394,7 @@ async def test_reconcile_never_requeues_when_temporal_state_is_unknown() -> None
     assert launcher.state_calls == ["keywords:build:run-1"]
     assert repository.requeue_calls == []
     assert launcher.start_calls == []
-    assert repository.checked_calls == [
-        ("run-1", "keywords:build:run-1")
-    ]
+    assert repository.checked_calls == [("run-1", "keywords:build:run-1")]
 
 
 async def test_reconcile_leaves_pending_dispatch_to_the_dispatch_loop() -> None:
@@ -363,9 +416,7 @@ async def test_reconcile_leaves_pending_dispatch_to_the_dispatch_loop() -> None:
     assert launcher.state_calls == []
     assert repository.requeue_calls == []
     assert launcher.start_calls == []
-    assert repository.checked_calls == [
-        ("run-1", "keywords:build:run-1")
-    ]
+    assert repository.checked_calls == [("run-1", "keywords:build:run-1")]
 
 
 async def test_reconcile_does_not_requeue_a_recently_missing_workflow() -> None:
@@ -387,9 +438,7 @@ async def test_reconcile_does_not_requeue_a_recently_missing_workflow() -> None:
     assert reconciled == 0
     assert launcher.state_calls == ["keywords:build:run-1"]
     assert repository.requeue_calls == []
-    assert repository.checked_calls == [
-        ("run-1", "keywords:build:run-1")
-    ]
+    assert repository.checked_calls == [("run-1", "keywords:build:run-1")]
 
 
 async def test_reconcile_waits_for_worker_without_querying_temporal() -> None:
@@ -429,9 +478,7 @@ async def test_dispatch_checks_blocked_runs_before_starting_pending_workflows() 
 
     assert dispatched == 1
     assert repository.resume_calls == ["test-org"]
-    assert launcher.start_calls == [
-        ({"run_id": "run-1"}, "keywords:build:run-1")
-    ]
+    assert launcher.start_calls == [({"run_id": "run-1"}, "keywords:build:run-1")]
 
 
 async def test_dispatch_starts_due_metric_recovery_workflow() -> None:
@@ -459,9 +506,7 @@ async def test_dispatch_starts_due_metric_recovery_workflow() -> None:
             "keyword-metrics:run-1:1",
         )
     ]
-    assert repository.metric_dispatch_successes == [
-        ("run-1", "keyword-metrics:run-1:1")
-    ]
+    assert repository.metric_dispatch_successes == [("run-1", "keyword-metrics:run-1:1")]
 
 
 async def test_metric_dispatch_failure_is_persisted_for_retry() -> None:
@@ -488,6 +533,30 @@ async def test_metric_dispatch_failure_is_persisted_for_retry() -> None:
     ]
 
 
+async def test_competitor_dispatch_acknowledges_the_expected_workflow() -> None:
+    service, repository, launcher = build_service()
+    repository.pending_competitor_dispatches = [
+        KeywordCompetitorAnalysisDispatchRecord(
+            run_id="analysis-1",
+            workflow_id="keywords:competitor-analysis:analysis-1:replacement",
+            task_payload={"run_id": "analysis-1"},
+        )
+    ]
+
+    dispatched = await service.dispatch_pending_workflows()
+
+    assert dispatched == 1
+    assert launcher.competitor_start_calls == [
+        (
+            {"run_id": "analysis-1"},
+            "keywords:competitor-analysis:analysis-1:replacement",
+        )
+    ]
+    assert repository.competitor_dispatch_successes == [
+        ("analysis-1", "keywords:competitor-analysis:analysis-1:replacement")
+    ]
+
+
 @pytest.mark.parametrize("workflow_state", ["closed", "missing"])
 async def test_reconcile_requeues_orphaned_metric_workflow(
     workflow_state: str,
@@ -505,12 +574,8 @@ async def test_reconcile_requeues_orphaned_metric_workflow(
     reconciled = await service.reconcile_active_runs()
 
     assert reconciled == 1
-    assert repository.metric_requeue_calls == [
-        ("run-1", "keyword-metrics:run-1:1")
-    ]
-    assert repository.metric_checked_calls == [
-        ("run-1", "keyword-metrics:run-1:1")
-    ]
+    assert repository.metric_requeue_calls == [("run-1", "keyword-metrics:run-1:1")]
+    assert repository.metric_checked_calls == [("run-1", "keyword-metrics:run-1:1")]
 
 
 @pytest.mark.parametrize("workflow_state", ["running", "unknown"])
@@ -531,6 +596,52 @@ async def test_reconcile_keeps_live_or_unknown_metric_workflow(
 
     assert reconciled == 0
     assert repository.metric_requeue_calls == []
-    assert repository.metric_checked_calls == [
-        ("run-1", "keyword-metrics:run-1:1")
+    assert repository.metric_checked_calls == [("run-1", "keyword-metrics:run-1:1")]
+
+
+@pytest.mark.parametrize("workflow_state", ["closed", "missing"])
+async def test_reconcile_requeues_orphaned_competitor_analysis(
+    workflow_state: str,
+) -> None:
+    service, repository, launcher = build_service()
+    repository.active_competitor_workflows = [
+        KeywordCompetitorAnalysisActiveWorkflowRecord(
+            run_id="analysis-1",
+            workflow_id="keywords:competitor-analysis:analysis-1",
+            updated_at=datetime.now(UTC) - timedelta(minutes=5),
+        )
+    ]
+    launcher.states["keywords:competitor-analysis:analysis-1"] = workflow_state
+
+    reconciled = await service.reconcile_active_runs()
+
+    assert reconciled == 1
+    assert repository.competitor_requeue_calls == [
+        ("analysis-1", "keywords:competitor-analysis:analysis-1")
+    ]
+    assert repository.competitor_checked_calls == [
+        ("analysis-1", "keywords:competitor-analysis:analysis-1")
+    ]
+
+
+@pytest.mark.parametrize("workflow_state", ["running", "unknown"])
+async def test_reconcile_keeps_live_or_unknown_competitor_analysis(
+    workflow_state: str,
+) -> None:
+    service, repository, launcher = build_service()
+    repository.active_competitor_workflows = [
+        KeywordCompetitorAnalysisActiveWorkflowRecord(
+            run_id="analysis-1",
+            workflow_id="keywords:competitor-analysis:analysis-1",
+            updated_at=NOW - timedelta(hours=1),
+        )
+    ]
+    launcher.states["keywords:competitor-analysis:analysis-1"] = workflow_state
+
+    reconciled = await service.reconcile_active_runs()
+
+    assert reconciled == 0
+    assert repository.competitor_requeue_calls == []
+    assert repository.competitor_checked_calls == [
+        ("analysis-1", "keywords:competitor-analysis:analysis-1")
     ]

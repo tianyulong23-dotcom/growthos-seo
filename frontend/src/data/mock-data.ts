@@ -126,7 +126,11 @@ export const modules: ModuleConfig[] = [
     label: "关键词",
     description: "自动发现、整理并管理网站的真实搜索关键词",
     icon: KeyRound,
-    tabs: [{ id: "library", label: "关键词库" }],
+    tabs: [
+      { id: "library", label: "关键词库" },
+      { id: "search-performance", label: "搜索表现" },
+      { id: "competitor-gap", label: "竞品差距" },
+    ],
     action: "",
   },
   {
@@ -174,6 +178,7 @@ export const modules: ModuleConfig[] = [
     tabs: [
       { id: "business", label: "业务资料" },
       { id: "ai", label: "AI 模型" },
+      { id: "data-sources", label: "数据源" },
       { id: "notifications", label: "通知设置" },
     ],
     action: "保存设置",

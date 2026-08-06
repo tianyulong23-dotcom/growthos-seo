@@ -25,6 +25,9 @@ CONTROL_ACTIVITY_SCHEDULE_TO_START = timedelta(minutes=1)
 MAX_IMMEDIATE_RECOVERIES = 4
 DELAYED_RETRY_SECONDS = 3600
 METRIC_REFRESH_MAX_ATTEMPTS = 3
+COMPETITOR_REQUEST_MAX_ATTEMPTS = 3
+COMPETITOR_REQUEST_RETRY_DELAYS_SECONDS = (5, 15)
+COMPETITOR_REQUEST_RETRY_PATCH = "competitor-analysis-request-retry-v1"
 
 NO_DATA_ERRORS = {
     "active_seeds_empty",
@@ -235,6 +238,135 @@ class KeywordBuildWorkflow:
             raise
 
 
+@workflow.defn(name="KeywordCompetitorAnalysisWorkflow")
+class KeywordCompetitorAnalysisWorkflow:
+    @workflow.run
+    async def run(self, task: dict[str, Any]) -> dict[str, Any]:
+        try:
+            await workflow.execute_activity(
+                "keyword_competitor_analysis_start",
+                task,
+                start_to_close_timeout=timedelta(minutes=2),
+                schedule_to_start_timeout=ACTIVITY_SCHEDULE_TO_START,
+                retry_policy=SHORT_RETRY,
+            )
+            retry_enabled = workflow.patched(COMPETITOR_REQUEST_RETRY_PATCH)
+            request_attempts = COMPETITOR_REQUEST_MAX_ATTEMPTS if retry_enabled else 1
+            request_task = (
+                {**task, "_competitor_request_retry_enabled": True} if retry_enabled else task
+            )
+            analysis_mode = str(task.get("analysis_mode") or "auto")
+            discovery: dict[str, Any]
+            if analysis_mode == "manual":
+                discovery = await workflow.execute_activity(
+                    "keyword_competitor_prepare_manual",
+                    task,
+                    start_to_close_timeout=timedelta(minutes=2),
+                    schedule_to_start_timeout=ACTIVITY_SCHEDULE_TO_START,
+                    retry_policy=SHORT_RETRY,
+                )
+            else:
+                discovery = {}
+                for attempt in range(request_attempts):
+                    discovery = await workflow.execute_activity(
+                        "keyword_competitor_discover",
+                        request_task,
+                        start_to_close_timeout=timedelta(minutes=30),
+                        schedule_to_start_timeout=ACTIVITY_SCHEDULE_TO_START,
+                        heartbeat_timeout=timedelta(minutes=5),
+                        retry_policy=METERED_ACTIVITY_RETRY,
+                    )
+                    if str(discovery.get("status")) != "failed":
+                        break
+                    if not bool(discovery.get("retryable")):
+                        return discovery
+                    if attempt + 1 >= request_attempts:
+                        if not retry_enabled:
+                            return discovery
+                        await workflow.execute_activity(
+                            "keyword_competitor_analysis_fail",
+                            {
+                                "task": request_task,
+                                "code": str(
+                                    discovery.get("error_code")
+                                    or "competitor_discovery_retry_exhausted"
+                                ),
+                                "detail": str(
+                                    discovery.get("error")
+                                    or "竞争对手发现临时失败，重试已用尽"
+                                ),
+                            },
+                            start_to_close_timeout=timedelta(minutes=2),
+                            schedule_to_start_timeout=CONTROL_ACTIVITY_SCHEDULE_TO_START,
+                            retry_policy=SHORT_RETRY,
+                        )
+                        return discovery
+                    await workflow.sleep(
+                        timedelta(seconds=COMPETITOR_REQUEST_RETRY_DELAYS_SECONDS[attempt])
+                    )
+            competitors = list(discovery.get("competitors") or [])[:5]
+            remaining = competitors
+            opportunities: list[dict[str, Any]] = []
+            for attempt in range(request_attempts):
+                activities = [
+                    workflow.start_activity(
+                        "keyword_competitor_opportunities",
+                        {
+                            "task": task,
+                            "competitor_id": str(competitor["id"]),
+                            "competitor_domain": str(competitor["domain"]),
+                        },
+                        start_to_close_timeout=timedelta(minutes=5),
+                        schedule_to_start_timeout=ACTIVITY_SCHEDULE_TO_START,
+                        heartbeat_timeout=timedelta(minutes=1),
+                        retry_policy=METERED_ACTIVITY_RETRY,
+                    )
+                    for competitor in remaining
+                ]
+                round_results = await asyncio.gather(*activities) if activities else []
+                retry_competitors: list[dict[str, Any]] = []
+                for competitor, result in zip(remaining, round_results, strict=True):
+                    if (
+                        str(result.get("status")) == "failed"
+                        and bool(result.get("retryable"))
+                        and attempt + 1 < request_attempts
+                    ):
+                        retry_competitors.append(competitor)
+                    else:
+                        opportunities.append(result)
+                remaining = retry_competitors
+                if not remaining:
+                    break
+                await workflow.sleep(
+                    timedelta(seconds=COMPETITOR_REQUEST_RETRY_DELAYS_SECONDS[attempt])
+                )
+            final = await workflow.execute_activity(
+                "keyword_competitor_analysis_finalize",
+                task,
+                start_to_close_timeout=timedelta(minutes=2),
+                schedule_to_start_timeout=ACTIVITY_SCHEDULE_TO_START,
+                retry_policy=SHORT_RETRY,
+            )
+            return {"discovery": discovery, "opportunities": opportunities, **final}
+        except Exception as exc:
+            failure = workflow_error(exc)
+            try:
+                await workflow.execute_activity(
+                    "keyword_competitor_analysis_fail",
+                    {
+                        "task": task,
+                        "code": failure.code,
+                        "detail": failure.detail,
+                    },
+                    start_to_close_timeout=timedelta(minutes=2),
+                    schedule_to_start_timeout=CONTROL_ACTIVITY_SCHEDULE_TO_START,
+                    retry_policy=SHORT_RETRY,
+                )
+            except Exception:
+                workflow.logger.exception("failed to persist competitor analysis failure")
+            return {"status": "failed", "error": str(exc)}
+
+
 @workflow.defn(name="KeywordMetricsRecoveryWorkflow")
 class KeywordMetricsRecoveryWorkflow:
     @workflow.run
@@ -272,8 +404,7 @@ class KeywordMetricsRecoveryWorkflow:
                             "task": task,
                             "attempt": attempt,
                             "code": str(
-                                result.get("failure_code")
-                                or "keyword_metrics_unavailable"
+                                result.get("failure_code") or "keyword_metrics_unavailable"
                             ),
                             "detail": "关键词指标暂时未完整返回",
                         },
@@ -292,10 +423,7 @@ class KeywordMetricsRecoveryWorkflow:
             elif pending_count > 0:
                 result = await self._settle(
                     task,
-                    code=str(
-                        result.get("failure_code")
-                        or "keyword_metrics_not_recoverable"
-                    ),
+                    code=str(result.get("failure_code") or "keyword_metrics_not_recoverable"),
                     detail="关键词指标无法继续自动补充",
                 )
                 failed_count = int(result.get("failed") or 0)
@@ -362,7 +490,7 @@ def workflow_error(error: Exception) -> WorkflowFailure:
         if isinstance(current, ApplicationError):
             return WorkflowFailure(
                 code=current.type or "keyword_build_failed",
-                detail=str(current),
+                detail=str(current.message or current),
                 non_retryable=bool(current.non_retryable),
             )
         current = getattr(current, "cause", None)

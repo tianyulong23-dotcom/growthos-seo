@@ -1,11 +1,16 @@
 import asyncio
 from datetime import UTC, datetime
+import json
 from typing import Any
+from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlparse
 
 from httpx import ASGITransport, AsyncClient
+import pytest
 
 from app.api.routes.data_sources import (
     get_dataforseo_settings_service,
+    get_gsc_service,
     get_google_ads_settings_service,
 )
 from app.core.config import Settings
@@ -16,6 +21,14 @@ from app.modules.settings.data_sources import (
     GoogleAdsSettingsRecord,
     GoogleAdsSettingsService,
     dataforseo_balance,
+)
+from app.modules.settings.gsc import (
+    GSCGrant,
+    GSCReconnectRequiredError,
+    GSCService,
+    GSCUpstreamError,
+    GSCValidationError,
+    gsc_site_matches_domain,
 )
 from app.modules.settings.schemas import (
     TestDataForSEOSettingsRequest as DataForSEOSettingsTestRequest,
@@ -34,6 +47,9 @@ class FakeDataSourceSettingsRepository:
 
     async def project_exists(self, organization_id: str, project_id: str) -> bool:
         return organization_id == "test-org" and project_id in self.projects
+
+    async def project_domain(self, organization_id: str, project_id: str) -> str | None:
+        return "example.com" if await self.project_exists(organization_id, project_id) else None
 
     async def get_google_ads(
         self,
@@ -86,6 +102,71 @@ class FakeDataSourceSettingsRepository:
             updated_at=datetime(2026, 7, 27, 12, 0, tzinfo=UTC),
         )
         return self.dataforseo_record
+
+
+class FakeGSCRepository:
+    def __init__(self) -> None:
+        self.projects = {"project-1"}
+        self.grant: GSCGrant | None = None
+        self.marked_reconnect: list[str] = []
+
+    async def project_exists(self, organization_id: str, project_id: str) -> bool:
+        return organization_id == "test-org" and project_id in self.projects
+
+    async def project_domain(self, organization_id: str, project_id: str) -> str | None:
+        return "example.com" if await self.project_exists(organization_id, project_id) else None
+
+    async def get(self, project_id: str, encryption_key: str) -> GSCGrant | None:
+        assert encryption_key == "encryption-key"
+        return self.grant if self.grant and self.grant.project_id == project_id else None
+
+    async def upsert_grant(self, **kwargs) -> None:
+        previous = self.grant
+        refresh_token = kwargs["refresh_token"] or (
+            previous.refresh_token if previous is not None else ""
+        )
+        site_url = (
+            previous.site_url
+            if previous is not None
+            and previous.google_account_id == kwargs["google_account_id"]
+            else None
+        )
+        self.grant = GSCGrant(
+            project_id=kwargs["project_id"],
+            organization_id=kwargs["organization_id"],
+            site_url=site_url,
+            google_account_id=kwargs["google_account_id"],
+            connected_account_email=kwargs["connected_account_email"],
+            refresh_token=refresh_token,
+            scopes=kwargs["scopes"],
+            requires_reconnect=False,
+        )
+
+    async def select_site(self, project_id: str, site_url: str) -> None:
+        assert self.grant is not None
+        self.grant = GSCGrant(**{**self.grant.__dict__, "site_url": site_url})
+
+    async def mark_reconnect(self, project_id: str) -> None:
+        self.marked_reconnect.append(project_id)
+        assert self.grant is not None
+        self.grant = GSCGrant(**{**self.grant.__dict__, "requires_reconnect": True})
+
+    async def disconnect(self, project_id: str) -> None:
+        self.grant = None
+
+
+def build_gsc_service() -> tuple[GSCService, FakeGSCRepository]:
+    repository = FakeGSCRepository()
+    settings = Settings(
+        app_env="test",
+        default_organization_id="test-org",
+        ai_settings_encryption_key="encryption-key",
+        google_gsc_client_id="gsc-client-id",
+        google_gsc_client_secret="gsc-client-secret",
+        gsc_public_api_origin="https://api.example",
+        gsc_frontend_origin="https://app.example",
+    )
+    return GSCService(settings, repository), repository
 
 
 class FakeGoogleAdsConnectionTester:
@@ -325,3 +406,348 @@ def test_secret_values_are_omitted_from_record_representations() -> None:
     assert "client-secret" not in representation
     assert "refresh-secret" not in representation
     assert "password-secret" not in representation
+
+
+def test_gsc_oauth_state_is_scoped_signed_and_rejects_foreign_callbacks() -> None:
+    service, _ = build_gsc_service()
+
+    authorization_url = asyncio.run(
+        service.authorization_url(
+            "project-1",
+            "https://app.example/projects/project-1/settings/data-sources?tab=gsc",
+        )
+    )
+    parsed = urlparse(authorization_url)
+    query = parse_qs(parsed.query)
+    state = query["state"][0]
+    payload = service._verify_state(state)
+
+    assert parsed.netloc == "accounts.google.com"
+    assert query["access_type"] == ["offline"]
+    assert query["prompt"] == ["select_account consent"]
+    assert payload["project_id"] == "project-1"
+    assert payload["organization_id"] == "test-org"
+    assert payload["callback_path"].endswith("?tab=gsc")
+    with pytest.raises(GSCValidationError):
+        asyncio.run(
+            service.authorization_url(
+                "project-1", "https://attacker.example/oauth/callback"
+            )
+        )
+    with pytest.raises(GSCValidationError):
+        service._verify_state(f"{state[:-1]}x")
+
+
+@pytest.mark.parametrize(
+    ("site_url", "domain", "expected"),
+    [
+        ("sc-domain:example.com", "example.com", True),
+        ("sc-domain:example.com", "www.example.com", True),
+        ("https://www.example.com/", "example.com", True),
+        ("https://shop.example.com/", "example.com", False),
+        ("sc-domain:unrelated.example", "example.com", False),
+    ],
+)
+def test_gsc_property_domain_matching(site_url: str, domain: str, expected: bool) -> None:
+    assert gsc_site_matches_domain(site_url, domain) is expected
+
+
+def test_gsc_callback_uses_verified_userinfo_identity_and_preserves_refresh_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = build_gsc_service()
+    authorization_url = asyncio.run(service.authorization_url("project-1", "/settings"))
+    state = parse_qs(urlparse(authorization_url).query)["state"][0]
+    token_results = [
+        {
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+            "scope": "openid email webmasters.readonly",
+        },
+        {
+            "access_token": "access-2",
+            "scope": "openid email webmasters.readonly",
+        },
+    ]
+    monkeypatch.setattr(service, "_exchange_code", lambda code: token_results.pop(0))
+    monkeypatch.setattr(
+        service,
+        "_userinfo",
+        lambda token: ("google-account-1", "owner@example.com"),
+    )
+
+    callback = asyncio.run(service.handle_callback(code="code-1", state=state))
+    assert callback == "/settings?gsc_oauth=authorized"
+    assert repository.grant is not None
+    assert repository.grant.google_account_id == "google-account-1"
+    assert repository.grant.refresh_token == "refresh-1"
+    assert repository.grant.site_url is None
+
+    repository.grant = GSCGrant(
+        **{**repository.grant.__dict__, "site_url": "sc-domain:example.com"}
+    )
+    asyncio.run(service.handle_callback(code="code-2", state=state))
+    assert repository.grant is not None
+    assert repository.grant.refresh_token == "refresh-1"
+    assert repository.grant.site_url == "sc-domain:example.com"
+
+
+def test_gsc_callback_reports_cancelled_and_failed_without_losing_query() -> None:
+    service, _ = build_gsc_service()
+    authorization_url = asyncio.run(
+        service.authorization_url(
+            "project-1", "/settings?returnTo=%2Fkeywords&gsc_oauth=authorized"
+        )
+    )
+    state = parse_qs(urlparse(authorization_url).query)["state"][0]
+
+    cancelled = asyncio.run(
+        service.handle_callback(code=None, state=state, error="access_denied")
+    )
+    failed = asyncio.run(
+        service.handle_callback(code=None, state=state, error="server_error")
+    )
+
+    assert cancelled == "/settings?returnTo=%2Fkeywords&gsc_oauth=cancelled"
+    assert failed == "/settings?returnTo=%2Fkeywords&gsc_oauth=failed"
+    assert service.failed_callback_path(state) == (
+        "/settings?returnTo=%2Fkeywords&gsc_oauth=failed"
+    )
+
+
+def test_gsc_property_selection_requires_verified_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = build_gsc_service()
+    repository.grant = GSCGrant(
+        project_id="project-1",
+        organization_id="test-org",
+        site_url=None,
+        google_account_id="google-account-1",
+        connected_account_email="owner@example.com",
+        refresh_token="refresh-1",
+        scopes="webmasters.readonly",
+        requires_reconnect=False,
+    )
+    monkeypatch.setattr(service, "_access_token", AsyncMock(return_value="access-token"))
+    monkeypatch.setattr(
+        "app.modules.settings.gsc._google_json",
+        lambda request: {
+            "siteEntry": [
+                {
+                    "siteUrl": "sc-domain:example.com",
+                    "permissionLevel": "siteOwner",
+                },
+                {
+                    "siteUrl": "https://unverified.example/",
+                    "permissionLevel": "siteUnverifiedUser",
+                },
+                {
+                    "siteUrl": "https://unrelated.example/",
+                    "permissionLevel": "siteOwner",
+                },
+            ]
+        },
+    )
+
+    with pytest.raises(GSCValidationError):
+        asyncio.run(service.select_site("project-1", "https://unverified.example/"))
+    with pytest.raises(GSCValidationError, match="项目域名不匹配"):
+        asyncio.run(service.select_site("project-1", "https://unrelated.example/"))
+    connection = asyncio.run(service.select_site("project-1", "sc-domain:example.com"))
+
+    assert connection.property_connected is True
+    assert connection.site_url == "sc-domain:example.com"
+
+
+def test_gsc_status_does_not_mark_a_mismatched_property_ready() -> None:
+    service, repository = build_gsc_service()
+    repository.grant = GSCGrant(
+        project_id="project-1",
+        organization_id="test-org",
+        site_url="sc-domain:unrelated.example",
+        google_account_id="google-account-1",
+        connected_account_email="owner@example.com",
+        refresh_token="refresh-1",
+        scopes="webmasters.readonly",
+        requires_reconnect=False,
+    )
+
+    connection = asyncio.run(service.status("project-1"))
+
+    assert connection.grant_connected is True
+    assert connection.property_connected is False
+    assert connection.site_url == "sc-domain:unrelated.example"
+
+
+def test_gsc_performance_returns_totals_and_query_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = build_gsc_service()
+    repository.grant = GSCGrant(
+        project_id="project-1",
+        organization_id="test-org",
+        site_url="sc-domain:example.com",
+        google_account_id="account-1",
+        connected_account_email="owner@example.com",
+        refresh_token="refresh-token",
+        scopes="scope",
+        requires_reconnect=False,
+    )
+    monkeypatch.setattr(service, "_access_token", AsyncMock(return_value="access-token"))
+
+    def google_json(request) -> dict[str, Any]:
+        body = json.loads(request.data)
+        if body.get("dimensions") == ["query"]:
+            assert body["rowLimit"] == 100
+            return {
+                "rows": [
+                    {
+                        "keys": ["solar panels"],
+                        "clicks": 12,
+                        "impressions": 240,
+                        "ctr": 0.05,
+                        "position": 6.4,
+                    }
+                ]
+            }
+        return {
+            "rows": [
+                {
+                    "clicks": 80,
+                    "impressions": 1600,
+                    "ctr": 0.05,
+                    "position": 8.2,
+                }
+            ]
+        }
+
+    monkeypatch.setattr("app.modules.settings.gsc._google_json", google_json)
+    performance = asyncio.run(
+        service.performance(
+            "project-1",
+            days=28,
+            limit=100,
+            today=datetime(2026, 8, 5, tzinfo=UTC).date(),
+        )
+    )
+
+    assert performance.start_date.isoformat() == "2026-07-06"
+    assert performance.end_date.isoformat() == "2026-08-02"
+    assert performance.totals.clicks == 80
+    assert performance.rows[0].query == "solar panels"
+    assert performance.rows[0].position == 6.4
+
+
+def test_gsc_refresh_failure_marks_connection_for_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = build_gsc_service()
+    repository.grant = GSCGrant(
+        project_id="project-1",
+        organization_id="test-org",
+        site_url="sc-domain:example.com",
+        google_account_id="google-account-1",
+        connected_account_email="owner@example.com",
+        refresh_token="refresh-1",
+        scopes="webmasters.readonly",
+        requires_reconnect=False,
+    )
+
+    def fail_refresh(refresh_token: str) -> str:
+        raise GSCReconnectRequiredError("revoked")
+
+    monkeypatch.setattr(service, "_refresh_access_token", fail_refresh)
+
+    with pytest.raises(GSCReconnectRequiredError):
+        asyncio.run(service.list_sites("project-1"))
+    assert repository.marked_reconnect == ["project-1"]
+    assert repository.grant.requires_reconnect is True
+
+
+def test_gsc_temporary_refresh_failure_does_not_require_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = build_gsc_service()
+    repository.grant = GSCGrant(
+        project_id="project-1",
+        organization_id="test-org",
+        site_url="sc-domain:example.com",
+        google_account_id="google-account-1",
+        connected_account_email="owner@example.com",
+        refresh_token="refresh-1",
+        scopes="webmasters.readonly",
+        requires_reconnect=False,
+    )
+
+    def fail_refresh(refresh_token: str) -> str:
+        raise GSCUpstreamError("Google API 返回 HTTP 503", status_code=503)
+
+    monkeypatch.setattr(service, "_refresh_access_token", fail_refresh)
+
+    with pytest.raises(GSCUpstreamError):
+        asyncio.run(service.list_sites("project-1"))
+    assert repository.marked_reconnect == []
+    assert repository.grant.requires_reconnect is False
+
+
+def test_gsc_routes_expose_connection_and_oauth_start() -> None:
+    service, _ = build_gsc_service()
+    app.dependency_overrides[get_gsc_service] = lambda: service
+
+    async def request() -> tuple[dict[str, Any], dict[str, Any]]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            status_response = await client.get(
+                "/api/v1/projects/project-1/gsc/connection"
+            )
+            oauth_response = await client.post(
+                "/api/v1/projects/project-1/gsc/oauth/start",
+                json={"callback_url": "https://app.example/settings"},
+            )
+        assert status_response.status_code == 200
+        assert oauth_response.status_code == 200
+        return status_response.json(), oauth_response.json()
+
+    try:
+        status_payload, oauth_payload = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_payload["oauth_configured"] is True
+    assert status_payload["oauth_redirect_uri"] == (
+        "https://api.example/api/v1/gsc/oauth/callback"
+    )
+    assert status_payload["property_connected"] is False
+    assert oauth_payload["authorization_url"].startswith(
+        "https://accounts.google.com/o/oauth2/v2/auth?"
+    )
+
+
+def test_gsc_route_redirects_callback_failures_to_frontend() -> None:
+    service, _ = build_gsc_service()
+    authorization_url = asyncio.run(
+        service.authorization_url("project-1", "/settings?tab=gsc")
+    )
+    state = parse_qs(urlparse(authorization_url).query)["state"][0]
+    service.handle_callback = AsyncMock(side_effect=GSCUpstreamError("token exchange failed"))
+    app.dependency_overrides[get_gsc_service] = lambda: service
+
+    async def request() -> tuple[int, str]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://test", follow_redirects=False
+        ) as client:
+            response = await client.get(
+                "/api/v1/gsc/oauth/callback",
+                params={"state": state, "code": "code-1"},
+            )
+        return response.status_code, response.headers["location"]
+
+    try:
+        status_code, location = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_code == 303
+    assert location == "https://app.example/settings?tab=gsc&gsc_oauth=failed"

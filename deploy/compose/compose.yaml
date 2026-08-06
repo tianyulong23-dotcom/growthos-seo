@@ -179,6 +179,7 @@ services:
       CRAWLER_BROWSER_EXECUTABLE: /usr/bin/chromium
       CRAWLER_PROXY_URL: ""
       CRAWLER_FALLBACK_PROXY_URL: ""
+      CRAWLER_PROBE_LISTEN_ADDRESS: ":8091"
     depends_on:
       api:
         condition: service_healthy
@@ -186,6 +187,17 @@ services:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:8091/health
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
   keyword-worker:
@@ -201,10 +213,14 @@ services:
       KEYWORD_WORKER_HEALTH_HOST: 0.0.0.0
       KEYWORD_WORKER_HEALTH_PORT: 8090
       KEYWORD_MAX_CONCURRENT_ACTIVITIES: 8
+      KEYWORD_CRAWLER_PROBE_URL: http://crawler-worker:8091
+      KEYWORD_CRAWLER_PROBE_TIMEOUT_SECONDS: 300
     depends_on:
       api:
         condition: service_healthy
       temporal:
+        condition: service_healthy
+      crawler-worker:
         condition: service_healthy
     healthcheck:
       test:

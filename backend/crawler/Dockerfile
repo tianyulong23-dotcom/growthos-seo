@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/crawler
 FROM debian:bookworm-slim
 
 RUN apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=60 update \
-    && apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=60 install -y --no-install-recommends ca-certificates chromium fonts-liberation \
+    && apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=60 install -y --no-install-recommends ca-certificates chromium curl fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 10001 crawler

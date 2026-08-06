@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     platform_auth_signing_key: SecretStr | None = None
     platform_auth_max_token_ttl_seconds: int = Field(default=900, ge=1, le=3600)
     platform_context_signing_key: SecretStr | None = None
+    google_gsc_client_id: str | None = None
+    google_gsc_client_secret: str | None = None
+    gsc_public_api_origin: str = "http://localhost:8000"
+    gsc_frontend_origin: str = "http://localhost:8080"
 
     model_config = SettingsConfigDict(
         env_file=".env",

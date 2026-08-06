@@ -22,6 +22,7 @@ import { ContentPlan } from "@/features/content/content-plan"
 import { CreateArticleDialog } from "@/features/content/create-article-dialog"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
 import { AIModelSettings } from "@/features/settings/ai-model-settings"
+import { DataSourceSettings } from "@/features/settings/data-source-settings"
 import { modules } from "@/data/mock-data"
 import type { AuditSettings } from "@/features/audit/audit-settings"
 import {
@@ -49,6 +50,12 @@ const OutreachWorkspace = React.lazy(() =>
     default: module.OutreachWorkspace,
   }))
 )
+
+function prefetchKeywordTab(projectId: string, view: string) {
+  void import("@/features/keywords/keyword-query-client")
+    .then(({ prefetchKeywordView }) => prefetchKeywordView(projectId, view))
+    .catch(() => undefined)
+}
 
 function ContentContent({
   view,
@@ -161,6 +168,15 @@ function SettingsContent({
 
   if (view === "ai") {
     return <AIModelSettings projectId={project.id} />
+  }
+
+  if (view === "data-sources") {
+    return (
+      <DataSourceSettings
+        projectId={project.id}
+        projectDomain={project.domain}
+      />
+    )
   }
 
   if (view === "notifications") {
@@ -310,7 +326,11 @@ function ModuleBody({
           </div>
         }
       >
-        <KeywordWorkspace key={project.id} projectId={project.id} />
+        <KeywordWorkspace
+          key={project.id}
+          projectId={project.id}
+          view={view}
+        />
       </React.Suspense>
     )
   if (moduleId === "content")
@@ -715,7 +735,20 @@ function LegacyModulePage() {
               className="no-scrollbar h-11 max-w-full justify-start overflow-x-auto"
             >
               {moduleConfig.tabs.map((tab) => (
-                <TabsTrigger key={tab.id} value={tab.id}>
+                <TabsTrigger
+                  key={tab.id}
+                  value={tab.id}
+                  onPointerEnter={() => {
+                    if (moduleConfig.id === "keywords") {
+                      prefetchKeywordTab(projectId, tab.id)
+                    }
+                  }}
+                  onFocus={() => {
+                    if (moduleConfig.id === "keywords") {
+                      prefetchKeywordTab(projectId, tab.id)
+                    }
+                  }}
+                >
                   {tab.label}
                 </TabsTrigger>
               ))}

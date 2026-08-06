@@ -292,3 +292,146 @@ export async function testDataForSEOSettings(
     }
   )
 }
+
+export type GSCConnection = {
+  oauthConfigured: boolean
+  oauthRedirectUri: string | null
+  grantConnected: boolean
+  propertyConnected: boolean
+  siteUrl: string | null
+  connectedAccountEmail: string | null
+  requiresReconnect: boolean
+}
+
+export type GSCSite = {
+  siteUrl: string
+  permissionLevel: string
+}
+
+export type GSCPerformance = {
+  siteUrl: string
+  startDate: string
+  endDate: string
+  totals: GSCPerformanceMetrics
+  rows: GSCPerformanceRow[]
+}
+
+export type GSCPerformanceMetrics = {
+  clicks: number
+  impressions: number
+  ctr: number
+  position: number
+}
+
+export type GSCPerformanceRow = GSCPerformanceMetrics & {
+  query: string
+}
+
+type GSCConnectionResponse = {
+  oauth_configured: boolean
+  oauth_redirect_uri?: string | null
+  grant_connected: boolean
+  property_connected: boolean
+  site_url: string | null
+  connected_account_email: string | null
+  requires_reconnect: boolean
+}
+
+type GSCPerformanceResponse = {
+  site_url: string
+  start_date: string
+  end_date: string
+  totals: GSCPerformanceMetrics
+  rows: Array<
+    {
+      query: string
+    } & GSCPerformanceMetrics
+  >
+}
+
+function mapGSCConnection(value: GSCConnectionResponse): GSCConnection {
+  return {
+    oauthConfigured: value.oauth_configured,
+    oauthRedirectUri: value.oauth_redirect_uri ?? null,
+    grantConnected: value.grant_connected,
+    propertyConnected: value.property_connected,
+    siteUrl: value.site_url,
+    connectedAccountEmail: value.connected_account_email,
+    requiresReconnect: value.requires_reconnect,
+  }
+}
+
+export async function getGSCConnection(
+  projectId: string
+): Promise<GSCConnection> {
+  return mapGSCConnection(
+    await apiRequest<GSCConnectionResponse>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/connection`
+    )
+  )
+}
+
+export async function getGSCPerformance(
+  projectId: string,
+  days = 28,
+  limit = 250
+): Promise<GSCPerformance> {
+  const result = await apiRequest<GSCPerformanceResponse>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/performance?days=${days}&limit=${limit}`
+  )
+  return {
+    siteUrl: result.site_url,
+    startDate: result.start_date,
+    endDate: result.end_date,
+    totals: result.totals,
+    rows: result.rows,
+  }
+}
+
+export async function startGSCOAuth(
+  projectId: string,
+  callbackUrl: string
+): Promise<string> {
+  const result = await apiRequest<{ authorization_url: string }>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/oauth/start`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_url: callbackUrl }),
+    }
+  )
+  return result.authorization_url
+}
+
+export async function listGSCSites(projectId: string): Promise<GSCSite[]> {
+  const result = await apiRequest<{
+    items: Array<{ site_url: string; permission_level: string }>
+  }>(`/api/v1/projects/${encodeURIComponent(projectId)}/gsc/sites`)
+  return result.items.map((item) => ({
+    siteUrl: item.site_url,
+    permissionLevel: item.permission_level,
+  }))
+}
+
+export async function selectGSCSite(
+  projectId: string,
+  siteUrl: string
+): Promise<GSCConnection> {
+  return mapGSCConnection(
+    await apiRequest<GSCConnectionResponse>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/connection`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ site_url: siteUrl }),
+      }
+    )
+  )
+}
+
+export async function disconnectGSC(projectId: string): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/connection`,
+    { method: "DELETE" }
+  )
+}

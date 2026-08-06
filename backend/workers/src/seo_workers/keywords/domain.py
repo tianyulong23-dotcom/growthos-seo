@@ -124,6 +124,20 @@ class RawKeyword:
     ai_relevance: float | None = None
 
 
+def raw_keyword_competition_level(payload: dict[str, Any]) -> str | None:
+    info = payload.get("keyword_info")
+    if not isinstance(info, dict):
+        keyword_data = payload.get("keyword_data")
+        info = keyword_data.get("keyword_info") if isinstance(keyword_data, dict) else None
+    if not isinstance(info, dict):
+        return None
+    value = info.get("competition_level")
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
 @dataclass(frozen=True)
 class SeedCandidate:
     keyword: str

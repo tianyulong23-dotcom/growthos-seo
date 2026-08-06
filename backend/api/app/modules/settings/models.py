@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, LargeBinary, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, LargeBinary, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -91,4 +91,28 @@ class DataForSEOProviderSetting(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class GSCConnection(Base):
+    __tablename__ = "gsc_connections"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    site_url: Mapped[str | None] = mapped_column(Text)
+    google_account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    connected_account_email: Mapped[str | None] = mapped_column(Text)
+    refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    scopes: Mapped[str] = mapped_column(Text, nullable=False)
+    requires_reconnect: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
