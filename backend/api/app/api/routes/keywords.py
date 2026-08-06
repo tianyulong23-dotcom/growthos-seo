@@ -16,6 +16,8 @@ from app.modules.keywords.schemas import (
     KeywordCostSummaryResponse,
     KeywordExternalIssueListResponse,
     KeywordExternalIssueResponse,
+    KeywordGSCSaveRequest,
+    KeywordGSCSaveResponse,
     KeywordLibraryStatusResponse,
     KeywordListResponse,
     KeywordTagAssignmentRequest,
@@ -147,6 +149,21 @@ async def list_keywords(
             sort=sort,
             order=order,
         )
+    except KeywordProjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在",
+        ) from exc
+
+
+@router.post("/gsc", response_model=KeywordGSCSaveResponse)
+async def save_gsc_keywords(
+    project_id: str,
+    request: KeywordGSCSaveRequest,
+    service: Annotated[KeywordService, Depends(get_keyword_service)],
+) -> KeywordGSCSaveResponse:
+    try:
+        return await service.save_gsc_keywords(project_id, request)
     except KeywordProjectNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

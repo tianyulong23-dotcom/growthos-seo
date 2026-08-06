@@ -224,13 +224,42 @@ class GSCPerformanceTotals(BaseModel):
     position: float = 0
 
 
-class GSCPerformanceRow(GSCPerformanceTotals):
-    query: str
-
-
-class GSCPerformanceResponse(BaseModel):
-    site_url: str
+class GSCPerformanceRange(BaseModel):
     start_date: date
     end_date: date
+    previous_start_date: date
+    previous_end_date: date
+
+
+class GSCPerformanceDimensionRow(GSCPerformanceTotals):
+    key: str
+
+
+class GSCStrikingDistanceRow(BaseModel):
+    query: str
+    page: str
+    clicks: float = 0
+    impressions: float = 0
+    position: float = 0
+
+
+class GSCPerformanceReportResponse(BaseModel):
+    site_url: str
+    range: GSCPerformanceRange
     totals: GSCPerformanceTotals
-    rows: list[GSCPerformanceRow] = Field(default_factory=list)
+    previous_totals: GSCPerformanceTotals
+    striking_distance: list[GSCStrikingDistanceRow] = Field(default_factory=list)
+    countries: list[GSCPerformanceDimensionRow] = Field(default_factory=list)
+
+
+class GSCPerformanceTableResponse(BaseModel):
+    dimension: Literal["query", "page"]
+    page: int = Field(ge=1)
+    page_size: Literal[25, 50, 100]
+    has_next_page: bool
+    rows: list[GSCPerformanceDimensionRow] = Field(default_factory=list)
+
+
+class GSCPerformanceExportResponse(BaseModel):
+    dimension: Literal["query", "page"]
+    rows: list[GSCPerformanceDimensionRow] = Field(default_factory=list)

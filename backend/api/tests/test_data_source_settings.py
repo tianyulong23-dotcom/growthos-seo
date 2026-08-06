@@ -4,6 +4,7 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request
 
 from httpx import ASGITransport, AsyncClient
 import pytest
@@ -28,9 +29,11 @@ from app.modules.settings.gsc import (
     GSCService,
     GSCUpstreamError,
     GSCValidationError,
+    _google_json,
     gsc_site_matches_domain,
 )
 from app.modules.settings.schemas import (
+    GSCPerformanceTableResponse,
     TestDataForSEOSettingsRequest as DataForSEOSettingsTestRequest,
     TestGoogleAdsSettingsRequest as GoogleAdsSettingsTestRequest,
     UpdateDataForSEOSettingsRequest,
@@ -127,8 +130,7 @@ class FakeGSCRepository:
         )
         site_url = (
             previous.site_url
-            if previous is not None
-            and previous.google_account_id == kwargs["google_account_id"]
+            if previous is not None and previous.google_account_id == kwargs["google_account_id"]
             else None
         )
         self.grant = GSCGrant(
@@ -430,9 +432,7 @@ def test_gsc_oauth_state_is_scoped_signed_and_rejects_foreign_callbacks() -> Non
     assert payload["callback_path"].endswith("?tab=gsc")
     with pytest.raises(GSCValidationError):
         asyncio.run(
-            service.authorization_url(
-                "project-1", "https://attacker.example/oauth/callback"
-            )
+            service.authorization_url("project-1", "https://attacker.example/oauth/callback")
         )
     with pytest.raises(GSCValidationError):
         service._verify_state(f"{state[:-1]}x")
@@ -501,12 +501,8 @@ def test_gsc_callback_reports_cancelled_and_failed_without_losing_query() -> Non
     )
     state = parse_qs(urlparse(authorization_url).query)["state"][0]
 
-    cancelled = asyncio.run(
-        service.handle_callback(code=None, state=state, error="access_denied")
-    )
-    failed = asyncio.run(
-        service.handle_callback(code=None, state=state, error="server_error")
-    )
+    cancelled = asyncio.run(service.handle_callback(code=None, state=state, error="access_denied"))
+    failed = asyncio.run(service.handle_callback(code=None, state=state, error="server_error"))
 
     assert cancelled == "/settings?returnTo=%2Fkeywords&gsc_oauth=cancelled"
     assert failed == "/settings?returnTo=%2Fkeywords&gsc_oauth=failed"
@@ -580,7 +576,7 @@ def test_gsc_status_does_not_mark_a_mismatched_property_ready() -> None:
     assert connection.site_url == "sc-domain:unrelated.example"
 
 
-def test_gsc_performance_returns_totals_and_query_rows(
+def test_gsc_performance_report_matches_openseo_granularity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, repository = build_gsc_service()
@@ -596,47 +592,204 @@ def test_gsc_performance_returns_totals_and_query_rows(
     )
     monkeypatch.setattr(service, "_access_token", AsyncMock(return_value="access-token"))
 
+    requests: list[dict[str, Any]] = []
+
     def google_json(request) -> dict[str, Any]:
         body = json.loads(request.data)
-        if body.get("dimensions") == ["query"]:
-            assert body["rowLimit"] == 100
+        requests.append(body)
+        if body.get("dimensions") == ["query", "page"]:
             return {
                 "rows": [
                     {
-                        "keys": ["solar panels"],
+                        "keys": ["solar panels", "https://example.com/solar"],
                         "clicks": 12,
                         "impressions": 240,
                         "ctr": 0.05,
                         "position": 6.4,
+                    },
+                    {
+                        "keys": ["brand", "https://example.com/"],
+                        "clicks": 50,
+                        "impressions": 500,
+                        "ctr": 0.1,
+                        "position": 2,
+                    },
+                ]
+            }
+        if body.get("dimensions") == ["country"]:
+            return {
+                "rows": [
+                    {
+                        "keys": ["usa"],
+                        "clicks": 80,
+                        "impressions": 1600,
+                        "ctr": 0.05,
+                        "position": 8.2,
                     }
                 ]
             }
+        current = body["startDate"] == "2026-07-05"
         return {
             "rows": [
                 {
-                    "clicks": 80,
-                    "impressions": 1600,
+                    "keys": [body["startDate"]],
+                    "clicks": 80 if current else 60,
+                    "impressions": 1600 if current else 1200,
                     "ctr": 0.05,
-                    "position": 8.2,
+                    "position": 8.2 if current else 9.1,
                 }
             ]
         }
 
     monkeypatch.setattr("app.modules.settings.gsc._google_json", google_json)
     performance = asyncio.run(
-        service.performance(
+        service.performance_report(
             "project-1",
-            days=28,
-            limit=100,
+            date_range="last_28_days",
+            device="MOBILE",
+            country="USA",
             today=datetime(2026, 8, 5, tzinfo=UTC).date(),
         )
     )
 
-    assert performance.start_date.isoformat() == "2026-07-06"
-    assert performance.end_date.isoformat() == "2026-08-02"
+    assert performance.range.start_date.isoformat() == "2026-07-05"
+    assert performance.range.end_date.isoformat() == "2026-08-02"
+    assert performance.range.previous_start_date.isoformat() == "2026-06-06"
+    assert performance.range.previous_end_date.isoformat() == "2026-07-04"
     assert performance.totals.clicks == 80
-    assert performance.rows[0].query == "solar panels"
-    assert performance.rows[0].position == 6.4
+    assert performance.previous_totals.clicks == 60
+    assert [row.query for row in performance.striking_distance] == ["solar panels"]
+    assert performance.countries[0].key == "usa"
+    assert len(requests) == 4
+    assert all(request["dataState"] == "all" for request in requests)
+    query_page_request = next(
+        request for request in requests if request["dimensions"] == ["query", "page"]
+    )
+    assert query_page_request["rowLimit"] == 1000
+    assert query_page_request["dimensionFilterGroups"][0]["filters"] == [
+        {"dimension": "device", "operator": "equals", "expression": "MOBILE"},
+        {"dimension": "country", "operator": "equals", "expression": "usa"},
+    ]
+    country_request = next(request for request in requests if request["dimensions"] == ["country"])
+    assert country_request["dimensionFilterGroups"][0]["filters"] == [
+        {"dimension": "device", "operator": "equals", "expression": "MOBILE"}
+    ]
+
+
+def test_gsc_performance_table_uses_start_row_and_extra_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = build_gsc_service()
+    repository.grant = GSCGrant(
+        project_id="project-1",
+        organization_id="test-org",
+        site_url="sc-domain:example.com",
+        google_account_id="account-1",
+        connected_account_email="owner@example.com",
+        refresh_token="refresh-token",
+        scopes="scope",
+        requires_reconnect=False,
+    )
+    monkeypatch.setattr(service, "_access_token", AsyncMock(return_value="access-token"))
+    captured: dict[str, Any] = {}
+
+    def google_json(request) -> dict[str, Any]:
+        captured.update(json.loads(request.data))
+        return {
+            "rows": [
+                {
+                    "keys": [f"query-{index}"],
+                    "clicks": index,
+                    "impressions": index * 10,
+                    "ctr": 0.1,
+                    "position": 8,
+                }
+                for index in range(26)
+            ]
+        }
+
+    monkeypatch.setattr("app.modules.settings.gsc._google_json", google_json)
+    result = asyncio.run(
+        service.performance_table(
+            "project-1",
+            dimension="query",
+            page=2,
+            page_size=25,
+            today=datetime(2026, 8, 5, tzinfo=UTC).date(),
+        )
+    )
+
+    assert captured["rowLimit"] == 26
+    assert captured["startRow"] == 25
+    assert result.has_next_page is True
+    assert len(result.rows) == 25
+
+
+def test_google_json_reads_valid_responses_larger_than_two_megabytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_key = "x" * 2_100_000
+    encoded = json.dumps({"rows": [{"keys": [long_key]}]}).encode()
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return encoded
+
+    monkeypatch.setattr("app.modules.settings.gsc.urlopen", lambda *_args, **_kwargs: Response())
+
+    payload = _google_json(Request("https://www.googleapis.com/test"))
+
+    assert payload["rows"][0]["keys"][0] == long_key
+
+
+def test_gsc_performance_table_route_parses_supported_page_sizes() -> None:
+    service, _ = build_gsc_service()
+    service.performance_table = AsyncMock(
+        return_value=GSCPerformanceTableResponse(
+            dimension="query",
+            page=1,
+            page_size=25,
+            has_next_page=False,
+            rows=[],
+        )
+    )
+    app.dependency_overrides[get_gsc_service] = lambda: service
+
+    async def request() -> tuple[int, int]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            valid = await client.get(
+                "/api/v1/projects/project-1/gsc/performance/table",
+                params={"dimension": "query", "page": 1, "page_size": 25},
+            )
+            invalid = await client.get(
+                "/api/v1/projects/project-1/gsc/performance/table",
+                params={"dimension": "query", "page": 1, "page_size": 30},
+            )
+        return valid.status_code, invalid.status_code
+
+    try:
+        valid_status, invalid_status = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert valid_status == 200
+    assert invalid_status == 422
+    service.performance_table.assert_awaited_once_with(
+        "project-1",
+        dimension="query",
+        page=1,
+        page_size=25,
+        date_range="last_28_days",
+        device=None,
+        country=None,
+    )
 
 
 def test_gsc_refresh_failure_marks_connection_for_reconnect(
@@ -698,9 +851,7 @@ def test_gsc_routes_expose_connection_and_oauth_start() -> None:
     async def request() -> tuple[dict[str, Any], dict[str, Any]]:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            status_response = await client.get(
-                "/api/v1/projects/project-1/gsc/connection"
-            )
+            status_response = await client.get("/api/v1/projects/project-1/gsc/connection")
             oauth_response = await client.post(
                 "/api/v1/projects/project-1/gsc/oauth/start",
                 json={"callback_url": "https://app.example/settings"},
@@ -715,9 +866,7 @@ def test_gsc_routes_expose_connection_and_oauth_start() -> None:
         app.dependency_overrides.clear()
 
     assert status_payload["oauth_configured"] is True
-    assert status_payload["oauth_redirect_uri"] == (
-        "https://api.example/api/v1/gsc/oauth/callback"
-    )
+    assert status_payload["oauth_redirect_uri"] == ("https://api.example/api/v1/gsc/oauth/callback")
     assert status_payload["property_connected"] is False
     assert oauth_payload["authorization_url"].startswith(
         "https://accounts.google.com/o/oauth2/v2/auth?"
@@ -726,9 +875,7 @@ def test_gsc_routes_expose_connection_and_oauth_start() -> None:
 
 def test_gsc_route_redirects_callback_failures_to_frontend() -> None:
     service, _ = build_gsc_service()
-    authorization_url = asyncio.run(
-        service.authorization_url("project-1", "/settings?tab=gsc")
-    )
+    authorization_url = asyncio.run(service.authorization_url("project-1", "/settings?tab=gsc"))
     state = parse_qs(urlparse(authorization_url).query)["state"][0]
     service.handle_callback = AsyncMock(side_effect=GSCUpstreamError("token exchange failed"))
     app.dependency_overrides[get_gsc_service] = lambda: service

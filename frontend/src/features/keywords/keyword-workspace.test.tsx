@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { ApiError } from "@/api/client"
 import type {
   KeywordBuildRun,
   KeywordLibraryStatus,
@@ -25,6 +26,7 @@ const keywordApi = vi.hoisted(() => ({
   listKeywordCompetitors: vi.fn(),
   listKeywords: vi.fn(),
   retryKeywordBuild: vi.fn(),
+  saveGSCKeywords: vi.fn(),
   startCompetitorAnalysis: vi.fn(),
   updateCompetitorOpportunities: vi.fn(),
   updateKeywordStatus: vi.fn(),
@@ -33,6 +35,8 @@ const keywordApi = vi.hoisted(() => ({
 const settingsApi = vi.hoisted(() => ({
   getGSCConnection: vi.fn(),
   getGSCPerformance: vi.fn(),
+  getGSCPerformanceTable: vi.fn(),
+  exportGSCPerformance: vi.fn(),
 }))
 
 vi.mock("@/api/keywords", async (importOriginal) => ({
@@ -137,6 +141,40 @@ const keywordResult: KeywordListResult = {
   resultVersion: 1,
 }
 
+const performanceReport = {
+  siteUrl: "sc-domain:example.com",
+  range: {
+    startDate: "2026-07-05",
+    endDate: "2026-08-02",
+    previousStartDate: "2026-06-06",
+    previousEndDate: "2026-07-04",
+  },
+  totals: {
+    clicks: 80,
+    impressions: 1600,
+    ctr: 0.05,
+    position: 8.2,
+  },
+  previousTotals: {
+    clicks: 60,
+    impressions: 1400,
+    ctr: 60 / 1400,
+    position: 9.1,
+  },
+  strikingDistance: [
+    {
+      query: "solar panels",
+      page: "https://example.com/solar-panels",
+      clicks: 12,
+      impressions: 240,
+      position: 6.4,
+    },
+  ],
+  countries: [
+    { key: "usa", clicks: 80, impressions: 1600, ctr: 0.05, position: 8.2 },
+  ],
+}
+
 beforeEach(() => {
   keywordQueryClient.clear()
   vi.clearAllMocks()
@@ -149,25 +187,27 @@ beforeEach(() => {
     connectedAccountEmail: "owner@example.com",
     requiresReconnect: false,
   })
-  settingsApi.getGSCPerformance.mockResolvedValue({
-    siteUrl: "sc-domain:example.com",
-    startDate: "2026-07-06",
-    endDate: "2026-08-02",
-    totals: {
-      clicks: 80,
-      impressions: 1600,
-      ctr: 0.05,
-      position: 8.2,
-    },
+  settingsApi.getGSCPerformance.mockResolvedValue(performanceReport)
+  settingsApi.getGSCPerformanceTable.mockResolvedValue({
+    dimension: "query",
+    page: 1,
+    pageSize: 25,
+    hasNextPage: false,
     rows: [
       {
-        query: "solar panels",
+        key: "solar panels",
         clicks: 12,
         impressions: 240,
         ctr: 0.05,
         position: 6.4,
       },
     ],
+  })
+  settingsApi.exportGSCPerformance.mockResolvedValue([])
+  keywordApi.saveGSCKeywords.mockResolvedValue({
+    saved: 1,
+    addedToLibrary: 1,
+    alreadyInLibrary: 0,
   })
   keywordApi.listKeywords.mockResolvedValue(keywordResult)
   keywordApi.getCompetitorAnalysisStatus.mockResolvedValue(null)
@@ -345,7 +385,18 @@ describe("KeywordWorkspace", () => {
     expect(await screen.findByText("Google 搜索表现")).toBeTruthy()
     expect(await screen.findByText("solar panels")).toBeTruthy()
     expect(screen.getByText("1,600")).toBeTruthy()
-    expect(settingsApi.getGSCPerformance).toHaveBeenCalledWith("project-1")
+    expect(
+      screen.getByRole("combobox", { name: "设备筛选" }).textContent
+    ).toContain("全部设备")
+    expect(
+      screen.getByRole("combobox", { name: "国家筛选" }).textContent
+    ).toContain("全部国家")
+    expect(
+      screen.getByRole("combobox", { name: "时间范围" }).textContent
+    ).toContain("最近 28 天")
+    expect(settingsApi.getGSCPerformance).toHaveBeenCalledWith("project-1", {
+      dateRange: "last_28_days",
+    })
     expect(keywordApi.getKeywordStatus).not.toHaveBeenCalled()
   })
 
@@ -361,6 +412,149 @@ describe("KeywordWorkspace", () => {
     expect(await screen.findByText("Google 搜索表现")).toBeTruthy()
     expect(settingsApi.getGSCConnection).toHaveBeenCalledTimes(1)
     expect(settingsApi.getGSCPerformance).toHaveBeenCalledTimes(1)
+  })
+
+  it("搜索表现按 OpenSEO 展示提升机会、查询与关键词保存操作", async () => {
+    render(<KeywordWorkspace projectId="project-1" view="search-performance" />)
+
+    expect(await screen.findByText("提升机会（1）")).toBeTruthy()
+    expect(screen.getByText("https://example.com/solar-panels")).toBeTruthy()
+    expect(screen.getByText("+33.3%")).toBeTruthy()
+
+    fireEvent.click(screen.getByRole("tab", { name: "搜索查询" }))
+    expect(
+      await screen.findByRole("columnheader", { name: "查询" })
+    ).toBeTruthy()
+    expect(settingsApi.getGSCPerformanceTable).toHaveBeenCalledWith(
+      "project-1",
+      {
+        dateRange: "last_28_days",
+        dimension: "query",
+        page: 1,
+        pageSize: 25,
+      }
+    )
+
+    fireEvent.click(screen.getByRole("tab", { name: "提升机会（1）" }))
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 solar panels" }))
+    fireEvent.click(screen.getByRole("button", { name: "保存到关键词库" }))
+    await waitFor(() => {
+      expect(keywordApi.saveGSCKeywords).toHaveBeenCalledWith("project-1", [
+        "solar panels",
+      ])
+    })
+    expect(await screen.findByText(/已保存 1 个关键词/)).toBeTruthy()
+  })
+
+  it("提升机会使用独立的 50 条分页并全选全部已加载结果", async () => {
+    settingsApi.getGSCPerformance.mockResolvedValue({
+      ...performanceReport,
+      strikingDistance: Array.from({ length: 60 }, (_, index) => ({
+        query: `query-${index}`,
+        page: `https://example.com/page-${index}`,
+        clicks: index,
+        impressions: 1000 - index,
+        position: 6 + index / 100,
+      })),
+    })
+
+    render(<KeywordWorkspace projectId="project-1" view="search-performance" />)
+
+    await screen.findByText("query-0")
+    expect(
+      screen.getByRole("combobox", { name: "每页数量" }).textContent
+    ).toContain("50")
+    expect(screen.getByText("1–50，共 60")).toBeTruthy()
+    expect(screen.getByText("第 1 页，共 2 页")).toBeTruthy()
+    expect(screen.queryByText("query-50")).toBeNull()
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择全部提升机会" }))
+    expect(await screen.findByText("已选择 60 个查询")).toBeTruthy()
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }))
+    expect(await screen.findByText("query-50")).toBeTruthy()
+    expect(screen.getByText("51–60，共 60")).toBeTruthy()
+    expect(screen.getByText("已选择 60 个查询")).toBeTruthy()
+  })
+
+  it("提升机会支持 Shift 连续选择", async () => {
+    settingsApi.getGSCPerformance.mockResolvedValue({
+      ...performanceReport,
+      strikingDistance: Array.from({ length: 5 }, (_, index) => ({
+        query: `range-${index}`,
+        page: `https://example.com/range-${index}`,
+        clicks: index,
+        impressions: 100 - index,
+        position: 6 + index,
+      })),
+    })
+
+    render(<KeywordWorkspace projectId="project-1" view="search-performance" />)
+
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: "选择 range-0" })
+    )
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 range-3" }), {
+      shiftKey: true,
+    })
+
+    expect(await screen.findByText("已选择 4 个查询")).toBeTruthy()
+  })
+
+  it("提升机会为空时显示说明且不显示分页", async () => {
+    settingsApi.getGSCPerformance.mockResolvedValue({
+      ...performanceReport,
+      strikingDistance: [],
+    })
+
+    render(<KeywordWorkspace projectId="project-1" view="search-performance" />)
+
+    expect(
+      await screen.findByText(/当前周期没有排名第 5–20 位的提升机会/)
+    ).toBeTruthy()
+    expect(screen.queryByRole("combobox", { name: "每页数量" })).toBeNull()
+  })
+
+  it("查询表读取失败时不显示分页", async () => {
+    settingsApi.getGSCPerformanceTable.mockRejectedValue(
+      new ApiError(502, "Google Search Console 暂时不可用")
+    )
+
+    render(<KeywordWorkspace projectId="project-1" view="search-performance" />)
+
+    fireEvent.click(await screen.findByRole("tab", { name: "搜索查询" }))
+    expect(
+      await screen.findByText("Google Search Console 暂时不可用")
+    ).toBeTruthy()
+    expect(screen.queryByRole("combobox", { name: "每页数量" })).toBeNull()
+  })
+
+  it("GSC 授权失效后立即切换到重新连接提示", async () => {
+    settingsApi.getGSCConnection
+      .mockResolvedValueOnce({
+        oauthConfigured: true,
+        grantConnected: true,
+        propertyConnected: true,
+        siteUrl: "sc-domain:example.com",
+        connectedAccountEmail: "owner@example.com",
+        requiresReconnect: false,
+      })
+      .mockResolvedValue({
+        oauthConfigured: true,
+        grantConnected: true,
+        propertyConnected: false,
+        siteUrl: "sc-domain:example.com",
+        connectedAccountEmail: "owner@example.com",
+        requiresReconnect: true,
+      })
+    settingsApi.getGSCPerformance.mockRejectedValue(
+      new ApiError(409, "Search Console 授权已失效，请重新连接")
+    )
+
+    render(<KeywordWorkspace projectId="project-1" view="search-performance" />)
+
+    expect(await screen.findByText("连接 Google Search Console")).toBeTruthy()
+    expect(settingsApi.getGSCConnection).toHaveBeenCalledTimes(2)
   })
 
   it("竞争分析完成后清除排队提示", async () => {

@@ -918,3 +918,27 @@ export async function assignKeywordTags(
   )
   return response.updated
 }
+
+export async function saveGSCKeywords(
+  projectId: string,
+  keywords: string[]
+): Promise<{
+  saved: number
+  addedToLibrary: number
+  alreadyInLibrary: number
+}> {
+  const response = await apiRequest<{
+    saved: number
+    added_to_library: number
+    already_in_library: number
+  }>(keywordPath(projectId, "/gsc"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keywords }),
+  })
+  return {
+    saved: response.saved,
+    addedToLibrary: response.added_to_library,
+    alreadyInLibrary: response.already_in_library,
+  }
+}

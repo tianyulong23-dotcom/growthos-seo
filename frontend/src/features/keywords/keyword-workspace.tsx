@@ -47,11 +47,7 @@ import {
   type KeywordListResult,
   type KeywordStatus,
 } from "@/api/keywords"
-import {
-  getGSCConnection,
-  getGSCPerformance,
-  type GSCPerformance,
-} from "@/api/settings"
+import { getGSCConnection } from "@/api/settings"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -98,10 +94,10 @@ import {
   DEFAULT_KEYWORD_LIBRARY_QUERY,
   keywordQueryKeys,
 } from "@/features/keywords/keyword-query-client"
+import { GSCPerformancePanel } from "@/features/keywords/gsc-performance-panel"
 import { KeywordQueryProvider } from "@/features/keywords/keyword-query-provider"
 
 const PAGE_SIZE = 50
-const GSC_PAGE_SIZE = 50
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "waiting"])
 const READABLE_RUN_STATUSES = new Set(["completed", "partial"])
 
@@ -169,19 +165,17 @@ function KeywordLibraryWorkspace({ projectId }: { projectId: string }) {
     () => keywordQueryKeys.libraryStatus(projectId),
     [projectId]
   )
-  const [status, setStatus] = React.useState<KeywordLibraryStatus | null>(() =>
-    queryClient.getQueryData<KeywordLibraryStatus>(statusQueryKey) ?? null
+  const [status, setStatus] = React.useState<KeywordLibraryStatus | null>(
+    () => queryClient.getQueryData<KeywordLibraryStatus>(statusQueryKey) ?? null
   )
   const [statusError, setStatusError] = React.useState("")
   const [statusLoading, setStatusLoading] = React.useState(() => !status)
   const [statusRefreshKey, setStatusRefreshKey] = React.useState(0)
-  const [result, setResult] = React.useState<KeywordListResult | null>(() =>
-    queryClient.getQueryData<KeywordListResult>(
-      keywordQueryKeys.libraryList(
-        projectId,
-        DEFAULT_KEYWORD_LIBRARY_QUERY
-      )
-    ) ?? null
+  const [result, setResult] = React.useState<KeywordListResult | null>(
+    () =>
+      queryClient.getQueryData<KeywordListResult>(
+        keywordQueryKeys.libraryList(projectId, DEFAULT_KEYWORD_LIBRARY_QUERY)
+      ) ?? null
   )
   const [listError, setListError] = React.useState("")
   const [listLoading, setListLoading] = React.useState(false)
@@ -232,9 +226,8 @@ function KeywordLibraryWorkspace({ projectId }: { projectId: string }) {
       if (requestInFlight) return
       requestInFlight = true
       try {
-        const cached = queryClient.getQueryData<KeywordLibraryStatus>(
-          statusQueryKey
-        )
+        const cached =
+          queryClient.getQueryData<KeywordLibraryStatus>(statusQueryKey)
         const next = await queryClient.fetchQuery({
           queryKey: statusQueryKey,
           queryFn: () => getKeywordStatus(projectId),
@@ -1056,7 +1049,9 @@ function GSCGuard({
             ? "连接与当前项目域名匹配的网站后，才能查看真实的搜索点击、曝光和排名数据。"
             : "连接与当前项目域名匹配的网站后，才能用真实业务查询发现搜索竞品并分析机会缺口。"}
         </p>
-        {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
+        {error ? (
+          <p className="mt-2 text-sm text-destructive">{error}</p>
+        ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           <Button
             nativeButton={false}
@@ -1084,183 +1079,6 @@ function GSCGuard({
     )
   }
   return children
-}
-
-function GSCPerformancePanel({ projectId }: { projectId: string }) {
-  const [page, setPage] = React.useState(1)
-  const performanceQuery = useQuery<GSCPerformance>({
-    queryKey: keywordQueryKeys.performance(projectId),
-    queryFn: () => getGSCPerformance(projectId),
-    staleTime: 30 * 60 * 1000,
-  })
-  const performance = performanceQuery.data
-  const loading = performanceQuery.isFetching
-  const error = performanceQuery.error
-    ? errorMessage(performanceQuery.error, "读取 Search Console 表现失败")
-    : ""
-
-  if (performanceQuery.isPending) {
-    return <KeywordLoadingState message="正在读取搜索表现" />
-  }
-  if (error && !performance) {
-    return (
-      <KeywordErrorState
-        title="暂时无法读取搜索表现"
-        message={error}
-        onRetry={() => {
-          void performanceQuery.refetch()
-        }}
-      />
-    )
-  }
-
-  const totals = performance?.totals
-  const metrics = [
-    ["总点击", formatNumber(totals?.clicks ?? 0)],
-    ["总曝光", formatNumber(totals?.impressions ?? 0)],
-    ["平均 CTR", `${((totals?.ctr ?? 0) * 100).toFixed(1)}%`],
-    ["平均排名", (totals?.position ?? 0).toFixed(1)],
-  ]
-  const rows = performance?.rows ?? []
-  const pageCount = Math.max(1, Math.ceil(rows.length / GSC_PAGE_SIZE))
-  const currentPage = Math.min(page, pageCount)
-  const visibleRows = rows.slice(
-    (currentPage - 1) * GSC_PAGE_SIZE,
-    currentPage * GSC_PAGE_SIZE
-  )
-
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="text-base font-semibold">Google 搜索表现</h2>
-          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            <span>{performance?.siteUrl}</span>
-            <span>
-              {performance?.startDate} 至 {performance?.endDate}
-            </span>
-          </div>
-        </div>
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  variant="outline"
-                  size="icon-sm"
-                  aria-label="刷新搜索表现"
-                  disabled={loading}
-                  onClick={() => {
-                    void performanceQuery.refetch()
-                  }}
-                />
-              }
-            >
-              <RefreshCw className={loading ? "animate-spin" : ""} />
-            </TooltipTrigger>
-            <TooltipContent>刷新</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      </div>
-
-      {error ? (
-        <div className="border-y border-destructive/25 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          {error}
-        </div>
-      ) : null}
-
-      <dl className="grid border-y sm:grid-cols-2 lg:grid-cols-4">
-        {metrics.map(([label, value], index) => (
-          <div
-            key={label}
-            className={`px-4 py-4 ${index ? "border-t sm:border-t-0 sm:border-l" : ""}`}
-          >
-            <dt className="text-xs text-muted-foreground">{label}</dt>
-            <dd className="mt-1 text-xl font-semibold tabular-nums">{value}</dd>
-          </div>
-        ))}
-      </dl>
-
-      <Card className="overflow-hidden">
-        <div className="border-b px-4 py-3">
-          <h3 className="text-sm font-semibold">搜索查询</h3>
-        </div>
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="min-w-64">查询</TableHead>
-                <TableHead className="text-right">点击</TableHead>
-                <TableHead className="text-right">曝光</TableHead>
-                <TableHead className="text-right">CTR</TableHead>
-                <TableHead className="text-right">平均排名</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {visibleRows.length ? (
-                visibleRows.map((row) => (
-                  <TableRow key={row.query}>
-                    <TableCell className="font-medium">{row.query}</TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {formatNumber(row.clicks)}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {formatNumber(row.impressions)}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {(row.ctr * 100).toFixed(1)}%
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {row.position.toFixed(1)}
-                    </TableCell>
-                  </TableRow>
-                ))
-              ) : (
-                <TableRow>
-                  <TableCell colSpan={5} className="h-40 text-center text-muted-foreground">
-                    当前时间范围没有搜索查询数据
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </div>
-        {rows.length ? (
-          <div className="flex items-center justify-between border-t px-4 py-3 text-sm">
-            <span className="text-muted-foreground">
-              共 {formatNumber(rows.length)} 个查询
-              {loading ? "，正在更新" : ""}
-            </span>
-            <div className="flex items-center gap-2">
-              <span className="min-w-20 text-center tabular-nums">
-                {currentPage} / {pageCount}
-              </span>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                aria-label="上一页搜索查询"
-                disabled={currentPage <= 1}
-                onClick={() => setPage((value) => Math.max(1, value - 1))}
-              >
-                <ChevronLeft />
-              </Button>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                aria-label="下一页搜索查询"
-                disabled={currentPage >= pageCount}
-                onClick={() =>
-                  setPage((value) => Math.min(pageCount, value + 1))
-                }
-              >
-                <ChevronRight />
-              </Button>
-            </div>
-          </div>
-        ) : null}
-      </Card>
-    </div>
-  )
 }
 
 type OpportunityResult = Awaited<
@@ -1405,10 +1223,7 @@ function CompetitorOpportunityPanel({
   const loadError =
     statusQuery.error || competitorsQuery.error || opportunitiesQuery.error
   const displayError =
-    error ||
-    (loadError
-      ? errorMessage(loadError, "读取竞争机会缺口失败")
-      : "")
+    error || (loadError ? errorMessage(loadError, "读取竞争机会缺口失败") : "")
   const displayMessage =
     message === "竞争分析已进入队列" &&
     run &&

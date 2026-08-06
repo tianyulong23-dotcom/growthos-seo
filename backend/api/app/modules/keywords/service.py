@@ -71,6 +71,8 @@ from app.modules.keywords.schemas import (
     KeywordCostSummaryResponse,
     KeywordExternalIssueListResponse,
     KeywordExternalIssueResponse,
+    KeywordGSCSaveRequest,
+    KeywordGSCSaveResponse,
     KeywordLibraryStatusResponse,
     KeywordListItemResponse,
     KeywordListResponse,
@@ -834,6 +836,161 @@ class SQLAlchemyKeywordRepository:
                 page=page,
                 page_size=page_size,
                 result_version=int(result_version or 0),
+            )
+
+    async def save_gsc_keywords(
+        self,
+        organization_id: str,
+        project_id: str,
+        request: KeywordGSCSaveRequest,
+    ) -> KeywordGSCSaveResponse:
+        normalized: dict[str, str] = {}
+        for value in request.keywords:
+            keyword, normalized_keyword = normalize_saved_keyword(value)
+            if keyword:
+                normalized.setdefault(normalized_keyword, keyword)
+        if not normalized:
+            return KeywordGSCSaveResponse(
+                saved=0,
+                added_to_library=0,
+                already_in_library=0,
+            )
+
+        now = datetime.now(UTC)
+        async with self.sessions() as session:
+            project = await self._require_project(
+                session,
+                organization_id,
+                project_id,
+                lock=True,
+            )
+            build_run = await session.scalar(
+                select(KeywordBuildRun)
+                .where(
+                    KeywordBuildRun.organization_id == organization_id,
+                    KeywordBuildRun.project_id == project_id,
+                )
+                .order_by(
+                    KeywordBuildRun.round_number.desc(),
+                    KeywordBuildRun.created_at.desc(),
+                )
+                .limit(1)
+                .with_for_update()
+            )
+            if build_run is None:
+                build_run = KeywordBuildRun(
+                    id=str(uuid4()),
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    kind="initial",
+                    round_number=1,
+                    status="completed",
+                    stage="completed",
+                    message="关键词已从 Google 搜索表现保存",
+                    progress=100,
+                    discovered_count=len(normalized),
+                    selected_count=len(normalized),
+                    keyword_count=0,
+                    pending_seed_count=0,
+                    result_version=0,
+                    profile_snapshot={},
+                    profile_source="gsc_search_performance",
+                    profile_version="",
+                    gap_status="not_requested",
+                    gap_message="",
+                    gap_count=0,
+                    partial_failures=[],
+                    started_at=now,
+                    finished_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(build_run)
+                await session.flush()
+
+            existing_rows = list(
+                (
+                    await session.scalars(
+                        select(Keyword).where(
+                            Keyword.organization_id == organization_id,
+                            Keyword.project_id == project_id,
+                            Keyword.country == project.country,
+                            Keyword.language == project.language,
+                            Keyword.normalized_keyword.in_(normalized),
+                        )
+                    )
+                ).all()
+            )
+            existing_by_normalized = {
+                row.normalized_keyword: row for row in existing_rows
+            }
+            added = 0
+            existing = 0
+            for normalized_keyword, keyword_value in normalized.items():
+                keyword = existing_by_normalized.get(normalized_keyword)
+                if keyword is None:
+                    keyword = Keyword(
+                        id=str(uuid4()),
+                        organization_id=organization_id,
+                        project_id=project_id,
+                        country=project.country,
+                        language=project.language,
+                        keyword=keyword_value,
+                        normalized_keyword=normalized_keyword,
+                        classification_confidence=None,
+                        review_status="approved",
+                        priority_details={"source": "gsc_search_performance"},
+                        status="active",
+                        metrics_status="stale",
+                        first_build_run_id=build_run.id,
+                        last_build_run_id=build_run.id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(keyword)
+                    await session.flush()
+                    added += 1
+                else:
+                    keyword.status = "active"
+                    keyword.archived_at = None
+                    keyword.last_build_run_id = build_run.id
+                    keyword.updated_at = now
+                    existing += 1
+
+                source = await session.scalar(
+                    select(KeywordSource).where(
+                        KeywordSource.keyword_id == keyword.id,
+                        KeywordSource.source == "gsc_search_performance",
+                        KeywordSource.source_seed_key == "",
+                    )
+                )
+                if source is None:
+                    session.add(
+                        KeywordSource(
+                            keyword_id=keyword.id,
+                            source="gsc_search_performance",
+                            source_seed_key="",
+                            first_build_run_id=build_run.id,
+                            metadata_json={"origin": "search_performance"},
+                        )
+                    )
+
+            build_run.result_version = int(build_run.result_version or 0) + 1
+            build_run.updated_at = now
+            build_run.keyword_count = int(
+                await session.scalar(
+                    select(func.count(Keyword.id)).where(
+                        Keyword.organization_id == organization_id,
+                        Keyword.project_id == project_id,
+                    )
+                )
+                or 0
+            )
+            await session.commit()
+            return KeywordGSCSaveResponse(
+                saved=len(normalized),
+                added_to_library=added,
+                already_in_library=existing,
             )
 
     async def list_competitor_gaps(
@@ -3041,6 +3198,17 @@ class KeywordService:
             **kwargs,
         )
 
+    async def save_gsc_keywords(
+        self,
+        project_id: str,
+        request: KeywordGSCSaveRequest,
+    ) -> KeywordGSCSaveResponse:
+        return await self.repository.save_gsc_keywords(
+            self.settings.default_organization_id,
+            project_id,
+            request,
+        )
+
     async def list_competitor_gaps(
         self,
         project_id: str,
@@ -3650,6 +3818,11 @@ def competitor_opportunity_metric_provenance(
         "provider_request_completed": True,
         "provider_null_fields": [field for field in fields if getattr(opportunity, field) is None],
     }
+
+
+def normalize_saved_keyword(value: str) -> tuple[str, str]:
+    keyword = " ".join(unicodedata.normalize("NFKC", value).strip().split())
+    return keyword[:500], keyword.casefold()[:500]
 
 
 def normalize_tags(values: list[str]) -> list[tuple[str, str]]:

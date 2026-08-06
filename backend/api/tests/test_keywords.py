@@ -21,6 +21,8 @@ from app.modules.keywords.schemas import (
     KeywordCostSummaryResponse,
     KeywordExternalIssueListResponse,
     KeywordExternalIssueResponse,
+    KeywordGSCSaveRequest,
+    KeywordGSCSaveResponse,
     KeywordLibraryStatusResponse,
     KeywordListItemResponse,
     KeywordListResponse,
@@ -60,6 +62,7 @@ class FakeKeywordService:
     def __init__(self) -> None:
         self.retry_calls: list[str] = []
         self.accepted_issue_ids: list[int] = []
+        self.saved_gsc_keywords: list[str] = []
 
     async def status(self, project_id: str) -> KeywordLibraryStatusResponse:
         return KeywordLibraryStatusResponse(
@@ -102,6 +105,18 @@ class FakeKeywordService:
             page=kwargs["page"],
             page_size=kwargs["page_size"],
             result_version=3,
+        )
+
+    async def save_gsc_keywords(
+        self,
+        project_id: str,
+        request: KeywordGSCSaveRequest,
+    ) -> KeywordGSCSaveResponse:
+        self.saved_gsc_keywords = request.keywords
+        return KeywordGSCSaveResponse(
+            saved=len(request.keywords),
+            added_to_library=len(request.keywords),
+            already_in_library=0,
         )
 
     async def cost_summary(self, project_id: str) -> KeywordCostSummaryResponse:
@@ -515,6 +530,24 @@ async def test_keyword_costs_separate_reported_cost_and_ai_tokens() -> None:
         "ai_output_tokens": 900,
         "ai_cost_complete": False,
     }
+
+
+async def test_gsc_search_performance_keywords_can_be_saved_to_library() -> None:
+    service = FakeKeywordService()
+    response = await api_request(
+        "POST",
+        "/api/v1/projects/project-1/keywords/gsc",
+        service,
+        json={"keywords": ["solar panels", "solar installation"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "saved": 2,
+        "added_to_library": 2,
+        "already_in_library": 0,
+    }
+    assert service.saved_gsc_keywords == ["solar panels", "solar installation"]
 
 
 async def test_uncertain_dataforseo_request_can_continue_as_empty_without_retry() -> None:

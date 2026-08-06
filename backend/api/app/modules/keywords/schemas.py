@@ -142,6 +142,19 @@ class KeywordBatchStatusResponse(BaseModel):
     updated: int = Field(ge=0)
 
 
+class KeywordGSCSaveRequest(BaseModel):
+    keywords: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        min_length=1,
+        max_length=100,
+    )
+
+
+class KeywordGSCSaveResponse(BaseModel):
+    saved: int = Field(ge=0)
+    added_to_library: int = Field(ge=0)
+    already_in_library: int = Field(ge=0)
+
+
 class KeywordTagAssignmentRequest(BaseModel):
     keyword_ids: list[str] = Field(min_length=1, max_length=700)
     tag_names: list[str] = Field(default_factory=list, max_length=20)

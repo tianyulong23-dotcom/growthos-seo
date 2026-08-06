@@ -1,5 +1,6 @@
 import logging
-from typing import Annotated
+from enum import IntEnum
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
@@ -34,7 +35,9 @@ from app.modules.settings.schemas import (
     UpdateDataForSEOSettingsRequest,
     UpdateGoogleAdsSettingsRequest,
     GSCConnectionResponse,
-    GSCPerformanceResponse,
+    GSCPerformanceExportResponse,
+    GSCPerformanceReportResponse,
+    GSCPerformanceTableResponse,
     GSCOAuthStartRequest,
     GSCOAuthStartResponse,
     GSCSelectSiteRequest,
@@ -43,6 +46,12 @@ from app.modules.settings.schemas import (
 
 router = APIRouter(tags=["settings"])
 logger = logging.getLogger(__name__)
+
+
+class GSCPerformancePageSize(IntEnum):
+    rows_25 = 25
+    rows_50 = 50
+    rows_100 = 100
 
 
 def get_google_ads_settings_service() -> GoogleAdsSettingsService:
@@ -198,16 +207,91 @@ async def disconnect_gsc(
 
 @router.get(
     "/api/v1/projects/{project_id}/gsc/performance",
-    response_model=GSCPerformanceResponse,
+    response_model=GSCPerformanceReportResponse,
 )
 async def get_gsc_performance(
     project_id: str,
     service: Annotated[GSCService, Depends(get_gsc_service)],
-    days: Annotated[int, Query(ge=7, le=90)] = 28,
-    limit: Annotated[int, Query(ge=1, le=1000)] = 250,
-) -> GSCPerformanceResponse:
+    date_range: Literal["last_7_days", "last_28_days", "last_3_months"] = (
+        "last_28_days"
+    ),
+    device: Literal["DESKTOP", "MOBILE", "TABLET"] | None = None,
+    country: Annotated[
+        str | None,
+        Query(min_length=3, max_length=3, pattern=r"^[A-Za-z]{3}$"),
+    ] = None,
+) -> GSCPerformanceReportResponse:
     try:
-        return await service.performance(project_id, days=days, limit=limit)
+        return await service.performance_report(
+            project_id,
+            date_range=date_range,
+            device=device,
+            country=country,
+        )
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
+
+
+@router.get(
+    "/api/v1/projects/{project_id}/gsc/performance/table",
+    response_model=GSCPerformanceTableResponse,
+)
+async def get_gsc_performance_table(
+    project_id: str,
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+    dimension: Literal["query", "page"],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: GSCPerformancePageSize = GSCPerformancePageSize.rows_25,
+    date_range: Literal["last_7_days", "last_28_days", "last_3_months"] = (
+        "last_28_days"
+    ),
+    device: Literal["DESKTOP", "MOBILE", "TABLET"] | None = None,
+    country: Annotated[
+        str | None,
+        Query(min_length=3, max_length=3, pattern=r"^[A-Za-z]{3}$"),
+    ] = None,
+) -> GSCPerformanceTableResponse:
+    try:
+        return await service.performance_table(
+            project_id,
+            dimension=dimension,
+            page=page,
+            page_size=int(page_size),
+            date_range=date_range,
+            device=device,
+            country=country,
+        )
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
+
+
+@router.get(
+    "/api/v1/projects/{project_id}/gsc/performance/export",
+    response_model=GSCPerformanceExportResponse,
+)
+async def export_gsc_performance(
+    project_id: str,
+    service: Annotated[GSCService, Depends(get_gsc_service)],
+    dimension: Literal["query", "page"],
+    date_range: Literal["last_7_days", "last_28_days", "last_3_months"] = (
+        "last_28_days"
+    ),
+    device: Literal["DESKTOP", "MOBILE", "TABLET"] | None = None,
+    country: Annotated[
+        str | None,
+        Query(min_length=3, max_length=3, pattern=r"^[A-Za-z]{3}$"),
+    ] = None,
+) -> GSCPerformanceExportResponse:
+    try:
+        return await service.performance_export(
+            project_id,
+            dimension=dimension,
+            date_range=date_range,
+            device=device,
+            country=country,
+        )
     except Exception as exc:
         handle_gsc_error(exc)
         raise

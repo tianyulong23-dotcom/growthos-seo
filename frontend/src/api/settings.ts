@@ -308,12 +308,30 @@ export type GSCSite = {
   permissionLevel: string
 }
 
-export type GSCPerformance = {
+export type GSCPerformanceDateRange =
+  "last_7_days" | "last_28_days" | "last_3_months"
+export type GSCPerformanceDevice = "DESKTOP" | "MOBILE" | "TABLET"
+export type GSCPerformanceDimension = "query" | "page"
+export type GSCPerformancePageSize = 25 | 50 | 100
+
+export type GSCPerformanceFilters = {
+  dateRange: GSCPerformanceDateRange
+  device?: GSCPerformanceDevice
+  country?: string
+}
+
+export type GSCPerformanceReport = {
   siteUrl: string
-  startDate: string
-  endDate: string
+  range: {
+    startDate: string
+    endDate: string
+    previousStartDate: string
+    previousEndDate: string
+  }
   totals: GSCPerformanceMetrics
-  rows: GSCPerformanceRow[]
+  previousTotals: GSCPerformanceMetrics
+  strikingDistance: GSCStrikingDistanceRow[]
+  countries: GSCPerformanceRow[]
 }
 
 export type GSCPerformanceMetrics = {
@@ -324,7 +342,20 @@ export type GSCPerformanceMetrics = {
 }
 
 export type GSCPerformanceRow = GSCPerformanceMetrics & {
+  key: string
+}
+
+export type GSCStrikingDistanceRow = Omit<GSCPerformanceMetrics, "ctr"> & {
   query: string
+  page: string
+}
+
+export type GSCPerformanceTable = {
+  dimension: GSCPerformanceDimension
+  page: number
+  pageSize: GSCPerformancePageSize
+  hasNextPage: boolean
+  rows: GSCPerformanceRow[]
 }
 
 type GSCConnectionResponse = {
@@ -337,16 +368,32 @@ type GSCConnectionResponse = {
   requires_reconnect: boolean
 }
 
-type GSCPerformanceResponse = {
+type GSCPerformanceReportResponse = {
   site_url: string
-  start_date: string
-  end_date: string
+  range: {
+    start_date: string
+    end_date: string
+    previous_start_date: string
+    previous_end_date: string
+  }
   totals: GSCPerformanceMetrics
-  rows: Array<
-    {
-      query: string
-    } & GSCPerformanceMetrics
-  >
+  previous_totals: GSCPerformanceMetrics
+  striking_distance: Array<{
+    query: string
+    page: string
+    clicks: number
+    impressions: number
+    position: number
+  }>
+  countries: Array<{ key: string } & GSCPerformanceMetrics>
+}
+
+type GSCPerformanceTableResponse = {
+  dimension: GSCPerformanceDimension
+  page: number
+  page_size: GSCPerformancePageSize
+  has_next_page: boolean
+  rows: Array<{ key: string } & GSCPerformanceMetrics>
 }
 
 function mapGSCConnection(value: GSCConnectionResponse): GSCConnection {
@@ -373,19 +420,70 @@ export async function getGSCConnection(
 
 export async function getGSCPerformance(
   projectId: string,
-  days = 28,
-  limit = 250
-): Promise<GSCPerformance> {
-  const result = await apiRequest<GSCPerformanceResponse>(
-    `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/performance?days=${days}&limit=${limit}`
+  filters: GSCPerformanceFilters = { dateRange: "last_28_days" }
+): Promise<GSCPerformanceReport> {
+  const result = await apiRequest<GSCPerformanceReportResponse>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/performance?${gscPerformanceParams(filters)}`
   )
   return {
     siteUrl: result.site_url,
-    startDate: result.start_date,
-    endDate: result.end_date,
+    range: {
+      startDate: result.range.start_date,
+      endDate: result.range.end_date,
+      previousStartDate: result.range.previous_start_date,
+      previousEndDate: result.range.previous_end_date,
+    },
     totals: result.totals,
+    previousTotals: result.previous_totals,
+    strikingDistance: result.striking_distance,
+    countries: result.countries,
+  }
+}
+
+export async function getGSCPerformanceTable(
+  projectId: string,
+  input: GSCPerformanceFilters & {
+    dimension: GSCPerformanceDimension
+    page: number
+    pageSize: GSCPerformancePageSize
+  }
+): Promise<GSCPerformanceTable> {
+  const params = gscPerformanceParams(input)
+  params.set("dimension", input.dimension)
+  params.set("page", String(input.page))
+  params.set("page_size", String(input.pageSize))
+  const result = await apiRequest<GSCPerformanceTableResponse>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/performance/table?${params}`
+  )
+  return {
+    dimension: result.dimension,
+    page: result.page,
+    pageSize: result.page_size,
+    hasNextPage: result.has_next_page,
     rows: result.rows,
   }
+}
+
+export async function exportGSCPerformance(
+  projectId: string,
+  input: GSCPerformanceFilters & { dimension: GSCPerformanceDimension }
+): Promise<GSCPerformanceRow[]> {
+  const params = gscPerformanceParams(input)
+  params.set("dimension", input.dimension)
+  const result = await apiRequest<{
+    dimension: GSCPerformanceDimension
+    rows: Array<{ key: string } & GSCPerformanceMetrics>
+  }>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/gsc/performance/export?${params}`
+  )
+  return result.rows
+}
+
+function gscPerformanceParams(filters: GSCPerformanceFilters): URLSearchParams {
+  const params = new URLSearchParams({ date_range: filters.dateRange })
+  if (filters.device) params.set("device", filters.device)
+  if (filters.country) params.set("country", filters.country)
+  return params
 }
 
 export async function startGSCOAuth(

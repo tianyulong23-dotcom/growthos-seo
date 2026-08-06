@@ -32,8 +32,6 @@ export const keywordQueryKeys = {
   all: ["keywords"] as const,
   connection: (projectId: string) =>
     ["keywords", projectId, "gsc-connection"] as const,
-  performance: (projectId: string) =>
-    ["keywords", projectId, "gsc-performance"] as const,
   libraryStatus: (projectId: string) =>
     ["keywords", projectId, "library-status"] as const,
   libraryList: (projectId: string, query: object) =>
@@ -87,10 +85,11 @@ export async function prefetchKeywordView(projectId: string, view: string) {
   if (!connection.propertyConnected || connection.requiresReconnect) return
 
   if (view === "search-performance") {
+    const filters = { dateRange: "last_28_days" as const }
     await keywordQueryClient.prefetchQuery({
-      queryKey: keywordQueryKeys.performance(projectId),
-      queryFn: () => getGSCPerformance(projectId),
-      staleTime: 30 * 60 * 1000,
+      queryKey: ["gsc-performance-report", projectId, filters],
+      queryFn: () => getGSCPerformance(projectId, filters),
+      staleTime: 5 * 60 * 1000,
     })
     return
   }

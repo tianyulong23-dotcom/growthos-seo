@@ -17,6 +17,7 @@ from app.modules.keywords.service import (
 from app.modules.keywords.schemas import (
     KeywordCompetitorAnalysisRequest,
     KeywordCompetitorOpportunityBatchRequest,
+    KeywordGSCSaveRequest,
 )
 
 pytestmark = pytest.mark.anyio
@@ -27,6 +28,117 @@ def _database_url() -> str:
     if not value:
         pytest.skip("KEYWORD_API_TEST_DATABASE_URL is required for PostgreSQL tests")
     return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+
+async def test_gsc_keywords_are_normalized_and_saved_idempotently() -> None:
+    engine = create_async_engine(_database_url(), pool_pre_ping=True)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    repository = SQLAlchemyKeywordRepository(sessions)
+    token = uuid4().hex
+    organization_id = f"gsc-save-org-{token}"
+    project_id = f"gsc-save-project-{token}"
+    try:
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO projects (
+                        id, organization_id, name, domain, country, language
+                    )
+                    VALUES (
+                        :project_id, :organization_id, 'GSC save test',
+                        :domain, 'US', 'en'
+                    )
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "organization_id": organization_id,
+                    "domain": f"{token}.example.test",
+                },
+            )
+            await session.commit()
+
+        first = await repository.save_gsc_keywords(
+            organization_id,
+            project_id,
+            KeywordGSCSaveRequest(
+                keywords=["  Solar   Panels  ", "solar panels", "ＳＯＬＡＲ ＰＡＮＥＬＳ"]
+            ),
+        )
+        assert first.saved == 1
+        assert first.added_to_library == 1
+        assert first.already_in_library == 0
+
+        async with sessions() as session:
+            saved = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT keyword.keyword, keyword.normalized_keyword,
+                               keyword.metrics_status, source.source,
+                               source.source_seed_key,
+                               run.status AS run_status, run.stage AS run_stage,
+                               run.profile_source, run.keyword_count
+                        FROM keywords AS keyword
+                        JOIN keyword_sources AS source
+                          ON source.keyword_id = keyword.id
+                        JOIN keyword_build_runs AS run
+                          ON run.id = keyword.first_build_run_id
+                        WHERE keyword.project_id = :project_id
+                        """
+                    ),
+                    {"project_id": project_id},
+                )
+            ).one()
+        assert saved.keyword == "Solar Panels"
+        assert saved.normalized_keyword == "solar panels"
+        assert saved.metrics_status == "stale"
+        assert saved.source == "gsc_search_performance"
+        assert saved.source_seed_key == ""
+        assert saved.run_status == "completed"
+        assert saved.run_stage == "completed"
+        assert saved.profile_source == "gsc_search_performance"
+        assert saved.keyword_count == 1
+
+        second = await repository.save_gsc_keywords(
+            organization_id,
+            project_id,
+            KeywordGSCSaveRequest(keywords=["SOLAR PANELS"]),
+        )
+        assert second.saved == 1
+        assert second.added_to_library == 0
+        assert second.already_in_library == 1
+
+        async with sessions() as session:
+            counts = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                            (SELECT count(*) FROM keywords
+                             WHERE project_id = :project_id) AS keywords,
+                            (SELECT count(*) FROM keyword_sources AS source
+                             JOIN keywords AS keyword ON keyword.id = source.keyword_id
+                             WHERE keyword.project_id = :project_id) AS sources,
+                            (SELECT count(*) FROM keyword_build_runs
+                             WHERE project_id = :project_id) AS runs
+                        """
+                    ),
+                    {"project_id": project_id},
+                )
+            ).one()
+        assert counts.keywords == 1
+        assert counts.sources == 1
+        assert counts.runs == 1
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                text("DELETE FROM projects WHERE id = :project_id"),
+                {"project_id": project_id},
+            )
+            await session.commit()
+        await engine.dispose()
 
 
 async def test_initial_workflow_orphan_recovery_is_capped_atomically() -> None:
