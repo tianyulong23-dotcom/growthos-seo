@@ -8,7 +8,6 @@ export const contentNavigation: NavigationItem = {
   description: "从搜索机会到内容计划、生产和发布的完整流程",
   icon: FileText,
   tabs: [
-    { id: "opportunities", label: "内容机会" },
     { id: "plans", label: "内容计划" },
     { id: "library", label: "内容库" },
   ],

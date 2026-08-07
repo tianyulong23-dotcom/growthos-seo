@@ -595,6 +595,15 @@ class DataForSEOSettingsService:
         register_sensitive_values((record.password,))
         return record
 
+    async def effective_record_for_organization(
+        self, organization_id: str
+    ) -> DataForSEOSettingsRecord:
+        record, _ = await self._effective_record_for_organization(organization_id)
+        if record is None or not record.configured:
+            raise DataSourceNotConfiguredError("请先配置 DataForSEO")
+        register_sensitive_values((record.password,))
+        return record
+
     async def update(
         self,
         project_id: str,
@@ -654,10 +663,17 @@ class DataForSEOSettingsService:
     async def _effective_record(
         self,
     ) -> tuple[DataForSEOSettingsRecord | None, str]:
+        return await self._effective_record_for_organization(
+            self.settings.default_organization_id
+        )
+
+    async def _effective_record_for_organization(
+        self, organization_id: str
+    ) -> tuple[DataForSEOSettingsRecord | None, str]:
         encryption_key = (self.settings.ai_settings_encryption_key or "").strip()
         if encryption_key:
             stored = await self.repository.get_dataforseo(
-                self.settings.default_organization_id,
+                organization_id,
                 encryption_key,
             )
             if stored is not None:

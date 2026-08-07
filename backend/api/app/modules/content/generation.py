@@ -467,10 +467,16 @@ async def _apply_content_quality_loop(
                         "sections": [item.model_dump(mode="json") for item in current],
                     },
                     "priority_fixes": score["priority_fixes"][:5],
+                    "locked_requirements": _locked_requirements(pack),
                 },
                 UnifiedArticle,
             )
-            candidate = normalize_unified(result.value, plan, current)
+            candidate = normalize_unified(
+                result.value,
+                plan,
+                current,
+                locked_title=_locked_title(pack),
+            )
             candidate_plan = plan.model_copy(
                 update={
                     "title": candidate.title,
@@ -688,10 +694,16 @@ async def unify_article(
             {
                 "plan": plan.model_dump(mode="json"),
                 "sections": [item.model_dump(mode="json") for item in current],
+                "locked_requirements": _locked_requirements(pack),
             },
             UnifiedArticle,
         )
-        candidate = normalize_unified(result.value, plan, current)
+        candidate = normalize_unified(
+            result.value,
+            plan,
+            current,
+            locked_title=_locked_title(pack),
+        )
         candidate_plan = plan.model_copy(
             update={
                 "title": candidate.title,
@@ -838,6 +850,8 @@ async def check_article(
     usage = None
     check_status = "completed"
     model_failure = None
+    expected_locked_requirements = _locked_requirements(pack)
+    locked_requirement_checks: list[dict[str, Any]] = []
     try:
         result = await cached_generate(
             writing_gateway(context),
@@ -853,10 +867,34 @@ async def check_article(
                 "sections": [item.model_dump(mode="json") for item in sections],
                 "section_requirements": _section_requirements(plan.sections),
                 "conversion_actions": conversion_actions,
+                "locked_requirements": expected_locked_requirements,
             },
             SemanticQualityResult,
         )
         issues.extend(result.value.issues)
+        locked_requirement_checks = [
+            item.model_dump(mode="json")
+            for item in result.value.locked_requirement_checks
+        ]
+        checks_by_key = {
+            (item["field"], item["requirement"]): item
+            for item in locked_requirement_checks
+        }
+        for requirement in expected_locked_requirements:
+            check = checks_by_key.get(
+                (requirement["field"], requirement["requirement"])
+            )
+            if check is None or check["passed"] is not True:
+                issues.append(
+                    SectionIssue(
+                        section_id=plan.sections[0].section_id,
+                        code="locked_requirement_failed",
+                        message=(
+                            "The generated article did not satisfy the locked writing "
+                            "direction."
+                        ),
+                    )
+                )
         usage = result.usage
     except Exception as exc:
         model_failure = writing_failure(exc)
@@ -909,6 +947,7 @@ async def check_article(
         "repairable_issue_count": len(repairable_issues),
         "evidence_issue_count": evidence_issue_count,
         "issues": [item.model_dump(mode="json") for item in unique],
+        "locked_requirement_checks": locked_requirement_checks,
         "required_questions": {
             "total": len(pack.get("required_questions", [])),
             "covered": _covered_questions(pack.get("required_questions", []), sections),
@@ -1043,6 +1082,7 @@ async def revise_article_sections(
                     if any(item.cta_type for item in failed_plans)
                     else []
                 ),
+                "locked_requirements": _locked_requirements(pack),
                 "claims": [
                     item.model_dump(mode="json")
                     for item in plan.claims
@@ -1191,6 +1231,7 @@ async def build_research_pack(
 ) -> dict[str, Any]:
     run_id = str(context["run_id"])
     snapshot = dict(context.get("project_snapshot") or {})
+    plan_input = dict(context.get("plan_input") or {})
     source_groups = {
         source_type: await repo.list_sources(run_id, source_type)
         for source_type in ("serp", "competitor", "authority", "internal")
@@ -1230,14 +1271,27 @@ async def build_research_pack(
         authority_sources=authority,
         internal_sources=internal,
     )
+    content_brief = dict(serp_analysis.get("content_brief") or {})
+    secondary_keywords = [
+        str(item.get("keyword"))
+        for item in plan_input.get("secondary_keywords") or []
+        if isinstance(item, dict) and item.get("keyword")
+    ]
+    if secondary_keywords:
+        content_brief["secondary_keywords"] = _unique(
+            [*content_brief.get("secondary_keywords", []), *secondary_keywords]
+        )
     return {
         "keyword": context["primary_keyword"],
+        "secondary_keywords": list(plan_input.get("secondary_keywords") or []),
+        "planned_title": dict(plan_input.get("title") or {}),
+        "writing_direction": dict(plan_input.get("writing_direction") or {}),
         "country": snapshot.get("country") or "US",
         "language": snapshot.get("language") or "en",
         "project": snapshot,
         "serp": serp,
         "serp_analysis": serp_analysis,
-        "content_brief": dict(serp_analysis.get("content_brief") or {}),
+        "content_brief": content_brief,
         "questions": questions,
         "required_questions": questions[:8],
         "competitors": competitors,
@@ -1246,6 +1300,22 @@ async def build_research_pack(
         "internal_sources": internal,
         "evidence_capabilities": evidence_capabilities,
     }
+
+
+def _locked_requirements(pack: dict[str, Any]) -> list[dict[str, str]]:
+    writing_direction = dict(pack.get("writing_direction") or {})
+    value = str(writing_direction.get("value") or "")
+    if writing_direction.get("policy") != "locked" or not value:
+        return []
+    return [{"field": "writing_direction", "requirement": value}]
+
+
+def _locked_title(pack: dict[str, Any]) -> str | None:
+    planned_title = dict(pack.get("planned_title") or {})
+    value = str(planned_title.get("value") or "").strip()
+    if planned_title.get("policy") != "locked" or not value:
+        return None
+    return value
 
 
 def _serp_features_from_payload(serp: dict[str, Any]) -> list[str]:
@@ -1481,7 +1551,9 @@ def normalize_plan(plan: ArticlePlan, pack: dict[str, Any]) -> ArticlePlan:
     sections = assign_internal_links_to_sections(sections, pack)
     sections = [_constrain_section_to_evidence(item, capabilities) for item in sections]
     gap_mapping = _gap_to_section_mapping(sections)
-    title = _constrain_metadata_to_evidence(plan.title, str(pack["keyword"]), capabilities)
+    title = _locked_title(pack) or _constrain_metadata_to_evidence(
+        plan.title, str(pack["keyword"]), capabilities
+    )
     meta_title = _constrain_metadata_to_evidence(
         plan.meta_title, str(pack["keyword"]), capabilities
     )
@@ -1981,7 +2053,7 @@ def fallback_plan(pack: dict[str, Any]) -> ArticlePlan:
     ) < 3:
         article_type = "Selection Guide"
     plan = ArticlePlan(
-        title=keyword,
+        title=_locked_title(pack) or keyword,
         search_intent=f"Understand and act on {keyword}",
         article_type=article_type,
         meta_title=keyword,
@@ -2541,6 +2613,7 @@ def section_payload(
         "conversion_actions": conversions if section.cta_type else [],
         "previous_section_summaries": previous_summaries,
         "project_writing_rules": (pack.get("project") or {}).get("profile", {}),
+        "locked_requirements": _locked_requirements(pack),
         "target": "complete concise section" if compact else "complete useful section",
     }
 
@@ -3148,7 +3221,11 @@ def normalize_section(draft: SectionDraft, expected: OutlineSection) -> SectionD
 
 
 def normalize_unified(
-    unified: UnifiedArticle, plan: ArticlePlan, fallback: list[SectionDraft]
+    unified: UnifiedArticle,
+    plan: ArticlePlan,
+    fallback: list[SectionDraft],
+    *,
+    locked_title: str | None = None,
 ) -> UnifiedArticle:
     by_id = {item.section_id: item for item in unified.sections}
     if any(
@@ -3164,6 +3241,7 @@ def normalize_unified(
         )
     return unified.model_copy(
         update={
+            "title": locked_title or unified.title,
             "slug": normalize_slug(unified.slug, plan.slug),
             "sections": [by_id[item.section_id] for item in plan.sections],
         }

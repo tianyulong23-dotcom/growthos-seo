@@ -47,6 +47,7 @@ class FakeDataSourceSettingsRepository:
         self.google_ads_record: GoogleAdsSettingsRecord | None = None
         self.dataforseo_record: DataForSEOSettingsRecord | None = None
         self.encryption_keys: list[str] = []
+        self.dataforseo_organizations: list[str] = []
 
     async def project_exists(self, organization_id: str, project_id: str) -> bool:
         return organization_id == "test-org" and project_id in self.projects
@@ -87,7 +88,7 @@ class FakeDataSourceSettingsRepository:
         organization_id: str,
         encryption_key: str,
     ) -> DataForSEOSettingsRecord | None:
-        assert organization_id == "test-org"
+        self.dataforseo_organizations.append(organization_id)
         self.encryption_keys.append(encryption_key)
         return self.dataforseo_record
 
@@ -268,6 +269,15 @@ def test_effective_dataforseo_record_prefers_database_and_falls_back_to_environm
     assert environment.password == "environment-password"
     assert stored.login == "stored-login"
     assert stored.password == "stored-password"
+
+
+def test_dataforseo_record_can_be_loaded_for_the_workflow_organization() -> None:
+    _, service, repository, _, _ = build_services()
+
+    record = asyncio.run(service.effective_record_for_organization("workflow-org"))
+
+    assert record.login == "environment-login"
+    assert repository.dataforseo_organizations == ["workflow-org"]
 
 
 def test_updates_reuse_existing_secrets_when_the_fields_are_blank() -> None:

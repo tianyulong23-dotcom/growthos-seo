@@ -18,8 +18,9 @@ class RuntimePlatformContextResolver(PlatformContextResolver):
         *,
         request: object,
         website_project_key: str,
+        required_permission: str | None = None,
     ) -> ResolvedPlatformRequestContext:
-        del request
+        del request, required_permission
         return ResolvedPlatformRequestContext(
             actor=PlatformActor(
                 user_id="user-runtime",

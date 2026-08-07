@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react"
 import { MemoryRouter } from "react-router"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -194,6 +195,13 @@ beforeEach(() => {
     page: 1,
     page_size: 50,
   })
+  auditApi.getAuditIssues.mockResolvedValue({
+    items: [],
+    total: 0,
+    page: 1,
+    page_size: 5,
+  })
+  auditApi.getAuditStatusCodes.mockResolvedValue([])
   auditApi.listAuditRuns.mockResolvedValue({
     items: [],
     total: 0,
@@ -240,6 +248,29 @@ describe("AuditWorkspace actions", () => {
     })
     expect(onRunChange).toHaveBeenCalledWith(recalculatingRun)
     expect(screen.queryByText("调整问题排除规则")).toBeNull()
+  })
+
+  it("keeps long exclusion rules inside a viewport-bound scroll area", async () => {
+    const issueExclusionPatterns = Array.from(
+      { length: 250 },
+      (_, index) => `/path-${index}/*`
+    )
+    const completedRun = createRun({
+      status: "completed",
+      progress: 100,
+      issue_exclusion_patterns: issueExclusionPatterns,
+    })
+    renderWorkspace(completedRun)
+
+    fireEvent.click(await screen.findByRole("button", { name: "调整排除规则" }))
+
+    const dialog = screen.getByRole("dialog")
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    expect(dialog.className).toContain("max-h-[calc(100dvh-2rem)]")
+    expect(dialog.className).toContain("overflow-hidden")
+    expect(textarea.className).toContain("field-sizing-fixed")
+    expect(textarea.className).toContain("overflow-y-auto")
+    expect(textarea.value.split("\n")).toHaveLength(250)
   })
 
   it("pauses the current audit and publishes the updated run", async () => {
@@ -396,6 +427,139 @@ describe("AuditWorkspace actions", () => {
 })
 
 describe("AuditWorkspace data loading", () => {
+  it("shows issue context, remediation, and a bounded affected URL list", async () => {
+    const urls = Array.from(
+      { length: 25 },
+      (_, index) => `https://example.com/a-very-long-affected-page-${index + 1}`
+    )
+    auditApi.getAuditIssues.mockResolvedValueOnce({
+      items: [
+        {
+          id: "missing-title",
+          title: "页面缺少 Title",
+          code: "missing_title",
+          severity: "error",
+          category: "元数据",
+          affected_count: 25,
+          description: "页面没有提供可供搜索引擎识别的标题。",
+          recommendation: "为每个页面补充唯一且准确的标题。",
+          urls,
+          raw: {},
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    })
+
+    renderWorkspace(
+      createRun({
+        status: "completed",
+        stage: "completed",
+        progress: 100,
+      }),
+      { view: "issues" }
+    )
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看页面缺少 Title的详情" })
+    )
+
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByText("问题说明")).toBeTruthy()
+    expect(
+      within(dialog).getByText("页面没有提供可供搜索引擎识别的标题。")
+    ).toBeTruthy()
+    expect(within(dialog).getByText("修复建议")).toBeTruthy()
+    expect(
+      within(dialog).getByText("为每个页面补充唯一且准确的标题。")
+    ).toBeTruthy()
+    expect(within(dialog).getByText("受影响网址")).toBeTruthy()
+
+    const urlList = within(dialog).getByRole("list", {
+      name: "受影响网址列表",
+    })
+    expect(urlList.className).toContain("max-h-72")
+    expect(urlList.className).toContain("overflow-y-auto")
+    expect(within(urlList).getAllByRole("listitem")).toHaveLength(20)
+    expect(within(urlList).getByText(urls[0])).toBeTruthy()
+    expect(within(urlList).queryByText(urls[20])).toBeNull()
+    expect(within(dialog).getByText("仅显示前 20 个，共返回 25 个网址。")).toBeTruthy()
+    expect(dialog.className).toContain("max-h-[calc(100dvh-2rem)]")
+    expect(dialog.className).toContain("overflow-hidden")
+  })
+
+  it("builds the completed overview from summary, issues, and status codes", async () => {
+    auditApi.getAuditIssues.mockResolvedValueOnce({
+      items: [
+        {
+          id: "missing-title",
+          title: "页面缺少 Title",
+          code: "missing_title",
+          severity: "error",
+          category: "元数据",
+          affected_count: 3,
+          description: "",
+          recommendation: "补充唯一的页面标题",
+          urls: [],
+          raw: {},
+        },
+      ],
+      total: 8,
+      page: 1,
+      page_size: 5,
+    })
+    auditApi.getAuditStatusCodes.mockResolvedValueOnce([
+      {
+        status_code: 200,
+        status: "成功",
+        count: 9,
+        percentage: 90,
+        error_type: "",
+      },
+      {
+        status_code: 404,
+        status: "未找到",
+        count: 1,
+        percentage: 10,
+        error_type: "",
+      },
+    ])
+
+    renderWorkspace(
+      createRun({
+        status: "completed",
+        stage: "completed",
+        progress: 100,
+        summary: {
+          page_count: 10,
+          health_score: 82,
+          errors: 3,
+          warnings: 4,
+          notices: 2,
+          rendered_pages: 1,
+          resource_checks_truncated: false,
+        },
+      })
+    )
+
+    expect(await screen.findByText("网站健康度")).toBeTruthy()
+    expect(screen.getByText("82")).toBeTruthy()
+    expect(screen.getByText("页面缺少 Title")).toBeTruthy()
+    expect(screen.getByText("影响 3 个页面")).toBeTruthy()
+    expect(screen.getByText("共检查 10 个页面响应")).toBeTruthy()
+    expect(screen.getByText("优先展示严重程度最高的问题，共 8 类")).toBeTruthy()
+    expect(auditApi.getAuditIssues).toHaveBeenCalledWith("project-1", "run-1", {
+      page: 1,
+      pageSize: 5,
+    })
+    expect(auditApi.getAuditStatusCodes).toHaveBeenCalledWith(
+      "project-1",
+      "run-1"
+    )
+    expect(auditApi.getAuditPages).not.toHaveBeenCalled()
+  })
+
   it("shows only a crawl message on non-overview views while running", async () => {
     renderWorkspace(createRun(), { view: "issues" })
 
@@ -560,22 +724,22 @@ describe("AuditWorkspace data loading", () => {
     expect(screen.getByRole("button", { name: "暂停" })).toBeTruthy()
   })
 
-  it("does not reload the current table for polling-only run updates", async () => {
+  it("does not load final overview data for polling-only run updates", async () => {
     const { rerenderRun } = renderWorkspace(createRun())
 
-    await waitFor(() => {
-      expect(auditApi.getAuditPages).toHaveBeenCalledTimes(1)
-    })
+    expect(auditApi.getAuditIssues).not.toHaveBeenCalled()
+    expect(auditApi.getAuditStatusCodes).not.toHaveBeenCalled()
 
     rerenderRun(createRun({ progress: 48, processed: 5 }))
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 0))
     })
 
-    expect(auditApi.getAuditPages).toHaveBeenCalledTimes(1)
+    expect(auditApi.getAuditIssues).not.toHaveBeenCalled()
+    expect(auditApi.getAuditStatusCodes).not.toHaveBeenCalled()
   })
 
-  it("refreshes the current table while an audit is running", async () => {
+  it("refreshes live activity while an audit is running", async () => {
     vi.useFakeTimers()
     try {
       renderWorkspace(createRun())
@@ -583,13 +747,13 @@ describe("AuditWorkspace data loading", () => {
       await act(async () => {
         await Promise.resolve()
       })
-      expect(auditApi.getAuditPages).toHaveBeenCalledTimes(1)
+      expect(auditApi.getAuditActivity).toHaveBeenCalledTimes(1)
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1500)
       })
 
-      expect(auditApi.getAuditPages).toHaveBeenCalledTimes(2)
+      expect(auditApi.getAuditActivity).toHaveBeenCalledTimes(2)
     } finally {
       cleanup()
       vi.useRealTimers()
@@ -650,7 +814,8 @@ describe("AuditWorkspace data loading", () => {
       page_size: 50,
     })
     const { rerenderRun } = renderWorkspace(
-      createRun({ run_id: "run-old", status: "completed" })
+      createRun({ run_id: "run-old", status: "completed" }),
+      { view: "internal" }
     )
 
     await screen.findByText("https://example.com/old")

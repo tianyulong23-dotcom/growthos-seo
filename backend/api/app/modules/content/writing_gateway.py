@@ -159,11 +159,23 @@ class SectionIssue(BaseModel):
     repairable: bool = True
 
 
+class LockedRequirementCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field: Literal["writing_direction"]
+    requirement: str = Field(min_length=1, max_length=5000)
+    passed: bool
+    evidence: str = Field(min_length=1, max_length=2000)
+
+
 class SemanticQualityResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     passed: bool
     issues: list[SectionIssue] = Field(default_factory=list, max_length=50)
+    locked_requirement_checks: list[LockedRequirementCheck] = Field(
+        default_factory=list, max_length=10
+    )
 
 
 class RevisedSections(BaseModel):

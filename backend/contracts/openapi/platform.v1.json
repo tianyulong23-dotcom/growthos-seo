@@ -9746,6 +9746,1411 @@
         "x-growthos-module": "content"
       }
     },
+    "/api/v1/projects/{project_id}/articles/{article_id}/review": {
+      "patch": {
+        "tags": [
+          "content"
+        ],
+        "summary": "Review Article",
+        "operationId": "review_article_api_v1_projects__project_id__articles__article_id__review_patch",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "article_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Article Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewArticleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
+    "/api/v1/projects/{project_id}/content-plan/items/{item_id}/generate-now": {
+      "post": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Generate Plan Item Now",
+        "operationId": "generate_plan_item_now_api_v1_projects__project_id__content_plan_items__item_id__generate_now_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item Id"
+            }
+          },
+          {
+            "name": "expected_version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "title": "Expected Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
+    "/api/v1/projects/{project_id}/content-plan/batches": {
+      "post": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Create Automatic Content Plan Batch",
+        "operationId": "create_automatic_content_plan_batch_api_v1_projects__project_id__content_plan_batches_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomaticBatchAcceptedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      },
+      "get": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "List Content Plan Batches",
+        "operationId": "list_content_plan_batches_api_v1_projects__project_id__content_plan_batches_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentPlanBatchCollectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
+    "/api/v1/projects/{project_id}/content-plan/batches/{batch_id}": {
+      "get": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Get Automatic Content Plan Batch",
+        "operationId": "get_automatic_content_plan_batch_api_v1_projects__project_id__content_plan_batches__batch_id__get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentPlanBatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
+    "/api/v1/projects/{project_id}/content-plan/batches/{batch_id}/retry": {
+      "post": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Retry Automatic Content Plan Batch",
+        "operationId": "retry_automatic_content_plan_batch_api_v1_projects__project_id__content_plan_batches__batch_id__retry_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchRetryAcceptedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
+    "/api/v1/projects/{project_id}/content-plan/items": {
+      "get": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "List Content Plan Items",
+        "operationId": "list_content_plan_items_api_v1_projects__project_id__content_plan_items_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentPlanItemCollectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      },
+      "post": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Create Manual Content Plan Item",
+        "operationId": "create_manual_content_plan_item_api_v1_projects__project_id__content_plan_items_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateManualPlanItemRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualPlanAcceptedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
+    "/api/v1/projects/{project_id}/content-plan/items/{item_id}": {
+      "get": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Get Content Plan Item",
+        "operationId": "get_content_plan_item_api_v1_projects__project_id__content_plan_items__item_id__get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentPlanItemResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      },
+      "patch": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Update Content Plan Item",
+        "operationId": "update_content_plan_item_api_v1_projects__project_id__content_plan_items__item_id__patch",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateContentPlanItemRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ContentPlanItemResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PlanItemEditAcceptedResponse"
+                    }
+                  ],
+                  "title": "Response Update Content Plan Item Api V1 Projects  Project Id  Content Plan Items  Item Id  Patch"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
+    "/api/v1/projects/{project_id}/content-plan/items/{item_id}/cancel": {
+      "post": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Cancel Content Plan Item",
+        "operationId": "cancel_content_plan_item_api_v1_projects__project_id__content_plan_items__item_id__cancel_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelContentPlanItemRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentPlanItemResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
+    "/api/v1/projects/{project_id}/content-plan/settings": {
+      "get": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Get Content Plan Settings",
+        "operationId": "get_content_plan_settings_api_v1_projects__project_id__content_plan_settings_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentPlanSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      },
+      "patch": {
+        "tags": [
+          "content-plan"
+        ],
+        "summary": "Update Content Plan Settings",
+        "operationId": "update_content_plan_settings_api_v1_projects__project_id__content_plan_settings_patch",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateContentPlanSettingsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentPlanSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "content"
+      }
+    },
     "/api/v1/projects/{websiteProjectKey}/backlinks/context": {
       "get": {
         "operationId": "backlinksGetProjectContextV1",
@@ -49349,6 +50754,37 @@
             ],
             "title": "Publication Status"
           },
+          "review_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "pending_review",
+                  "approved",
+                  "changes_requested"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Status"
+          },
+          "review_version": {
+            "type": "integer",
+            "title": "Review Version"
+          },
+          "publication_blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Blocked Reason"
+          },
           "warning_count": {
             "type": "integer",
             "title": "Warning Count"
@@ -49426,6 +50862,9 @@
           "meta_description",
           "status",
           "publication_status",
+          "review_status",
+          "review_version",
+          "publication_blocked_reason",
           "warning_count",
           "run",
           "created_at",
@@ -49512,6 +50951,37 @@
             ],
             "title": "Publication Status"
           },
+          "review_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "pending_review",
+                  "approved",
+                  "changes_requested"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Status"
+          },
+          "review_version": {
+            "type": "integer",
+            "title": "Review Version"
+          },
+          "publication_blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Blocked Reason"
+          },
           "warning_count": {
             "type": "integer",
             "title": "Warning Count"
@@ -49548,6 +51018,9 @@
           "meta_description",
           "status",
           "publication_status",
+          "review_status",
+          "review_version",
+          "publication_blocked_reason",
           "warning_count",
           "run",
           "created_at",
@@ -51018,6 +52491,55 @@
         ],
         "title": "AuditVisualizationResponse"
       },
+      "AutomaticBatchAcceptedResponse": {
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "status": {
+            "type": "string",
+            "const": "queued",
+            "title": "Status",
+            "default": "queued"
+          },
+          "target_count": {
+            "type": "integer",
+            "const": 30,
+            "title": "Target Count",
+            "default": 30
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_id"
+        ],
+        "title": "AutomaticBatchAcceptedResponse"
+      },
+      "BatchRetryAcceptedResponse": {
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "status": {
+            "type": "string",
+            "const": "queued",
+            "title": "Status",
+            "default": "queued"
+          },
+          "target_count": {
+            "type": "integer",
+            "title": "Target Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_id",
+          "target_count"
+        ],
+        "title": "BatchRetryAcceptedResponse"
+      },
       "BusinessProfileRunResponse": {
         "properties": {
           "run_id": {
@@ -51110,6 +52632,684 @@
           "created_at"
         ],
         "title": "BusinessProfileRunResponse"
+      },
+      "CancelContentPlanItemRequest": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "CancelContentPlanItemRequest"
+      },
+      "ContentPlanBatchCollectionResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContentPlanBatchResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "ContentPlanBatchCollectionResponse"
+      },
+      "ContentPlanBatchResponse": {
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "automatic",
+              "manual"
+            ],
+            "title": "Source"
+          },
+          "target_count": {
+            "type": "integer",
+            "title": "Target Count"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage"
+          },
+          "candidate_snapshot_count": {
+            "type": "integer",
+            "title": "Candidate Snapshot Count"
+          },
+          "selected_count": {
+            "type": "integer",
+            "title": "Selected Count"
+          },
+          "valid_pack_count": {
+            "type": "integer",
+            "title": "Valid Pack Count"
+          },
+          "preparation_count": {
+            "type": "integer",
+            "title": "Preparation Count"
+          },
+          "preview_ready_count": {
+            "type": "integer",
+            "title": "Preview Ready Count"
+          },
+          "plan_item_count": {
+            "type": "integer",
+            "title": "Plan Item Count"
+          },
+          "external_request_count": {
+            "type": "integer",
+            "title": "External Request Count"
+          },
+          "total_cost_usd": {
+            "type": "number",
+            "title": "Total Cost Usd"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Detail"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_id",
+          "project_id",
+          "source",
+          "target_count",
+          "status",
+          "stage",
+          "candidate_snapshot_count",
+          "selected_count",
+          "valid_pack_count",
+          "preparation_count",
+          "preview_ready_count",
+          "plan_item_count",
+          "external_request_count",
+          "total_cost_usd",
+          "retryable",
+          "error_code",
+          "error_detail",
+          "created_at",
+          "updated_at",
+          "finished_at"
+        ],
+        "title": "ContentPlanBatchResponse"
+      },
+      "ContentPlanItemCollectionResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContentPlanItemSummaryResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "ContentPlanItemCollectionResponse"
+      },
+      "ContentPlanItemResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "automatic",
+              "manual"
+            ],
+            "title": "Source"
+          },
+          "seed_keyword": {
+            "type": "string",
+            "title": "Seed Keyword"
+          },
+          "primary_keyword": {
+            "type": "string",
+            "title": "Primary Keyword"
+          },
+          "secondary_keywords": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Secondary Keywords"
+          },
+          "keywords": {
+            "items": {
+              "$ref": "#/components/schemas/PlanItemKeywordResponse"
+            },
+            "type": "array",
+            "title": "Keywords"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "writing_direction": {
+            "type": "string",
+            "title": "Writing Direction"
+          },
+          "title_source": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user"
+            ],
+            "title": "Title Source"
+          },
+          "writing_direction_source": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user"
+            ],
+            "title": "Writing Direction Source"
+          },
+          "title_user_edited": {
+            "type": "boolean",
+            "title": "Title User Edited"
+          },
+          "direction_user_edited": {
+            "type": "boolean",
+            "title": "Direction User Edited"
+          },
+          "edit_state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "repreparing",
+              "reprepare_failed"
+            ],
+            "title": "Edit State"
+          },
+          "pending_preparation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Preparation Id"
+          },
+          "preparation_version": {
+            "type": "integer",
+            "title": "Preparation Version"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "publish_local_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publish Local Date"
+          },
+          "schedule_timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Timezone"
+          },
+          "generation_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generation At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "unscheduled",
+              "scheduled",
+              "triggering",
+              "generating",
+              "generated",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status"
+          },
+          "schedule_attention_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Attention Reason"
+          },
+          "article_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Article Id"
+          },
+          "current_serp_snapshot_id": {
+            "type": "string",
+            "title": "Current Serp Snapshot Id"
+          },
+          "current_serp_snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanItemSerpSnapshotResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending_preparation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PendingPreparationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "publication_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Status"
+          },
+          "review_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Status"
+          },
+          "review_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Version"
+          },
+          "publication_blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Blocked Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "source",
+          "seed_keyword",
+          "primary_keyword",
+          "secondary_keywords",
+          "keywords",
+          "title",
+          "writing_direction",
+          "title_source",
+          "writing_direction_source",
+          "title_user_edited",
+          "direction_user_edited",
+          "edit_state",
+          "pending_preparation_id",
+          "preparation_version",
+          "version",
+          "publish_local_date",
+          "schedule_timezone",
+          "generation_at",
+          "status",
+          "schedule_attention_reason",
+          "article_id",
+          "current_serp_snapshot_id",
+          "current_serp_snapshot",
+          "pending_preparation",
+          "publication_status",
+          "review_status",
+          "review_version",
+          "publication_blocked_reason"
+        ],
+        "title": "ContentPlanItemResponse"
+      },
+      "ContentPlanItemSummaryResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "automatic",
+              "manual"
+            ],
+            "title": "Source"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "primary_keyword": {
+            "type": "string",
+            "title": "Primary Keyword"
+          },
+          "edit_state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "repreparing",
+              "reprepare_failed"
+            ],
+            "title": "Edit State"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "publish_local_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publish Local Date"
+          },
+          "schedule_timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Timezone"
+          },
+          "generation_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generation At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "unscheduled",
+              "scheduled",
+              "triggering",
+              "generating",
+              "generated",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status"
+          },
+          "schedule_attention_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Attention Reason"
+          },
+          "article_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Article Id"
+          },
+          "publication_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Status"
+          },
+          "review_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "source",
+          "title",
+          "primary_keyword",
+          "edit_state",
+          "version",
+          "publish_local_date",
+          "schedule_timezone",
+          "generation_at",
+          "status",
+          "schedule_attention_reason",
+          "article_id",
+          "publication_status",
+          "review_status"
+        ],
+        "title": "ContentPlanItemSummaryResponse"
+      },
+      "ContentPlanSettingsResponse": {
+        "properties": {
+          "cadence": {
+            "type": "string",
+            "enum": [
+              "weekly_1",
+              "weekly_2_3",
+              "weekly_5",
+              "weekly_7"
+            ],
+            "title": "Cadence"
+          },
+          "paused": {
+            "type": "boolean",
+            "title": "Paused"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "default_publish_local_time": {
+            "type": "string",
+            "format": "time",
+            "title": "Default Publish Local Time"
+          },
+          "cadence_anchor_week": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cadence Anchor Week"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cadence",
+          "paused",
+          "timezone",
+          "default_publish_local_time",
+          "cadence_anchor_week",
+          "version",
+          "updated_at"
+        ],
+        "title": "ContentPlanSettingsResponse"
       },
       "CreateArticleRequest": {
         "properties": {
@@ -51221,6 +53421,22 @@
         },
         "type": "object",
         "title": "CreateAuditRunRequest"
+      },
+      "CreateManualPlanItemRequest": {
+        "properties": {
+          "seed_keyword": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Seed Keyword"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "seed_keyword"
+        ],
+        "title": "CreateManualPlanItemRequest"
       },
       "CreateProjectRequest": {
         "properties": {
@@ -53929,6 +56145,30 @@
         ],
         "title": "KeywordTagResponse"
       },
+      "ManualPlanAcceptedResponse": {
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "preparation_id": {
+            "type": "string",
+            "title": "Preparation Id"
+          },
+          "status": {
+            "type": "string",
+            "const": "queued",
+            "title": "Status",
+            "default": "queued"
+          }
+        },
+        "type": "object",
+        "required": [
+          "batch_id",
+          "preparation_id"
+        ],
+        "title": "ManualPlanAcceptedResponse"
+      },
       "PageContext": {
         "properties": {
           "module": {
@@ -53956,6 +56196,193 @@
           "module"
         ],
         "title": "PageContext"
+      },
+      "PendingPreparationResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "preparation_version": {
+            "type": "integer",
+            "title": "Preparation Version"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "preparation_version",
+          "state",
+          "stage",
+          "error_code",
+          "error_detail"
+        ],
+        "title": "PendingPreparationResponse"
+      },
+      "PlanItemEditAcceptedResponse": {
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "title": "Item Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "pending_preparation_id": {
+            "type": "string",
+            "title": "Pending Preparation Id"
+          },
+          "preparation_version": {
+            "type": "integer",
+            "title": "Preparation Version"
+          },
+          "edit_state": {
+            "type": "string",
+            "const": "repreparing",
+            "title": "Edit State",
+            "default": "repreparing"
+          }
+        },
+        "type": "object",
+        "required": [
+          "item_id",
+          "version",
+          "pending_preparation_id",
+          "preparation_version"
+        ],
+        "title": "PlanItemEditAcceptedResponse"
+      },
+      "PlanItemKeywordResponse": {
+        "properties": {
+          "keyword": {
+            "type": "string",
+            "title": "Keyword"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "primary",
+              "secondary"
+            ],
+            "title": "Role"
+          },
+          "keyword_type": {
+            "type": "string",
+            "enum": [
+              "informational",
+              "service",
+              "product",
+              "unknown"
+            ],
+            "title": "Keyword Type"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "seed",
+              "related",
+              "ai",
+              "user"
+            ],
+            "title": "Source"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position"
+          }
+        },
+        "type": "object",
+        "required": [
+          "keyword",
+          "role",
+          "keyword_type",
+          "source",
+          "position"
+        ],
+        "title": "PlanItemKeywordResponse"
+      },
+      "PlanItemSerpSnapshotResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "preparation_id": {
+            "type": "string",
+            "title": "Preparation Id"
+          },
+          "snapshot_version": {
+            "type": "integer",
+            "title": "Snapshot Version"
+          },
+          "primary_keyword": {
+            "type": "string",
+            "title": "Primary Keyword"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "provider_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "preparation_id",
+          "snapshot_version",
+          "primary_keyword",
+          "provider",
+          "provider_request_id"
+        ],
+        "title": "PlanItemSerpSnapshotResponse"
       },
       "ProjectResponse": {
         "properties": {
@@ -54176,6 +56603,42 @@
           "all"
         ],
         "title": "RenderingMode"
+      },
+      "ReviewArticleRequest": {
+        "properties": {
+          "review_status": {
+            "type": "string",
+            "enum": [
+              "approved",
+              "changes_requested"
+            ],
+            "title": "Review Status"
+          },
+          "review_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Note"
+          },
+          "review_version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Review Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "review_status",
+          "review_version"
+        ],
+        "title": "ReviewArticleRequest"
       },
       "RewindConversationRequest": {
         "properties": {
@@ -54929,6 +57392,155 @@
           "business_type"
         ],
         "title": "UpdateBusinessProfileRequest"
+      },
+      "UpdateContentPlanItemRequest": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Version"
+          },
+          "seed_keyword": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed Keyword"
+          },
+          "primary_keyword": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primary Keyword"
+          },
+          "secondary_keywords": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secondary Keywords"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "writing_direction": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 10000,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writing Direction"
+          },
+          "publish_local_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publish Local Date"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "UpdateContentPlanItemRequest"
+      },
+      "UpdateContentPlanSettingsRequest": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Version"
+          },
+          "cadence": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "weekly_1",
+                  "weekly_2_3",
+                  "weekly_5",
+                  "weekly_7"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cadence"
+          },
+          "paused": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "UpdateContentPlanSettingsRequest"
       },
       "UpdateDataForSEOSettingsRequest": {
         "properties": {

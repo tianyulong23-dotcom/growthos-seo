@@ -27,6 +27,7 @@ class FakeAISettingsRepository:
         self.encryption_keys: list[str | None] = []
         self.allow_plaintext_values: list[bool] = []
         self.plaintext_migration_required = False
+        self.requested_organizations: list[str] = []
 
     async def project_exists(self, organization_id: str, project_id: str) -> bool:
         return organization_id == "test-org" and project_id in self.projects
@@ -37,7 +38,7 @@ class FakeAISettingsRepository:
         encryption_key: str | None,
         allow_plaintext: bool,
     ) -> AIProviderSettingsRecord | None:
-        assert organization_id == "test-org"
+        self.requested_organizations.append(organization_id)
         self.encryption_keys.append(encryption_key)
         self.allow_plaintext_values.append(allow_plaintext)
         if self.plaintext_migration_required and not allow_plaintext:
@@ -116,6 +117,15 @@ def test_get_uses_environment_fallback_without_returning_api_key() -> None:
     assert response.request_timeout_seconds == 45
     assert response.max_retries == 2
     assert "api_key" not in payload
+
+
+def test_effective_record_can_be_loaded_for_the_workflow_organization() -> None:
+    service, repository, _ = build_service()
+
+    record = asyncio.run(service.effective_record_for_organization("workflow-org"))
+
+    assert record.model == "environment-model"
+    assert repository.requested_organizations == ["workflow-org"]
 
 
 def test_update_reuses_current_key_when_request_leaves_it_blank() -> None:

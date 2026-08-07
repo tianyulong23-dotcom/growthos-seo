@@ -52,8 +52,9 @@ class StaticResolver(PlatformContextResolver):
         *,
         request: object,
         website_project_key: str,
+        required_permission: str | None = None,
     ) -> ResolvedPlatformRequestContext:
-        del request
+        del request, required_permission
         self.calls.append(website_project_key)
         return self.resolved
 

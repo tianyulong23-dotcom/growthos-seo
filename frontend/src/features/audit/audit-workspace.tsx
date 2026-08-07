@@ -10,6 +10,7 @@ import {
   FileJson,
   FileSpreadsheet,
   FileType2,
+  Gauge,
   Link2,
   LoaderCircle,
   Monitor,
@@ -21,6 +22,7 @@ import {
   Smartphone,
   Square,
   Trash2,
+  TriangleAlert,
 } from "lucide-react"
 import { useNavigate } from "react-router"
 
@@ -58,6 +60,14 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -79,6 +89,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
+import { Separator } from "@/components/ui/separator"
 import {
   Select,
   SelectContent,
@@ -164,6 +175,11 @@ function severityVariant(severity: AuditSeverity) {
   if (severity === "error") return "destructive" as const
   if (severity === "warning") return "secondary" as const
   return "outline" as const
+}
+
+function severityClassName(severity: AuditSeverity) {
+  if (severity !== "warning") return undefined
+  return "border-orange-200 bg-orange-50 text-orange-700 dark:border-orange-900/50 dark:bg-orange-950/40 dark:text-orange-400"
 }
 
 function EmptyState({
@@ -678,135 +694,6 @@ function StatusBadge({ status }: { status: number | null }) {
   return <Badge variant={variant}>{label}</Badge>
 }
 
-function analyticsSummary(analytics: Record<string, unknown>) {
-  const names = Object.entries(analytics)
-    .filter(([, value]) => Boolean(value))
-    .map(([key]) => key.replaceAll("_", " "))
-  return names.length > 0 ? names.join(", ") : "-"
-}
-
-function DetailGrid({ items }: { items: Array<[string, React.ReactNode]> }) {
-  return (
-    <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
-      {items.map(([label, value]) => (
-        <div key={label} className="min-w-0 border-t pt-2">
-          <div className="text-xs text-muted-foreground">{label}</div>
-          <div className="mt-1 text-sm break-words">{value || "-"}</div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function PageDetailDialog({
-  page,
-  onClose,
-}: {
-  page: AuditPage | null
-  onClose: () => void
-}) {
-  return (
-    <Dialog open={page !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[88dvh] overflow-y-auto rounded-md sm:max-w-4xl">
-        <DialogHeader>
-          <DialogTitle>页面完整分析</DialogTitle>
-          <DialogDescription className="break-all">
-            {page?.final_url}
-          </DialogDescription>
-        </DialogHeader>
-        {page && (
-          <div className="space-y-6">
-            <section>
-              <h3 className="mb-3 text-sm font-semibold">基础 SEO</h3>
-              <DetailGrid
-                items={[
-                  ["Title", page.title],
-                  ["H1", page.h1.join(" | ")],
-                  ["Meta Description", page.description],
-                  ["词数", page.word_count ?? "-"],
-                  ["语言", page.language],
-                  ["字符集", page.charset],
-                  ["Canonical", page.canonical],
-                  ["Robots", page.robots],
-                ]}
-              />
-            </section>
-            <section>
-              <h3 className="mb-3 text-sm font-semibold">分析与跟踪</h3>
-              <DetailGrid
-                items={[
-                  ["已检测工具", analyticsSummary(page.analytics)],
-                  ["Analytics 字段", Object.keys(page.analytics).length],
-                  [
-                    "OpenGraph",
-                    `${Object.keys(page.open_graph).length} 个标签`,
-                  ],
-                  [
-                    "Twitter Cards",
-                    `${Object.keys(page.twitter_tags).length} 个标签`,
-                  ],
-                ]}
-              />
-            </section>
-            <section>
-              <h3 className="mb-3 text-sm font-semibold">链接与结构</h3>
-              <DetailGrid
-                items={[
-                  ["内部链接", page.internal_links],
-                  ["外部链接", page.external_links],
-                  ["图片", page.images.length],
-                  ["损坏图片", page.broken_images.length],
-                  ["H2", page.h2.length],
-                  ["H3", page.h3.length],
-                  ["JSON-LD", page.structured_data.length],
-                  ["Schema.org", page.schema_org.length],
-                ]}
-              />
-            </section>
-            <section>
-              <h3 className="mb-3 text-sm font-semibold">响应与性能</h3>
-              <DetailGrid
-                items={[
-                  ["状态码", page.status_code || "无响应"],
-                  [
-                    "响应时间",
-                    page.response_time_ms === null
-                      ? "-"
-                      : `${page.response_time_ms} ms`,
-                  ],
-                  ["Content-Type", page.content_type],
-                  ["页面大小", formatBytes(page.size_bytes)],
-                  ["渲染方式", page.rendered ? "JavaScript" : "HTML"],
-                  ["错误类型", page.error_type],
-                  ["错误", page.error],
-                  ["抓取深度", page.depth ?? "-"],
-                ]}
-              />
-            </section>
-            {page.linked_from.length > 0 && (
-              <section>
-                <h3 className="mb-3 text-sm font-semibold">
-                  入链来源（{page.linked_from.length}）
-                </h3>
-                <div className="max-h-48 overflow-y-auto border-y">
-                  {page.linked_from.slice(0, 20).map((url) => (
-                    <div
-                      key={url}
-                      className="border-b px-2 py-2 text-xs break-all last:border-b-0"
-                    >
-                      {url}
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 function PageFilters({
   search,
   status,
@@ -846,147 +733,306 @@ function PageFilters({
 }
 
 function OverviewView({
-  pages,
-  total,
-  page,
-  pageSize,
-  search,
-  status,
+  run,
+  issues,
+  issueTotal,
+  statusCodes,
   loading,
-  onSearchChange,
-  onStatusChange,
-  onPageChange,
-  onPageSizeChange,
+  onOpenView,
 }: {
-  pages: AuditPage[]
-  total: number
-  page: number
-  pageSize: number
-  search: string
-  status: "all" | AuditStatusFamily
+  run: AuditRun
+  issues: AuditIssue[]
+  issueTotal: number
+  statusCodes: AuditStatusCode[]
   loading: boolean
-  onSearchChange: (value: string) => void
-  onStatusChange: (value: "all" | AuditStatusFamily) => void
-  onPageChange: (value: number) => void
-  onPageSizeChange: (value: number) => void
+  onOpenView: (view: "issues" | "status-codes") => void
 }) {
-  const [selected, setSelected] = React.useState<AuditPage | null>(null)
+  const summary = run.summary
+  const severityItems = [
+    {
+      label: "错误",
+      value: summary?.errors ?? 0,
+      badge: "destructive" as const,
+      barClassName: "bg-destructive",
+    },
+    {
+      label: "警告",
+      value: summary?.warnings ?? 0,
+      badge: "secondary" as const,
+      badgeClassName:
+        "border-orange-200 bg-orange-50 text-orange-700 dark:border-orange-900/50 dark:bg-orange-950/40 dark:text-orange-400",
+      barClassName: "bg-orange-500",
+    },
+    {
+      label: "提示",
+      value: summary?.notices ?? 0,
+      badge: "outline" as const,
+      barClassName: "bg-muted-foreground/40",
+    },
+  ]
+  const maxSeverity = Math.max(1, ...severityItems.map((item) => item.value))
+  const statusGroups = [
+    {
+      label: "2xx 成功",
+      count: statusCodes
+        .filter((item) => item.status_code >= 200 && item.status_code < 300)
+        .reduce((total, item) => total + item.count, 0),
+      barClassName: "bg-primary",
+    },
+    {
+      label: "3xx 重定向",
+      count: statusCodes
+        .filter((item) => item.status_code >= 300 && item.status_code < 400)
+        .reduce((total, item) => total + item.count, 0),
+      barClassName: "bg-muted-foreground/50",
+    },
+    {
+      label: "4xx 错误",
+      count: statusCodes
+        .filter((item) => item.status_code >= 400 && item.status_code < 500)
+        .reduce((total, item) => total + item.count, 0),
+      barClassName: "bg-destructive/70",
+    },
+    {
+      label: "5xx 错误",
+      count: statusCodes
+        .filter((item) => item.status_code >= 500 && item.status_code < 600)
+        .reduce((total, item) => total + item.count, 0),
+      barClassName: "bg-destructive",
+    },
+    {
+      label: "无响应",
+      count: statusCodes
+        .filter((item) => item.status_code === 0)
+        .reduce((total, item) => total + item.count, 0),
+      barClassName: "bg-foreground/30",
+    },
+  ]
+  const statusTotal = statusGroups.reduce(
+    (total, item) => total + item.count,
+    0
+  )
+  const healthScore = summary?.health_score
+
+  if (loading) return <LoadingState />
+
   return (
-    <>
-      <section className="overflow-hidden rounded-md border">
-        <PageFilters
-          search={search}
-          status={status}
-          total={total}
-          onSearchChange={onSearchChange}
-          onStatusChange={onStatusChange}
-        />
-        {loading ? (
-          <LoadingState />
-        ) : pages.length === 0 ? (
-          <EmptyState
-            title="没有匹配的页面"
-            description="修改搜索词或状态筛选后重试。"
-          />
-        ) : (
-          <Table className="min-w-[1780px]">
-            <TableHeader>
-              <TableRow>
-                <TableHead>地址</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>Title</TableHead>
-                <TableHead>Meta Description</TableHead>
-                <TableHead>H1</TableHead>
-                <TableHead className="text-right">词数</TableHead>
-                <TableHead className="text-right">响应</TableHead>
-                <TableHead>Analytics</TableHead>
-                <TableHead className="text-right">OG</TableHead>
-                <TableHead className="text-right">JSON-LD</TableHead>
-                <TableHead className="text-right">链接（内/外）</TableHead>
-                <TableHead className="text-right">图片</TableHead>
-                <TableHead>JS</TableHead>
-                <TableHead className="w-16">详情</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {pages.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell
-                    className="max-w-72 truncate font-medium"
-                    title={item.final_url}
-                  >
-                    {item.final_url}
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={item.status_code} />
-                  </TableCell>
-                  <TableCell className="max-w-56 truncate" title={item.title}>
-                    {item.title || "-"}
-                  </TableCell>
-                  <TableCell
-                    className="max-w-64 truncate text-muted-foreground"
-                    title={item.description}
-                  >
-                    {item.description || "-"}
-                  </TableCell>
-                  <TableCell
-                    className="max-w-48 truncate"
-                    title={item.h1.join(" | ")}
-                  >
-                    {item.h1.join(" | ") || "-"}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {item.word_count ?? 0}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {item.response_time_ms === null
-                      ? "-"
-                      : `${item.response_time_ms} ms`}
-                  </TableCell>
-                  <TableCell
-                    className="max-w-52 truncate"
-                    title={analyticsSummary(item.analytics)}
-                  >
-                    {analyticsSummary(item.analytics)}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {Object.keys(item.open_graph).length}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {item.structured_data.length}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {item.internal_links}/{item.external_links}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {item.images.length}
-                  </TableCell>
-                  <TableCell>{item.rendered ? "JS" : "-"}</TableCell>
-                  <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      title="查看页面详情"
-                      onClick={() => setSelected(item)}
-                    >
-                      <Eye />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-        <TablePagination
-          page={page}
-          pageSize={pageSize}
-          total={total}
-          onPageChange={onPageChange}
-          onPageSizeChange={onPageSizeChange}
-        />
+    <div className="space-y-4">
+      <section
+        aria-label="审计摘要"
+        className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
+      >
+        <Card className="rounded-md border shadow-none ring-0">
+          <CardHeader className="px-5">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Gauge className="size-4" />
+              <CardTitle className="text-sm">网站健康度</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="px-5">
+            <div className="flex items-end gap-1">
+              <span className="text-3xl font-semibold tabular-nums">
+                {healthScore ?? "-"}
+              </span>
+              <span className="pb-1 text-sm text-muted-foreground">/ 100</span>
+            </div>
+            <Progress value={healthScore ?? 0} className="mt-4" />
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-md border shadow-none ring-0">
+          <CardHeader className="px-5">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <CircleAlert className="size-4" />
+              <CardTitle className="text-sm">错误</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="px-5">
+            <div className="text-3xl font-semibold text-destructive tabular-nums">
+              {summary?.errors ?? "-"}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              需要优先处理的问题
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-md border shadow-none ring-0">
+          <CardHeader className="px-5">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <TriangleAlert className="size-4" />
+              <CardTitle className="text-sm">警告</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="px-5">
+            <div className="text-3xl font-semibold text-orange-600 tabular-nums dark:text-orange-400">
+              {summary?.warnings ?? "-"}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              建议排期处理的问题
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-md border shadow-none ring-0">
+          <CardHeader className="px-5">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <FileType2 className="size-4" />
+              <CardTitle className="text-sm">已审计页面</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="px-5">
+            <div className="text-3xl font-semibold tabular-nums">
+              {summary?.page_count ?? run.processed}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              其中 {summary?.rendered_pages ?? 0} 个页面使用 JS 渲染
+            </p>
+          </CardContent>
+        </Card>
       </section>
-      <PageDetailDialog page={selected} onClose={() => setSelected(null)} />
-    </>
+
+      <section className="grid gap-4 lg:grid-cols-2">
+        <Card className="rounded-md border shadow-none ring-0">
+          <CardHeader className="px-5">
+            <CardTitle>问题分布</CardTitle>
+            <CardDescription>按严重程度查看本次审计结果</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4 px-5">
+            {severityItems.map((item) => (
+              <div
+                key={item.label}
+                className="grid grid-cols-[4rem_minmax(0,1fr)_auto] items-center gap-3"
+              >
+                <Badge variant={item.badge} className={item.badgeClassName}>
+                  {item.label}
+                </Badge>
+                <div className="h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={`h-full rounded-full ${item.barClassName}`}
+                    style={{ width: `${(item.value / maxSeverity) * 100}%` }}
+                  />
+                </div>
+                <span className="min-w-8 text-right font-medium tabular-nums">
+                  {item.value}
+                </span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-md border shadow-none ring-0">
+          <CardHeader className="px-5">
+            <CardTitle>HTTP 状态分布</CardTitle>
+            <CardDescription>共检查 {statusTotal} 个页面响应</CardDescription>
+            <CardAction>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onOpenView("status-codes")}
+              >
+                查看详情
+                <ChevronRight />
+              </Button>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-3 px-5">
+            {statusTotal === 0 ? (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                暂无状态码数据
+              </div>
+            ) : (
+              statusGroups.map((item) => (
+                <div
+                  key={item.label}
+                  className="grid grid-cols-[5.5rem_minmax(0,1fr)_auto] items-center gap-3 text-sm"
+                >
+                  <span>{item.label}</span>
+                  <div className="h-2 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className={`h-full rounded-full ${item.barClassName}`}
+                      style={{ width: `${(item.count / statusTotal) * 100}%` }}
+                    />
+                  </div>
+                  <span className="min-w-8 text-right font-medium tabular-nums">
+                    {item.count}
+                  </span>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+      </section>
+
+      <Card className="rounded-md border shadow-none ring-0">
+        <CardHeader className="px-5">
+          <CardTitle>优先修复问题</CardTitle>
+          <CardDescription>
+            优先展示严重程度最高的问题，共 {issueTotal} 类
+          </CardDescription>
+          <CardAction>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onOpenView("issues")}
+            >
+              查看全部
+              <ChevronRight />
+            </Button>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="px-5">
+          {issues.length === 0 ? (
+            <div className="rounded-md border py-10 text-center">
+              <div className="font-medium">未发现需要修复的问题</div>
+              <div className="mt-1 text-sm text-muted-foreground">
+                本次审计没有返回问题记录。
+              </div>
+            </div>
+          ) : (
+            <div className="divide-y rounded-md border">
+              {issues.map((issue) => (
+                <div
+                  key={issue.id}
+                  className="grid gap-3 px-4 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto] sm:items-center"
+                >
+                  <Badge
+                    variant={severityVariant(issue.severity)}
+                    className={severityClassName(issue.severity)}
+                  >
+                    {severityLabels[issue.severity]}
+                  </Badge>
+                  <div className="min-w-0">
+                    <div className="truncate font-medium" title={issue.title}>
+                      {issue.title}
+                    </div>
+                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                      {issue.category || "其他问题"}
+                    </div>
+                  </div>
+                  <div className="text-sm text-muted-foreground tabular-nums">
+                    影响 {issue.affected_count} 个页面
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    title="查看问题清单"
+                    onClick={() => onOpenView("issues")}
+                  >
+                    <ChevronRight />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+          {summary?.resource_checks_truncated && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              部分外部资源检查达到上限，本次结果可能不包含全部外部资源。
+            </p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 
@@ -1016,6 +1062,7 @@ function IssuesView({
   onPageSizeChange: (value: number) => void
 }) {
   const [selected, setSelected] = React.useState<AuditIssue | null>(null)
+  const visibleUrls = selected?.urls.slice(0, 20) ?? []
 
   return (
     <>
@@ -1068,7 +1115,10 @@ function IssuesView({
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant={severityVariant(issue.severity)}>
+                    <Badge
+                      variant={severityVariant(issue.severity)}
+                      className={severityClassName(issue.severity)}
+                    >
                       {severityLabels[issue.severity]}
                     </Badge>
                   </TableCell>
@@ -1083,7 +1133,8 @@ function IssuesView({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      title="查看受影响页面"
+                      aria-label={`查看${issue.title}的详情`}
+                      title="查看问题详情"
                       onClick={() => setSelected(issue)}
                     >
                       <Eye />
@@ -1107,20 +1158,85 @@ function IssuesView({
         open={selected !== null}
         onOpenChange={(open) => !open && setSelected(null)}
       >
-        <DialogContent className="max-h-[80vh] overflow-y-auto rounded-md sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{selected?.title}</DialogTitle>
-            <DialogDescription>{selected?.description}</DialogDescription>
+        <DialogContent className="grid max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-md sm:max-w-2xl">
+          <DialogHeader className="min-w-0 pr-8">
+            <div className="flex flex-wrap items-center gap-2">
+              {selected && (
+                <Badge
+                  variant={severityVariant(selected.severity)}
+                  className={severityClassName(selected.severity)}
+                >
+                  {severityLabels[selected.severity]}
+                </Badge>
+              )}
+              <span className="text-xs text-muted-foreground">
+                影响 {selected?.affected_count ?? 0} 个页面
+              </span>
+            </div>
+            <DialogTitle className="leading-snug">
+              {selected?.title}
+            </DialogTitle>
+            <DialogDescription className="break-all">
+              {[selected?.code, selected?.category].filter(Boolean).join(" · ")}
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            {selected?.urls.map((url) => (
-              <div
-                key={url}
-                className="rounded-md border px-3 py-2 text-xs break-all"
-              >
-                {url}
+          <div className="min-h-0 space-y-5 overflow-y-auto pr-1">
+            <section className="space-y-2">
+              <h3 className="text-sm font-medium">问题说明</h3>
+              <p className="text-sm leading-6 text-muted-foreground">
+                {selected?.description || "暂无问题说明。"}
+              </p>
+            </section>
+
+            <Separator />
+
+            <section className="space-y-2">
+              <h3 className="text-sm font-medium">修复建议</h3>
+              <p className="text-sm leading-6 text-muted-foreground">
+                {selected?.recommendation || "暂无修复建议。"}
+              </p>
+            </section>
+
+            <Separator />
+
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-medium">受影响网址</h3>
+                <Badge variant="outline">
+                  {selected?.affected_count ?? 0} 个页面
+                </Badge>
               </div>
-            ))}
+              {visibleUrls.length > 0 ? (
+                <ul
+                  aria-label="受影响网址列表"
+                  className="max-h-72 divide-y overflow-y-auto rounded-md border"
+                >
+                  {visibleUrls.map((url) => (
+                    <li key={url} className="px-3 py-2.5 text-xs break-all">
+                      {url}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="rounded-md border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
+                  当前结果未返回具体网址。
+                </div>
+              )}
+              {selected && selected.urls.length > visibleUrls.length && (
+                <p className="text-xs text-muted-foreground">
+                  仅显示前 {visibleUrls.length} 个，共返回{" "}
+                  {selected.urls.length} 个网址。
+                </p>
+              )}
+              {selected &&
+                selected.urls.length > 0 &&
+                selected.affected_count > selected.urls.length && (
+                  <p className="text-xs text-muted-foreground">
+                    当前结果返回 {selected.urls.length} 个网址，问题共影响{" "}
+                    {selected.affected_count} 个页面。
+                  </p>
+                )}
+            </section>
           </div>
         </DialogContent>
       </Dialog>
@@ -2129,7 +2245,7 @@ export function AuditWorkspace({
   }, [historySearch])
 
   React.useEffect(() => {
-    if (!runId || view === "history" || (crawling && view !== "overview")) {
+    if (!runId || view === "history" || crawling) {
       return
     }
     let active = true
@@ -2167,7 +2283,25 @@ export function AuditWorkspace({
         setWorkspaceError("")
       }
       try {
-        if (view === "overview" || view === "internal") {
+        if (view === "overview") {
+          if (replacingData) {
+            setIssues([])
+            setIssueTotal(0)
+            setStatusCodes([])
+          }
+          const [issueResult, statusCodeResult] = await Promise.all([
+            getAuditIssues(project.id, runId, {
+              page: 1,
+              pageSize: 5,
+            }),
+            getAuditStatusCodes(project.id, runId),
+          ])
+          if (active) {
+            setIssues(issueResult.items)
+            setIssueTotal(issueResult.total)
+            setStatusCodes(statusCodeResult)
+          }
+        } else if (view === "internal") {
           if (replacingData) {
             setPages([])
             setPageTotal(0)
@@ -2620,8 +2754,10 @@ export function AuditWorkspace({
         </div>
       )}
 
-      {crawling && view !== "overview" ? (
-        <CrawlPendingState finalizing={finalizing} />
+      {crawling ? (
+        view === "overview" && !finalizing ? null : (
+          <CrawlPendingState finalizing={finalizing} />
+        )
       ) : finalResultsPending ? (
         <FinalResultsState
           error={workspaceError || error}
@@ -2657,22 +2793,17 @@ export function AuditWorkspace({
         />
       ) : !run ? null : view === "overview" ? (
         <OverviewView
-          pages={pages}
-          total={pageTotal}
-          page={pagePage}
-          pageSize={pagePageSize}
-          search={pageSearch}
-          status={pageStatus}
+          run={run}
+          issues={issues}
+          issueTotal={issueTotal}
+          statusCodes={statusCodes}
           loading={loading}
-          onSearchChange={setPageSearch}
-          onStatusChange={(value) => {
-            setPageStatus(value)
-            setPagePage(1)
-          }}
-          onPageChange={setPagePage}
-          onPageSizeChange={(value) => {
-            setPagePageSize(value)
-            setPagePage(1)
+          onOpenView={(nextView) => {
+            navigate(
+              `/projects/${project.id}/audit/${nextView}?runId=${encodeURIComponent(
+                run.run_id
+              )}`
+            )
           }}
         />
       ) : view === "internal" ? (
@@ -2793,7 +2924,7 @@ export function AuditWorkspace({
       )}
 
       <Dialog open={recalculateOpen} onOpenChange={setRecalculateOpen}>
-        <DialogContent className="rounded-md sm:max-w-2xl">
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-hidden rounded-md sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>调整问题排除规则</DialogTitle>
             <DialogDescription>
@@ -2804,7 +2935,7 @@ export function AuditWorkspace({
             value={recalculatePatterns}
             onChange={(event) => setRecalculatePatterns(event.target.value)}
             placeholder={"/admin/*\n*.json"}
-            className="min-h-64 font-mono text-sm"
+            className="field-sizing-fixed h-[min(20rem,calc(100dvh-18rem))] min-h-32 overflow-y-auto font-mono text-sm"
             disabled={actionBusy}
           />
           <div className="text-xs text-muted-foreground">
