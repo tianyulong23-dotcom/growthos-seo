@@ -18,6 +18,15 @@ import {
 } from "@/api/settings"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Combobox,
+  ComboboxCollection,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from "@/components/ui/combobox"
 import { Input } from "@/components/ui/input"
 import {
   InputGroup,
@@ -44,6 +53,13 @@ const emptySettings: AIProviderSettings = {
   apiKeyConfigured: false,
   source: "none",
   updatedAt: null,
+}
+
+const suggestedModels = ["gpt-5.4-mini", "gpt-5.6-luna", "gpt-5.6-terra"]
+
+type ModelOption = {
+  value: string
+  label: string
 }
 
 export function AIModelSettings({ projectId }: AIModelSettingsProps) {
@@ -88,6 +104,15 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
   }, [projectId])
 
   const busy = loading || saving || testing
+  const modelOptions = React.useMemo<ModelOption[]>(() => {
+    const values = model.trim()
+      ? [model.trim(), ...suggestedModels]
+      : suggestedModels
+    return [...new Set(values)].map((value) => ({ value, label: value }))
+  }, [model])
+  const selectedModel = model.trim()
+    ? { value: model.trim(), label: model.trim() }
+    : null
   const parsedTimeout = Number(requestTimeoutSeconds)
   const parsedRetries = Number(maxRetries)
   const canSubmit = Boolean(
@@ -156,7 +181,7 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
     <form className="max-w-3xl" onSubmit={handleSave}>
       <section className="space-y-6 border-b pb-8">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-lg font-semibold">模型服务</h2>
+          <h2 className="text-lg font-semibold">AI 模型</h2>
           <Badge variant={settings.configured ? "outline" : "secondary"}>
             {settings.configured ? "已配置" : "未配置"}
           </Badge>
@@ -166,6 +191,9 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
             </span>
           )}
         </div>
+        <p className="text-sm text-muted-foreground">
+          此处保存的平台默认模型适用于所有网站和项目，无需重复配置。
+        </p>
 
         {loading ? (
           <div className="flex h-28 items-center gap-2 text-sm text-muted-foreground">
@@ -188,21 +216,50 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
             </label>
 
             <div className="grid gap-6 sm:grid-cols-2">
-              <label
-                htmlFor="ai-provider-model"
-                className="block space-y-2 text-sm"
-              >
-                <span className="font-medium">模型</span>
-                <Input
-                  id="ai-provider-model"
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                  placeholder="gpt-5.4-mini"
-                  autoComplete="off"
+              <div className="block space-y-2 text-sm">
+                <label htmlFor="ai-provider-model" className="font-medium">
+                  默认模型
+                </label>
+                <Combobox
+                  items={modelOptions}
+                  value={selectedModel}
+                  inputValue={model}
+                  onInputValueChange={(value) => setModel(value)}
+                  onValueChange={(option) => {
+                    if (option) setModel(option.value)
+                  }}
+                  itemToStringLabel={(option) => option.label}
+                  itemToStringValue={(option) => option.value}
+                  isItemEqualToValue={(option, selected) =>
+                    option.value === selected.value
+                  }
                   disabled={busy}
                   required
-                />
-              </label>
+                  autoHighlight
+                >
+                  <ComboboxInput
+                    id="ai-provider-model"
+                    className="w-full"
+                    placeholder="选择或输入模型 ID"
+                    autoComplete="off"
+                  />
+                  <ComboboxContent>
+                    <ComboboxEmpty>输入该接口提供的模型 ID</ComboboxEmpty>
+                    <ComboboxList>
+                      <ComboboxCollection>
+                        {(option: ModelOption) => (
+                          <ComboboxItem key={option.value} value={option}>
+                            {option.label}
+                          </ComboboxItem>
+                        )}
+                      </ComboboxCollection>
+                    </ComboboxList>
+                  </ComboboxContent>
+                </Combobox>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  可从常用项选择，也可输入该接口实际提供的模型 ID。
+                </span>
+              </div>
 
               <div className="block space-y-2 text-sm">
                 <div className="flex items-center gap-2">

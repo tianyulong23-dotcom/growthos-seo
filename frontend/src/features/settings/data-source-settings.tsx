@@ -864,6 +864,9 @@ function DataForSEOForm({ projectId }: DataSourceSettingsProps) {
           configured={settings.configured}
           source={settings.source}
         />
+        <p className="text-sm text-muted-foreground">
+          此账号由所有网站和项目共用，保存一次后会用于关键词和搜索结果数据流程。
+        </p>
 
         {loading ? (
           <div className="flex h-28 items-center gap-2 text-sm text-muted-foreground">
@@ -920,6 +923,25 @@ export function DataSourceSettings({
   return (
     <div className="max-w-3xl space-y-8">
       <GSCConnectionCard projectId={projectId} projectDomain={projectDomain} />
+      <DataForSEOForm projectId={projectId} />
+    </div>
+  )
+}
+
+export function GoogleSearchConsoleSettings({
+  projectId,
+  projectDomain,
+}: DataSourceSettingsProps) {
+  return (
+    <div className="max-w-3xl">
+      <GSCConnectionCard projectId={projectId} projectDomain={projectDomain} />
+    </div>
+  )
+}
+
+export function DataForSEOSettings({ projectId }: DataSourceSettingsProps) {
+  return (
+    <div className="max-w-3xl">
       <DataForSEOForm projectId={projectId} />
     </div>
   )

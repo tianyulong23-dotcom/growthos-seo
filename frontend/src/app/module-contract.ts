@@ -1,17 +1,10 @@
 import type { LucideIcon } from "lucide-react"
 import type { RouteObject } from "react-router"
 
-export type PlatformModuleId =
-  | "audit"
-  | "keywords"
-  | "content"
-  | "backlinks"
+export type PlatformModuleId = "audit" | "keywords" | "content" | "backlinks"
 
 export type NavigationItemId =
-  | "overview"
-  | PlatformModuleId
-  | "performance"
-  | "settings"
+  PlatformModuleId | "performance" | "settings" | "platform-settings"
 
 export type ModuleTab = {
   id: string

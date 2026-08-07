@@ -35,7 +35,7 @@ export function PageHeader({
       <div className="min-w-0">
         <div className="mb-2 flex items-center gap-1 text-xs text-muted-foreground">
           <Link
-            to={`/projects/${project.id}/overview`}
+            to={`/projects/${project.id}`}
             className="truncate hover:text-foreground"
           >
             {project.name}

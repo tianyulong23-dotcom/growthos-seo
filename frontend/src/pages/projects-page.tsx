@@ -101,7 +101,7 @@ export function ProjectsPage() {
                 className="group relative grid min-h-16 grid-cols-1 items-center gap-x-4 px-5 py-2.5 pr-16 transition-colors hover:bg-muted/30 md:grid-cols-2"
               >
                 <Link
-                  to={`/projects/${project.id}/overview`}
+                  to={`/projects/${project.id}/audit/overview`}
                   className="absolute inset-0 z-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset"
                   aria-label={`进入 ${project.name}`}
                 />

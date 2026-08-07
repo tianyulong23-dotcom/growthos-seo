@@ -3275,6 +3275,1000 @@
         "x-growthos-module": "platform"
       }
     },
+    "/api/v1/platform/settings/ai": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Platform Ai Settings",
+        "operationId": "get_platform_ai_settings_api_v1_platform_settings_ai_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIProviderSettingsResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Update Platform Ai Settings",
+        "operationId": "update_platform_ai_settings_api_v1_platform_settings_ai_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAIProviderSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIProviderSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/platform/settings/ai/test": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Test Platform Ai Settings",
+        "operationId": "test_platform_ai_settings_api_v1_platform_settings_ai_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestAIProviderSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestAIProviderSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/service-connections/gsc": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Gsc Connection",
+        "operationId": "get_gsc_connection_api_v1_projects__project_id__service_connections_gsc_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCServiceAccountConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Update Gsc Connection",
+        "operationId": "update_gsc_connection_api_v1_projects__project_id__service_connections_gsc_put",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateGSCServiceAccountConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCServiceAccountConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      },
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Disconnect Gsc Connection",
+        "operationId": "disconnect_gsc_connection_api_v1_projects__project_id__service_connections_gsc_delete",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/service-connections/gsc/test": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Test Gsc Connection",
+        "operationId": "test_gsc_connection_api_v1_projects__project_id__service_connections_gsc_test_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestGSCServiceAccountConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestGSCServiceAccountConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/service-connections/wordpress": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Wordpress Connection",
+        "operationId": "get_wordpress_connection_api_v1_projects__project_id__service_connections_wordpress_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WordPressConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Update Wordpress Connection",
+        "operationId": "update_wordpress_connection_api_v1_projects__project_id__service_connections_wordpress_put",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWordPressConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WordPressConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      },
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Disconnect Wordpress Connection",
+        "operationId": "disconnect_wordpress_connection_api_v1_projects__project_id__service_connections_wordpress_delete",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/service-connections/wordpress/test": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Test Wordpress Connection",
+        "operationId": "test_wordpress_connection_api_v1_projects__project_id__service_connections_wordpress_test_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestWordPressConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestWordPressConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
     "/api/v1/projects/{project_id}/agent/conversations": {
       "post": {
         "tags": [
@@ -4618,6 +5612,954 @@
         "x-growthos-module": "agent"
       }
     },
+    "/api/v1/projects/{project_id}/gsc/connection": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Gsc Connection",
+        "operationId": "get_gsc_connection_api_v1_projects__project_id__gsc_connection_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Select Gsc Site",
+        "operationId": "select_gsc_site_api_v1_projects__project_id__gsc_connection_put",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GSCSelectSiteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      },
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Disconnect Gsc",
+        "operationId": "disconnect_gsc_api_v1_projects__project_id__gsc_connection_delete",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/gsc/oauth/start": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Start Gsc Oauth",
+        "operationId": "start_gsc_oauth_api_v1_projects__project_id__gsc_oauth_start_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GSCOAuthStartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCOAuthStartResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/gsc/sites": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List Gsc Sites",
+        "operationId": "list_gsc_sites_api_v1_projects__project_id__gsc_sites_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCSiteListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/gsc/performance": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Gsc Performance",
+        "operationId": "get_gsc_performance_api_v1_projects__project_id__gsc_performance_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "date_range",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "last_7_days",
+                "last_28_days",
+                "last_3_months"
+              ],
+              "type": "string",
+              "default": "last_28_days",
+              "title": "Date Range"
+            }
+          },
+          {
+            "name": "device",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "DESKTOP",
+                    "MOBILE",
+                    "TABLET"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Device"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 3,
+                  "pattern": "^[A-Za-z]{3}$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Country"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCPerformanceReportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/gsc/performance/table": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Gsc Performance Table",
+        "operationId": "get_gsc_performance_table_api_v1_projects__project_id__gsc_performance_table_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "dimension",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "enum": [
+                "query",
+                "page"
+              ],
+              "type": "string",
+              "title": "Dimension"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/GSCPerformancePageSize",
+              "default": 25
+            }
+          },
+          {
+            "name": "date_range",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "last_7_days",
+                "last_28_days",
+                "last_3_months"
+              ],
+              "type": "string",
+              "default": "last_28_days",
+              "title": "Date Range"
+            }
+          },
+          {
+            "name": "device",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "DESKTOP",
+                    "MOBILE",
+                    "TABLET"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Device"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 3,
+                  "pattern": "^[A-Za-z]{3}$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Country"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCPerformanceTableResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/projects/{project_id}/gsc/performance/export": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Export Gsc Performance",
+        "operationId": "export_gsc_performance_api_v1_projects__project_id__gsc_performance_export_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "dimension",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "enum": [
+                "query",
+                "page"
+              ],
+              "type": "string",
+              "title": "Dimension"
+            }
+          },
+          {
+            "name": "date_range",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "last_7_days",
+                "last_28_days",
+                "last_3_months"
+              ],
+              "type": "string",
+              "default": "last_28_days",
+              "title": "Date Range"
+            }
+          },
+          {
+            "name": "device",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "DESKTOP",
+                    "MOBILE",
+                    "TABLET"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Device"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 3,
+                  "pattern": "^[A-Za-z]{3}$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Country"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GSCPerformanceExportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
     "/api/v1/projects/{project_id}/google-ads-settings": {
       "get": {
         "tags": [
@@ -5126,6 +7068,254 @@
               }
             }
           }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestDataForSEOSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/platform/settings/dataforseo": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Platform Dataforseo Settings",
+        "operationId": "get_platform_dataforseo_settings_api_v1_platform_settings_dataforseo_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataForSEOSettingsResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Update Platform Dataforseo Settings",
+        "operationId": "update_platform_dataforseo_settings_api_v1_platform_settings_dataforseo_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDataForSEOSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataForSEOSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "platform"
+      }
+    },
+    "/api/v1/platform/settings/dataforseo/test": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Test Platform Dataforseo Settings",
+        "operationId": "test_platform_dataforseo_settings_api_v1_platform_settings_dataforseo_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestDataForSEOSettingsRequest"
+              }
+            }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -5952,13 +8142,415 @@
         "x-growthos-module": "keywords"
       }
     },
-    "/api/v1/projects/{project_id}/keywords/gaps": {
+    "/api/v1/projects/{project_id}/keywords/gsc": {
+      "post": {
+        "tags": [
+          "keywords"
+        ],
+        "summary": "Save Gsc Keywords",
+        "operationId": "save_gsc_keywords_api_v1_projects__project_id__keywords_gsc_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeywordGSCSaveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeywordGSCSaveResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "keywords"
+      }
+    },
+    "/api/v1/projects/{project_id}/keywords/competitor-analysis": {
+      "post": {
+        "tags": [
+          "keywords"
+        ],
+        "summary": "Start Keyword Competitor Analysis",
+        "operationId": "start_keyword_competitor_analysis_api_v1_projects__project_id__keywords_competitor_analysis_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeywordCompetitorAnalysisRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeywordCompetitorAnalysisRunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "keywords"
+      }
+    },
+    "/api/v1/projects/{project_id}/keywords/competitor-analysis/status": {
       "get": {
         "tags": [
           "keywords"
         ],
-        "summary": "List Keyword Competitor Gaps",
-        "operationId": "list_keyword_competitor_gaps_api_v1_projects__project_id__keywords_gaps_get",
+        "summary": "Get Keyword Competitor Analysis Status",
+        "operationId": "get_keyword_competitor_analysis_status_api_v1_projects__project_id__keywords_competitor_analysis_status_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/KeywordCompetitorAnalysisRunResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Keyword Competitor Analysis Status Api V1 Projects  Project Id  Keywords Competitor Analysis Status Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "keywords"
+      }
+    },
+    "/api/v1/projects/{project_id}/keywords/competitor-analysis/competitors": {
+      "get": {
+        "tags": [
+          "keywords"
+        ],
+        "summary": "List Keyword Competitors",
+        "operationId": "list_keyword_competitors_api_v1_projects__project_id__keywords_competitor_analysis_competitors_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "include_evidence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Evidence"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeywordCompetitorListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "keywords"
+      }
+    },
+    "/api/v1/projects/{project_id}/keywords/competitor-analysis/opportunities": {
+      "get": {
+        "tags": [
+          "keywords"
+        ],
+        "summary": "List Keyword Competitor Opportunities",
+        "operationId": "list_keyword_competitor_opportunities_api_v1_projects__project_id__keywords_competitor_analysis_opportunities_get",
         "parameters": [
           {
             "name": "project_id",
@@ -5991,6 +8583,136 @@
               "default": 50,
               "title": "Page Size"
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Search"
+            }
+          },
+          {
+            "name": "competitor_domain",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Competitor Domain"
+            }
+          },
+          {
+            "name": "intent",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Intent"
+            }
+          },
+          {
+            "name": "opportunity_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "new",
+                "accepted",
+                "dismissed",
+                "all"
+              ],
+              "type": "string",
+              "default": "new",
+              "title": "Opportunity Status"
+            }
+          },
+          {
+            "name": "min_volume",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Volume"
+            }
+          },
+          {
+            "name": "max_difficulty",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 100,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Difficulty"
+            }
+          },
+          {
+            "name": "in_library",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "In Library"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "keyword",
+                "opportunity_score",
+                "search_volume",
+                "difficulty",
+                "best_rank",
+                "competitor_count",
+                "updated_at"
+              ],
+              "type": "string",
+              "default": "opportunity_score",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string",
+              "default": "desc",
+              "title": "Order"
+            }
           }
         ],
         "responses": {
@@ -5999,7 +8721,209 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/KeywordCompetitorGapListResponse"
+                  "$ref": "#/components/schemas/KeywordCompetitorOpportunityListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "keywords"
+      },
+      "patch": {
+        "tags": [
+          "keywords"
+        ],
+        "summary": "Update Keyword Competitor Opportunities",
+        "operationId": "update_keyword_competitor_opportunities_api_v1_projects__project_id__keywords_competitor_analysis_opportunities_patch",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeywordCompetitorOpportunityBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeywordCompetitorOpportunityBatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning module is unavailable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code",
+                    "message",
+                    "requestId",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "const": 503
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-growthos-module": "keywords"
+      }
+    },
+    "/api/v1/projects/{project_id}/keywords/competitor-analysis/runs": {
+      "get": {
+        "tags": [
+          "keywords"
+        ],
+        "summary": "List Keyword Competitor Analysis Runs",
+        "operationId": "list_keyword_competitor_analysis_runs_api_v1_projects__project_id__keywords_competitor_analysis_runs_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 20,
+              "minimum": 1,
+              "default": 10,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeywordCompetitorAnalysisRunListResponse"
                 }
               }
             }
@@ -48414,6 +51338,420 @@
         ],
         "title": "EditMessageRequest"
       },
+      "GSCConnectionResponse": {
+        "properties": {
+          "oauth_configured": {
+            "type": "boolean",
+            "title": "Oauth Configured"
+          },
+          "oauth_redirect_uri": {
+            "type": "string",
+            "title": "Oauth Redirect Uri"
+          },
+          "grant_connected": {
+            "type": "boolean",
+            "title": "Grant Connected"
+          },
+          "property_connected": {
+            "type": "boolean",
+            "title": "Property Connected"
+          },
+          "site_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Site Url"
+          },
+          "connected_account_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connected Account Email"
+          },
+          "requires_reconnect": {
+            "type": "boolean",
+            "title": "Requires Reconnect",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "oauth_configured",
+          "oauth_redirect_uri",
+          "grant_connected",
+          "property_connected"
+        ],
+        "title": "GSCConnectionResponse"
+      },
+      "GSCOAuthStartRequest": {
+        "properties": {
+          "callback_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Callback Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "callback_url"
+        ],
+        "title": "GSCOAuthStartRequest"
+      },
+      "GSCOAuthStartResponse": {
+        "properties": {
+          "authorization_url": {
+            "type": "string",
+            "title": "Authorization Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "authorization_url"
+        ],
+        "title": "GSCOAuthStartResponse"
+      },
+      "GSCPerformanceDimensionRow": {
+        "properties": {
+          "clicks": {
+            "type": "number",
+            "title": "Clicks",
+            "default": 0
+          },
+          "impressions": {
+            "type": "number",
+            "title": "Impressions",
+            "default": 0
+          },
+          "ctr": {
+            "type": "number",
+            "title": "Ctr",
+            "default": 0
+          },
+          "position": {
+            "type": "number",
+            "title": "Position",
+            "default": 0
+          },
+          "key": {
+            "type": "string",
+            "title": "Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key"
+        ],
+        "title": "GSCPerformanceDimensionRow"
+      },
+      "GSCPerformanceExportResponse": {
+        "properties": {
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "query",
+              "page"
+            ],
+            "title": "Dimension"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/GSCPerformanceDimensionRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dimension"
+        ],
+        "title": "GSCPerformanceExportResponse"
+      },
+      "GSCPerformancePageSize": {
+        "type": "integer",
+        "enum": [
+          25,
+          50,
+          100
+        ],
+        "title": "GSCPerformancePageSize"
+      },
+      "GSCPerformanceRange": {
+        "properties": {
+          "start_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Start Date"
+          },
+          "end_date": {
+            "type": "string",
+            "format": "date",
+            "title": "End Date"
+          },
+          "previous_start_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Previous Start Date"
+          },
+          "previous_end_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Previous End Date"
+          }
+        },
+        "type": "object",
+        "required": [
+          "start_date",
+          "end_date",
+          "previous_start_date",
+          "previous_end_date"
+        ],
+        "title": "GSCPerformanceRange"
+      },
+      "GSCPerformanceReportResponse": {
+        "properties": {
+          "site_url": {
+            "type": "string",
+            "title": "Site Url"
+          },
+          "range": {
+            "$ref": "#/components/schemas/GSCPerformanceRange"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/GSCPerformanceTotals"
+          },
+          "previous_totals": {
+            "$ref": "#/components/schemas/GSCPerformanceTotals"
+          },
+          "striking_distance": {
+            "items": {
+              "$ref": "#/components/schemas/GSCStrikingDistanceRow"
+            },
+            "type": "array",
+            "title": "Striking Distance"
+          },
+          "countries": {
+            "items": {
+              "$ref": "#/components/schemas/GSCPerformanceDimensionRow"
+            },
+            "type": "array",
+            "title": "Countries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "site_url",
+          "range",
+          "totals",
+          "previous_totals"
+        ],
+        "title": "GSCPerformanceReportResponse"
+      },
+      "GSCPerformanceTableResponse": {
+        "properties": {
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "query",
+              "page"
+            ],
+            "title": "Dimension"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "enum": [
+              25,
+              50,
+              100
+            ],
+            "title": "Page Size"
+          },
+          "has_next_page": {
+            "type": "boolean",
+            "title": "Has Next Page"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/GSCPerformanceDimensionRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dimension",
+          "page",
+          "page_size",
+          "has_next_page"
+        ],
+        "title": "GSCPerformanceTableResponse"
+      },
+      "GSCPerformanceTotals": {
+        "properties": {
+          "clicks": {
+            "type": "number",
+            "title": "Clicks",
+            "default": 0
+          },
+          "impressions": {
+            "type": "number",
+            "title": "Impressions",
+            "default": 0
+          },
+          "ctr": {
+            "type": "number",
+            "title": "Ctr",
+            "default": 0
+          },
+          "position": {
+            "type": "number",
+            "title": "Position",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "GSCPerformanceTotals"
+      },
+      "GSCSelectSiteRequest": {
+        "properties": {
+          "site_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Site Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "site_url"
+        ],
+        "title": "GSCSelectSiteRequest"
+      },
+      "GSCServiceAccountConnectionResponse": {
+        "properties": {
+          "property_url": {
+            "type": "string",
+            "title": "Property Url"
+          },
+          "service_account_email": {
+            "type": "string",
+            "title": "Service Account Email"
+          },
+          "private_key_configured": {
+            "type": "boolean",
+            "title": "Private Key Configured"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "connected",
+              "disconnected"
+            ],
+            "title": "Status"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "property_url",
+          "service_account_email",
+          "private_key_configured",
+          "status"
+        ],
+        "title": "GSCServiceAccountConnectionResponse"
+      },
+      "GSCSiteListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/GSCSiteResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "GSCSiteListResponse"
+      },
+      "GSCSiteResponse": {
+        "properties": {
+          "site_url": {
+            "type": "string",
+            "title": "Site Url"
+          },
+          "permission_level": {
+            "type": "string",
+            "title": "Permission Level"
+          }
+        },
+        "type": "object",
+        "required": [
+          "site_url",
+          "permission_level"
+        ],
+        "title": "GSCSiteResponse"
+      },
+      "GSCStrikingDistanceRow": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "page": {
+            "type": "string",
+            "title": "Page"
+          },
+          "clicks": {
+            "type": "number",
+            "title": "Clicks",
+            "default": 0
+          },
+          "impressions": {
+            "type": "number",
+            "title": "Impressions",
+            "default": 0
+          },
+          "position": {
+            "type": "number",
+            "title": "Position",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "query",
+          "page"
+        ],
+        "title": "GSCStrikingDistanceRow"
+      },
       "GoogleAdsSettingsResponse": {
         "properties": {
           "client_id": {
@@ -48733,21 +52071,687 @@
         ],
         "title": "KeywordBuildRunResponse"
       },
-      "KeywordCompetitorGapItemResponse": {
+      "KeywordCompetitorAnalysisRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "auto"
+            ],
+            "title": "Mode"
+          },
+          "competitor_domains": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 5,
+            "title": "Competitor Domains"
+          },
+          "local_market": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KeywordCompetitorLocalMarket"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "title": "KeywordCompetitorAnalysisRequest"
+      },
+      "KeywordCompetitorAnalysisRunListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KeywordCompetitorAnalysisRunSummaryResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "KeywordCompetitorAnalysisRunListResponse"
+      },
+      "KeywordCompetitorAnalysisRunResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "target_domain": {
+            "type": "string",
+            "title": "Target Domain"
+          },
+          "country": {
+            "type": "string",
+            "title": "Country"
+          },
+          "language": {
+            "type": "string",
+            "title": "Language"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "auto"
+            ],
+            "title": "Mode"
+          },
+          "requested_competitor_domains": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requested Competitor Domains"
+          },
+          "discovery_method": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "serp_competitors"
+            ],
+            "title": "Discovery Method"
+          },
+          "discovery_keywords": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Discovery Keywords"
+          },
+          "discovery_result_types": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "organic",
+                "paid",
+                "featured_snippet",
+                "local_pack"
+              ]
+            },
+            "type": "array",
+            "title": "Discovery Result Types"
+          },
+          "discovery_include_subdomains": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discovery Include Subdomains"
+          },
+          "discovery_sort": {
+            "type": "string",
+            "enum": [
+              "visibility",
+              "traffic_estimate",
+              "avg_position",
+              "keyword_count"
+            ],
+            "title": "Discovery Sort"
+          },
+          "discovery_limit": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Discovery Limit"
+          },
+          "discovery_offset": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Discovery Offset"
+          },
+          "gsc_query_evidence": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Gsc Query Evidence"
+          },
+          "query_metrics": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Query Metrics"
+          },
+          "serp_snapshots": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Serp Snapshots"
+          },
+          "cost_breakdown": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Cost Breakdown"
+          },
+          "landscape_summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Landscape Summary"
+          },
+          "directional_result": {
+            "type": "boolean",
+            "title": "Directional Result",
+            "default": false
+          },
+          "market_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Summary"
+          },
+          "local_market": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Local Market"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "partial",
+              "completed",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "progress": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Progress"
+          },
+          "competitor_limit": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Competitor Limit"
+          },
+          "keyword_limit": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Keyword Limit"
+          },
+          "discovered_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Discovered Count"
+          },
+          "analyzed_competitor_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Analyzed Competitor Count"
+          },
+          "completed_competitors": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Completed Competitors"
+          },
+          "failed_competitors": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Failed Competitors"
+          },
+          "raw_keyword_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Raw Keyword Count"
+          },
+          "unique_keyword_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unique Keyword Count"
+          },
+          "discovery_cost_usd": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Discovery Cost Usd"
+          },
+          "total_cost_usd": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Total Cost Usd"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "recovery_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Recovery Count"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "target_domain",
+          "country",
+          "language",
+          "mode",
+          "discovery_method",
+          "discovery_sort",
+          "discovery_limit",
+          "discovery_offset",
+          "status",
+          "stage",
+          "message",
+          "progress",
+          "competitor_limit",
+          "keyword_limit",
+          "discovered_count",
+          "analyzed_competitor_count",
+          "completed_competitors",
+          "failed_competitors",
+          "raw_keyword_count",
+          "unique_keyword_count",
+          "discovery_cost_usd",
+          "total_cost_usd",
+          "recovery_count",
+          "created_at"
+        ],
+        "title": "KeywordCompetitorAnalysisRunResponse"
+      },
+      "KeywordCompetitorAnalysisRunSummaryResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "auto"
+            ],
+            "title": "Mode"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "partial",
+              "completed",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "discovered_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Discovered Count"
+          },
+          "analyzed_competitor_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Analyzed Competitor Count"
+          },
+          "completed_competitors": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Completed Competitors"
+          },
+          "unique_keyword_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unique Keyword Count"
+          },
+          "total_cost_usd": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Total Cost Usd"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "mode",
+          "status",
+          "discovered_count",
+          "analyzed_competitor_count",
+          "completed_competitors",
+          "unique_keyword_count",
+          "total_cost_usd",
+          "created_at"
+        ],
+        "title": "KeywordCompetitorAnalysisRunSummaryResponse"
+      },
+      "KeywordCompetitorListResponse": {
+        "properties": {
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KeywordCompetitorResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "KeywordCompetitorListResponse"
+      },
+      "KeywordCompetitorLocalMarket": {
+        "properties": {
+          "latitude": {
+            "type": "number",
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Latitude"
+          },
+          "longitude": {
+            "type": "number",
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Longitude"
+          },
+          "radius_km": {
+            "type": "number",
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Radius Km",
+            "default": 10
+          },
+          "zoom": {
+            "type": "integer",
+            "maximum": 18.0,
+            "minimum": 4.0,
+            "title": "Zoom",
+            "default": 12
+          },
+          "search_type": {
+            "type": "string",
+            "enum": [
+              "maps",
+              "local_finder"
+            ],
+            "title": "Search Type",
+            "default": "maps"
+          },
+          "device": {
+            "type": "string",
+            "enum": [
+              "desktop",
+              "mobile"
+            ],
+            "title": "Device",
+            "default": "desktop"
+          },
+          "depth": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Depth",
+            "default": 20
+          },
+          "business_query": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Business Query"
+          },
+          "categories": {
+            "items": {
+              "type": "string",
+              "maxLength": 120,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Categories"
+          },
+          "include_questions": {
+            "type": "boolean",
+            "title": "Include Questions",
+            "default": false
+          },
+          "questions_keyword": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Questions Keyword"
+          },
+          "questions_depth": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Questions Depth",
+            "default": 20
+          }
+        },
+        "type": "object",
+        "required": [
+          "latitude",
+          "longitude"
+        ],
+        "title": "KeywordCompetitorLocalMarket"
+      },
+      "KeywordCompetitorOpportunityBatchRequest": {
+        "properties": {
+          "opportunity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Opportunity Ids"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "accept",
+              "dismiss",
+              "restore"
+            ],
+            "title": "Action"
+          }
+        },
+        "type": "object",
+        "required": [
+          "opportunity_ids",
+          "action"
+        ],
+        "title": "KeywordCompetitorOpportunityBatchRequest"
+      },
+      "KeywordCompetitorOpportunityBatchResponse": {
+        "properties": {
+          "updated": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Updated"
+          },
+          "added_to_library": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Added To Library"
+          },
+          "already_in_library": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Already In Library"
+          }
+        },
+        "type": "object",
+        "required": [
+          "updated",
+          "added_to_library",
+          "already_in_library"
+        ],
+        "title": "KeywordCompetitorOpportunityBatchResponse"
+      },
+      "KeywordCompetitorOpportunityListResponse": {
+        "properties": {
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "analyzed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analyzed At"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KeywordCompetitorOpportunityResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Page Size"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "page_size"
+        ],
+        "title": "KeywordCompetitorOpportunityListResponse"
+      },
+      "KeywordCompetitorOpportunityResponse": {
         "properties": {
           "id": {
             "type": "string",
             "title": "Id"
           },
-          "competitor_domain": {
-            "type": "string",
-            "title": "Competitor Domain"
-          },
           "keyword": {
             "type": "string",
             "title": "Keyword"
           },
-          "competitor_rank": {
+          "normalized_keyword": {
+            "type": "string",
+            "title": "Normalized Keyword"
+          },
+          "best_competitor_rank": {
             "anyOf": [
               {
                 "type": "integer"
@@ -48756,7 +52760,25 @@
                 "type": "null"
               }
             ],
-            "title": "Competitor Rank"
+            "title": "Best Competitor Rank"
+          },
+          "competitor_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Competitor Count"
+          },
+          "opportunity_score": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Opportunity Score"
           },
           "search_volume": {
             "anyOf": [
@@ -48791,6 +52813,17 @@
             ],
             "title": "Competition"
           },
+          "competition_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Level"
+          },
           "keyword_difficulty": {
             "anyOf": [
               {
@@ -48821,7 +52854,226 @@
             "type": "array",
             "title": "Monthly Searches"
           },
-          "relevance": {
+          "metrics_fetched_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Metrics Fetched At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "new",
+              "accepted",
+              "dismissed"
+            ],
+            "title": "Status"
+          },
+          "keyword_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keyword Id"
+          },
+          "in_library": {
+            "type": "boolean",
+            "title": "In Library"
+          },
+          "analyzed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Analyzed At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "rankings": {
+            "items": {
+              "$ref": "#/components/schemas/KeywordCompetitorRankingResponse"
+            },
+            "type": "array",
+            "title": "Rankings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "keyword",
+          "normalized_keyword",
+          "competitor_count",
+          "metrics_fetched_at",
+          "status",
+          "in_library",
+          "analyzed_at",
+          "updated_at"
+        ],
+        "title": "KeywordCompetitorOpportunityResponse"
+      },
+      "KeywordCompetitorRankingResponse": {
+        "properties": {
+          "competitor_id": {
+            "type": "string",
+            "title": "Competitor Id"
+          },
+          "domain": {
+            "type": "string",
+            "title": "Domain"
+          },
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rank"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "competitor_id",
+          "domain"
+        ],
+        "title": "KeywordCompetitorRankingResponse"
+      },
+      "KeywordCompetitorResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "domain": {
+            "type": "string",
+            "title": "Domain"
+          },
+          "provider_rank": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Provider Rank"
+          },
+          "avg_position": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Position"
+          },
+          "median_position": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Position"
+          },
+          "rating": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rating"
+          },
+          "etv": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Etv"
+          },
+          "keywords_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keywords Count"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "relevant_serp_items": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relevant Serp Items"
+          },
+          "keywords_positions": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Keywords Positions"
+          },
+          "domain_type": {
+            "type": "string",
+            "enum": [
+              "direct_product_competitor",
+              "publisher_media",
+              "marketplace_directory",
+              "community_forum",
+              "documentation_resource"
+            ],
+            "title": "Domain Type"
+          },
+          "is_seo_competitor": {
+            "type": "boolean",
+            "title": "Is Seo Competitor"
+          },
+          "is_business_competitor": {
+            "type": "boolean",
+            "title": "Is Business Competitor"
+          },
+          "classification_confidence": {
             "anyOf": [
               {
                 "type": "number",
@@ -48832,66 +53084,188 @@
                 "type": "null"
               }
             ],
-            "title": "Relevance"
+            "title": "Classification Confidence"
+          },
+          "why_they_matter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Why They Matter"
+          },
+          "serp_evidence": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Serp Evidence"
+          },
+          "domain_overview": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Domain Overview"
+          },
+          "ranked_keywords_evidence": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Ranked Keywords Evidence"
+          },
+          "ranked_keywords_evidence_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Ranked Keywords Evidence Count",
+            "default": 0
+          },
+          "ranked_keywords_checked": {
+            "type": "boolean",
+            "title": "Ranked Keywords Checked",
+            "default": false
+          },
+          "backlinks_evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Backlinks Evidence"
+          },
+          "selected_for_gap": {
+            "type": "boolean",
+            "title": "Selected For Gap"
+          },
+          "site_check_status": {
+            "type": "string",
+            "enum": [
+              "not_checked",
+              "verified",
+              "redirected_related",
+              "redirected_unrelated",
+              "unverified_redirect",
+              "blocked",
+              "temporarily_unavailable",
+              "permanently_unavailable",
+              "non_html",
+              "unsafe_target",
+              "redirect_loop",
+              "platform_or_login"
+            ],
+            "title": "Site Check Status"
+          },
+          "site_relation": {
+            "type": "string",
+            "enum": [
+              "related",
+              "unrelated",
+              "uncertain"
+            ],
+            "title": "Site Relation"
+          },
+          "site_verification": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Site Verification"
+          },
+          "intersections": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intersections"
+          },
+          "organic_keywords": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organic Keywords"
+          },
+          "organic_traffic": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organic Traffic"
           },
           "status": {
             "type": "string",
             "enum": [
-              "active",
-              "needs_review"
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "excluded"
             ],
             "title": "Status"
           },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
+          "keyword_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Keyword Count"
+          },
+          "cost_usd": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Cost Usd"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Detail"
           }
         },
         "type": "object",
         "required": [
           "id",
-          "competitor_domain",
-          "keyword",
+          "domain",
+          "provider_rank",
+          "domain_type",
+          "is_seo_competitor",
+          "is_business_competitor",
+          "selected_for_gap",
+          "site_check_status",
+          "site_relation",
           "status",
-          "created_at"
+          "keyword_count",
+          "cost_usd"
         ],
-        "title": "KeywordCompetitorGapItemResponse"
-      },
-      "KeywordCompetitorGapListResponse": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/KeywordCompetitorGapItemResponse"
-            },
-            "type": "array",
-            "title": "Items"
-          },
-          "total": {
-            "type": "integer",
-            "minimum": 0.0,
-            "title": "Total"
-          },
-          "page": {
-            "type": "integer",
-            "minimum": 1.0,
-            "title": "Page"
-          },
-          "page_size": {
-            "type": "integer",
-            "maximum": 100.0,
-            "minimum": 1.0,
-            "title": "Page Size"
-          }
-        },
-        "type": "object",
-        "required": [
-          "items",
-          "total",
-          "page",
-          "page_size"
-        ],
-        "title": "KeywordCompetitorGapListResponse"
+        "title": "KeywordCompetitorResponse"
       },
       "KeywordCostSummaryResponse": {
         "properties": {
@@ -49034,6 +53408,52 @@
         ],
         "title": "KeywordExternalIssueResponse"
       },
+      "KeywordGSCSaveRequest": {
+        "properties": {
+          "keywords": {
+            "items": {
+              "type": "string",
+              "maxLength": 500,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Keywords"
+          }
+        },
+        "type": "object",
+        "required": [
+          "keywords"
+        ],
+        "title": "KeywordGSCSaveRequest"
+      },
+      "KeywordGSCSaveResponse": {
+        "properties": {
+          "saved": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Saved"
+          },
+          "added_to_library": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Added To Library"
+          },
+          "already_in_library": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Already In Library"
+          }
+        },
+        "type": "object",
+        "required": [
+          "saved",
+          "added_to_library",
+          "already_in_library"
+        ],
+        "title": "KeywordGSCSaveResponse"
+      },
       "KeywordLibraryStatusResponse": {
         "properties": {
           "run": {
@@ -49173,6 +53593,17 @@
               }
             ],
             "title": "Competition"
+          },
+          "competition_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competition Level"
           },
           "keyword_difficulty": {
             "anyOf": [
@@ -50171,6 +54602,63 @@
         ],
         "title": "TestDataForSEOSettingsResponse"
       },
+      "TestGSCServiceAccountConnectionRequest": {
+        "properties": {
+          "property_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Property Url"
+          },
+          "service_account_email": {
+            "type": "string",
+            "maxLength": 320,
+            "minLength": 3,
+            "title": "Service Account Email"
+          },
+          "private_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16384
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "property_url",
+          "service_account_email"
+        ],
+        "title": "TestGSCServiceAccountConnectionRequest"
+      },
+      "TestGSCServiceAccountConnectionResponse": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "property_url": {
+            "type": "string",
+            "title": "Property Url"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "property_url",
+          "message"
+        ],
+        "title": "TestGSCServiceAccountConnectionResponse"
+      },
       "TestGoogleAdsSettingsRequest": {
         "properties": {
           "developer_token": {
@@ -50263,6 +54751,68 @@
           "message"
         ],
         "title": "TestGoogleAdsSettingsResponse"
+      },
+      "TestWordPressConnectionRequest": {
+        "properties": {
+          "site_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Site Url"
+          },
+          "username": {
+            "type": "string",
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Username"
+          },
+          "application_password": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Application Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "site_url",
+          "username"
+        ],
+        "title": "TestWordPressConnectionRequest"
+      },
+      "TestWordPressConnectionResponse": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "site_url": {
+            "type": "string",
+            "title": "Site Url"
+          },
+          "verified_user": {
+            "type": "string",
+            "title": "Verified User"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "site_url",
+          "verified_user",
+          "message"
+        ],
+        "title": "TestWordPressConnectionResponse"
       },
       "UpdateAIProviderSettingsRequest": {
         "properties": {
@@ -50407,6 +54957,40 @@
         ],
         "title": "UpdateDataForSEOSettingsRequest"
       },
+      "UpdateGSCServiceAccountConnectionRequest": {
+        "properties": {
+          "property_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Property Url"
+          },
+          "service_account_email": {
+            "type": "string",
+            "maxLength": 320,
+            "minLength": 3,
+            "title": "Service Account Email"
+          },
+          "private_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16384
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "property_url",
+          "service_account_email"
+        ],
+        "title": "UpdateGSCServiceAccountConnectionRequest"
+      },
       "UpdateGoogleAdsSettingsRequest": {
         "properties": {
           "developer_token": {
@@ -50477,6 +55061,40 @@
         ],
         "title": "UpdateGoogleAdsSettingsRequest"
       },
+      "UpdateWordPressConnectionRequest": {
+        "properties": {
+          "site_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Site Url"
+          },
+          "username": {
+            "type": "string",
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Username"
+          },
+          "application_password": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Application Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "site_url",
+          "username"
+        ],
+        "title": "UpdateWordPressConnectionRequest"
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -50516,6 +55134,61 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WordPressConnectionResponse": {
+        "properties": {
+          "site_url": {
+            "type": "string",
+            "title": "Site Url"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "application_password_configured": {
+            "type": "boolean",
+            "title": "Application Password Configured"
+          },
+          "verified_user": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified User"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "connected",
+              "disconnected"
+            ],
+            "title": "Status"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "site_url",
+          "username",
+          "application_password_configured",
+          "status"
+        ],
+        "title": "WordPressConnectionResponse"
       }
     }
   }

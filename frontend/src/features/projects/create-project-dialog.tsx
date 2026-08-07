@@ -117,7 +117,7 @@ export function CreateProjectDialog({
       markBusinessProfileOnboarding(project.id)
       onOpenChange(false)
       resetForm()
-      navigate(`/projects/${project.id}/overview`, {
+      navigate(`/projects/${project.id}/audit/overview`, {
         state: { waitForBusinessProfile: true },
       })
     } catch (requestError) {

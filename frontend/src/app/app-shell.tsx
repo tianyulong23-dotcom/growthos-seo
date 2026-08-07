@@ -12,6 +12,7 @@ import {
   Plus,
   Search,
   Settings,
+  SlidersHorizontal,
   Sun,
 } from "lucide-react"
 import { Link, Outlet, useLocation, useNavigate, useParams } from "react-router"
@@ -70,13 +71,13 @@ function AppSidebar() {
   const { projectId = projects[0]?.id ?? "" } = useParams()
   const project = getProject(projectId)
   const currentProjectId = project.id || projectId
-  const activeModule = location.pathname.split("/")[3] ?? "overview"
+  const activeModule = location.pathname.split("/")[3] ?? "audit"
 
   function switchProject(nextProjectId: string) {
     const suffix = location.pathname
       .replace(`/projects/${projectId}`, "")
       .replace(/^\/+/, "")
-    navigate(`/projects/${nextProjectId}/${suffix || "overview"}`)
+    navigate(`/projects/${nextProjectId}/${suffix || "audit/overview"}`)
     if (isMobile) {
       setOpenMobile(false)
     }
@@ -170,26 +171,31 @@ function AppSidebar() {
             <SidebarGroupLabel>工作区</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {modules.slice(0, -1).map((item) => {
-                  const Icon = item.icon
-                  return (
-                    <SidebarMenuItem key={item.id}>
-                      <SidebarMenuButton
-                        tooltip={item.label}
-                        isActive={activeModule === item.id}
-                        render={
-                          <Link
-                            to={getModulePath(currentProjectId, item.id)}
-                            onClick={closeMobileSidebar}
-                          />
-                        }
-                      >
-                        <Icon />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
+                {modules
+                  .filter(
+                    (item) =>
+                      item.id !== "settings" && item.id !== "platform-settings"
                   )
-                })}
+                  .map((item) => {
+                    const Icon = item.icon
+                    return (
+                      <SidebarMenuItem key={item.id}>
+                        <SidebarMenuButton
+                          tooltip={item.label}
+                          isActive={activeModule === item.id}
+                          render={
+                            <Link
+                              to={getModulePath(currentProjectId, item.id)}
+                              onClick={closeMobileSidebar}
+                            />
+                          }
+                        >
+                          <Icon />
+                          <span>{item.label}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    )
+                  })}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
@@ -210,6 +216,21 @@ function AppSidebar() {
               >
                 <Settings />
                 <span>设置</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                tooltip="平台设置"
+                isActive={activeModule === "platform-settings"}
+                render={
+                  <Link
+                    to={getModulePath(currentProjectId, "platform-settings")}
+                    onClick={closeMobileSidebar}
+                  />
+                }
+              >
+                <SlidersHorizontal />
+                <span>平台设置</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>

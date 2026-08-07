@@ -305,6 +305,33 @@ def test_routes_save_and_load_settings_without_exposing_key() -> None:
     assert "api_key" not in loaded
 
 
+def test_platform_routes_do_not_require_a_project_id() -> None:
+    service, _, _ = build_service()
+    app.dependency_overrides[get_ai_settings_service] = lambda: service
+
+    async def request() -> tuple[int, dict[str, Any]]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.put(
+                "/api/v1/platform/settings/ai",
+                json={
+                    "base_url": "https://models.example/v1",
+                    "api_key": "platform-key",
+                    "model": "platform-model",
+                },
+            )
+            return response.status_code, response.json()
+
+    try:
+        status_code, payload = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_code == 200
+    assert payload["source"] == "database"
+    assert "api_key" not in payload
+
+
 def test_routes_reject_request_policy_outside_supported_range() -> None:
     service, _, _ = build_service()
     app.dependency_overrides[get_ai_settings_service] = lambda: service

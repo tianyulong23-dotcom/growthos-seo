@@ -14,7 +14,8 @@ type GmailConnectionLoadStatus = "idle" | "loading" | "ready" | "error"
 
 export function useGmailConnection(
   websiteProjectKey: string,
-  enabled: boolean
+  enabled: boolean,
+  returnPath?: string
 ) {
   const [status, setStatus] = React.useState<GmailConnectionLoadStatus>("idle")
   const [connection, setConnection] =
@@ -83,7 +84,7 @@ export function useGmailConnection(
     try {
       const response = await startGmailConnection(
         websiteProjectKey,
-        window.location.pathname
+        returnPath ?? window.location.pathname
       )
       window.location.assign(response.authorizationUrl)
     } catch {
@@ -92,7 +93,7 @@ export function useGmailConnection(
       )
       setBusyAction(null)
     }
-  }, [websiteProjectKey])
+  }, [returnPath, websiteProjectKey])
 
   const disconnect = React.useCallback(async () => {
     if (visibleConnection === null) return

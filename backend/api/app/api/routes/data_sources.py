@@ -407,3 +407,56 @@ async def test_dataforseo_settings(
     except Exception as exc:
         handle_data_source_error(exc)
         raise
+
+
+@router.get(
+    "/api/v1/platform/settings/dataforseo",
+    response_model=DataForSEOSettingsResponse,
+)
+async def get_platform_dataforseo_settings(
+    service: Annotated[
+        DataForSEOSettingsService,
+        Depends(get_dataforseo_settings_service),
+    ],
+) -> DataForSEOSettingsResponse:
+    try:
+        return await service.get_platform()
+    except Exception as exc:
+        handle_data_source_error(exc)
+        raise
+
+
+@router.put(
+    "/api/v1/platform/settings/dataforseo",
+    response_model=DataForSEOSettingsResponse,
+)
+async def update_platform_dataforseo_settings(
+    request: UpdateDataForSEOSettingsRequest,
+    service: Annotated[
+        DataForSEOSettingsService,
+        Depends(get_dataforseo_settings_service),
+    ],
+) -> DataForSEOSettingsResponse:
+    try:
+        return await service.update_platform(request)
+    except Exception as exc:
+        handle_data_source_error(exc)
+        raise
+
+
+@router.post(
+    "/api/v1/platform/settings/dataforseo/test",
+    response_model=TestDataForSEOSettingsResponse,
+)
+async def test_platform_dataforseo_settings(
+    request: TestDataForSEOSettingsRequest,
+    service: Annotated[
+        DataForSEOSettingsService,
+        Depends(get_dataforseo_settings_service),
+    ],
+) -> TestDataForSEOSettingsResponse:
+    try:
+        return await service.test_platform_connection(request)
+    except Exception as exc:
+        handle_data_source_error(exc)
+        raise

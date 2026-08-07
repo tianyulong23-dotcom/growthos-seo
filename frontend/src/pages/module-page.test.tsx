@@ -22,6 +22,7 @@ const auditApi = vi.hoisted(() => ({
 const projectApi = vi.hoisted(() => ({
   getProject: vi.fn(),
   refreshProject: vi.fn(),
+  refreshBusinessProfile: vi.fn(),
   updateProject: vi.fn(),
   updateBusinessProfile: vi.fn(),
 }))
@@ -36,6 +37,7 @@ vi.mock("@/features/projects/project-context", () => ({
     projects: [projectApi.getProject()],
     getProject: projectApi.getProject,
     refreshProject: projectApi.refreshProject,
+    refreshBusinessProfile: projectApi.refreshBusinessProfile,
     updateProject: projectApi.updateProject,
     updateBusinessProfile: projectApi.updateBusinessProfile,
   }),
@@ -43,6 +45,19 @@ vi.mock("@/features/projects/project-context", () => ({
 
 vi.mock("@/components/shared/page-header", () => ({
   PageHeader: () => null,
+}))
+
+vi.mock("@/features/settings/ai-model-settings", () => ({
+  AIModelSettings: () => <div>AI 模型设置内容</div>,
+}))
+
+vi.mock("@/features/settings/data-source-settings", () => ({
+  DataSourceSettings: () => <div>DataForSEO 设置内容</div>,
+  DataForSEOSettings: () => <div>DataForSEO 设置内容</div>,
+}))
+
+vi.mock("@/features/settings/service-connections-settings", () => ({
+  ServiceConnectionsSettings: () => <div>服务连接设置内容</div>,
 }))
 
 vi.mock("@/features/audit/audit-workspace", () => ({
@@ -225,5 +240,67 @@ describe("ModulePage audit selection", () => {
     })
 
     expect(screen.getByTestId("selected-run").textContent).toBe("run-history")
+  })
+})
+
+describe("ModulePage settings navigation", () => {
+  it("renders only project settings on the settings page", async () => {
+    render(
+      <MemoryRouter
+        initialEntries={["/projects/project-1/settings/connections"]}
+      >
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect(await screen.findByText("服务连接设置内容")).toBeTruthy()
+    expect(screen.getByRole("tablist")).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "业务资料" })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "服务连接" })).toBeTruthy()
+    expect(screen.queryByRole("tab", { name: "AI 模型" })).toBeNull()
+    expect(screen.queryByRole("tab", { name: "DataForSEO" })).toBeNull()
+    expect(screen.queryByText("通知设置")).toBeNull()
+    expect(screen.queryByText("外联规则")).toBeNull()
+  })
+
+  it("renders AI and DataForSEO only on the platform settings page", async () => {
+    render(
+      <MemoryRouter
+        initialEntries={["/projects/project-1/platform-settings/ai"]}
+      >
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect(await screen.findByText("AI 模型设置内容")).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "AI 模型" })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "DataForSEO" })).toBeTruthy()
+    expect(screen.queryByRole("tab", { name: "业务资料" })).toBeNull()
+    expect(screen.queryByRole("tab", { name: "服务连接" })).toBeNull()
+  })
+
+  it("redirects the old AI settings route to platform settings", async () => {
+    render(
+      <MemoryRouter initialEntries={["/projects/project-1/settings/ai"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect(await screen.findByText("AI 模型设置内容")).toBeTruthy()
   })
 })

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.db.session import session_factory
+from app.modules.agent.security import register_sensitive_values
 from app.modules.projects.models import Project
 from app.modules.settings.models import (
     DataForSEOProviderSetting,
@@ -581,8 +582,18 @@ class DataForSEOSettingsService:
 
     async def get(self, project_id: str) -> DataForSEOSettingsResponse:
         await self._ensure_project(project_id)
+        return await self.get_platform()
+
+    async def get_platform(self) -> DataForSEOSettingsResponse:
         record, source = await self._effective_record()
         return dataforseo_response(record, source)
+
+    async def effective_record(self) -> DataForSEOSettingsRecord:
+        record, _ = await self._effective_record()
+        if record is None or not record.configured:
+            raise DataSourceNotConfiguredError("请先在平台设置中配置 DataForSEO")
+        register_sensitive_values((record.password,))
+        return record
 
     async def update(
         self,
@@ -590,6 +601,12 @@ class DataForSEOSettingsService:
         request: UpdateDataForSEOSettingsRequest,
     ) -> DataForSEOSettingsResponse:
         await self._ensure_project(project_id)
+        return await self.update_platform(request)
+
+    async def update_platform(
+        self,
+        request: UpdateDataForSEOSettingsRequest,
+    ) -> DataForSEOSettingsResponse:
         record = await self._merged_record(request)
         saved = await self.repository.upsert_dataforseo(
             self.settings.default_organization_id,
@@ -604,6 +621,12 @@ class DataForSEOSettingsService:
         request: TestDataForSEOSettingsRequest,
     ) -> TestDataForSEOSettingsResponse:
         await self._ensure_project(project_id)
+        return await self.test_platform_connection(request)
+
+    async def test_platform_connection(
+        self,
+        request: TestDataForSEOSettingsRequest,
+    ) -> TestDataForSEOSettingsResponse:
         record = await self._merged_record(request)
         balance = await self.connection_tester.test(record)
         message = "连接成功，DataForSEO 账号可用"

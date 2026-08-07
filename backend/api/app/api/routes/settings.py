@@ -18,10 +18,7 @@ from app.modules.settings.service import (
     build_ai_settings_service,
 )
 
-router = APIRouter(
-    prefix="/api/v1/projects/{project_id}/ai-settings",
-    tags=["settings"],
-)
+router = APIRouter(tags=["settings"])
 
 
 def get_ai_settings_service() -> AISettingsService:
@@ -57,7 +54,10 @@ def handle_settings_error(exc: Exception) -> None:
     raise exc
 
 
-@router.get("", response_model=AIProviderSettingsResponse)
+@router.get(
+    "/api/v1/projects/{project_id}/ai-settings",
+    response_model=AIProviderSettingsResponse,
+)
 async def get_ai_settings(
     project_id: str,
     service: Annotated[AISettingsService, Depends(get_ai_settings_service)],
@@ -69,7 +69,10 @@ async def get_ai_settings(
         raise
 
 
-@router.put("", response_model=AIProviderSettingsResponse)
+@router.put(
+    "/api/v1/projects/{project_id}/ai-settings",
+    response_model=AIProviderSettingsResponse,
+)
 async def update_ai_settings(
     project_id: str,
     request: UpdateAIProviderSettingsRequest,
@@ -82,7 +85,10 @@ async def update_ai_settings(
         raise
 
 
-@router.post("/test", response_model=TestAIProviderSettingsResponse)
+@router.post(
+    "/api/v1/projects/{project_id}/ai-settings/test",
+    response_model=TestAIProviderSettingsResponse,
+)
 async def test_ai_settings(
     project_id: str,
     request: TestAIProviderSettingsRequest,
@@ -90,6 +96,44 @@ async def test_ai_settings(
 ) -> TestAIProviderSettingsResponse:
     try:
         return await service.test_connection(project_id, request)
+    except Exception as exc:
+        handle_settings_error(exc)
+        raise
+
+
+@router.get("/api/v1/platform/settings/ai", response_model=AIProviderSettingsResponse)
+async def get_platform_ai_settings(
+    service: Annotated[AISettingsService, Depends(get_ai_settings_service)],
+) -> AIProviderSettingsResponse:
+    try:
+        return await service.get_platform()
+    except Exception as exc:
+        handle_settings_error(exc)
+        raise
+
+
+@router.put("/api/v1/platform/settings/ai", response_model=AIProviderSettingsResponse)
+async def update_platform_ai_settings(
+    request: UpdateAIProviderSettingsRequest,
+    service: Annotated[AISettingsService, Depends(get_ai_settings_service)],
+) -> AIProviderSettingsResponse:
+    try:
+        return await service.update_platform(request)
+    except Exception as exc:
+        handle_settings_error(exc)
+        raise
+
+
+@router.post(
+    "/api/v1/platform/settings/ai/test",
+    response_model=TestAIProviderSettingsResponse,
+)
+async def test_platform_ai_settings(
+    request: TestAIProviderSettingsRequest,
+    service: Annotated[AISettingsService, Depends(get_ai_settings_service)],
+) -> TestAIProviderSettingsResponse:
+    try:
+        return await service.test_platform_connection(request)
     except Exception as exc:
         handle_settings_error(exc)
         raise

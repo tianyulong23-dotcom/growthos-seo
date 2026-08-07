@@ -254,6 +254,22 @@ def test_get_uses_environment_without_exposing_secrets() -> None:
     assert "password" not in dataforseo_payload
 
 
+def test_effective_dataforseo_record_prefers_database_and_falls_back_to_environment() -> None:
+    _, dataforseo_service, repository, _, _ = build_services()
+
+    environment = asyncio.run(dataforseo_service.effective_record())
+    repository.dataforseo_record = DataForSEOSettingsRecord(
+        login="stored-login",
+        password="stored-password",
+    )
+    stored = asyncio.run(dataforseo_service.effective_record())
+
+    assert environment.login == "environment-login"
+    assert environment.password == "environment-password"
+    assert stored.login == "stored-login"
+    assert stored.password == "stored-password"
+
+
 def test_updates_reuse_existing_secrets_when_the_fields_are_blank() -> None:
     google_service, dataforseo_service, repository, _, _ = build_services()
 
@@ -369,6 +385,29 @@ def test_routes_save_and_load_without_exposing_provider_secrets() -> None:
     assert dataforseo["login"] == "saved-login"
     assert dataforseo["password_configured"] is True
     assert "password" not in dataforseo
+
+
+def test_platform_dataforseo_route_does_not_require_a_project_id() -> None:
+    _, service, _, _, _ = build_services()
+    app.dependency_overrides[get_dataforseo_settings_service] = lambda: service
+
+    async def request() -> tuple[int, dict[str, Any]]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.put(
+                "/api/v1/platform/settings/dataforseo",
+                json={"login": "platform-login", "password": "platform-password"},
+            )
+            return response.status_code, response.json()
+
+    try:
+        status_code, payload = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_code == 200
+    assert payload["login"] == "platform-login"
+    assert "password" not in payload
 
 
 def test_dataforseo_balance_reads_the_user_data_response() -> None:

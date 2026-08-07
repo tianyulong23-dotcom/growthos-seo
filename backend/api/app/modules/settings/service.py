@@ -252,6 +252,9 @@ class AISettingsService:
 
     async def get(self, project_id: str) -> AIProviderSettingsResponse:
         await self._ensure_project(project_id)
+        return await self.get_platform()
+
+    async def get_platform(self) -> AIProviderSettingsResponse:
         record, source = await self._effective_record()
         return settings_response(record, source)
 
@@ -267,6 +270,12 @@ class AISettingsService:
         request: UpdateAIProviderSettingsRequest,
     ) -> AIProviderSettingsResponse:
         await self._ensure_project(project_id)
+        return await self.update_platform(request)
+
+    async def update_platform(
+        self,
+        request: UpdateAIProviderSettingsRequest,
+    ) -> AIProviderSettingsResponse:
         encryption_key = self._encryption_key()
         allow_plaintext = self._allow_plaintext_storage()
         if not encryption_key and not allow_plaintext:
@@ -299,6 +308,12 @@ class AISettingsService:
         request: TestAIProviderSettingsRequest,
     ) -> TestAIProviderSettingsResponse:
         await self._ensure_project(project_id)
+        return await self.test_platform_connection(request)
+
+    async def test_platform_connection(
+        self,
+        request: TestAIProviderSettingsRequest,
+    ) -> TestAIProviderSettingsResponse:
         current = None
         if request.api_key is None:
             current, _ = await self._effective_record()

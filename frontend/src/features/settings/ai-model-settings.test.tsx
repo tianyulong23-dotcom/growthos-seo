@@ -47,7 +47,10 @@ describe("AIModelSettings", () => {
   it("loads settings without rendering the stored API key", async () => {
     render(<AIModelSettings projectId="project-1" />)
 
-    expect(await screen.findByDisplayValue("gpt-5.4-mini")).toBeTruthy()
+    const modelInput = await screen.findByRole("combobox", {
+      name: "默认模型",
+    })
+    expect((modelInput as HTMLInputElement).value).toBe("gpt-5.4-mini")
     const keyInput = screen.getByLabelText("API 密钥") as HTMLInputElement
     expect(keyInput.value).toBe("")
     expect(keyInput.type).toBe("password")
@@ -58,16 +61,20 @@ describe("AIModelSettings", () => {
     ) as HTMLInputElement
     expect(timeoutInput.value).toBe("90")
     expect(retriesInput.value).toBe("1")
+    expect(screen.getByRole("combobox", { name: "默认模型" })).toBeTruthy()
+    expect(
+      screen.getByText("此处保存的平台默认模型适用于所有网站和项目，无需重复配置。")
+    ).toBeTruthy()
   })
 
   it("tests unsaved values and saves a replacement key", async () => {
     render(<AIModelSettings projectId="project-1" />)
-    await screen.findByDisplayValue("gpt-5.4-mini")
+    await screen.findByRole("combobox", { name: "默认模型" })
 
     fireEvent.change(screen.getByLabelText("接口地址"), {
       target: { value: "https://new.example/v1" },
     })
-    fireEvent.change(screen.getByLabelText("模型"), {
+    fireEvent.change(screen.getByLabelText("默认模型"), {
       target: { value: "new-model" },
     })
     fireEvent.change(screen.getByLabelText("API 密钥"), {

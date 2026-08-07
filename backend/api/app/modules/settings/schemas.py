@@ -89,6 +89,7 @@ class TestAIProviderSettingsResponse(BaseModel):
 
 
 SettingsSource = Literal["database", "environment", "none"]
+ConnectionStatus = Literal["connected", "disconnected"]
 
 
 def clean_required_text(value: str) -> str:
@@ -263,3 +264,80 @@ class GSCPerformanceTableResponse(BaseModel):
 class GSCPerformanceExportResponse(BaseModel):
     dimension: Literal["query", "page"]
     rows: list[GSCPerformanceDimensionRow] = Field(default_factory=list)
+
+
+def clean_service_url(value: str) -> str:
+    value = value.strip().rstrip("/")
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("地址必须是有效的 HTTP 或 HTTPS 地址")
+    if parsed.username or parsed.password:
+        raise ValueError("地址不能包含用户名或密码")
+    if parsed.query or parsed.fragment:
+        raise ValueError("地址不能包含查询参数或片段")
+    return value
+
+
+def clean_gsc_property(value: str) -> str:
+    value = value.strip().rstrip("/")
+    if value.startswith("sc-domain:") and len(value) > len("sc-domain:"):
+        return value
+    return clean_service_url(value)
+
+
+class GSCServiceAccountConnectionResponse(BaseModel):
+    property_url: str
+    service_account_email: str
+    private_key_configured: bool
+    status: ConnectionStatus
+    verified_at: datetime | None = None
+
+
+class UpdateGSCServiceAccountConnectionRequest(BaseModel):
+    property_url: str = Field(min_length=1, max_length=2048)
+    service_account_email: str = Field(min_length=3, max_length=320)
+    private_key: str | None = Field(default=None, max_length=16384)
+
+    _clean_property_url = field_validator("property_url")(clean_gsc_property)
+    _clean_email = field_validator("service_account_email")(clean_required_text)
+    _clean_private_key = field_validator("private_key")(clean_optional_secret)
+
+
+class TestGSCServiceAccountConnectionRequest(UpdateGSCServiceAccountConnectionRequest):
+    pass
+
+
+class TestGSCServiceAccountConnectionResponse(BaseModel):
+    success: bool
+    property_url: str
+    message: str
+
+
+class WordPressConnectionResponse(BaseModel):
+    site_url: str
+    username: str
+    application_password_configured: bool
+    verified_user: str | None = None
+    status: ConnectionStatus
+    verified_at: datetime | None = None
+
+
+class UpdateWordPressConnectionRequest(BaseModel):
+    site_url: str = Field(min_length=1, max_length=2048)
+    username: str = Field(min_length=1, max_length=320)
+    application_password: str | None = Field(default=None, max_length=4096)
+
+    _clean_site_url = field_validator("site_url")(clean_service_url)
+    _clean_username = field_validator("username")(clean_required_text)
+    _clean_password = field_validator("application_password")(clean_optional_secret)
+
+
+class TestWordPressConnectionRequest(UpdateWordPressConnectionRequest):
+    pass
+
+
+class TestWordPressConnectionResponse(BaseModel):
+    success: bool
+    site_url: str
+    verified_user: str
+    message: str
