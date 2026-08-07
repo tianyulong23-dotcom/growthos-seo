@@ -17,6 +17,7 @@ import { ModulePage } from "@/pages/module-page"
 const auditApi = vi.hoisted(() => ({
   createAuditRun: vi.fn(),
   getAuditRun: vi.fn(),
+  listAuditRuns: vi.fn(),
 }))
 
 const projectApi = vi.hoisted(() => ({
@@ -47,13 +48,16 @@ vi.mock("@/components/shared/page-header", () => ({
 
 vi.mock("@/features/audit/audit-workspace", () => ({
   AuditWorkspace: ({
+    view,
     run,
     onRunChange,
   }: {
+    view: string
     run: AuditRun | null
     onRunChange: (run: AuditRun | null) => void
   }) => (
     <div>
+      <div data-testid="selected-view">{view}</div>
       <div data-testid="selected-run">{run?.run_id ?? "none"}</div>
       <button
         type="button"
@@ -117,13 +121,173 @@ beforeEach(() => {
   projectApi.getProject.mockReturnValue(project)
   projectApi.refreshProject.mockResolvedValue(project)
   auditApi.getAuditRun.mockResolvedValue(latestRun)
+  auditApi.listAuditRuns.mockImplementation(
+    (_projectId: string, options?: { status?: string }) =>
+      Promise.resolve({
+        items: options?.status === "completed" ? [latestRun] : [latestRun],
+        total: 1,
+        page: 1,
+        page_size: 1,
+      })
+  )
 })
 
 afterEach(() => {
   cleanup()
 })
 
+function tabIsDisabled(tab: HTMLElement) {
+  return (
+    tab.hasAttribute("disabled") || tab.getAttribute("aria-disabled") === "true"
+  )
+}
+
 describe("ModulePage audit selection", () => {
+  it("keeps only overview available before the first audit", async () => {
+    projectApi.getProject.mockReturnValue({
+      ...project,
+      auditRunId: null,
+      auditStatus: "never_started",
+      auditHealth: null,
+    })
+    auditApi.listAuditRuns.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 1,
+    })
+
+    render(
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect(
+      tabIsDisabled(await screen.findByRole("tab", { name: "概览" }))
+    ).toBe(false)
+    expect(tabIsDisabled(screen.getByRole("tab", { name: "内部资源" }))).toBe(
+      true
+    )
+    expect(tabIsDisabled(screen.getByRole("tab", { name: "问题清单" }))).toBe(
+      true
+    )
+    expect(tabIsDisabled(screen.getByRole("tab", { name: "审计历史" }))).toBe(
+      true
+    )
+  })
+
+  it("redirects a first-time project from a result URL to overview", async () => {
+    const emptyRuns = {
+      items: [] as AuditRun[],
+      total: 0,
+      page: 1,
+      page_size: 1,
+    }
+    const resolveRequests: Array<(result: typeof emptyRuns) => void> = []
+    projectApi.getProject.mockReturnValue({
+      ...project,
+      auditRunId: null,
+      auditStatus: "never_started",
+      auditHealth: null,
+    })
+    auditApi.listAuditRuns.mockImplementation(
+      () =>
+        new Promise<typeof emptyRuns>((resolve) => {
+          resolveRequests.push(resolve)
+        })
+    )
+
+    render(
+      <MemoryRouter initialEntries={["/projects/project-1/audit/issues"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    await waitFor(() => expect(resolveRequests).toHaveLength(2))
+    expect(screen.queryByTestId("selected-view")).toBeNull()
+
+    await act(async () => {
+      resolveRequests.forEach((resolve) => resolve(emptyRuns))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId("selected-view").textContent).toBe("overview")
+    })
+  })
+
+  it("keeps history disabled while the first audit is queued", async () => {
+    const queuedRun = {
+      ...latestRun,
+      status: "queued" as const,
+      stage: "queued",
+      progress: 0,
+    }
+    projectApi.getProject.mockReturnValue({
+      ...project,
+      auditStatus: "queued",
+      auditHealth: null,
+    })
+    auditApi.getAuditRun.mockResolvedValue(queuedRun)
+    auditApi.listAuditRuns.mockImplementation(
+      (_projectId: string, options?: { status?: string }) =>
+        Promise.resolve({
+          items: options?.status === "completed" ? [] : [queuedRun],
+          total: options?.status === "completed" ? 0 : 1,
+          page: 1,
+          page_size: 1,
+        })
+    )
+
+    render(
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect(
+      tabIsDisabled(await screen.findByRole("tab", { name: "审计历史" }))
+    ).toBe(true)
+  })
+
+  it("keeps result and history tabs available after a completed audit", async () => {
+    render(
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/:module/:view"
+            element={<ModulePage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect(
+      tabIsDisabled(await screen.findByRole("tab", { name: "内部资源" }))
+    ).toBe(false)
+    expect(tabIsDisabled(screen.getByRole("tab", { name: "PageSpeed" }))).toBe(
+      false
+    )
+    expect(tabIsDisabled(screen.getByRole("tab", { name: "审计历史" }))).toBe(
+      false
+    )
+  })
+
   it("restores a completed audit from cache without requesting its status again", async () => {
     const firstRender = render(
       <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>

@@ -1,21 +1,26 @@
 import * as React from "react"
-import {
-  Download,
-  FilePlus2,
-  Link2,
-  LoaderCircle,
-  Plus,
-} from "lucide-react"
+import { Download, FilePlus2, Link2, LoaderCircle, Plus } from "lucide-react"
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router"
 
 import type { NavigationItem } from "@/app/module-contract"
 import { PageHeader } from "@/components/shared/page-header"
-import { createAuditRun, getAuditRun, type AuditRun } from "@/api/audits"
+import {
+  createAuditRun,
+  getAuditRun,
+  listAuditRuns,
+  type AuditRun,
+} from "@/api/audits"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { ArticleWorkspace } from "@/features/content/article-workspace"
 import { ContentLibrary } from "@/features/content/content-library"
 import { ContentPlan } from "@/features/content/content-plan"
@@ -473,6 +478,12 @@ function LegacyModulePage() {
       error: "",
     }
   })
+  const [auditAvailability, setAuditAvailability] = React.useState({
+    requestKey: "",
+    loaded: false,
+    totalRuns: project.auditStatus === "never_started" ? 0 : 1,
+    completedRuns: project.auditStatus === "completed" ? 1 : 0,
+  })
   const [actionCount, setActionCount] = React.useState(0)
   const [createArticleOpen, setCreateArticleOpen] = React.useState(false)
   const [contentPlanAddRequestVersion, setContentPlanAddRequestVersion] =
@@ -504,6 +515,77 @@ function LegacyModulePage() {
     currentAuditRun?.status === "running" ||
     currentAuditRun?.status === "stopping" ||
     currentAuditRun?.status === "recalculating"
+  const currentRunIsHistorical =
+    currentAuditRun?.status === "completed" ||
+    currentAuditRun?.status === "failed" ||
+    currentAuditRun?.status === "stopped"
+  const projectRunIsHistorical =
+    project.auditStatus === "completed" ||
+    project.auditStatus === "failed" ||
+    project.auditStatus === "stopped"
+  const currentOrProjectRunIsActive = [
+    "queued",
+    "running",
+    "paused",
+    "stopping",
+    "recalculating",
+  ].includes(currentAuditRun?.status ?? project.auditStatus)
+  const auditAvailabilityRequestKey = [
+    project.id,
+    project.auditRunId ?? "",
+    project.auditStatus,
+  ].join("\x1f")
+  const currentAuditAvailability =
+    auditAvailability.requestKey === auditAvailabilityRequestKey
+  const projectHasCompletedAudit =
+    currentAuditRun?.status === "completed" ||
+    project.auditStatus === "completed" ||
+    (currentAuditAvailability && auditAvailability.completedRuns > 0)
+  const projectHasAuditHistory =
+    currentRunIsHistorical ||
+    projectRunIsHistorical ||
+    (currentAuditAvailability &&
+      auditAvailability.loaded &&
+      auditAvailability.totalRuns > (currentOrProjectRunIsActive ? 1 : 0))
+
+  React.useEffect(() => {
+    if (module !== "audit" || !project.id) return
+    let active = true
+    void Promise.all([
+      listAuditRuns(project.id, {
+        includeArchived: true,
+        page: 1,
+        pageSize: 1,
+      }),
+      listAuditRuns(project.id, {
+        includeArchived: true,
+        page: 1,
+        pageSize: 1,
+        status: "completed",
+      }),
+    ])
+      .then(([allRuns, completedRuns]) => {
+        if (!active || project.id !== activeProjectId.current) return
+        setAuditAvailability({
+          requestKey: auditAvailabilityRequestKey,
+          loaded: true,
+          totalRuns: allRuns.total,
+          completedRuns: completedRuns.total,
+        })
+      })
+      .catch(() => {
+        if (!active || project.id !== activeProjectId.current) return
+        setAuditAvailability({
+          requestKey: auditAvailabilityRequestKey,
+          loaded: true,
+          totalRuns: project.auditStatus === "never_started" ? 0 : 1,
+          completedRuns: project.auditStatus === "completed" ? 1 : 0,
+        })
+      })
+    return () => {
+      active = false
+    }
+  }, [auditAvailabilityRequestKey, module, project.auditStatus, project.id])
 
   const handleAuditRunChange = React.useCallback(
     (run: AuditRun | null, sourceProjectId: string) => {
@@ -611,6 +693,19 @@ function LegacyModulePage() {
       />
     )
   }
+  const auditAvailabilityLoaded =
+    currentAuditAvailability && auditAvailability.loaded
+  const auditViewDisabled =
+    moduleConfig.id === "audit" &&
+    activeView !== "overview" &&
+    (activeView === "history"
+      ? !projectHasAuditHistory
+      : !projectHasCompletedAudit)
+  if (auditAvailabilityLoaded && auditViewDisabled) {
+    return <Navigate to={`/projects/${projectId}/audit/overview`} replace />
+  }
+  const auditViewAvailabilityPending =
+    auditViewDisabled && !auditAvailabilityLoaded
 
   async function handleAuditStart(settings: AuditSettings) {
     handleAuditError("", project.id)
@@ -710,47 +805,89 @@ function LegacyModulePage() {
               )
             }}
           >
-            <TabsList
-              variant="line"
-              className="no-scrollbar h-11 max-w-full justify-start overflow-x-auto"
-            >
-              {moduleConfig.tabs.map((tab) => (
-                <TabsTrigger key={tab.id} value={tab.id}>
-                  {tab.label}
-                </TabsTrigger>
-              ))}
-            </TabsList>
+            <TooltipProvider>
+              <TabsList
+                variant="line"
+                className="no-scrollbar h-11 max-w-full justify-start overflow-x-auto"
+              >
+                {moduleConfig.tabs.map((tab) => {
+                  const disabled =
+                    moduleConfig.id === "audit" &&
+                    tab.id !== "overview" &&
+                    (tab.id === "history"
+                      ? !projectHasAuditHistory
+                      : !projectHasCompletedAudit)
+                  const trigger = (
+                    <TabsTrigger
+                      key={tab.id}
+                      value={tab.id}
+                      disabled={disabled}
+                    >
+                      {tab.label}
+                    </TabsTrigger>
+                  )
+                  if (!disabled) return trigger
+                  return (
+                    <Tooltip key={tab.id}>
+                      <TooltipTrigger
+                        render={
+                          <span
+                            className="inline-flex"
+                            tabIndex={0}
+                            aria-label={`${tab.label}，暂不可用`}
+                          />
+                        }
+                      >
+                        {trigger}
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {tab.id === "history"
+                          ? "产生审计记录后可查看"
+                          : "完成首次审计后可查看"}
+                      </TooltipContent>
+                    </Tooltip>
+                  )
+                })}
+              </TabsList>
+            </TooltipProvider>
           </Tabs>
         </div>
       )}
       <div className="p-4 sm:p-6 lg:p-8">
-        <ModuleBody
-          moduleId={moduleConfig.id}
-          view={activeView}
-          project={project}
-          onStart={handleAuditStart}
-          auditRun={currentAuditRun}
-          auditError={currentAuditError}
-          onAuditRunChange={(run) => {
-            handleAuditRunChange(run, project.id)
-            if (run && run.run_id !== targetAuditRunId) {
-              navigate(
-                `/projects/${project.id}/audit/${activeView}?runId=${encodeURIComponent(
-                  run.run_id
-                )}`
-              )
+        {auditViewAvailabilityPending ? (
+          <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">
+            <LoaderCircle className="mr-2 size-4 animate-spin" />
+            正在加载网站审计
+          </div>
+        ) : (
+          <ModuleBody
+            moduleId={moduleConfig.id}
+            view={activeView}
+            project={project}
+            onStart={handleAuditStart}
+            auditRun={currentAuditRun}
+            auditError={currentAuditError}
+            onAuditRunChange={(run) => {
+              handleAuditRunChange(run, project.id)
+              if (run && run.run_id !== targetAuditRunId) {
+                navigate(
+                  `/projects/${project.id}/audit/${activeView}?runId=${encodeURIComponent(
+                    run.run_id
+                  )}`
+                )
+              }
+            }}
+            onProjectRefresh={() => refreshProject(project.id)}
+            onSaveBusinessProfile={(input) =>
+              updateBusinessProfile(project.id, input)
             }
-          }}
-          onProjectRefresh={() => refreshProject(project.id)}
-          onSaveBusinessProfile={(input) =>
-            updateBusinessProfile(project.id, input)
-          }
-          onRefreshBusinessProfile={() => refreshBusinessProfile(project.id)}
-          articleId={selectedArticleId}
-          contentPlanAddRequestVersion={contentPlanAddRequestVersion}
-          onOpenArticle={openArticle}
-          onCloseArticle={closeArticle}
-        />
+            onRefreshBusinessProfile={() => refreshBusinessProfile(project.id)}
+            articleId={selectedArticleId}
+            contentPlanAddRequestVersion={contentPlanAddRequestVersion}
+            onOpenArticle={openArticle}
+            onCloseArticle={closeArticle}
+          />
+        )}
       </div>
       {moduleConfig.id === "content" && activeView === "library" && (
         <CreateArticleDialog
