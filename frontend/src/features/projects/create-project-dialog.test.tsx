@@ -82,7 +82,7 @@ describe("CreateProjectDialog", () => {
             element={<CreateProjectDialog open onOpenChange={onOpenChange} />}
           />
           <Route
-            path="/projects/:projectId/overview"
+            path="/projects/:projectId/audit/overview"
             element={<Destination />}
           />
         </Routes>
@@ -103,7 +103,7 @@ describe("CreateProjectDialog", () => {
     })
 
     expect(
-      await screen.findByText("/projects/project-new/overview")
+      await screen.findByText("/projects/project-new/audit/overview")
     ).toBeTruthy()
     expect(screen.getByText("等待业务资料")).toBeTruthy()
     expect(onOpenChange).toHaveBeenCalledWith(false)

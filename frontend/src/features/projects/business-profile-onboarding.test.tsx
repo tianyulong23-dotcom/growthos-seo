@@ -137,7 +137,7 @@ describe("BusinessProfileOnboardingController", () => {
     projectApi.listProjects.mockResolvedValue([failedProject])
 
     render(
-      <MemoryRouter initialEntries={["/projects/project-1/overview"]}>
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
         <ProjectProvider>
           <Routes>
             <Route path="/projects/:projectId/*" element={<AgentDock />} />
@@ -160,7 +160,7 @@ describe("BusinessProfileOnboardingController", () => {
     projectApi.refreshBusinessProfile.mockResolvedValue(rerunningProject)
 
     render(
-      <MemoryRouter initialEntries={["/projects/project-1/overview"]}>
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
         <ProjectProvider>
           <Routes>
             <Route path="/projects/:projectId/*" element={<AgentDock />} />
@@ -185,7 +185,7 @@ describe("BusinessProfileOnboardingController", () => {
     projectApi.getProject.mockReset().mockResolvedValue(completedProject)
 
     render(
-      <MemoryRouter initialEntries={["/projects/project-1/overview"]}>
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
         <ProjectProvider>
           <Routes>
             <Route path="/projects/:projectId/*" element={<AgentDock />} />
@@ -210,7 +210,7 @@ describe("BusinessProfileOnboardingController", () => {
     projectApi.listProjects.mockResolvedValue([generatingProfileProject])
 
     render(
-      <MemoryRouter initialEntries={["/projects/project-1/overview"]}>
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
         <ProjectProvider>
           <Routes>
             <Route path="/projects/:projectId/*" element={<AgentDock />} />
@@ -228,7 +228,7 @@ describe("BusinessProfileOnboardingController", () => {
     projectApi.listProjects.mockResolvedValue([rerunningProject])
 
     render(
-      <MemoryRouter initialEntries={["/projects/project-1/overview"]}>
+      <MemoryRouter initialEntries={["/projects/project-1/audit/overview"]}>
         <ProjectProvider>
           <Routes>
             <Route path="/projects/:projectId/*" element={<AgentDock />} />
@@ -266,7 +266,7 @@ describe("BusinessProfileOnboardingController", () => {
       <MemoryRouter
         initialEntries={[
           {
-            pathname: "/projects/project-1/overview",
+            pathname: "/projects/project-1/audit/overview",
             state: { waitForBusinessProfile: true },
           },
         ]}
@@ -289,7 +289,7 @@ describe("BusinessProfileOnboardingController", () => {
     )
 
     expect(screen.getByTestId("current-path").textContent).toBe(
-      "/projects/project-1/overview"
+      "/projects/project-1/audit/overview"
     )
     expect(await screen.findByText("网站业务识别")).toBeTruthy()
     expect(screen.getByText("项目创建完成")).toBeTruthy()

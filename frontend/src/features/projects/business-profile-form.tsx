@@ -425,10 +425,10 @@ export function BusinessProfileForm({
 
       <section className="space-y-4 pt-8">
         <div>
-          <h2 className="text-lg font-semibold">AI 内容规则</h2>
+          <h2 className="text-lg font-semibold">内容要求</h2>
         </div>
         <Textarea
-          aria-label="AI 内容规则"
+          aria-label="内容要求"
           value={aiContentRules}
           onChange={(event) => setAiContentRules(event.target.value)}
           className="min-h-44 resize-y"

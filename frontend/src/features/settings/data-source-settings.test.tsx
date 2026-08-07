@@ -50,6 +50,11 @@ describe("DataSourceSettings", () => {
     expect(input.value).toBe("")
     expect(input.type).toBe("password")
     expect(screen.getByText("已保存")).toBeTruthy()
+    expect(
+      screen.getByText(
+        "此账号由所有网站和项目共用，保存一次后会用于关键词和搜索结果数据流程。"
+      )
+    ).toBeTruthy()
     expect(screen.queryByText("Google Ads")).toBeNull()
   })
 

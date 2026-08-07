@@ -1,11 +1,11 @@
 import {
   BarChart3,
   FileText,
-  Gauge,
   KeyRound,
   Link2,
   SearchCheck,
   Settings2,
+  SlidersHorizontal,
   type LucideIcon,
 } from "lucide-react"
 
@@ -96,14 +96,6 @@ export const projects: Project[] = [
 
 export const modules: ModuleConfig[] = [
   {
-    id: "overview",
-    label: "项目总览",
-    description: "项目健康度、增长趋势与待处理事项",
-    icon: Gauge,
-    tabs: [],
-    action: "查看报告",
-  },
-  {
     id: "audit",
     label: "网站审计",
     description: "持续发现并修复影响抓取、索引和体验的问题",
@@ -168,26 +160,26 @@ export const modules: ModuleConfig[] = [
   },
   {
     id: "settings",
-    label: "项目设置",
-    description: "管理项目资料、AI 模型与通知规则",
+    label: "设置",
+    description: "管理当前项目的业务资料与服务连接",
     icon: Settings2,
     tabs: [
       { id: "business", label: "业务资料" },
-      { id: "ai", label: "AI 模型" },
-      { id: "notifications", label: "通知设置" },
+      { id: "connections", label: "服务连接" },
     ],
-    action: "保存设置",
+    action: "",
   },
-]
-
-export const trendData = [
-  { date: "7月11日", clicks: 1260, impressions: 18200 },
-  { date: "7月12日", clicks: 1390, impressions: 19500 },
-  { date: "7月13日", clicks: 1325, impressions: 19100 },
-  { date: "7月14日", clicks: 1510, impressions: 20700 },
-  { date: "7月15日", clicks: 1680, impressions: 22600 },
-  { date: "7月16日", clicks: 1760, impressions: 23800 },
-  { date: "7月17日", clicks: 1938, impressions: 25140 },
+  {
+    id: "platform-settings",
+    label: "平台设置",
+    description: "管理平台使用的 AI 模型与数据服务",
+    icon: SlidersHorizontal,
+    tabs: [
+      { id: "ai", label: "AI 模型" },
+      { id: "dataforseo", label: "DataForSEO" },
+    ],
+    action: "",
+  },
 ]
 
 export const auditRows = [

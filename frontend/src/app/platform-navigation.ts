@@ -1,16 +1,7 @@
-import { BarChart3, Gauge, Settings2 } from "lucide-react"
+import { BarChart3, Settings2, SlidersHorizontal } from "lucide-react"
 
 import type { NavigationItem } from "@/app/module-contract"
 import { registeredModuleNavigation } from "@/app/module-registry"
-
-export const overviewNavigation: NavigationItem = {
-  id: "overview",
-  label: "项目总览",
-  description: "项目健康度、增长趋势与待处理事项",
-  icon: Gauge,
-  tabs: [],
-  action: "查看报告",
-}
 
 export const performanceNavigation: NavigationItem = {
   id: "performance",
@@ -28,16 +19,26 @@ export const performanceNavigation: NavigationItem = {
 
 export const settingsNavigation: NavigationItem = {
   id: "settings",
-  label: "项目设置",
-  description: "管理项目资料、数据源与通知规则",
+  label: "设置",
+  description: "管理当前项目的业务资料与服务连接",
   icon: Settings2,
   tabs: [
-    { id: "profile", label: "项目资料" },
-    { id: "sources", label: "数据连接" },
-    { id: "outreach", label: "外联规则" },
-    { id: "notifications", label: "通知设置" },
+    { id: "business", label: "业务资料" },
+    { id: "connections", label: "服务连接" },
   ],
-  action: "保存设置",
+  action: "",
+}
+
+export const platformSettingsNavigation: NavigationItem = {
+  id: "platform-settings",
+  label: "平台设置",
+  description: "管理平台使用的 AI 模型与数据服务",
+  icon: SlidersHorizontal,
+  tabs: [
+    { id: "ai", label: "AI 模型" },
+    { id: "dataforseo", label: "DataForSEO" },
+  ],
+  action: "",
 }
 
 export const workspaceNavigation: readonly NavigationItem[] = [
@@ -46,9 +47,9 @@ export const workspaceNavigation: readonly NavigationItem[] = [
 ]
 
 export const allNavigation: readonly NavigationItem[] = [
-  overviewNavigation,
   ...workspaceNavigation,
   settingsNavigation,
+  platformSettingsNavigation,
 ]
 
 export function getNavigationItem(moduleId: string) {

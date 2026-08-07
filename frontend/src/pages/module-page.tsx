@@ -14,7 +14,6 @@ import { createAuditRun, getAuditRun, type AuditRun } from "@/api/audits"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ArticleWorkspace } from "@/features/content/article-workspace"
 import { ContentLibrary } from "@/features/content/content-library"
@@ -22,6 +21,8 @@ import { ContentPlan } from "@/features/content/content-plan"
 import { CreateArticleDialog } from "@/features/content/create-article-dialog"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
 import { AIModelSettings } from "@/features/settings/ai-model-settings"
+import { DataSourceSettings } from "@/features/settings/data-source-settings"
+import { ServiceConnectionsSettings } from "@/features/settings/service-connections-settings"
 import { modules } from "@/data/mock-data"
 import type { AuditSettings } from "@/features/audit/audit-settings"
 import {
@@ -159,39 +160,8 @@ function SettingsContent({
     project.understandingStatus === "running"
   const waitingForProfile = !project.siteProfile && understandingInProgress
 
-  if (view === "ai") {
-    return <AIModelSettings projectId={project.id} />
-  }
-
-  if (view === "notifications") {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>通知规则</CardTitle>
-        </CardHeader>
-        <CardContent className="divide-y">
-          {[
-            ["审计完成", "每次网站审计完成后通知", true],
-            ["严重问题", "发现新的高优先级技术问题时通知", true],
-            ["排名波动", "关键词排名单日变化超过 5 位时通知", true],
-            ["内容到期", "内容进入计划更新日期时通知", false],
-          ].map(([title, description, enabled]) => (
-            <label
-              key={String(title)}
-              className="flex items-center gap-4 py-4 first:pt-0 last:pb-0"
-            >
-              <span className="flex-1">
-                <span className="block text-sm font-medium">{title}</span>
-                <span className="block text-xs text-muted-foreground">
-                  {description}
-                </span>
-              </span>
-              <Switch defaultChecked={Boolean(enabled)} />
-            </label>
-          ))}
-        </CardContent>
-      </Card>
-    )
+  if (view === "connections") {
+    return <ServiceConnectionsSettings projectId={project.id} />
   }
 
   if (project.siteProfile) {
@@ -245,6 +215,20 @@ function SettingsContent({
       </p>
     </div>
   )
+}
+
+function PlatformSettingsContent({
+  view,
+  projectId,
+}: {
+  view: string
+  projectId: string
+}) {
+  if (view === "dataforseo") {
+    return <DataSourceSettings projectId={projectId} />
+  }
+
+  return <AIModelSettings projectId={projectId} />
 }
 
 function ModuleBody({
@@ -348,6 +332,8 @@ function ModuleBody({
         onRefreshBusinessProfile={onRefreshBusinessProfile}
       />
     )
+  if (moduleId === "platform-settings")
+    return <PlatformSettingsContent view={view} projectId={project.id} />
   return null
 }
 
@@ -379,7 +365,7 @@ function RegisteredModulePage({
   const activeView = view ?? module.tabs[0]?.id
 
   if (!activeView) {
-    return <Navigate to={`/projects/${projectId}/overview`} replace />
+    return <Navigate to={`/projects/${projectId}/audit/overview`} replace />
   }
   if (!module.tabs.some((tab) => tab.id === activeView)) {
     return (
@@ -594,14 +580,61 @@ function LegacyModulePage() {
     onTerminal: refreshProject,
   })
 
-  if (!currentModule || currentModule.id === "overview") {
-    return <Navigate to={`/projects/${projectId}/overview`} replace />
+  if (!currentModule) {
+    return <Navigate to={`/projects/${projectId}/audit/overview`} replace />
   }
 
   const moduleConfig = currentModule
   const activeView = view ?? moduleConfig.tabs[0]?.id
   if (!activeView) {
-    return <Navigate to={`/projects/${projectId}/overview`} replace />
+    return <Navigate to={`/projects/${projectId}/audit/overview`} replace />
+  }
+  if (moduleConfig.id === "settings") {
+    const legacySettingsViews: Record<string, string> = {
+      profile: "business",
+      sources: "connections",
+      outreach: "business",
+      notifications: "business",
+    }
+    const replacement = legacySettingsViews[activeView]
+    if (replacement) {
+      return (
+        <Navigate
+          to={`/projects/${projectId}/settings/${replacement}`}
+          replace
+        />
+      )
+    }
+    const legacyPlatformViews: Record<string, string> = {
+      ai: "ai",
+      "platform-ai": "ai",
+      dataforseo: "dataforseo",
+      "platform-dataforseo": "dataforseo",
+    }
+    const platformReplacement = legacyPlatformViews[activeView]
+    if (platformReplacement) {
+      return (
+        <Navigate
+          to={`/projects/${projectId}/platform-settings/${platformReplacement}`}
+          replace
+        />
+      )
+    }
+  }
+  if (moduleConfig.id === "platform-settings") {
+    const legacyPlatformViews: Record<string, string> = {
+      "platform-ai": "ai",
+      "platform-dataforseo": "dataforseo",
+    }
+    const replacement = legacyPlatformViews[activeView]
+    if (replacement) {
+      return (
+        <Navigate
+          to={`/projects/${projectId}/platform-settings/${replacement}`}
+          replace
+        />
+      )
+    }
   }
   if (!moduleConfig.tabs.some((tab) => tab.id === activeView)) {
     return (
@@ -684,6 +717,7 @@ function LegacyModulePage() {
         actionLabel={
           moduleConfig.id === "audit" ||
           moduleConfig.id === "settings" ||
+          moduleConfig.id === "platform-settings" ||
           moduleConfig.id === "keywords"
             ? undefined
             : moduleConfig.id === "content" && activeView === "library"
@@ -723,7 +757,7 @@ function LegacyModulePage() {
           </Tabs>
         </div>
       )}
-      <div className="p-4 sm:p-6 lg:p-8">
+      <div className="min-w-0 p-4 sm:p-6 lg:p-8">
         <ModuleBody
           moduleId={moduleConfig.id}
           view={activeView}

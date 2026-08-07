@@ -37,6 +37,10 @@ from app.modules.content.source_verification import (
     select_upstream_source_links,
     verify_source_claim_with_quote,
 )
+from app.modules.settings.data_sources import (
+    DataSourceNotConfiguredError,
+    build_dataforseo_settings_service,
+)
 from app.workflows.client import connect_temporal
 from app.workflows.worker import get_crawler_worker_launcher
 
@@ -321,9 +325,16 @@ async def _collect_serp(
                 metadata=dict(source.get("metadata") or {}),
             )
         return None, len(serp_payload.get("organic_results", []))
+    try:
+        provider_settings = await build_dataforseo_settings_service().effective_record()
+        login = provider_settings.login
+        password = provider_settings.password
+    except DataSourceNotConfiguredError:
+        login = None
+        password = None
     client = DataForSEOClient(
-        login=settings.dataforseo_login,
-        password=settings.dataforseo_password,
+        login=login,
+        password=password,
         base_url=settings.dataforseo_base_url,
         cache=get_redis(),
         cache_ttl_seconds=settings.dataforseo_cache_ttl_seconds,

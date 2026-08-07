@@ -58,6 +58,7 @@ from app.modules.content.source_verification import (
     verify_source_claim_with_quote,
     verify_source_claims,
 )
+from app.modules.settings.data_sources import DataForSEOSettingsRecord
 
 
 def serp_response() -> dict[str, Any]:
@@ -119,6 +120,26 @@ class FakeCache:
 
     async def set(self, key: str, value: str, ex: int) -> None:
         self.set_calls.append((key, value, ex))
+
+
+class FakeDataForSEOSettingsService:
+    def __init__(self, record: DataForSEOSettingsRecord | None = None) -> None:
+        self.record = record or DataForSEOSettingsRecord(
+            login="platform-login",
+            password="platform-password",
+        )
+
+    async def effective_record(self) -> DataForSEOSettingsRecord:
+        return self.record
+
+
+@pytest.fixture(autouse=True)
+def platform_dataforseo_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        collection,
+        "build_dataforseo_settings_service",
+        lambda: FakeDataForSEOSettingsService(),
+    )
 
 
 def dataforseo_client(cache: FakeCache | None = None) -> DataForSEOClient:
@@ -443,6 +464,7 @@ class FakeUpsertSourceRepository(FakeSourceRepository):
 
 def test_serp_collection_saves_raw_response_reference(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = FakeSourceRepository()
+    credentials: dict[str, str | None] = {}
     result = SERPResult(
         keyword="solar battery",
         organic_results=[OrganicResult(1, "https://example.net", "example.net", "", "")],
@@ -457,6 +479,14 @@ def test_serp_collection_saves_raw_response_reference(monkeypatch: pytest.Monkey
     async def write_json(*_: Any, **__: Any) -> str:
         return "s3://bucket/raw-serp.json.gz"
 
+    original_init = collection.DataForSEOClient.__init__
+
+    def capture_init(self: DataForSEOClient, **kwargs: Any) -> None:
+        credentials["login"] = kwargs["login"]
+        credentials["password"] = kwargs["password"]
+        original_init(self, **kwargs)
+
+    monkeypatch.setattr(collection.DataForSEOClient, "__init__", capture_init)
     monkeypatch.setattr(collection.DataForSEOClient, "search", search)
     monkeypatch.setattr(collection.S3JSONWriter, "write_json", write_json)
     monkeypatch.setattr(collection, "get_redis", lambda: None)
@@ -472,6 +502,10 @@ def test_serp_collection_saves_raw_response_reference(monkeypatch: pytest.Monkey
     )
 
     assert outcome == (None, 1)
+    assert credentials == {
+        "login": "platform-login",
+        "password": "platform-password",
+    }
     assert repo.sources[0]["content_ref"] == "s3://bucket/raw-serp.json.gz"
     assert repo.sources[0]["metadata"] == {
         "cached": False,

@@ -64,20 +64,19 @@ function settingsBody(input: AIProviderSettingsInput) {
 export async function getAIProviderSettings(
   projectId: string
 ): Promise<AIProviderSettings> {
+  void projectId
   return mapSettings(
-    await apiRequest<AIProviderSettingsResponse>(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/ai-settings`
-    )
+    await apiRequest<AIProviderSettingsResponse>("/api/v1/platform/settings/ai")
   )
 }
 
 export async function updateAIProviderSettings(
-  projectId: string,
+  _projectId: string,
   input: AIProviderSettingsInput
 ): Promise<AIProviderSettings> {
   return mapSettings(
     await apiRequest<AIProviderSettingsResponse>(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/ai-settings`,
+      "/api/v1/platform/settings/ai",
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -88,11 +87,11 @@ export async function updateAIProviderSettings(
 }
 
 export async function testAIProviderSettings(
-  projectId: string,
+  _projectId: string,
   input: AIProviderSettingsInput
 ): Promise<TestAIProviderSettingsResponse> {
   return apiRequest<TestAIProviderSettingsResponse>(
-    `/api/v1/projects/${encodeURIComponent(projectId)}/ai-settings/test`,
+    "/api/v1/platform/settings/ai/test",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -256,20 +255,21 @@ function dataForSEOSettingsBody(input: DataForSEOSettingsInput) {
 export async function getDataForSEOSettings(
   projectId: string
 ): Promise<DataForSEOSettings> {
+  void projectId
   return mapDataForSEOSettings(
     await apiRequest<DataForSEOSettingsResponse>(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/dataforseo-settings`
+      "/api/v1/platform/settings/dataforseo"
     )
   )
 }
 
 export async function updateDataForSEOSettings(
-  projectId: string,
+  _projectId: string,
   input: DataForSEOSettingsInput
 ): Promise<DataForSEOSettings> {
   return mapDataForSEOSettings(
     await apiRequest<DataForSEOSettingsResponse>(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/dataforseo-settings`,
+      "/api/v1/platform/settings/dataforseo",
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -280,11 +280,11 @@ export async function updateDataForSEOSettings(
 }
 
 export async function testDataForSEOSettings(
-  projectId: string,
+  _projectId: string,
   input: DataForSEOSettingsInput
 ): Promise<TestDataForSEOSettingsResponse> {
   return apiRequest<TestDataForSEOSettingsResponse>(
-    `/api/v1/projects/${encodeURIComponent(projectId)}/dataforseo-settings/test`,
+    "/api/v1/platform/settings/dataforseo/test",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
