@@ -256,7 +256,14 @@ class AISettingsService:
         return settings_response(record, source)
 
     async def effective_record(self) -> AIProviderSettingsRecord:
-        record, _ = await self._effective_record()
+        return await self.effective_record_for_organization(
+            self.settings.default_organization_id
+        )
+
+    async def effective_record_for_organization(
+        self, organization_id: str
+    ) -> AIProviderSettingsRecord:
+        record, _ = await self._effective_record_for_organization(organization_id)
         if record is None or not (record.base_url and record.api_key and record.model):
             raise AIProviderNotConfiguredError("请先在设置中配置可用的 AI 模型")
         return record
@@ -329,9 +336,16 @@ class AISettingsService:
     async def _effective_record(
         self,
     ) -> tuple[AIProviderSettingsRecord | None, str]:
+        return await self._effective_record_for_organization(
+            self.settings.default_organization_id
+        )
+
+    async def _effective_record_for_organization(
+        self, organization_id: str
+    ) -> tuple[AIProviderSettingsRecord | None, str]:
         encryption_key = self._encryption_key()
         stored = await self.repository.get(
-            self.settings.default_organization_id,
+            organization_id,
             encryption_key,
             self._allow_plaintext_storage(),
         )

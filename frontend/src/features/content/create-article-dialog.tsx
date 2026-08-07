@@ -118,7 +118,7 @@ export function CreateArticleDialog({
                   pendingRequestRef.current = null
                 }
               }}
-              placeholder="例如：solar battery payback"
+              placeholder="输入目标主关键词"
               aria-invalid={Boolean(error)}
               disabled={submitting}
             />

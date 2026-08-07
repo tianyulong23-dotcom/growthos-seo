@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 KeywordRunStatus = Literal[
@@ -16,6 +16,72 @@ KeywordRunStatus = Literal[
 ]
 KeywordMetricsStatus = Literal["pending", "fresh", "stale", "failed"]
 KeywordStatus = Literal["active", "archived"]
+KeywordCoverageStatus = Literal["covered", "uncovered", "unknown"]
+
+
+class KeywordCoverageInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=100)
+    keyword_id: str | None = Field(default=None, min_length=1, max_length=100)
+    keyword: str = Field(min_length=1, max_length=200)
+
+    @field_validator("request_id", "keyword_id", "keyword", mode="before")
+    @classmethod
+    def strip_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class KeywordCoverageBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=100)
+    keywords: list[KeywordCoverageInput] = Field(min_length=1, max_length=100)
+
+    @field_validator("project_id", mode="before")
+    @classmethod
+    def strip_project_id(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def require_unique_request_ids(self) -> "KeywordCoverageBatchRequest":
+        request_ids = [item.request_id for item in self.keywords]
+        if len(set(request_ids)) != len(request_ids):
+            raise ValueError("request_id values must be unique")
+        return self
+
+
+class KeywordCoverageResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=100)
+    normalized_keyword: str = Field(min_length=1, max_length=200)
+    status: KeywordCoverageStatus
+    relation_id: str | None = Field(default=None, min_length=1)
+    covered_url: str | None = Field(default=None, min_length=1)
+
+    @field_validator(
+        "request_id",
+        "normalized_keyword",
+        "relation_id",
+        "covered_url",
+        mode="before",
+    )
+    @classmethod
+    def strip_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def require_covered_evidence(self) -> "KeywordCoverageResult":
+        if self.status == "covered" and not (self.relation_id or self.covered_url):
+            raise ValueError("covered result requires relation_id or covered_url")
+        return self
+
+
+class KeywordCoverageBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[KeywordCoverageResult] = Field(max_length=100)
 
 
 class KeywordBuildRunResponse(BaseModel):

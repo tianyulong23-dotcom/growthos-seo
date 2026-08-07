@@ -18,11 +18,11 @@ vi.mock("@/api/articles", async (importOriginal) => ({
 const completedArticle = {
   id: "article-1",
   project_id: "project-1",
-  primary_keyword: "solar battery payback",
-  title: "Solar battery payback",
-  slug: "solar-battery-payback",
-  meta_title: "Solar battery payback guide",
-  meta_description: "A practical guide.",
+  primary_keyword: "test-keyword",
+  title: "test-title",
+  slug: "test-title",
+  meta_title: "test-title",
+  meta_description: "test-description",
   status: "completed_with_warnings",
   publication_status: "complete_draft",
   warning_count: 1,
@@ -51,19 +51,19 @@ const completedArticle = {
     sections: [
       {
         section_id: "section-1",
-        heading: "Payback factors",
-        objective: "Explain the main factors.",
+        heading: "test-heading",
+        objective: "test-objective",
       },
     ],
   },
-  markdown: "# Solar battery payback\n\nComplete article.",
-  html: "<h1>Solar battery payback</h1><p>Complete article.</p>",
+  markdown: "# test-title\n\ntest-body",
+  html: "<h1>test-title</h1><p>test-body</p>",
   external_sources: [
     {
       source_type: "authority",
-      url: "https://authority.example/payback",
-      title: "Payback facts",
-      domain: "authority.example",
+      url: "https://example.test/source",
+      title: "test-source",
+      domain: "example.test",
     },
   ],
   internal_links: [],
@@ -91,9 +91,9 @@ describe("ArticleWorkspace", () => {
     })
 
     expect(screen.queryByText("完成稿")).toBeNull()
-    expect(screen.getByText("Complete article.")).toBeTruthy()
-    expect(screen.getByText("Payback factors")).toBeTruthy()
-    expect(screen.getByText("Payback facts")).toBeTruthy()
+    expect(screen.getByText("test-body")).toBeTruthy()
+    expect(screen.getByText("test-heading")).toBeTruthy()
+    expect(screen.getByText("test-source")).toBeTruthy()
     expect(
       screen.getByText("未取得可用站内页面，本次不插入内链")
     ).toBeTruthy()
@@ -106,9 +106,9 @@ describe("ArticleWorkspace", () => {
       internal_links: [
         {
           source_type: "internal",
-          url: "https://project.example/financing",
-          title: "Solar financing guide",
-          domain: "project.example",
+          url: "https://example.test/internal",
+          title: "test-internal-source",
+          domain: "example.test",
         },
       ],
     })
@@ -121,7 +121,7 @@ describe("ArticleWorkspace", () => {
       />
     )
 
-    expect(await screen.findByText("Solar financing guide")).toBeTruthy()
+    expect(await screen.findByText("test-internal-source")).toBeTruthy()
   })
 
   it("restores a running article from the API after mounting", async () => {

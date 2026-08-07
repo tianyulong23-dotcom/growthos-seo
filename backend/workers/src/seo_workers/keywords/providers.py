@@ -97,6 +97,31 @@ class DataForSEOProviderConfig:
 class DataForSEOBilling:
     cost_usd: float
     path: list[str]
+    provider_request_id: str | None = None
+    tag: str | None = None
+
+
+@dataclass(frozen=True)
+class RelatedKeywordSeed:
+    request_index: int
+    seed_keyword_id: str
+    keyword: str
+    tag: str
+
+
+@dataclass(frozen=True)
+class RelatedKeywordResult:
+    request_index: int
+    seed_keyword_id: str
+    keyword: str
+    tag: str
+    status: str
+    rows: tuple[RawKeyword, ...]
+    provider_request_id: str | None = None
+    cost_usd: float = 0.0
+    path: tuple[str, ...] = ()
+    error_code: str | None = None
+    error_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1750,6 +1775,7 @@ class DataForSEOClient:
     ADS_SITE_PATH = "keywords_data/google_ads/keywords_for_site/live"
     KEYWORD_IDEAS_PATH = "dataforseo_labs/google/keyword_ideas/live"
     KEYWORD_OVERVIEW_PATH = "dataforseo_labs/google/keyword_overview/live"
+    RELATED_KEYWORDS_PATH = "dataforseo_labs/google/related_keywords/live"
     KEYWORD_IDEAS_BROAD_SOURCE = "keyword_ideas_broad"
     KEYWORD_IDEAS_CLOSE_SOURCE = "keyword_ideas_close"
     DOMAIN_INTERSECTION_PATH = "dataforseo_labs/google/domain_intersection/live"
@@ -1876,6 +1902,77 @@ class DataForSEOClient:
         ]
         return deduplicate_raw_keywords([row for row in rows if row is not None]), billing
 
+    async def related_keywords_batch(
+        self,
+        *,
+        seeds: list[RelatedKeywordSeed],
+        country: str,
+        language: str,
+        max_concurrency: int = 5,
+        limit: int = 100,
+    ) -> list[RelatedKeywordResult]:
+        if len(seeds) > 30:
+            raise ValueError("Related Keywords 一个逻辑批次最多接受 30 个种子词")
+        if len({seed.request_index for seed in seeds}) != len(seeds):
+            raise ValueError("Related Keywords request_index 必须唯一")
+        if len({seed.tag for seed in seeds}) != len(seeds):
+            raise ValueError("Related Keywords tag 必须唯一")
+        if any(not seed.keyword.strip() or not seed.tag.strip() for seed in seeds):
+            raise ValueError("Related Keywords keyword 和 tag 不能为空")
+
+        semaphore = asyncio.Semaphore(max(1, min(max_concurrency, 30)))
+
+        async def fetch(seed: RelatedKeywordSeed) -> RelatedKeywordResult:
+            async with semaphore:
+                try:
+                    task, billing = await self._request(
+                        self.RELATED_KEYWORDS_PATH,
+                        {
+                            "keyword": seed.keyword,
+                            "location_name": country_display_name(country),
+                            "language_code": provider_language_code(language),
+                            "limit": max(1, min(limit, 1000)),
+                            "include_seed_keyword": True,
+                            "include_serp_info": False,
+                            "tag": seed.tag,
+                        },
+                        expected_task_tag=seed.tag,
+                    )
+                    rows = [
+                        parse_labs_keyword(raw, source="related", rank=index)
+                        for index, raw in enumerate(labs_items(task), start=1)
+                    ]
+                    deduplicated = deduplicate_raw_keywords(
+                        [row for row in rows if row is not None]
+                    )
+                    return RelatedKeywordResult(
+                        request_index=seed.request_index,
+                        seed_keyword_id=seed.seed_keyword_id,
+                        keyword=seed.keyword,
+                        tag=seed.tag,
+                        status="completed",
+                        rows=tuple(deduplicated),
+                        provider_request_id=billing.provider_request_id,
+                        cost_usd=billing.cost_usd,
+                        path=tuple(billing.path),
+                    )
+                except ProviderError as exc:
+                    return RelatedKeywordResult(
+                        request_index=seed.request_index,
+                        seed_keyword_id=seed.seed_keyword_id,
+                        keyword=seed.keyword,
+                        tag=seed.tag,
+                        status=exc.failure_status,
+                        rows=(),
+                        cost_usd=exc.cost_usd,
+                        path=tuple(exc.path),
+                        error_code=exc.code,
+                        error_detail=str(exc),
+                    )
+
+        results = await asyncio.gather(*(fetch(seed) for seed in seeds))
+        return sorted(results, key=lambda result: result.request_index)
+
     async def domain_intersection(
         self,
         *,
@@ -1910,6 +2007,8 @@ class DataForSEOClient:
         self,
         path: str,
         request: dict[str, Any],
+        *,
+        expected_task_tag: str | None = None,
     ) -> tuple[dict[str, Any], DataForSEOBilling]:
         if not self.config.configured:
             raise ProviderError(
@@ -1962,11 +2061,33 @@ class DataForSEOClient:
                 "DataForSEO 缺少任务结果",
                 failure_status=UNCERTAIN_FAILURE,
             )
+        task_data = task.get("data")
+        task_data = task_data if isinstance(task_data, dict) else {}
+        response_tag = clean_string(task_data.get("tag"))
+        if expected_task_tag is not None and response_tag != expected_task_tag:
+            raise ProviderError(
+                "dataforseo_tag_mismatch",
+                "DataForSEO 响应 tag 与请求不一致，无法可靠归属结果",
+                failure_status=UNCERTAIN_FAILURE,
+                cost_usd=number(task.get("cost")) or 0.0,
+                path=(
+                    [str(value) for value in task["path"]]
+                    if isinstance(task.get("path"), list)
+                    else []
+                ),
+                metadata={
+                    "expected_tag": expected_task_tag,
+                    "response_tag": response_tag,
+                    "provider_request_id": clean_string(task.get("id")),
+                },
+            )
         billing = DataForSEOBilling(
             cost_usd=number(task.get("cost")) or 0.0,
             path=(
                 [str(value) for value in task["path"]] if isinstance(task.get("path"), list) else []
             ),
+            provider_request_id=clean_string(task.get("id")),
+            tag=response_tag,
         )
         if integer(task.get("status_code")) != 20000:
             message = str(task.get("status_message") or "DataForSEO task failed")

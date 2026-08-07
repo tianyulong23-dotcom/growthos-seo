@@ -14,7 +14,7 @@ vi.mock("@/api/articles", async (importOriginal) => ({
 const queuedArticle = {
   id: "article-1",
   project_id: "project-1",
-  primary_keyword: "solar battery payback",
+  primary_keyword: "test-keyword",
   title: null,
   slug: null,
   meta_title: null,
@@ -53,14 +53,14 @@ describe("CreateArticleDialog", () => {
     expect(screen.getAllByRole("textbox")).toHaveLength(1)
 
     fireEvent.change(screen.getByLabelText("主关键词"), {
-      target: { value: "  solar battery payback  " },
+      target: { value: "  test-keyword  " },
     })
     fireEvent.click(screen.getByRole("button", { name: "生成" }))
 
     await waitFor(() => {
       expect(articleApi.createArticle).toHaveBeenCalledWith(
         "project-1",
-        "solar battery payback",
+        "test-keyword",
         uuid
       )
       expect(onCreated).toHaveBeenCalledWith(queuedArticle)
@@ -85,7 +85,7 @@ describe("CreateArticleDialog", () => {
     )
 
     fireEvent.change(screen.getByLabelText("主关键词"), {
-      target: { value: "solar battery payback" },
+      target: { value: "test-keyword" },
     })
     const form = screen.getByRole("button", { name: "生成" }).closest("form")
     expect(form).not.toBeNull()
@@ -117,7 +117,7 @@ describe("CreateArticleDialog", () => {
     )
 
     fireEvent.change(screen.getByLabelText("主关键词"), {
-      target: { value: "solar battery payback" },
+      target: { value: "test-keyword" },
     })
     fireEvent.click(screen.getByRole("button", { name: "生成" }))
 
@@ -130,13 +130,13 @@ describe("CreateArticleDialog", () => {
     expect(articleApi.createArticle).toHaveBeenNthCalledWith(
       1,
       "project-1",
-      "solar battery payback",
+      "test-keyword",
       uuid
     )
     expect(articleApi.createArticle).toHaveBeenNthCalledWith(
       2,
       "project-1",
-      "solar battery payback",
+      "test-keyword",
       uuid
     )
     expect(crypto.randomUUID).toHaveBeenCalledTimes(1)

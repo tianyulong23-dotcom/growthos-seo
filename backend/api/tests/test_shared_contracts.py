@@ -172,6 +172,7 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
                     ("agent", "agent"),
                     ("keywords", "keywords"),
                     ("content", "content"),
+                    ("content-plan", "content"),
                 ),
             ),
             ModuleOpenApi("backlinks", backlinks, frozenset({"/health"})),
@@ -185,8 +186,8 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
     assert "/health" in aggregate["paths"]
     assert aggregate["paths"]["/health"]["get"]["operationId"] == "platformHealthV1"
     assert len(backlinks["paths"]) == 38
-    assert len(aggregate["paths"]) == 92
-    assert operation_count(aggregate) == 102
+    assert len(aggregate["paths"]) == 101
+    assert operation_count(aggregate) == 115
     modules = [
         operation["x-growthos-module"]
         for path, path_item in aggregate["paths"].items()
@@ -198,7 +199,7 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
     assert modules.count("audit") == 18
     assert modules.count("agent") == 13
     assert modules.count("keywords") == 9
-    assert modules.count("content") == 5
+    assert modules.count("content") == 18
     assert modules.count("backlinks") == 37
     assert all(
         "application/problem+json" in operation["responses"]["503"]["content"]

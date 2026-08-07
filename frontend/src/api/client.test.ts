@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { apiRequest, resolveApiUrl } from "@/api/client"
+import { ApiError, apiRequest, resolveApiUrl } from "@/api/client"
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -30,5 +30,38 @@ describe("apiRequest", () => {
     expect(resolveApiUrl("https://example.com/favicon.ico")).toBe(
       "https://example.com/favicon.ico"
     )
+  })
+
+  it("keeps structured platform error details", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            error: {
+              code: "stale_version",
+              message: "stale_version",
+              retryable: false,
+              conflict_id: "item-a",
+              current_version: 5,
+            },
+          },
+          { status: 409 }
+        )
+      )
+    )
+
+    const error = await apiRequest("/structured-error").catch(
+      (reason: unknown) => reason
+    )
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({
+      status: 409,
+      code: "stale_version",
+      retryable: false,
+      conflictId: "item-a",
+      currentVersion: 5,
+    })
   })
 })

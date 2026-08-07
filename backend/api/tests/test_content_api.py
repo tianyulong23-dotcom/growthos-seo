@@ -2,13 +2,21 @@ import asyncio
 from copy import deepcopy
 from datetime import UTC, datetime
 from hashlib import sha256
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from httpx import ASGITransport, AsyncClient
 
 from app.api.routes.content import get_content_service
+from app.core.backlinks_gateway import PlatformContextResolver
 from app.core.config import Settings
+from app.core.platform_request_context import (
+    PlatformActor,
+    PlatformProject,
+    PlatformTenant,
+    ResolvedPlatformRequestContext,
+)
 from app.main import app
 from app.modules.content.models import Article, ArticleRun, ArticleSource
 from app.modules.content.repository import (
@@ -33,6 +41,16 @@ class FakeContentRepository:
         self.runs: dict[str, ArticleRun] = {}
         self.idempotency: dict[tuple[str, str, str], tuple[str, str]] = {}
         self.sources: dict[str, list[ArticleSource]] = {}
+        self.reviewed_by: list[str] = []
+
+    async def claim_due_plan_items(self, *, now: datetime, limit: int = 20) -> list:
+        del now, limit
+        return []
+
+    async def release_plan_trigger(
+        self, plan_item_id: str, *, error_code: str, error_detail: str
+    ) -> None:
+        del plan_item_id, error_code, error_detail
 
     async def project_exists(self, organization_id: str, project_id: str) -> bool:
         return organization_id == "test-org" and project_id in self.projects
@@ -170,6 +188,32 @@ class FakeContentRepository:
                 run.updated_at = NOW
         return article, run
 
+    async def review_article(
+        self,
+        organization_id: str,
+        project_id: str,
+        article_id: str,
+        *,
+        decision: str,
+        review_note: str | None,
+        expected_version: int,
+        reviewed_by: str,
+    ) -> tuple[Article, ArticleRun | None]:
+        result = await self.get_article(organization_id, project_id, article_id)
+        if result is None:
+            raise LookupError("article_not_found")
+        article, run = result
+        if article.review_version != expected_version or article.reviewed_at is not None:
+            raise ValueError("stale_review_version")
+        if decision == "changes_requested" and not review_note:
+            raise ValueError("review_note_required")
+        article.review_status = decision
+        article.review_note = review_note
+        article.reviewed_by = reviewed_by
+        article.reviewed_at = NOW
+        self.reviewed_by.append(reviewed_by)
+        return article, run
+
 
 class FakeAISettings:
     def __init__(self, configured: bool = True) -> None:
@@ -203,6 +247,38 @@ class FakeWorkflowController:
         self.cancelled.append(workflow_id)
 
 
+class ContentResolver(PlatformContextResolver):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def resolve(
+        self,
+        *,
+        request: object,
+        website_project_key: str,
+        required_permission: str | None = None,
+    ) -> ResolvedPlatformRequestContext:
+        del request
+        self.calls.append((website_project_key, required_permission))
+        return ResolvedPlatformRequestContext(
+            actor=PlatformActor(
+                user_id="reviewer-from-token",
+                session_id="content-session",
+                roles=("member",),
+            ),
+            tenant=PlatformTenant(
+                organization_id="test-org",
+                workspace_id="content-workspace",
+            ),
+            project=PlatformProject(
+                website_project_id=website_project_key,
+                website_project_key=website_project_key,
+            ),
+            permissions=("content:read", "content:write"),
+            correlation_id="content-request",
+        )
+
+
 def build_service(
     *, configured: bool = True, controller_available: bool = True
 ) -> tuple[ContentService, FakeContentRepository, FakeWorkflowController]:
@@ -219,6 +295,9 @@ def build_service(
 
 async def request_scenario() -> dict[str, Any]:
     service, repository, controller = build_service()
+    resolver = ContentResolver()
+    previous_resolver = app.state.platform_context_resolver
+    app.state.platform_context_resolver = resolver
     app.dependency_overrides[get_content_service] = lambda: service
     transport = ASGITransport(app=app)
     try:
@@ -347,9 +426,11 @@ async def request_scenario() -> dict[str, Any]:
                 "missing_project": missing_project,
                 "repository": repository,
                 "controller": controller,
+                "resolver": resolver,
             }
     finally:
         app.dependency_overrides.clear()
+        app.state.platform_context_resolver = previous_resolver
 
 
 def test_content_api_is_idempotent_scoped_listed_and_cancellable() -> None:
@@ -400,6 +481,8 @@ def test_content_api_is_idempotent_scoped_listed_and_cancellable() -> None:
     assert result["cancelled"].json()["run"]["status"] == "cancelled"
     assert result["cancelled_again"].json() == result["cancelled"].json()
     assert result["controller"].cancelled == [run.workflow_id, run.workflow_id]
+    assert ("project-a", "content:read") in result["resolver"].calls
+    assert ("project-a", "content:write") in result["resolver"].calls
 
 
 def test_article_detail_hides_failed_source_audit_records() -> None:
@@ -435,6 +518,8 @@ def test_publication_status_is_independent_from_runtime_warnings() -> None:
 
 async def validation_scenario() -> list[int]:
     service, _, _ = build_service()
+    previous_resolver = app.state.platform_context_resolver
+    app.state.platform_context_resolver = ContentResolver()
     app.dependency_overrides[get_content_service] = lambda: service
     transport = ASGITransport(app=app)
     try:
@@ -468,6 +553,7 @@ async def validation_scenario() -> list[int]:
             ]
     finally:
         app.dependency_overrides.clear()
+        app.state.platform_context_resolver = previous_resolver
 
 
 def test_content_api_validates_the_only_user_input() -> None:
@@ -477,6 +563,8 @@ def test_content_api_validates_the_only_user_input() -> None:
 def test_content_api_rejects_creation_without_writing_model() -> None:
     async def scenario() -> int:
         service, _, _ = build_service(configured=False)
+        previous_resolver = app.state.platform_context_resolver
+        app.state.platform_context_resolver = ContentResolver()
         app.dependency_overrides[get_content_service] = lambda: service
         try:
             async with AsyncClient(
@@ -490,6 +578,7 @@ def test_content_api_rejects_creation_without_writing_model() -> None:
                 return response.status_code
         finally:
             app.dependency_overrides.clear()
+            app.state.platform_context_resolver = previous_resolver
 
     assert asyncio.run(scenario()) == 422
 
@@ -508,6 +597,136 @@ def test_temporal_outage_keeps_run_queued_for_background_dispatch() -> None:
         return run.status, dispatched
 
     assert asyncio.run(scenario()) == ("queued", 1)
+
+
+def test_due_plan_temporal_failure_retries_the_same_article_and_run() -> None:
+    class PlanDispatchRepository(FakeContentRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.item = SimpleNamespace(
+                id="plan-item-1",
+                project_id="project-a",
+                version=1,
+                status="scheduled",
+                article_id=None,
+                trigger_lease_until=None,
+                error_code=None,
+                error_detail=None,
+            )
+            self.create_calls = 0
+            self.release_calls = 0
+
+        async def claim_due_plan_items(self, *, now: datetime, limit: int = 20) -> list:
+            del now, limit
+            if self.item.article_id is not None:
+                return []
+            self.item.status = "triggering"
+            return [(self.item, "test-org")]
+
+        async def create_article_from_plan(self, *_: Any, **__: Any) -> tuple[Article, ArticleRun]:
+            self.create_calls += 1
+            article, run = await self.create_article(
+                "test-org",
+                "project-a",
+                "content planning",
+                "content-plan:plan-item-1:article",
+                "plan-item-1",
+                {},
+            )
+            article.plan_item_id = self.item.id
+            self.item.article_id = article.id
+            self.item.status = "generating"
+            return article, run
+
+        async def release_plan_trigger(
+            self, plan_item_id: str, *, error_code: str, error_detail: str
+        ) -> None:
+            del error_code, error_detail
+            assert plan_item_id == self.item.id
+            self.release_calls += 1
+            if self.item.article_id is None:
+                self.item.status = "scheduled"
+
+    async def scenario() -> tuple[int, int, int, int, int]:
+        repository = PlanDispatchRepository()
+        controller = FakeWorkflowController(available=False)
+        service = ContentService(
+            Settings(default_organization_id="test-org"),
+            repository,  # type: ignore[arg-type]
+            ai_settings=FakeAISettings(),
+            controller=controller,
+        )
+
+        first = await service.dispatch_queued()
+        controller.available = True
+        second = await service.dispatch_queued()
+
+        return (
+            first,
+            second,
+            repository.create_calls,
+            len(repository.articles),
+            len(repository.runs),
+        )
+
+    assert asyncio.run(scenario()) == (0, 1, 1, 1, 1)
+
+
+def test_due_plan_failure_before_article_creation_restores_schedule() -> None:
+    class FailingPlanRepository(FakeContentRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.item = SimpleNamespace(
+                id="plan-item-before-create",
+                project_id="project-a",
+                version=1,
+                status="triggering",
+                article_id=None,
+                trigger_lease_until=NOW,
+                error_code=None,
+                error_detail=None,
+            )
+
+        async def claim_due_plan_items(self, *, now: datetime, limit: int = 20) -> list:
+            del now, limit
+            return [(self.item, "test-org")]
+
+        async def create_article_from_plan(self, *_: Any, **__: Any) -> tuple[Article, ArticleRun]:
+            raise RuntimeError("database unavailable before article creation")
+
+        async def release_plan_trigger(
+            self, plan_item_id: str, *, error_code: str, error_detail: str
+        ) -> None:
+            assert plan_item_id == self.item.id
+            self.item.status = "scheduled"
+            self.item.trigger_lease_until = None
+            self.item.error_code = error_code
+            self.item.error_detail = error_detail
+
+    async def scenario() -> tuple[int, str, Any, str, str]:
+        repository = FailingPlanRepository()
+        service = ContentService(
+            Settings(default_organization_id="test-org"),
+            repository,  # type: ignore[arg-type]
+            ai_settings=FakeAISettings(),
+            controller=FakeWorkflowController(),
+        )
+        dispatched = await service.dispatch_queued()
+        return (
+            dispatched,
+            repository.item.status,
+            repository.item.trigger_lease_until,
+            repository.item.error_code,
+            repository.item.error_detail,
+        )
+
+    assert asyncio.run(scenario()) == (
+        0,
+        "scheduled",
+        None,
+        "plan_trigger_failed",
+        "database unavailable before article creation",
+    )
 
 
 def test_request_hash_is_based_on_the_normalized_keyword() -> None:
@@ -541,3 +760,126 @@ def test_article_cannot_be_read_from_another_organization() -> None:
             raise AssertionError("cross-organization article read was allowed")
 
     asyncio.run(scenario())
+
+
+def test_plan_generation_not_found_does_not_start_workflow() -> None:
+    class MissingPlanRepository(FakeContentRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.plan_create_calls = 0
+
+        async def create_article_from_plan(
+            self, *_: Any, **__: Any
+        ) -> tuple[Article, ArticleRun]:
+            self.plan_create_calls += 1
+            raise LookupError("content_plan_item_not_found")
+
+    async def scenario() -> tuple[int, int, int, int]:
+        repository = MissingPlanRepository()
+        controller = FakeWorkflowController()
+        service = ContentService(
+            Settings(default_organization_id="test-org"),
+            repository,  # type: ignore[arg-type]
+            ai_settings=FakeAISettings(),
+            controller=controller,
+        )
+
+        try:
+            await service.generate_plan_item_now(
+                "project-b",
+                "plan-item-from-project-a",
+                expected_version=1,
+            )
+        except ContentNotFoundError:
+            pass
+        else:
+            raise AssertionError("cross-project plan generation was allowed")
+
+        return (
+            repository.plan_create_calls,
+            len(repository.articles),
+            len(repository.runs),
+            len(controller.started),
+        )
+
+    assert asyncio.run(scenario()) == (1, 0, 0, 0)
+
+
+def test_review_uses_authenticated_actor_and_rejects_forged_reviewer() -> None:
+    async def scenario() -> tuple[int, int, dict, int, dict, list[str]]:
+        service, repository, _controller = build_service()
+        created = await service.create_article(
+            "project-a",
+            type("Request", (), {"primary_keyword": "content workflow"})(),
+            "review-contract",
+        )
+        article = repository.articles[created.id]
+        run = repository.runs[article.current_run_id or ""]
+        article.status = "completed"
+        article.review_status = "pending_review"
+        article.review_version = 1
+        run.status = "completed"
+        app.dependency_overrides[get_content_service] = lambda: service
+        previous_resolver = app.state.platform_context_resolver
+        app.state.platform_context_resolver = ContentResolver()
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                forged = await client.patch(
+                    f"/api/v1/projects/project-a/articles/{article.id}/review",
+                    json={
+                        "review_status": "approved",
+                        "review_version": 1,
+                        "reviewed_by": "forged-user",
+                    },
+                )
+                missing_note = await client.patch(
+                    f"/api/v1/projects/project-a/articles/{article.id}/review",
+                    json={
+                        "review_status": "changes_requested",
+                        "review_note": "",
+                        "review_version": 1,
+                    },
+                )
+                first = await client.patch(
+                    f"/api/v1/projects/project-a/articles/{article.id}/review",
+                    json={"review_status": "approved", "review_version": 1},
+                )
+                stale = await client.patch(
+                    f"/api/v1/projects/project-a/articles/{article.id}/review",
+                    json={
+                        "review_status": "changes_requested",
+                        "review_note": "Revise this draft",
+                        "review_version": 1,
+                    },
+                )
+                return (
+                    forged.status_code,
+                    missing_note.status_code,
+                    missing_note.json(),
+                    first.status_code,
+                    stale.status_code,
+                    stale.json(),
+                    repository.reviewed_by,
+                )
+        finally:
+            app.dependency_overrides.clear()
+            app.state.platform_context_resolver = previous_resolver
+
+    forged_status, missing_note_status, missing_note, first_status, stale_status, stale, reviewed_by = asyncio.run(scenario())
+    assert forged_status == 422
+    assert missing_note_status == 422
+    assert missing_note["error"] == {
+        "code": "review_note_required",
+        "message": "review_note_required",
+        "retryable": False,
+    }
+    assert first_status == 200
+    assert stale_status == 409
+    assert stale["error"] == {
+        "code": "stale_review_version",
+        "message": "stale_review_version",
+        "retryable": False,
+    }
+    assert reviewed_by == ["reviewer-from-token"]

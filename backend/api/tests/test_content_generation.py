@@ -27,6 +27,7 @@ from app.modules.content.quality import (
 from app.modules.content.writing_gateway import (
     ArticlePlan,
     EvidenceClaim,
+    LockedRequirementCheck,
     OutlineSection,
     SectionDraft,
     SectionIssue,
@@ -388,6 +389,86 @@ def test_supplemental_research_only_queries_unsupported_load_bearing_requirement
     assert "How long is solar battery payback?" not in queries
     assert "Are solar batteries worth it?" not in queries
     assert any("current federal tax credit rules" in query for query in queries)
+
+
+def test_planning_receives_complete_plan_input_and_preserves_locked_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = patch_store(monkeypatch)
+    repo = FakeRepository(
+        {
+            "serp": [
+                source(
+                    "serp://content-plan/serp-1",
+                    summary={
+                        "keyword": "content planning",
+                        "organic_results": [],
+                        "people_also_ask": [],
+                        "related_searches": [],
+                        "features": [],
+                    },
+                )
+            ]
+        }
+    )
+    context = {
+        **base_context(),
+        "primary_keyword": "content planning",
+        "plan_input": {
+            "secondary_keywords": [
+                {"keyword": "editorial calendar", "type": "supporting"},
+                {"keyword": "content workflow", "type": "supporting"},
+            ],
+            "title": {"value": "Locked Content Plan Title", "policy": "locked"},
+            "writing_direction": {
+                "value": "Explain the workflow with one complete worked example.",
+                "policy": "locked",
+            },
+        },
+    }
+    received_payload: dict[str, Any] = {}
+
+    async def generate(
+        _gateway: Any,
+        _settings: Settings,
+        _context: dict[str, Any],
+        call: str,
+        payload: dict[str, Any],
+        _output: Any,
+    ) -> Any:
+        assert call == "plan_article"
+        received_payload.update(deepcopy(payload))
+        return SimpleNamespace(
+            value=plan_with_sections(1).model_copy(update={"title": "Model Rewritten Title"}),
+            usage={"input_tokens": 10, "output_tokens": 20},
+        )
+
+    monkeypatch.setattr(generation, "cached_generate", generate)
+
+    result = asyncio.run(
+        plan_article(repo, Settings(app_env="test"), context, POLICY)
+    )
+    artifact = store.objects[result["output_ref"]]
+    pack = received_payload["research_pack"]
+
+    assert pack["planned_title"] == {
+        "value": "Locked Content Plan Title",
+        "policy": "locked",
+    }
+    assert pack["writing_direction"] == {
+        "value": "Explain the workflow with one complete worked example.",
+        "policy": "locked",
+    }
+    assert pack["secondary_keywords"] == [
+        {"keyword": "editorial calendar", "type": "supporting"},
+        {"keyword": "content workflow", "type": "supporting"},
+    ]
+    assert pack["content_brief"]["secondary_keywords"] == [
+        "editorial calendar",
+        "content workflow",
+    ]
+    assert artifact["plan"]["title"] == "Locked Content Plan Title"
+    assert generation.fallback_plan(pack).title == "Locked Content Plan Title"
 
 
 def test_existing_section_evidence_suppresses_supplemental_research() -> None:
@@ -1232,6 +1313,91 @@ def test_semantic_check_receives_only_required_questions(
 
     assert received_questions == ["Required question"]
     assert result["summary"]["passed"] is True
+
+
+def test_semantic_check_records_failed_locked_writing_direction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = patch_store(monkeypatch)
+    plan = plan_with_sections(1)
+    requirement = "Explain the workflow with one complete worked example."
+    pack = {
+        "keyword": "content planning",
+        "language": "en",
+        "questions": [],
+        "required_questions": [],
+        "project": {"domain": "project.example"},
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+        "writing_direction": {"value": requirement, "policy": "locked"},
+    }
+    section = SectionDraft(
+        section_id="section-1",
+        markdown=f"## Section 1\n\nA complete useful answer. {QUALITY_PROSE}",
+    )
+    pack_ref = asyncio.run(store.write_json("locked-pack.json.gz", pack))
+    planning_ref = asyncio.run(
+        store.write_json(
+            "locked-plan.json.gz",
+            {"research_pack_ref": pack_ref, "plan": plan.model_dump(mode="json")},
+        )
+    )
+    editing_ref = asyncio.run(
+        store.write_json(
+            "locked-article.json.gz",
+            generation.article_artifact(plan, [section], pack),
+        )
+    )
+    received_requirements: list[dict[str, str]] = []
+
+    class Gateway:
+        async def generate(
+            self, _call: str, payload: dict[str, Any], _output: Any
+        ) -> Any:
+            received_requirements.extend(payload["locked_requirements"])
+            return SimpleNamespace(
+                value=SemanticQualityResult(
+                    passed=True,
+                    locked_requirement_checks=[
+                        LockedRequirementCheck(
+                            field="writing_direction",
+                            requirement=requirement,
+                            passed=False,
+                            evidence="The article has no worked example.",
+                        )
+                    ],
+                ),
+                usage={"input_tokens": 5, "output_tokens": 1},
+            )
+
+    monkeypatch.setattr(generation, "writing_gateway", lambda _context: Gateway())
+    context = base_context()
+    context["completed_steps"] = {
+        "planning": {"output_ref": planning_ref},
+        "editing": {"output_ref": editing_ref},
+    }
+
+    result = asyncio.run(
+        check_article(FakeRepository(), Settings(app_env="test"), context, POLICY)
+    )
+    artifact = store.objects[result["output_ref"]]
+
+    assert received_requirements == [
+        {"field": "writing_direction", "requirement": requirement}
+    ]
+    assert artifact["quality"]["locked_requirement_checks"] == [
+        {
+            "field": "writing_direction",
+            "requirement": requirement,
+            "passed": False,
+            "evidence": "The article has no worked example.",
+        }
+    ]
+    assert "locked_requirement_failed" in {
+        issue["code"] for issue in artifact["quality"]["issues"]
+    }
+    assert result["summary"]["passed"] is False
 
 
 def test_check_and_revision_receive_matching_section_requirements(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Protocol
 
@@ -51,6 +52,10 @@ class ContentWorkflowController(Protocol):
 class ContentAISettings(Protocol):
     async def effective_record(self) -> AIProviderSettingsRecord: ...
 
+    async def effective_record_for_organization(
+        self, organization_id: str
+    ) -> AIProviderSettingsRecord: ...
+
 
 class TemporalContentWorkflowController:
     def __init__(self, task_queue: str) -> None:
@@ -95,11 +100,17 @@ class ContentService:
         return sha256(payload.encode("utf-8")).hexdigest()
 
     async def create_article(
-        self, project_id: str, request: CreateArticleRequest, idempotency_key: str
+        self,
+        project_id: str,
+        request: CreateArticleRequest,
+        idempotency_key: str,
+        *,
+        organization_id: str | None = None,
     ) -> ArticleResponse:
-        await self._ensure_project(project_id)
+        organization_id = organization_id or self.settings.default_organization_id
+        await self._ensure_project(project_id, organization_id=organization_id)
         try:
-            model = await self.ai_settings.effective_record()
+            model = await self._effective_model(organization_id)
         except AIProviderNotConfiguredError as exc:
             raise ContentConfigurationError(str(exc)) from exc
         normalized_key = idempotency_key.strip()
@@ -107,7 +118,7 @@ class ContentService:
             raise ValueError("Idempotency-Key 长度必须为 1-200")
         try:
             article, run = await self.repository.create_article(
-                self.settings.default_organization_id,
+                organization_id,
                 project_id,
                 request.primary_keyword,
                 normalized_key,
@@ -130,11 +141,14 @@ class ContentService:
         page_size: int,
         article_status: str | None,
         search: str | None,
+        *,
+        organization_id: str | None = None,
     ) -> ArticleCollection:
-        await self._ensure_project(project_id)
+        organization_id = organization_id or self.settings.default_organization_id
+        await self._ensure_project(project_id, organization_id=organization_id)
         normalized_search = search.strip() if search and search.strip() else None
         rows, total = await self.repository.list_articles(
-            self.settings.default_organization_id,
+            organization_id,
             project_id,
             page,
             page_size,
@@ -148,9 +162,16 @@ class ContentService:
             page_size=page_size,
         )
 
-    async def get_article(self, project_id: str, article_id: str) -> ArticleDetailResponse:
+    async def get_article(
+        self,
+        project_id: str,
+        article_id: str,
+        *,
+        organization_id: str | None = None,
+    ) -> ArticleDetailResponse:
+        organization_id = organization_id or self.settings.default_organization_id
         result = await self.repository.get_article(
-            self.settings.default_organization_id, project_id, article_id
+            organization_id, project_id, article_id
         )
         if result is None:
             raise ContentNotFoundError
@@ -158,17 +179,31 @@ class ContentService:
         sources = await self.repository.list_article_sources(run.id) if run else []
         return article_detail_response(article, run, sources)
 
-    async def get_run(self, project_id: str, article_id: str) -> ArticleRunResponse:
+    async def get_run(
+        self,
+        project_id: str,
+        article_id: str,
+        *,
+        organization_id: str | None = None,
+    ) -> ArticleRunResponse:
+        organization_id = organization_id or self.settings.default_organization_id
         run = await self.repository.get_run(
-            self.settings.default_organization_id, project_id, article_id
+            organization_id, project_id, article_id
         )
         if run is None:
             raise ContentNotFoundError
         return run_response(run)
 
-    async def cancel_article(self, project_id: str, article_id: str) -> ArticleResponse:
+    async def cancel_article(
+        self,
+        project_id: str,
+        article_id: str,
+        *,
+        organization_id: str | None = None,
+    ) -> ArticleResponse:
+        organization_id = organization_id or self.settings.default_organization_id
         result = await self.repository.cancel_article(
-            self.settings.default_organization_id, project_id, article_id
+            organization_id, project_id, article_id
         )
         if result is None:
             raise ContentNotFoundError
@@ -182,7 +217,34 @@ class ContentService:
 
     async def dispatch_queued(self, limit: int = 20) -> int:
         dispatched = 0
+        started_run_ids: set[str] = set()
+        for item, organization_id in await self.repository.claim_due_plan_items(
+            now=datetime.now(UTC), limit=limit
+        ):
+            try:
+                model = await self._effective_model(organization_id)
+                _article, run = await self.repository.create_article_from_plan(
+                    organization_id,
+                    item.project_id,
+                    item.id,
+                    expected_version=item.version,
+                    model_snapshot=model_snapshot(model),
+                    now=datetime.now(UTC),
+                    explicit=False,
+                )
+                await self.controller.start(run.id)
+                started_run_ids.add(run.id)
+            except Exception as exc:
+                await self.repository.release_plan_trigger(
+                    item.id,
+                    error_code="plan_trigger_failed",
+                    error_detail=str(exc),
+                )
+                continue
+            dispatched += 1
         for run in await self.repository.queued_runs(limit):
+            if run.id in started_run_ids:
+                continue
             try:
                 await self.controller.start(run.id)
             except Exception:
@@ -190,9 +252,81 @@ class ContentService:
             dispatched += 1
         return dispatched
 
-    async def _ensure_project(self, project_id: str) -> None:
+    async def generate_plan_item_now(
+        self,
+        project_id: str,
+        plan_item_id: str,
+        *,
+        expected_version: int,
+        organization_id: str | None = None,
+    ) -> ArticleResponse:
+        organization_id = organization_id or self.settings.default_organization_id
+        await self._ensure_project(project_id, organization_id=organization_id)
+        try:
+            model = await self._effective_model(organization_id)
+            article, run = await self.repository.create_article_from_plan(
+                organization_id,
+                project_id,
+                plan_item_id,
+                expected_version=expected_version,
+                model_snapshot=model_snapshot(model),
+                now=datetime.now(UTC),
+                explicit=True,
+            )
+        except LookupError as exc:
+            raise ContentNotFoundError from exc
+        except AIProviderNotConfiguredError as exc:
+            raise ContentConfigurationError(str(exc)) from exc
+        if article.project_id != project_id:
+            raise ContentNotFoundError
+        try:
+            await self.controller.start(run.id)
+        except Exception:
+            pass
+        return article_response(article, run)
+
+    async def _effective_model(
+        self, organization_id: str
+    ) -> AIProviderSettingsRecord:
+        organization_lookup = getattr(
+            self.ai_settings, "effective_record_for_organization", None
+        )
+        if organization_lookup is not None:
+            return await organization_lookup(organization_id)
+        return await self.ai_settings.effective_record()
+
+    async def review_article(
+        self,
+        project_id: str,
+        article_id: str,
+        request: object,
+        *,
+        organization_id: str,
+        reviewed_by: str,
+    ) -> ArticleResponse:
+        try:
+            article, run = await self.repository.review_article(
+                organization_id,
+                project_id,
+                article_id,
+                decision=request.review_status,
+                review_note=request.review_note,
+                expected_version=request.review_version,
+                reviewed_by=reviewed_by,
+            )
+        except LookupError as exc:
+            raise ContentNotFoundError from exc
+        except ValueError as exc:
+            if str(exc) == "review_note_required":
+                raise ValueError(str(exc)) from exc
+            raise ContentConflictError(str(exc)) from exc
+        return article_response(article, run)
+
+    async def _ensure_project(
+        self, project_id: str, *, organization_id: str | None = None
+    ) -> None:
         if not await self.repository.project_exists(
-            self.settings.default_organization_id, project_id
+            organization_id or self.settings.default_organization_id, project_id
         ):
             raise ContentNotFoundError
 
@@ -225,6 +359,9 @@ def article_response(row: Article, run: ArticleRun | None) -> ArticleResponse:
         meta_description=row.meta_description,
         status=row.status,
         publication_status=row.publication_status,
+        review_status=row.review_status,
+        review_version=row.review_version or 0,
+        publication_blocked_reason=row.publication_blocked_reason,
         warning_count=row.warning_count,
         run=run_response(run) if run else None,
         created_at=row.created_at,
