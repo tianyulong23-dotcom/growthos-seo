@@ -16,6 +16,16 @@ class DataForSEOError(Exception):
     pass
 
 
+class DataForSEOOutcomeUnknown(DataForSEOError):
+    pass
+
+
+class DataForSEOEmptyResult(DataForSEOError):
+    def __init__(self, result: SERPResult) -> None:
+        super().__init__("dataforseo_empty_result")
+        self.result = result
+
+
 COUNTRY_LOCATION_CODES = {
     "US": 2840,
     "GB": 2826,
@@ -109,8 +119,12 @@ class DataForSEOClient:
             self._request, keyword, country, language_code, device
         )
         result = parse_serp_response(response, keyword)
-        if not result.organic_results and not result.people_also_ask:
-            raise DataForSEOError("dataforseo_empty_result")
+        if (
+            not result.organic_results
+            and not result.people_also_ask
+            and not result.related_searches
+        ):
+            raise DataForSEOEmptyResult(result)
         await self._cache_set(cache_key, result.cache_value())
         return result
 
@@ -141,8 +155,12 @@ class DataForSEOClient:
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        except HTTPError as exc:
             raise DataForSEOError("dataforseo_request_failed") from exc
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise DataForSEOOutcomeUnknown(
+                "dataforseo_request_outcome_unknown"
+            ) from exc
 
     async def _cache_get(self, key: str) -> str | None:
         if self.cache is None:

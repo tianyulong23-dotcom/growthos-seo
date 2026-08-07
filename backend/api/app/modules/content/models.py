@@ -27,6 +27,13 @@ ARTICLE_STATUSES = (
 )
 
 ARTICLE_PUBLICATION_STATUSES = ("publish_ready", "complete_draft")
+ARTICLE_REVIEW_STATUSES = ("pending_review", "approved", "changes_requested")
+ARTICLE_PUBLICATION_BLOCKED_REASONS = (
+    "changes_requested",
+    "awaiting_review",
+    "quality_not_ready",
+    "publishing_paused",
+)
 
 
 class Article(Base):
@@ -40,6 +47,17 @@ class Article(Base):
             "publication_status IN ('publish_ready','complete_draft')",
             name="ck_articles_publication_status",
         ),
+        CheckConstraint(
+            "review_status IS NULL OR review_status IN "
+            "('pending_review','approved','changes_requested')",
+            name="ck_articles_review_status",
+        ),
+        CheckConstraint(
+            "publication_blocked_reason IS NULL OR publication_blocked_reason IN "
+            "('changes_requested','awaiting_review','quality_not_ready','publishing_paused')",
+            name="ck_articles_publication_blocked_reason",
+        ),
+        CheckConstraint("review_version >= 0", name="ck_articles_review_version"),
         Index(
             "ix_articles_organization_project_updated",
             "organization_id",
@@ -47,12 +65,16 @@ class Article(Base):
             text("updated_at DESC"),
         ),
         Index("ix_articles_project_status", "project_id", "status"),
+        UniqueConstraint("plan_item_id", name="uq_articles_plan_item"),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     organization_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     project_id: Mapped[str] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_item_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_plan_items.id", ondelete="SET NULL")
     )
     primary_keyword: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
@@ -73,6 +95,14 @@ class Article(Base):
         default="complete_draft",
         server_default="complete_draft",
     )
+    review_status: Mapped[str | None] = mapped_column(Text)
+    review_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(Text)
+    publication_blocked_reason: Mapped[str | None] = mapped_column(Text)
     current_run_id: Mapped[str | None] = mapped_column(Text)
     warning_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
@@ -93,6 +123,13 @@ class ArticleRun(Base):
             name="ck_article_runs_status",
         ),
         CheckConstraint("progress >= 0 AND progress <= 100", name="ck_article_runs_progress"),
+        CheckConstraint(
+            "plan_item_version IS NULL OR plan_item_version > 0",
+            name="ck_article_runs_plan_item_version",
+        ),
+        UniqueConstraint(
+            "run_idempotency_key", name="uq_article_runs_run_idempotency_key"
+        ),
         Index(
             "uq_article_runs_active_article",
             "article_id",
@@ -111,6 +148,11 @@ class ArticleRun(Base):
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
     workflow_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    plan_item_version: Mapped[int | None] = mapped_column(Integer)
+    run_idempotency_key: Mapped[str | None] = mapped_column(Text)
+    plan_input_snapshot_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default="queued", server_default="queued"
     )
@@ -258,3 +300,42 @@ class ArticleIdempotencyKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class ArticleReviewDecision(Base):
+    __tablename__ = "article_review_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "article_id",
+            "review_version",
+            name="uq_article_review_decisions_article_version",
+        ),
+        CheckConstraint(
+            "decision IN ('approved','changes_requested')",
+            name="ck_article_review_decisions_decision",
+        ),
+        CheckConstraint(
+            "review_version > 0",
+            name="ck_article_review_decisions_review_version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    article_id: Mapped[str] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    article_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("article_runs.id", ondelete="SET NULL")
+    )
+    review_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_by: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+# Article.plan_item_id creates a metadata dependency even when callers import
+# this module without loading the content-plan repository or Alembic environment.
+from app.modules.content_plan import models as content_plan_models  # noqa: E402, F401

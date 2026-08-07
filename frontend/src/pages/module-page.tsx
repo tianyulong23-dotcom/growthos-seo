@@ -59,14 +59,12 @@ function ContentContent({
   view,
   projectId,
   articleId,
-  addRequestVersion,
   onOpenArticle,
   onCloseArticle,
 }: {
   view: string
   projectId: string
   articleId: string | null
-  addRequestVersion: number
   onOpenArticle: (articleId: string) => void
   onCloseArticle: () => void
 }) {
@@ -94,7 +92,7 @@ function ContentContent({
     return (
       <ContentPlan
         key={projectId}
-        addRequestVersion={addRequestVersion}
+        projectId={projectId}
         onOpenArticle={onOpenArticle}
       />
     )
@@ -264,7 +262,6 @@ function ModuleBody({
   onSaveBusinessProfile,
   onRefreshBusinessProfile,
   articleId,
-  contentPlanAddRequestVersion,
   onOpenArticle,
   onCloseArticle,
 }: {
@@ -279,7 +276,6 @@ function ModuleBody({
   onSaveBusinessProfile: (input: BusinessProfileInput) => Promise<unknown>
   onRefreshBusinessProfile: () => Promise<unknown>
   articleId: string | null
-  contentPlanAddRequestVersion: number
   onOpenArticle: (articleId: string) => void
   onCloseArticle: () => void
 }) {
@@ -324,7 +320,6 @@ function ModuleBody({
         view={view}
         projectId={project.id}
         articleId={articleId}
-        addRequestVersion={contentPlanAddRequestVersion}
         onOpenArticle={onOpenArticle}
         onCloseArticle={onCloseArticle}
       />
@@ -486,8 +481,6 @@ function LegacyModulePage() {
   })
   const [actionCount, setActionCount] = React.useState(0)
   const [createArticleOpen, setCreateArticleOpen] = React.useState(false)
-  const [contentPlanAddRequestVersion, setContentPlanAddRequestVersion] =
-    React.useState(0)
   const auditSelectionVersion = React.useRef(0)
   const activeProjectId = React.useRef(project.id)
   React.useLayoutEffect(() => {
@@ -734,10 +727,6 @@ function LegacyModulePage() {
 
   function handleAction() {
     if (moduleConfig.id === "content") {
-      if (activeView === "plans") {
-        setContentPlanAddRequestVersion((version) => version + 1)
-        return
-      }
       setCreateArticleOpen(true)
       return
     }
@@ -759,11 +748,7 @@ function LegacyModulePage() {
 
   const actionIcon =
     moduleConfig.id === "content" ? (
-      activeView === "plans" ? (
-        <Plus />
-      ) : (
-        <FilePlus2 />
-      )
+      <FilePlus2 />
     ) : moduleConfig.id === "backlinks" ? (
       <Link2 />
     ) : moduleConfig.id === "performance" ? (
@@ -779,7 +764,8 @@ function LegacyModulePage() {
         actionLabel={
           moduleConfig.id === "audit" ||
           moduleConfig.id === "settings" ||
-          moduleConfig.id === "keywords"
+          moduleConfig.id === "keywords" ||
+          (moduleConfig.id === "content" && activeView === "plans")
             ? undefined
             : moduleConfig.id === "content" && activeView === "library"
               ? "创建文章"
@@ -788,7 +774,11 @@ function LegacyModulePage() {
                 : moduleConfig.action
         }
         actionIcon={actionIcon}
-        onAction={handleAction}
+        onAction={
+          moduleConfig.id === "content" && activeView === "plans"
+            ? undefined
+            : handleAction
+        }
         actionDisabled={moduleConfig.id === "audit" && running}
       />
       {moduleConfig.tabs.length > 0 && (
@@ -883,7 +873,6 @@ function LegacyModulePage() {
             }
             onRefreshBusinessProfile={() => refreshBusinessProfile(project.id)}
             articleId={selectedArticleId}
-            contentPlanAddRequestVersion={contentPlanAddRequestVersion}
             onOpenArticle={openArticle}
             onCloseArticle={closeArticle}
           />

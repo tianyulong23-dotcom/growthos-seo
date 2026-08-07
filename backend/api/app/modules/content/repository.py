@@ -14,11 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.modules.content.models import (
     Article,
     ArticleIdempotencyKey,
+    ArticleReviewDecision,
     ArticleRun,
     ArticleRunStep,
     ArticleSource,
     ArticleVersion,
 )
+from app.modules.content_plan import models as content_plan_models  # noqa: F401
 from app.modules.crawling.models import CrawlRun, LinkEdge, Page, PageSnapshot
 from app.modules.projects.models import Project, SiteProfile
 
@@ -332,6 +334,355 @@ class ContentRepository:
                     return existing
             raise
 
+    async def create_article_from_plan(
+        self,
+        organization_id: str,
+        project_id: str,
+        plan_item_id: str,
+        *,
+        expected_version: int,
+        model_snapshot: dict[str, Any],
+        now: datetime,
+        explicit: bool,
+    ) -> tuple[Article, ArticleRun]:
+        from app.modules.content_plan.models import (
+            ContentPlanItem,
+            ContentPlanItemKeyword,
+            ContentPlanSerpSnapshot,
+            ContentPlanSettings,
+        )
+
+        async with self.sessions() as session:
+            item = await session.scalar(
+                select(ContentPlanItem)
+                .where(
+                    ContentPlanItem.id == plan_item_id,
+                    ContentPlanItem.project_id == project_id,
+                )
+                .with_for_update()
+            )
+            if item is None:
+                raise LookupError("content_plan_item_not_found")
+            project = await session.scalar(
+                select(Project).where(
+                    Project.id == project_id,
+                    Project.organization_id == organization_id,
+                )
+            )
+            if project is None:
+                raise LookupError("content_plan_item_not_found")
+            if item.version != expected_version:
+                raise ValueError("stale_plan_item_version")
+            if item.article_id:
+                article = await session.get(Article, item.article_id)
+                run = await session.get(ArticleRun, article.current_run_id) if article else None
+                if article is None or run is None:
+                    raise ValueError("plan_article_integrity_error")
+                return article, run
+            settings = await session.get(ContentPlanSettings, item.project_id)
+            allowed_status = "scheduled" if explicit else "triggering"
+            if (
+                item.status != allowed_status
+                or item.edit_state != "idle"
+                or (not explicit and item.schedule_attention_reason is not None)
+                or (not explicit and (item.generation_at is None or item.generation_at > now))
+                or (not explicit and (settings is None or settings.paused))
+            ):
+                raise ValueError("plan_item_not_triggerable")
+            if explicit and item.schedule_attention_reason not in {
+                None,
+                "expired_user_pinned_date",
+            }:
+                raise ValueError("plan_item_not_triggerable")
+
+            if explicit:
+                item.status = "triggering"
+                item.trigger_lease_until = now + timedelta(minutes=5)
+            keywords = list(
+                (
+                    await session.scalars(
+                        select(ContentPlanItemKeyword)
+                        .where(ContentPlanItemKeyword.plan_item_id == item.id)
+                        .order_by(ContentPlanItemKeyword.position)
+                    )
+                ).all()
+            )
+            serp = await session.get(ContentPlanSerpSnapshot, item.current_serp_snapshot_id)
+            if (
+                serp is None
+                or serp.error_code is not None
+                or not item.publish_local_date
+                or not item.publish_local_time
+                or not item.schedule_timezone
+                or not item.publish_at
+                or not item.generation_at
+                or not item.title.strip()
+                or not item.writing_direction.strip()
+                or not keywords
+                or sum(row.role == "primary" for row in keywords) != 1
+            ):
+                raise ValueError("plan_input_incomplete")
+            profile = await session.get(SiteProfile, project.id)
+            profile_json, profile_status = merge_project_profile(profile)
+            project_snapshot = {
+                "organization_id": organization_id,
+                "project_id": project.id,
+                "domain": project.domain,
+                "country": project.country,
+                "language": project.language,
+                "profile": profile_json,
+                "profile_status": profile_status,
+            }
+            serp_payload = {
+                "keyword": serp.primary_keyword,
+                "organic_results": list(serp.organic_summary_json),
+                "people_also_ask": [
+                    str(row.get("question")) for row in serp.paa_json if row.get("question")
+                ],
+                "related_searches": [
+                    str(row.get("query"))
+                    for row in serp.related_searches_json
+                    if row.get("query")
+                ],
+                "features": list(serp.serp_features_json),
+                "featured_snippet": serp.featured_snippet_json,
+            }
+            snapshot = {
+                "plan_item_id": item.id,
+                "plan_item_version": item.version,
+                "primary_keyword": item.primary_keyword,
+                "secondary_keywords": [
+                    {"keyword": row.keyword, "type": row.keyword_type}
+                    for row in keywords
+                    if row.role == "secondary"
+                ],
+                "title": {
+                    "value": item.title,
+                    "policy": "locked" if item.title_user_edited else "suggested",
+                },
+                "writing_direction": {
+                    "value": item.writing_direction,
+                    "policy": "locked" if item.direction_user_edited else "suggested",
+                },
+                "serp_snapshot": {
+                    "id": serp.id,
+                    "generated_at": serp.created_at.isoformat(),
+                    "evidence": serp_payload,
+                },
+                "project": project_snapshot,
+                "schedule": {
+                    "publish_local_date": item.publish_local_date.isoformat(),
+                    "publish_local_time": item.publish_local_time.isoformat(),
+                    "timezone": item.schedule_timezone,
+                    "publish_at": item.publish_at.isoformat(),
+                    "generation_at": item.generation_at.isoformat(),
+                },
+            }
+            article_id, run_id = str(uuid4()), str(uuid4())
+            article = Article(
+                id=article_id,
+                organization_id=organization_id,
+                project_id=item.project_id,
+                plan_item_id=item.id,
+                primary_keyword=item.primary_keyword,
+                status="queued",
+                current_run_id=run_id,
+            )
+            run = ArticleRun(
+                id=run_id,
+                article_id=article_id,
+                organization_id=organization_id,
+                project_id=item.project_id,
+                workflow_id=f"article-generation:{run_id}",
+                plan_item_version=item.version,
+                run_idempotency_key=f"content-plan:{item.id}:v{item.version}:run",
+                plan_input_snapshot_json=snapshot,
+                project_snapshot_json=project_snapshot,
+                model_snapshot_json=model_snapshot,
+                status="queued",
+                stage="queued",
+                progress=0,
+            )
+            key = ArticleIdempotencyKey(
+                organization_id=organization_id,
+                project_id=item.project_id,
+                idempotency_key=f"content-plan:{item.id}:article",
+                request_hash=sha256(item.id.encode()).hexdigest(),
+                article_id=article_id,
+            )
+            source = ArticleSource(
+                id=str(uuid4()),
+                run_id=run_id,
+                source_type="serp",
+                url=f"serp://content-plan/{serp.id}",
+                normalized_url=f"serp://content-plan/{serp.id}",
+                title=item.primary_keyword,
+                status="available",
+                summary_json=serp_payload,
+                metadata_json={
+                    "content_plan_serp_snapshot_id": serp.id,
+                    "provider_request_id": serp.provider_request_id,
+                    "request_cost_usd": 0,
+                    "reused": True,
+                },
+                retrieved_at=now,
+            )
+            session.add_all([article, run, key, source])
+            item.article_id = article_id
+            item.status = "generating"
+            item.schedule_attention_reason = None
+            item.trigger_lease_until = None
+            await session.commit()
+            await session.refresh(article)
+            await session.refresh(run)
+            return article, run
+
+    async def claim_due_plan_items(
+        self,
+        *,
+        now: datetime,
+        limit: int = 20,
+    ) -> list[tuple[Any, str]]:
+        from app.modules.content_plan.models import ContentPlanItem, ContentPlanSettings
+
+        lease_until = now + timedelta(minutes=5)
+        async with self.sessions() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(ContentPlanItem, Project.organization_id)
+                        .join(Project, Project.id == ContentPlanItem.project_id)
+                        .join(
+                            ContentPlanSettings,
+                            ContentPlanSettings.project_id == ContentPlanItem.project_id,
+                        )
+                        .where(
+                            or_(
+                                ContentPlanItem.status == "scheduled",
+                                (
+                                    (ContentPlanItem.status == "triggering")
+                                    & (ContentPlanItem.trigger_lease_until <= now)
+                                ),
+                            ),
+                            ContentPlanItem.edit_state == "idle",
+                            ContentPlanItem.schedule_attention_reason.is_(None),
+                            ContentPlanItem.article_id.is_(None),
+                            ContentPlanItem.generation_at.is_not(None),
+                            ContentPlanItem.generation_at <= now,
+                            ContentPlanSettings.paused.is_(False),
+                        )
+                        .order_by(
+                            ContentPlanItem.generation_at,
+                            ContentPlanItem.id,
+                        )
+                        .limit(max(1, min(limit, 100)))
+                        .with_for_update(skip_locked=True, of=ContentPlanItem)
+                    )
+                ).all()
+            )
+            for item, _organization_id in rows:
+                item.status = "triggering"
+                item.trigger_lease_until = lease_until
+                item.error_code = None
+                item.error_detail = None
+            await session.commit()
+            return [(item, str(organization_id)) for item, organization_id in rows]
+
+    async def release_plan_trigger(
+        self,
+        plan_item_id: str,
+        *,
+        error_code: str,
+        error_detail: str,
+    ) -> None:
+        from app.modules.content_plan.models import ContentPlanItem
+
+        async with self.sessions() as session:
+            item = await session.scalar(
+                select(ContentPlanItem)
+                .where(ContentPlanItem.id == plan_item_id)
+                .with_for_update()
+            )
+            if item is None or item.article_id is not None or item.status != "triggering":
+                return
+            item.status = "scheduled"
+            item.trigger_lease_until = None
+            item.error_code = error_code[:100]
+            item.error_detail = error_detail[:2000]
+            await session.commit()
+
+    async def review_article(
+        self,
+        organization_id: str,
+        project_id: str,
+        article_id: str,
+        *,
+        decision: str,
+        review_note: str | None,
+        expected_version: int,
+        reviewed_by: str,
+    ) -> tuple[Article, ArticleRun | None]:
+        from app.modules.content_plan.models import ContentPlanSettings
+        from app.modules.content_plan.scheduling import publication_blocked_reason
+
+        async with self.sessions() as session:
+            article = await session.scalar(
+                select(Article)
+                .where(
+                    Article.id == article_id,
+                    Article.organization_id == organization_id,
+                    Article.project_id == project_id,
+                )
+                .with_for_update()
+            )
+            if article is None:
+                raise LookupError("article_not_found")
+            run = await session.get(ArticleRun, article.current_run_id) if article.current_run_id else None
+            if (
+                run is None
+                or run.status not in {"completed", "completed_with_warnings"}
+                or article.review_status is None
+            ):
+                raise ValueError("article_not_reviewable")
+            if article.review_version != expected_version:
+                raise ValueError("stale_review_version")
+            prior_decision = await session.scalar(
+                select(ArticleReviewDecision.id).where(
+                    ArticleReviewDecision.article_id == article.id,
+                    ArticleReviewDecision.review_version == article.review_version,
+                )
+            )
+            if prior_decision is not None:
+                raise ValueError("stale_review_version")
+            review_note = review_note.strip() if review_note else None
+            if decision == "changes_requested" and not review_note:
+                raise ValueError("review_note_required")
+            now = datetime.now(UTC)
+            settings = await session.get(ContentPlanSettings, project_id)
+            article.review_status = decision
+            article.review_note = review_note
+            article.reviewed_at = now
+            article.reviewed_by = reviewed_by
+            article.publication_blocked_reason = publication_blocked_reason(
+                review_status=decision,
+                publication_status=article.publication_status,
+                paused=bool(settings.paused) if settings else False,
+            )
+            session.add(
+                ArticleReviewDecision(
+                    article_id=article.id,
+                    article_run_id=run.id,
+                    review_version=article.review_version,
+                    decision=decision,
+                    review_note=review_note,
+                    reviewed_by=reviewed_by,
+                    reviewed_at=now,
+                )
+            )
+            await session.commit()
+            await session.refresh(article)
+            return article, run
+
     async def list_articles(
         self,
         organization_id: str,
@@ -509,6 +860,7 @@ class ContentRepository:
             "organization_id": run.organization_id,
             "project_id": run.project_id,
             "primary_keyword": article.primary_keyword,
+            "plan_input": dict(run.plan_input_snapshot_json),
             "project_snapshot": dict(run.project_snapshot_json),
             "model_snapshot": dict(run.model_snapshot_json),
             "status": run.status,
@@ -1497,6 +1849,44 @@ class ContentRepository:
                 ),
             }
 
+            article.publication_status = publication_status_for_artifact(artifact)
+            plan_input = dict(run.plan_input_snapshot_json or {})
+            locked_title = dict(plan_input.get("title") or {})
+            if locked_title.get("policy") == "locked":
+                generated_title = str(artifact.get("title") or "").strip()
+                required_title = str(locked_title.get("value") or "").strip()
+                if generated_title != required_title:
+                    unique_warnings.append(
+                        {
+                            "code": "locked_requirement_failed",
+                            "message": "Generated title did not preserve the locked plan title.",
+                        }
+                    )
+                    article.publication_status = "complete_draft"
+            locked_direction = dict(plan_input.get("writing_direction") or {})
+            if locked_direction.get("policy") == "locked":
+                required_direction = str(locked_direction.get("value") or "")
+                checks = (artifact.get("quality") or {}).get(
+                    "locked_requirement_checks"
+                ) or []
+                direction_passed = any(
+                    isinstance(check, dict)
+                    and check.get("field") == "writing_direction"
+                    and check.get("requirement") == required_direction
+                    and check.get("passed") is True
+                    for check in checks
+                )
+                if not direction_passed:
+                    unique_warnings.append(
+                        {
+                            "code": "locked_requirement_failed",
+                            "message": "Generated article did not preserve the locked writing direction.",
+                        }
+                    )
+                    article.publication_status = "complete_draft"
+            unique_warnings = list(
+                {str(item["code"]): item for item in unique_warnings}.values()
+            )
             terminal_status = "completed_with_warnings" if unique_warnings else status
             run.status = terminal_status
             run.stage = "completed"
@@ -1504,15 +1894,31 @@ class ContentRepository:
             run.warnings_json = unique_warnings
             run.finished_at = now
             article.status = terminal_status
-            article.publication_status = publication_status_for_artifact(artifact)
             article.warning_count = len(unique_warnings)
-            article.title = str(artifact.get("title") or article.primary_keyword)[:300]
+            article.title = str(
+                locked_title.get("value")
+                if locked_title.get("policy") == "locked"
+                else artifact.get("title") or article.primary_keyword
+            )[:300]
             article.slug = str(artifact.get("slug") or "article")[:200]
             article.meta_title = str(artifact.get("meta_title") or article.title)[:300]
             article.meta_description = str(artifact.get("meta_description") or "")[:500]
             article.outline_json = outline
             article.markdown = str(artifact.get("markdown") or "")
             article.html = html
+            article.review_version = (article.review_version or 0) + 1
+            article.review_status = "pending_review"
+            article.review_note = None
+            article.reviewed_at = None
+            article.reviewed_by = None
+            article.publication_blocked_reason = "awaiting_review"
+            if article.plan_item_id:
+                from app.modules.content_plan.models import ContentPlanItem
+
+                plan_item = await session.get(ContentPlanItem, article.plan_item_id)
+                if plan_item is not None:
+                    plan_item.status = "generated"
+                    plan_item.trigger_lease_until = None
             await session.commit()
 
     async def _idempotent_result(

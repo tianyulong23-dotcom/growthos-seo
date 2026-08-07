@@ -226,7 +226,11 @@ class OpenAIProvider:
                 return
             except ProviderError as exc:
                 if visible or not exc.retryable or attempt >= self.config.max_retries:
-                    if exc.retryable and attempt >= self.config.max_retries:
+                    if (
+                        exc.retryable
+                        and self.config.max_retries > 0
+                        and attempt >= self.config.max_retries
+                    ):
                         raise ProviderError(
                             str(exc),
                             code=exc.code,
@@ -455,7 +459,11 @@ class OpenAIProvider:
                 return await operation()
             except ProviderError as exc:
                 if not exc.retryable or attempt >= self.config.max_retries:
-                    if exc.retryable and attempt >= self.config.max_retries:
+                    if (
+                        exc.retryable
+                        and self.config.max_retries > 0
+                        and attempt >= self.config.max_retries
+                    ):
                         raise ProviderError(
                             str(exc),
                             code=exc.code,

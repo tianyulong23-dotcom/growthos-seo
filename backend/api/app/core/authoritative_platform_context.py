@@ -34,6 +34,7 @@ class AuthoritativePlatformContextResolver:
         *,
         request: Request,
         website_project_key: str,
+        required_permission: str | None = None,
     ) -> ResolvedPlatformRequestContext:
         try:
             actor = self._authentication.authenticate(
@@ -83,7 +84,7 @@ class AuthoritativePlatformContextResolver:
                 detail="The authenticated membership does not grant access to this project.",
             )
         membership = project_memberships[0]
-        required_permission = (
+        required_permission = required_permission or (
             "backlinks:read" if request.method in {"GET", "HEAD"} else "backlinks:write"
         )
         if required_permission not in membership.permissions:

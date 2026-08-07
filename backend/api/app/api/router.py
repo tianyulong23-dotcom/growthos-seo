@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from app.api.routes.agents import router as agents_router
 from app.api.routes.audits import router as audits_router
 from app.api.routes.backlinks import router as backlinks_router
-from app.api.routes.content import router as content_router
+from app.api.routes.content import content_plan_router, router as content_router
 from app.api.routes.data_sources import router as data_sources_router
 from app.api.routes.health import router as health_router
 from app.api.routes.keywords import router as keywords_router
@@ -20,3 +20,4 @@ api_router.include_router(data_sources_router)
 api_router.include_router(keywords_router)
 api_router.include_router(backlinks_router)
 api_router.include_router(content_router)
+api_router.include_router(content_plan_router)

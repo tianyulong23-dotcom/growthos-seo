@@ -18,6 +18,7 @@ class PlatformContextResolver(Protocol):
         *,
         request: Request,
         website_project_key: str,
+        required_permission: str | None = None,
     ) -> ResolvedPlatformRequestContext: ...
 
 
@@ -43,8 +44,9 @@ class RejectingPlatformContextResolver:
         *,
         request: Request,
         website_project_key: str,
+        required_permission: str | None = None,
     ) -> ResolvedPlatformRequestContext:
-        del request, website_project_key
+        del request, website_project_key, required_permission
         raise PlatformContextResolutionError(
             status=401,
             code="PLATFORM_AUTHENTICATION_REQUIRED",

@@ -14,6 +14,7 @@ from app.modules.content import activities as content_activities
 from app.modules.content import collection
 from app.modules.content.dataforseo import (
     DataForSEOClient,
+    DataForSEOEmptyResult,
     DataForSEOError,
     OrganicResult,
     SERPResult,
@@ -169,6 +170,34 @@ def test_dataforseo_accepts_empty_question_and_related_search_groups() -> None:
     assert len(result.organic_results) == 1
     assert result.people_also_ask == []
     assert result.related_searches == []
+
+
+def test_dataforseo_search_accepts_related_searches_without_organic_results() -> None:
+    response = serp_response()
+    response["tasks"][0]["result"][0]["items"] = [
+        response["tasks"][0]["result"][0]["items"][2]
+    ]
+    client = dataforseo_client()
+    client._request = lambda *_: response  # type: ignore[method-assign]
+
+    result = asyncio.run(client.search("solar battery", "US", "en"))
+
+    assert result.organic_results == []
+    assert result.related_searches == ["solar battery lifespan", "solar battery price"]
+
+
+def test_dataforseo_empty_result_preserves_cost_and_request_id() -> None:
+    response = serp_response()
+    response["tasks"][0]["result"][0]["items"] = []
+    client = dataforseo_client()
+    client._request = lambda *_: response  # type: ignore[method-assign]
+
+    with pytest.raises(DataForSEOEmptyResult) as exc_info:
+        asyncio.run(client.search("solar battery", "US", "en"))
+
+    assert exc_info.value.result.request_cost_usd == 0.002
+    assert exc_info.value.result.provider_request_id == "dataforseo-task-1"
+    assert exc_info.value.result.raw_response == response
 
 
 def test_dataforseo_never_reports_an_unusable_organic_item_as_a_feature() -> None:
@@ -527,6 +556,62 @@ def test_existing_serp_collection_backfills_missing_analysis() -> None:
     )
     assert saved["content_ref"] == "s3://bucket/raw-serp.json.gz"
     assert saved["metadata"] == {"cached": True}
+
+
+def test_content_plan_serp_source_is_reused_without_dataforseo_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = FakeSourceRepository()
+    repo.sources.append(
+        {
+            "source_type": "serp",
+            "url": "serp://content-plan/serp-1",
+            "status": "available",
+            "title": "content planning",
+            "domain": None,
+            "content_ref": None,
+            "summary": {
+                "keyword": "content planning",
+                "organic_results": [
+                    {
+                        "position": 1,
+                        "url": "https://example.test/content-planning",
+                        "title": "Content Planning Guide",
+                    }
+                ],
+                "people_also_ask": ["What is content planning?"],
+                "related_searches": ["editorial calendar"],
+                "features": [],
+            },
+            "metadata": {
+                "content_plan_serp_snapshot_id": "serp-1",
+                "request_cost_usd": 0,
+                "reused": True,
+            },
+        }
+    )
+    calls = 0
+
+    async def search(*_: Any, **__: Any) -> SERPResult:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("content-plan SERP must be reused")
+
+    monkeypatch.setattr(collection.DataForSEOClient, "search", search)
+
+    outcome = asyncio.run(
+        collection._collect_serp(
+            repo,  # type: ignore[arg-type]
+            Settings(app_env="test"),
+            "run-from-plan",
+            "content planning",
+            {"country": "US", "language": "en"},
+        )
+    )
+
+    assert outcome == (None, 1)
+    assert calls == 0
+    assert repo.sources[-1]["metadata"]["reused"] is True
 
 
 def test_existing_serp_collection_refreshes_older_analysis_granularity() -> None:

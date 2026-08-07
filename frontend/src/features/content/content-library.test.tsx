@@ -19,11 +19,11 @@ const collection = {
     {
       id: "article-1",
       project_id: "project-1",
-      primary_keyword: "solar battery payback",
-      title: "Solar battery payback guide",
-      slug: "solar-battery-payback",
-      meta_title: "Solar battery payback guide",
-      meta_description: "A practical guide.",
+      primary_keyword: "test-keyword",
+      title: "test-title",
+      slug: "test-title",
+      meta_title: "test-title",
+      meta_description: "test-description",
       status: "completed_with_warnings",
       publication_status: "complete_draft",
       warning_count: 1,
@@ -46,7 +46,7 @@ describe("ContentLibrary", () => {
     render(<ContentLibrary projectId="project-1" onOpenArticle={vi.fn()} />)
 
     await waitFor(() => {
-      expect(screen.getByText("Solar battery payback guide")).toBeTruthy()
+      expect(screen.getByText("test-title")).toBeTruthy()
     })
     expect(articleApi.listArticles).toHaveBeenCalledWith("project-1")
     expect(screen.getByText("完整草稿")).toBeTruthy()

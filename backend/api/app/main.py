@@ -21,6 +21,8 @@ from app.db.session import session_factory
 from app.modules.audit.service import AuditService, build_audit_service
 from app.modules.agent.service import build_agent_service
 from app.modules.content.service import build_content_service
+from app.modules.content_plan.d6_service import build_content_plan_d6_service
+from app.modules.content_plan.batch_service import build_content_plan_batch_service
 from app.modules.keywords.service import KeywordService, build_keyword_service
 from app.modules.projects.authority import SQLAlchemyWebsiteProjectAuthority
 from app.modules.projects.service import ProjectService, build_project_service
@@ -133,6 +135,34 @@ async def dispatch_content_workflows() -> None:
         await asyncio.sleep(5)
 
 
+async def dispatch_content_plan_preparations() -> None:
+    preparation_service = build_content_plan_d6_service()
+    batch_service = build_content_plan_batch_service()
+    if preparation_service.dispatcher is None and batch_service.dispatcher is None:
+        return
+    while True:
+        try:
+            if batch_service.dispatcher is not None:
+                batches = (
+                    await batch_service.repository.list_recoverable_automatic_batches()
+                )
+                for batch in batches:
+                    await batch_service.dispatcher.dispatch_batch(batch.batch_id)
+            if preparation_service.dispatcher is not None:
+                targets = (
+                    await preparation_service.repository.list_recoverable_preparations()
+                )
+                for target in targets:
+                    await preparation_service.dispatcher.dispatch(
+                        target.preparation_id
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to dispatch recoverable content-plan work")
+        await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     settings = get_settings()
@@ -153,6 +183,9 @@ async def lifespan(application: FastAPI):
     )
     agent_dispatch_task = asyncio.create_task(dispatch_agent_workflows())
     content_dispatch_task = asyncio.create_task(dispatch_content_workflows())
+    content_plan_dispatch_task = asyncio.create_task(
+        dispatch_content_plan_preparations()
+    )
     keyword_service = build_keyword_service()
     keyword_dispatch_task = asyncio.create_task(
         dispatch_keyword_workflows(
@@ -185,6 +218,7 @@ async def lifespan(application: FastAPI):
         audit_dispatch_task.cancel()
         agent_dispatch_task.cancel()
         content_dispatch_task.cancel()
+        content_plan_dispatch_task.cancel()
         keyword_dispatch_task.cancel()
         keyword_reconcile_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -195,6 +229,8 @@ async def lifespan(application: FastAPI):
             await agent_dispatch_task
         with suppress(asyncio.CancelledError):
             await content_dispatch_task
+        with suppress(asyncio.CancelledError):
+            await content_plan_dispatch_task
         with suppress(asyncio.CancelledError):
             await keyword_dispatch_task
         with suppress(asyncio.CancelledError):
