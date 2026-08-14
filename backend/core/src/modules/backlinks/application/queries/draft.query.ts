@@ -11,15 +11,25 @@ import type {
   DraftGenerationRepository,
 } from "../repositories/draft-generation.repository.js";
 import { draftDocumentSchema } from "../schemas/draft-document.schema.js";
+import type { DraftRequest } from "../schemas/draft-request.schema.js";
 
-const draftJobDeadlineMs = 120_000;
+const draftJobDeadlineMs = 60_000;
 
 type DraftJobView = Readonly<{
   id: string;
   draftId: string;
-  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "REFUSED";
+  status:
+    | "QUEUED"
+    | "RUNNING"
+    | "RETRY_SCHEDULED"
+    | "SUCCEEDED"
+    | "FAILED"
+    | "REFUSED";
   contactId: string | null;
   contactVersion: number | null;
+  requestSnapshotId: string | null;
+  request: DraftRequest | null;
+  generator: "AI" | "TEMPLATE_FALLBACK" | null;
   versionId: string | null;
   lastSuccessfulVersionId: string | null;
   queuedAt: string;
@@ -60,7 +70,7 @@ export type DraftQuery = Readonly<{
       subjectText: string;
       bodyText: string;
       bodyDocument: ReturnType<typeof draftDocumentSchema.parse>;
-      source: "MODEL" | "MANUAL" | "RESTORED";
+      source: "MODEL" | "TEMPLATE_FALLBACK" | "MANUAL" | "RESTORED";
       createdAt: string;
     }> | null;
   }>>;
@@ -72,6 +82,9 @@ const toJobView = (job: DraftGenerationJob): DraftJobView => ({
   status: job.status,
   contactId: job.contactId,
   contactVersion: job.contactVersion,
+  requestSnapshotId: job.requestSnapshotId,
+  request: job.request,
+  generator: job.generator,
   versionId: job.versionId,
   lastSuccessfulVersionId: job.lastSuccessfulVersionId,
   queuedAt: job.queuedAt.toISOString(),

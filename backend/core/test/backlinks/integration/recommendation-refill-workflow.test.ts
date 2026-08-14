@@ -15,6 +15,7 @@ import {
   type RecommendationScoreComponentId,
   type RecommendationScoreComponentInput,
 } from "../../../src/modules/backlinks/domain/recommendations/scoring.js";
+import { commercialSupplyPublishedTarget } from "../../../src/modules/backlinks/domain/recommendations/commercial-refill-cycle.js";
 import {
   runBacklinkRecommendationRefillWorkflow,
   type BacklinkRecommendationRefillActivities,
@@ -46,8 +47,8 @@ const input: BacklinkRecommendationRefillInput = {
   correlationId: "correlation-061",
   actorId: "worker-061",
   refillWindowKey: "2026-07-25T08:00Z/15m",
-  lowWatermark: 2,
-  highWatermark: 5,
+  lowWatermark: 9,
+  highWatermark: 10,
 };
 
 function observed<T>(value: T, evidenceRef: string): EvidenceValue<T> {
@@ -153,10 +154,12 @@ function fakeActivities(
   options: Readonly<{
     fail?: boolean;
     candidates?: readonly RecommendationEvidenceCandidate[];
+    outcome?: "TARGET_REACHED" | "SUPPLY_FLOOR_REACHED";
   }> = {},
 ) {
   const inventory = new Set(readyIds);
   const windows = new Map<string, string>();
+  let plannedWindow = false;
   const reserveRecommendationRefill = vi.fn(async (
     request: BacklinkRecommendationRefillInput,
   ) => {
@@ -167,7 +170,7 @@ function fakeActivities(
         jobId: existingJobId,
       } as const;
     }
-    if (inventory.size >= request.lowWatermark) {
+    if (inventory.size >= commercialSupplyPublishedTarget) {
       return {
         status: "inventory_sufficient", readyCount: inventory.size,
       } as const;
@@ -206,11 +209,35 @@ function fakeActivities(
     }
     return { addedCount: request.recommendations.length };
   });
+  const planRecommendationRefillSupply = vi.fn(async () => {
+    if (!plannedWindow) {
+      plannedWindow = true;
+      return {
+        status: "execute",
+        source: "paid",
+        refillWindowKey: input.refillWindowKey,
+        refillTier: "exact_product_target_market",
+        refillRound: 1,
+        refillWindow: 1,
+        requestedCandidateCount: input.highWatermark - inventory.size,
+      } as const;
+    }
+    return {
+      status: "complete",
+      outcome: options.outcome ?? "TARGET_REACHED",
+      publishedCount: inventory.size,
+    } as const;
+  });
+  const completeRecommendationRefillSupply = vi.fn(async () => undefined);
+  const waitForRecommendationRefillRetry = vi.fn(async () => undefined);
   const recordRecommendationRefillFailure = vi.fn(async () => undefined);
   const activities: BacklinkRecommendationRefillActivities = {
     reserveRecommendationRefill,
     executeRecommendationRefill,
     storeReadyRecommendations,
+    planRecommendationRefillSupply,
+    completeRecommendationRefillSupply,
+    waitForRecommendationRefillRetry,
     recordRecommendationRefillFailure,
   };
   return {
@@ -219,6 +246,8 @@ function fakeActivities(
     reserveRecommendationRefill,
     executeRecommendationRefill,
     storeReadyRecommendations,
+    planRecommendationRefillSupply,
+    completeRecommendationRefillSupply,
     recordRecommendationRefillFailure,
   };
 }
@@ -234,17 +263,20 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
       backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
     );
 
-    const fake = fakeActivities(["ready-1"]);
+    const readyIds = Array.from({ length: 8 }, (_, index) => `ready-${index + 1}`);
+    const fake = fakeActivities(readyIds);
     await expect(runBacklinkRecommendationRefillWorkflow(
       input, fake.activities,
     )).resolves.toEqual({
       status: "completed",
-      readyCount: 1,
+      readyCount: 8,
       jobId: input.jobId,
       addedCount: 2,
       evaluatedCount: 4,
       excludedCount: 1,
       insufficientDataCount: 1,
+      outcome: "TARGET_REACHED",
+      publishedCount: 10,
     });
     expect(
       fake.storeReadyRecommendations.mock.calls[0]?.[0].recommendations.map(
@@ -252,7 +284,7 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
       ),
     ).toEqual(["alpha.com", "zeta.com"]);
     expect(fake.inventory).toEqual(new Set([
-      "ready-1",
+      ...readyIds,
       "alpha.com",
       "zeta.com",
     ]));
@@ -264,31 +296,42 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
     });
     expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
     expect(fake.storeReadyRecommendations).toHaveBeenCalledOnce();
+    expect(fake.storeReadyRecommendations).toHaveBeenCalledWith(
+      expect.objectContaining({ finalizeJob: false }),
+    );
+    expect(fake.completeRecommendationRefillSupply).toHaveBeenCalledOnce();
   }, 60_000);
 
-  it("does not refill when Ready inventory is at the low watermark", async () => {
-    const fake = fakeActivities(["ready-1", "ready-2"]);
+  it("does not refill when published inventory is at the fixed target", async () => {
+    const readyIds = Array.from(
+      { length: commercialSupplyPublishedTarget },
+      (_, index) => `ready-${index + 1}`,
+    );
+    const fake = fakeActivities(readyIds);
     await expect(runBacklinkRecommendationRefillWorkflow(
       input, fake.activities,
     )).resolves.toEqual({
-      status: "inventory_sufficient", readyCount: 2,
+      status: "inventory_sufficient",
+      readyCount: commercialSupplyPublishedTarget,
     });
     expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
     expect(fake.storeReadyRecommendations).not.toHaveBeenCalled();
   });
 
-  it("stores an empty result so the durable job can finish", async () => {
+  it("stores an empty result without reporting target completion", async () => {
     const fake = fakeActivities([], { candidates: [] });
     await expect(runBacklinkRecommendationRefillWorkflow(
       input, fake.activities,
     )).resolves.toEqual({
-      status: "completed",
+      status: "incomplete",
       readyCount: 0,
       jobId: input.jobId,
       addedCount: 0,
       evaluatedCount: 0,
       excludedCount: 0,
       insufficientDataCount: 0,
+      outcome: "TARGET_REACHED",
+      publishedCount: 0,
     });
     expect(fake.storeReadyRecommendations).toHaveBeenCalledOnce();
     expect(fake.storeReadyRecommendations).toHaveBeenCalledWith(
@@ -304,6 +347,23 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
     );
   });
 
+  it("does not report completion when governed supply stops below target", async () => {
+    const fake = fakeActivities([], {
+      candidates: [],
+      outcome: "SUPPLY_FLOOR_REACHED",
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+    )).resolves.toMatchObject({
+      status: "incomplete",
+      outcome: "SUPPLY_FLOOR_REACHED",
+      publishedCount: 0,
+    });
+    expect(fake.completeRecommendationRefillSupply).toHaveBeenCalledOnce();
+  });
+
   it("records failure without clearing existing Ready inventory", async () => {
     const fake = fakeActivities(["ready-1"], { fail: true });
     await expect(runBacklinkRecommendationRefillWorkflow(
@@ -315,6 +375,11 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
       ...input,
       jobId: input.jobId,
       errorCode: "BACKLINK_RECOMMENDATION_REFILL_FAILED",
+      rootCause: "PROVIDER_UNAVAILABLE",
+      recovery: "WAIT_PROVIDER",
+      diagnosticId: expect.stringMatching(/^refill-/),
+      message:
+        "The recommendation provider is unavailable. Retry after recovery.",
     });
   });
 });

@@ -1,4 +1,4 @@
-export const contactPurposeRuleVersion = "contact-purpose-rules.v2";
+export const contactPurposeRuleVersion = "contact-purpose-rules.v4";
 
 export const contactPurposes = [
   "press",
@@ -23,7 +23,12 @@ export const contactPurposes = [
 export type ContactPurpose = (typeof contactPurposes)[number];
 export type ContactPurposeEvidence = Readonly<{
   tier: "high" | "medium" | "low";
-  field: "email_local_part" | "mailto_label" | "nearby_text" | "page_title";
+  field:
+    | "email_local_part"
+    | "mailto_label"
+    | "nearby_text"
+    | "page_title"
+    | "page_url";
   value: string;
   matchedToken: string;
   ruleId: string;
@@ -41,6 +46,7 @@ export type ContactPurposeInput = Readonly<{
   mailtoLabel?: string;
   nearbyText?: string;
   pageTitle?: string;
+  pageUrl?: string;
 }>;
 
 type Rule = Readonly<{
@@ -132,6 +138,8 @@ const rules: readonly Rule[] = [
   { id: "general.hello", purpose: "general", observedRole: "hello", tokens: ["hello"] },
   { id: "general.office", purpose: "general", observedRole: "office", tokens: ["office"] },
   { id: "general.admin", purpose: "general", observedRole: "admin", tokens: ["admin"] },
+  { id: "general.manager", purpose: "general",
+    observedRole: "manager", tokens: ["manager"], highTrustOnly: true },
 ];
 
 function tokenize(value: string): readonly string[] {
@@ -175,6 +183,10 @@ export function classifyContactPurpose(
   if (input.pageTitle !== undefined && input.pageTitle.trim() !== "") {
     fields.push({ field: "page_title", tier: "low", confidence: 72,
       value: input.pageTitle, highTrust: false });
+  }
+  if (input.pageUrl !== undefined && input.pageUrl.trim() !== "") {
+    fields.push({ field: "page_url", tier: "low", confidence: 72,
+      value: input.pageUrl, highTrust: false });
   }
 
   const matches = fields.flatMap((field) => {

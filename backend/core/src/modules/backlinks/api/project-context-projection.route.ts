@@ -35,16 +35,37 @@ const bodySchema = z
     canonicalDomain: nonBlankString,
     locale: nonBlankString,
     countryCode: nonBlankString,
+    targetMarket: nonBlankString,
     profileVersionId: z.string().uuid(),
     promotionTargetVersionId: z.string().uuid(),
     products: projectTextListSchema,
     keywords: projectTextListSchema,
     targetUrls: z.array(z.string().trim().url().max(2_048)).max(100),
+    targetAudiences: projectTextListSchema,
+    partnershipGoals: projectTextListSchema,
     inputComplete: z.boolean(),
     jobId: z.string().uuid(),
     outboxEventId: z.string().uuid(),
   })
-  .strict();
+  .strict()
+  .superRefine((body, context) => {
+    if (!body.inputComplete) return;
+    for (const field of [
+      "products",
+      "keywords",
+      "targetUrls",
+      "targetAudiences",
+      "partnershipGoals",
+    ] as const) {
+      if (body[field].length === 0) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: "A complete Website Project context cannot contain an empty list.",
+        });
+      }
+    }
+  });
 const responseSchema = z
   .object({
     state: z.enum(["projected", "replayed"]),
@@ -109,6 +130,8 @@ export function registerProjectContextProjectionRoute(
         workspaceId: context.tenant.workspaceId,
         websiteProjectId: context.project.websiteProjectId,
         actorId: context.actor.userId,
+        actorSessionId: context.actor.sessionId,
+        actorRoles: context.actor.roles,
         correlationId: context.correlationId,
         ...request.body,
       });

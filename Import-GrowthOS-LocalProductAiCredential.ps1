@@ -13,7 +13,8 @@ param(
     [string]$ModelVersion = "2026-08-03",
     [ValidateRange(1, 10000)]
     [int]$MaxCalls = 25,
-    [int]$TimeoutMs = 60000,
+    [ValidateRange(1, 45000)]
+    [int]$TimeoutMs = 45000,
     [int]$MaxInputTokens = 8000,
     [int]$MaxOutputTokens = 1200,
     [decimal]$AbsoluteBudgetUsd = 0.05,

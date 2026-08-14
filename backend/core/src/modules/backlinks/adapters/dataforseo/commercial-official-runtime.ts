@@ -125,6 +125,20 @@ function firstTaskId(value: unknown): string | null {
   return null;
 }
 
+function taskStatusCode(
+  value: unknown,
+  taskId: string,
+): number | null {
+  for (const task of tasks(value)) {
+    if (task.id !== taskId) continue;
+    return typeof task.status_code === "number"
+        && Number.isInteger(task.status_code)
+      ? task.status_code
+      : null;
+  }
+  return null;
+}
+
 function readyTaskIds(value: unknown): ReadonlySet<string> {
   const ids = new Set<string>();
   for (const task of tasks(value)) {
@@ -156,8 +170,19 @@ export type CommercialDataForSeoCredentials = Readonly<{
   password: string;
 }>;
 
+export type CommercialDataForSeoExecutionHooks = Readonly<{
+  onProviderTaskAccepted?(taskId: string): Promise<void> | void;
+}>;
+
 export type CommercialDataForSeoRuntime = Readonly<{
-  execute(call: CommercialDiscoveryCall): Promise<Record<string, unknown>>;
+  execute(
+    call: CommercialDiscoveryCall,
+    hooks?: CommercialDataForSeoExecutionHooks,
+  ): Promise<Record<string, unknown>>;
+  recoverAcceptedTask?(
+    call: CommercialDiscoveryCall,
+    providerTaskId: string,
+  ): Promise<Record<string, unknown>>;
 }>;
 
 export function createCommercialOfficialDataForSeoRuntime(input: Readonly<{
@@ -173,11 +198,11 @@ export function createCommercialOfficialDataForSeoRuntime(input: Readonly<{
   const sleep = input.sleep
     ?? ((milliseconds: number) =>
       new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-  const pollAttempts = input.pollAttempts ?? 8;
-  const pollIntervalMs = input.pollIntervalMs ?? 1_000;
+  const pollAttempts = input.pollAttempts ?? 600;
+  const pollIntervalMs = input.pollIntervalMs ?? 500;
 
   return Object.freeze({
-    async execute(rawCall) {
+    async execute(rawCall, hooks) {
       const call = assertCommercialDiscoveryCallAllowed({
         call: rawCall,
         endpointAllowlist: input.endpointAllowlist,
@@ -242,6 +267,14 @@ export function createCommercialOfficialDataForSeoRuntime(input: Readonly<{
               statusCode: responseStatus,
             });
           }
+          if (taskStatusCode(posted, taskId) !== 20100) {
+            throw new DataForSeoRuntimeError({
+              kind: "invalid_request",
+              requestDispatched,
+              statusCode: responseStatus,
+            });
+          }
+          await hooks?.onProviderTaskAccepted?.(taskId);
           for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
             if (attempt > 0) await sleep(pollIntervalMs);
             const ready = requireResponse(await serp.googleOrganicTasksReady());
@@ -274,6 +307,93 @@ export function createCommercialOfficialDataForSeoRuntime(input: Readonly<{
         return requireResponse(await backlinks.referringDomainsLive([
           new BacklinksReferringDomainsLiveRequestInfo(call.request),
         ]));
+      } catch (error) {
+        if (error instanceof DataForSeoRuntimeError) {
+          throw mapDataForSeoProviderError(error);
+        }
+        const statusCode = errorStatus(error) ?? responseStatus;
+        if (controller.signal.aborted) {
+          throw mapDataForSeoProviderError(new DataForSeoRuntimeError({
+            kind: "timeout",
+            requestDispatched,
+            statusCode,
+          }, error));
+        }
+        if (statusCode !== undefined && statusCode >= 400) {
+          throw mapDataForSeoProviderError(new DataForSeoRuntimeError({
+            kind: statusFailureKind(statusCode),
+            requestDispatched,
+            statusCode,
+          }, error));
+        }
+        throw mapDataForSeoProviderError(new DataForSeoRuntimeError({
+          kind: error instanceof SyntaxError || error instanceof TypeError
+            ? "malformed_response"
+            : "network",
+          requestDispatched,
+          statusCode,
+        }, error));
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+
+    async recoverAcceptedTask(rawCall, rawProviderTaskId) {
+      const call = assertCommercialDiscoveryCallAllowed({
+        call: rawCall,
+        endpointAllowlist: input.endpointAllowlist,
+      });
+      const providerTaskId = rawProviderTaskId.trim();
+      if (
+        call.endpoint !== "/v3/serp/google/organic/task_post"
+        || !/^[A-Za-z0-9-]{1,128}$/u.test(providerTaskId)
+      ) {
+        throw mapDataForSeoProviderError(new DataForSeoRuntimeError({
+          kind: "invalid_request",
+          requestDispatched: false,
+        }));
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
+      let requestDispatched = false;
+      let responseStatus: number | undefined;
+      try {
+        const url = `${baseUrl}${taskGetPrefix}${providerTaskId}`;
+        if (!allowedPath(url, input.endpointAllowlist)) {
+          throw new DataForSeoRuntimeError({
+            kind: "invalid_request",
+            requestDispatched: false,
+          });
+        }
+        const response = await fetchImplementation(url, {
+          method: "GET",
+          headers: {
+            authorization: `Basic ${Buffer.from(
+              `${input.credentials.login}:${input.credentials.password}`,
+              "utf8",
+            ).toString("base64")}`,
+          },
+          signal: controller.signal,
+        });
+        requestDispatched = true;
+        responseStatus = response.status;
+        if (!response.ok) {
+          throw new DataForSeoRuntimeError({
+            kind: statusFailureKind(response.status),
+            requestDispatched,
+            statusCode: response.status,
+          });
+        }
+        const recovered = normalizeJson(await response.json());
+        if (taskStatusCode(recovered, providerTaskId) !== 20000) {
+          throw new DataForSeoRuntimeError({
+            kind: "malformed_response",
+            requestDispatched,
+            statusCode: responseStatus,
+          });
+        }
+        return recovered;
       } catch (error) {
         if (error instanceof DataForSeoRuntimeError) {
           throw mapDataForSeoProviderError(error);

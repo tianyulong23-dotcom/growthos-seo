@@ -4,6 +4,9 @@ import {
   createAiDraftClient,
 } from "../adapters/ai/ai-draft-client.js";
 import {
+  createAiSdkCommercialDiscoveryBlueprintAdapter,
+} from "../adapters/ai/ai-sdk-commercial-discovery-blueprint.adapter.js";
+import {
   createAiSdkDraftTransport,
 } from "../adapters/ai/ai-sdk-draft.transport.js";
 import {
@@ -30,6 +33,9 @@ import {
   AiDraftError,
   type AiDraftPort,
 } from "../ports/ai-draft.port.js";
+import type {
+  AiCommercialDiscoveryBlueprintPort,
+} from "../ports/ai-commercial-discovery-blueprint.port.js";
 import {
   secretKinds,
 } from "../ports/secret-store.port.js";
@@ -65,7 +71,7 @@ const configurationSchema = z.object({
   modelVersion: z.string().trim().min(1),
   credentialSecretReference: aiCredentialReferenceSchema,
   maxCalls: positiveInteger.max(10_000),
-  timeoutMs: positiveInteger.max(120_000),
+  timeoutMs: positiveInteger.max(45_000),
   maxInputTokens: positiveInteger,
   maxOutputTokens: positiveInteger,
   absoluteBudgetUsd: positiveNumber,
@@ -81,6 +87,7 @@ type AiRunScope = BacklinkTenantContext & Readonly<{ runId: string }>;
 
 export type LocalProductAiRuntime = Readonly<{
   ai: AiDraftPort;
+  blueprint: AiCommercialDiscoveryBlueprintPort;
   budgetGate: DraftBudgetGate;
   reserve(input: AiRunScope): Promise<void>;
   release(input: AiRunScope): Promise<void>;
@@ -227,25 +234,43 @@ async function readCommittedAndReservedUsage(
   excludedRunId: string | null,
 ): Promise<Readonly<{ usedUsd: number; usedCalls: number }>> {
   const result = await client.query(
-    `SELECT COALESCE(sum(
-       CASE
-         WHEN status='SUCCEEDED' THEN COALESCE(estimated_cost_usd,0)
-         WHEN status IN ('QUEUED','RUNNING') THEN COALESCE(
-           NULLIF(quality_result->>'budgetReservationUsd','')::numeric,
-           0
-         )
-         ELSE 0
-       END
-     ),0)::text AS "usedUsd",
-     count(*) FILTER (
-       WHERE status IN ('QUEUED','RUNNING','SUCCEEDED')
-     )::text AS "usedCalls"
-     FROM backlinks.backlink_model_runs
-     WHERE organization_id=$1
-       AND workspace_id=$2
-       AND website_project_id=$3
-       AND quality_result->>'generationMode'='MODEL'
-       AND ($4::uuid IS NULL OR id<>$4::uuid)`,
+    `WITH model_usage AS (
+       SELECT COALESCE(sum(
+         CASE
+           WHEN status='SUCCEEDED' THEN COALESCE(estimated_cost_usd,0)
+           WHEN status IN ('QUEUED','RUNNING') THEN COALESCE(
+             NULLIF(quality_result->>'budgetReservationUsd','')::numeric,
+             0
+           )
+           ELSE 0
+         END
+       ),0) AS used_usd,
+       count(*) FILTER (
+         WHERE status IN ('QUEUED','RUNNING','SUCCEEDED')
+       ) AS used_calls
+       FROM backlinks.backlink_model_runs
+       WHERE organization_id=$1
+         AND workspace_id=$2
+         AND website_project_id=$3
+         AND quality_result->>'generationMode'='MODEL'
+         AND ($4::uuid IS NULL OR id<>$4::uuid)
+     ),
+     blueprint_usage AS (
+       SELECT COALESCE(sum(COALESCE(
+                NULLIF(blueprint#>>'{generation,estimatedCostUsd}','')::numeric,
+                0
+              )),0) AS used_usd,
+              count(*) AS used_calls
+         FROM backlinks.backlink_commercial_discovery_blueprints
+        WHERE organization_id=$1
+          AND workspace_id=$2
+          AND website_project_id=$3
+          AND generator='AI'
+     )
+     SELECT (model_usage.used_usd+blueprint_usage.used_usd)::text AS "usedUsd",
+            (model_usage.used_calls+blueprint_usage.used_calls)::text
+              AS "usedCalls"
+       FROM model_usage CROSS JOIN blueprint_usage`,
     [...scopeValues(scope), excludedRunId],
   );
   return {
@@ -297,26 +322,46 @@ export function createLocalProductAiRuntime(options: Readonly<{
     configuration.credentialSecretReference,
     secretKinds.aiProviderCredential,
   );
+  const resolveApprovedSecret = async (input: Readonly<{
+    organizationId: string;
+    secretRef: string;
+  }>): Promise<string> => {
+    if (input.secretRef !== configuration.credentialSecretReference) {
+      throw new Error("AI Provider Secret Reference is not approved.");
+    }
+    return secretStore.resolve({
+      reference: credentialReference,
+      context: {
+        organizationId: "local-product",
+        subjectProvider: "ai",
+      },
+    });
+  };
+  const assertCapacityForScope = async (
+    scope: BacklinkTenantContext,
+  ): Promise<void> => {
+    await assertProviderAllowed(
+      options.pool,
+      scope,
+      configuration.providerRef,
+    );
+    await withBacklinkTenantTransaction(
+      options.pool,
+      scope,
+      async (client) => {
+        await lockBudget(client, scope);
+        assertProviderCapacity(
+          await readCommittedAndReservedUsage(client, scope, null),
+          reservationUsd,
+          configuration,
+        );
+      },
+    );
+  };
 
   const budgetGate: DraftBudgetGate = Object.freeze({
     async assertAvailable(scope) {
-      await assertProviderAllowed(
-        options.pool,
-        scope,
-        configuration.providerRef,
-      );
-      await withBacklinkTenantTransaction(
-        options.pool,
-        scope,
-        async (client) => {
-          await lockBudget(client, scope);
-          assertProviderCapacity(
-            await readCommittedAndReservedUsage(client, scope, null),
-            reservationUsd,
-            configuration,
-          );
-        },
-      );
+      await assertCapacityForScope(scope);
     },
   });
 
@@ -326,18 +371,7 @@ export function createLocalProductAiRuntime(options: Readonly<{
       configuration.inputCostUsdPerMillionTokens,
     outputCostUsdPerMillionTokens:
       configuration.outputCostUsdPerMillionTokens,
-    resolveSecret: async ({ secretRef }) => {
-      if (secretRef !== configuration.credentialSecretReference) {
-        throw new Error("AI Provider Secret Reference is not approved.");
-      }
-      return secretStore.resolve({
-        reference: credentialReference,
-        context: {
-          organizationId: "local-product",
-          subjectProvider: "ai",
-        },
-      });
-    },
+    resolveSecret: resolveApprovedSecret,
     beforeProviderCall: async (scope) => {
       await assertProviderAllowed(
         options.pool,
@@ -360,9 +394,27 @@ export function createLocalProductAiRuntime(options: Readonly<{
     },
     transport,
   });
+  const blueprint = createAiSdkCommercialDiscoveryBlueprintAdapter({
+    providerRef: configuration.providerRef,
+    providerBaseUrl: configuration.baseUrl,
+    modelId: configuration.modelId,
+    modelVersion: configuration.modelVersion,
+    credentialSecretReference: configuration.credentialSecretReference,
+    timeoutMs: configuration.timeoutMs,
+    maxOutputTokens: configuration.maxOutputTokens,
+    inputCostUsdPerMillionTokens:
+      configuration.inputCostUsdPerMillionTokens,
+    outputCostUsdPerMillionTokens:
+      configuration.outputCostUsdPerMillionTokens,
+    resolveSecret: resolveApprovedSecret,
+    beforeProviderCall: async (scope) => {
+      await assertCapacityForScope(scope);
+    },
+  });
 
   return Object.freeze({
     ai,
+    blueprint,
     budgetGate,
     async reserve(input) {
       await assertProviderAllowed(

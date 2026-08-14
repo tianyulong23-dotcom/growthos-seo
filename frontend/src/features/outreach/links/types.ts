@@ -25,6 +25,22 @@ export type PlacementCandidateCreation =
 export type OpportunityListResponse =
   BacklinksResponse<"backlinksListOpportunitiesV1">
 export type OpportunityListItem = OpportunityListResponse["items"][number]
+export type BacklinkProfileResponse =
+  BacklinksResponse<"backlinksGetProfileV1">
+export type BacklinkInventoryResponse =
+  BacklinksResponse<"backlinksListInventoryV1">
+export type BacklinkProfileSyncResponse =
+  BacklinksResponse<"backlinksRequestProfileSyncV1">
+export type BacklinkProfileSyncJobResponse =
+  BacklinksResponse<"backlinksGetProfileSyncJobV1">
+export type BacklinkInventoryImportResponse =
+  BacklinksResponse<"backlinksImportInventoryItemV1">
+export type BacklinkInventoryPolicyResponse =
+  BacklinksResponse<"backlinksUpdateInventoryMonitoringPolicyV1">
+export type BacklinkInventoryCheckResponse =
+  BacklinksResponse<"backlinksRequestInventoryCheckV1">
+export type BacklinkInventoryDirectObservationsResponse =
+  BacklinksResponse<"backlinksListInventoryDirectObservationsV1">
 
 export type LinkListItem = LinksPage["items"][number]
 export type LinkCandidate = Extract<LinkListItem, { recordType: "candidate" }>
@@ -116,4 +132,59 @@ export type LinksClient = Readonly<{
       idempotencyKey: string
     }>
   ): Promise<PlacementReverifyResult>
+  getBacklinkProfile(
+    websiteProjectKey: string,
+    signal?: AbortSignal
+  ): Promise<BacklinkProfileResponse>
+  listBacklinkInventory(
+    websiteProjectKey: string,
+    input: Readonly<{
+      page: number
+      pageSize: number
+      status?: "live" | "lost" | "unknown"
+      source?: "DATAFORSEO" | "USER_IMPORTED"
+      query?: string
+      sort: "last_seen_desc" | "rank_desc" | "spam_desc"
+    }>,
+    signal?: AbortSignal
+  ): Promise<BacklinkInventoryResponse>
+  requestBacklinkProfileSync(
+    websiteProjectKey: string,
+    idempotencyKey: string
+  ): Promise<BacklinkProfileSyncResponse>
+  getBacklinkProfileSyncJob(
+    websiteProjectKey: string,
+    jobId: string,
+    signal?: AbortSignal
+  ): Promise<BacklinkProfileSyncJobResponse["job"]>
+  importBacklinkInventoryItem(
+    websiteProjectKey: string,
+    input: Readonly<{
+      sourceUrl: string
+      targetUrl: string
+      anchorText?: string
+      notes?: string
+      managed?: boolean
+    }>
+  ): Promise<BacklinkInventoryImportResponse>
+  updateBacklinkInventoryPolicy(
+    websiteProjectKey: string,
+    inventoryItemId: string,
+    input: Readonly<{
+      expectedVersion: number
+      important: boolean
+      monitoringStatus: "enabled" | "paused"
+    }>
+  ): Promise<BacklinkInventoryPolicyResponse>
+  requestBacklinkInventoryCheck(
+    websiteProjectKey: string,
+    inventoryItemId: string,
+    idempotencyKey: string
+  ): Promise<BacklinkInventoryCheckResponse>
+  listBacklinkInventoryDirectObservations(
+    websiteProjectKey: string,
+    inventoryItemId: string,
+    limit: number,
+    signal?: AbortSignal
+  ): Promise<BacklinkInventoryDirectObservationsResponse>
 }>

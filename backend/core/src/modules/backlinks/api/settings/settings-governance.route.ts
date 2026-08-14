@@ -35,6 +35,15 @@ const values = z.object({
   reportingTimezone: nonBlank,
   reportLookbackDays: z.number().int().min(1).max(366),
   exportExpiryHours: z.number().int().min(1).max(168),
+  discoveryTargetAudiences: z.array(
+    z.string().trim().min(1).max(2_048),
+  ).max(100).default([]),
+  discoveryPartnershipGoals: z.array(
+    z.string().trim().min(1).max(2_048),
+  ).max(100).default([]),
+  discoveryExplicitCompetitorDomains: z.array(
+    z.string().trim().min(1).max(253),
+  ).max(100).default([]),
 }).strict();
 const switchLayer = z.enum(["project", "provider"]);
 const switchSourceLayer = z.enum([
@@ -167,11 +176,12 @@ export function registerBacklinksSettingsGovernanceRoutes(
         actor: request.actor,
         websiteProjectKey: request.params.websiteProjectKey,
       });
-      return options.service.getView({
+      const view = await options.service.getView({
         organizationId: context.tenant.organizationId,
         workspaceId: context.tenant.workspaceId,
         websiteProjectId: context.project.websiteProjectId,
       });
+      return viewResponse.parse(view);
     },
   );
 
@@ -211,7 +221,7 @@ export function registerBacklinksSettingsGovernanceRoutes(
         values: request.body.values,
         actorId: request.actor.userId,
       });
-      return { settings: updated };
+      return settingsResponse.parse({ settings: updated });
     },
   );
 

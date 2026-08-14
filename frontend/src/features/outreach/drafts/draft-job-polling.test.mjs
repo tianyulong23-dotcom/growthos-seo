@@ -10,10 +10,10 @@ const runningJob = (status) => ({
   deadlineAt: "2026-08-05T04:02:00.000Z",
 })
 
-test("LOCAL-PRODUCT-010 keeps polling the same Job across repeated RUNNING responses", async () => {
+test("LOCAL-PRODUCT-018 keeps polling the same Job across running and retry states", async () => {
   const responses = [
     runningJob("RUNNING"),
-    runningJob("RUNNING"),
+    runningJob("RETRY_SCHEDULED"),
     runningJob("SUCCEEDED"),
   ]
   let calls = 0
@@ -42,7 +42,7 @@ test("LOCAL-PRODUCT-010 keeps polling the same Job across repeated RUNNING respo
   assert.equal(result.job?.draftId, "draft-010")
   assert.equal(calls, 3)
   assert.equal(maxInFlight, 1)
-  assert.deepEqual(seen, ["RUNNING", "RUNNING", "SUCCEEDED"])
+  assert.deepEqual(seen, ["RUNNING", "RETRY_SCHEDULED", "SUCCEEDED"])
 })
 
 test("LOCAL-PRODUCT-010 stops polling when the request scope is aborted", async () => {

@@ -305,6 +305,7 @@ function createDependencies() {
         replayed: false,
       }),
       requestRefill: async () => ({
+        operationId: "018f0000-0000-7000-8000-000000000155",
         jobId: "job-private-api",
         workflowId: "workflow-private-api",
         status: "queued" as const,
@@ -540,9 +541,11 @@ describe("private Backlinks API bootstrap", () => {
       headers: { origin: "https://browser.example" },
     });
 
-    expect(operationIds).toHaveLength(59);
-    expect(new Set(operationIds).size).toBe(59);
+    expect(operationIds).toHaveLength(73);
+    expect(new Set(operationIds).size).toBe(73);
     expect(operationIds).toContain("backlinksPrivateHealthV1");
+    expect(operationIds).toContain("backlinksPreflightSendIntentV1");
+    expect(operationIds).toContain("backlinksRetryUnpublishedContactsV1");
     expect(operationIds).toContain("backlinksGetAssessmentV1");
     expect(operationIds).toContain("backlinksCreateDraftJobV1");
     expect(operationIds).toContain("backlinksGetDraftJobV1");
@@ -591,6 +594,18 @@ describe("private Backlinks API bootstrap", () => {
     expect(operationIds).toContain("backlinksGetReplyMailMessageV1");
     expect(operationIds).toContain("backlinksGetReplyMailThreadV1");
     expect(operationIds).toContain("backlinksReceiveGmailPushV1");
+    expect(operationIds).toContain("backlinksGetProfileV1");
+    expect(operationIds).toContain("backlinksListInventoryV1");
+    expect(operationIds).toContain("backlinksRequestProfileSyncV1");
+    expect(operationIds).toContain("backlinksGetProfileSyncJobV1");
+    expect(operationIds).toContain("backlinksImportInventoryItemV1");
+    expect(operationIds).toContain(
+      "backlinksUpdateInventoryMonitoringPolicyV1",
+    );
+    expect(operationIds).toContain("backlinksRequestInventoryCheckV1");
+    expect(operationIds).toContain(
+      "backlinksListInventoryDirectObservationsV1",
+    );
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ status: "ok" });
     expect(response.headers).not.toHaveProperty("access-control-allow-origin");

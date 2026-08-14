@@ -65,10 +65,15 @@ describe("LOCAL-PRODUCT-015 commercial Gold Set metrics", () => {
   });
 
   it("requires 500 unique labels and 100 of each label in every market", () => {
+    const labelValues = [
+      "suitable",
+      "unsuitable",
+      "uncertain",
+    ] as const;
     const labels = Array.from({ length: 600 }, (_, index) => ({
       canonicalDomain: `site-${index}.example.com`,
       marketCode: index < 300 ? "US" : "ZA",
-      label: (["suitable", "unsuitable", "uncertain"] as const)[index % 3]!,
+      label: labelValues[index % labelValues.length] ?? "uncertain",
     }));
     const metrics = calculateCommercialGoldMetrics({
       labels,

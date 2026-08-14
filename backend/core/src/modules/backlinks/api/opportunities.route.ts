@@ -56,7 +56,7 @@ const detailSchema = listItemSchema.extend({
   targetIdentityKind: z.enum(["registrable_domain", "exact_host"]),
   targetIdentityRuleVersion: nonBlank,
   targetIdentityOverrideReason: z.string().nullable(),
-  assessment: publicAssessmentSchema,
+  assessment: publicAssessmentSchema.nullable(),
   placementCandidate: placementCandidateSchema.nullable(),
 }).strict();
 const metaSchema = z.object({

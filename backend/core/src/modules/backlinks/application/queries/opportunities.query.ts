@@ -38,7 +38,7 @@ export type OpportunityDetail = OpportunityListItem & Readonly<{
   targetIdentityKind: "registrable_domain" | "exact_host";
   targetIdentityRuleVersion: string;
   targetIdentityOverrideReason: string | null;
-  assessment: PublicAssessment;
+  assessment: PublicAssessment | null;
   placementCandidate: PlacementCandidate | null;
 }>;
 export type OpportunitiesListInput = Readonly<{
@@ -137,15 +137,18 @@ function toDetail(row: Record<string, unknown>): OpportunityDetail {
     targetIdentityRuleVersion: String(row.targetIdentityRuleVersion),
     targetIdentityOverrideReason: row.targetIdentityOverrideReason === null
       ? null : String(row.targetIdentityOverrideReason),
-    assessment: toPublicAssessment({
-      scoreId: row.assessmentScoreId,
-      totalScore: row.assessmentScore,
-      scoreModelVersion: row.assessmentScoreModelVersion,
-      ruleVersion: row.assessmentRuleVersion,
-      components: row.assessmentComponents,
-      evidence: row.assessmentEvidence,
-      generatedAt: row.assessmentGeneratedAt ?? row.updatedAt,
-    }),
+    assessment: row.assessmentScoreId === null
+        || row.assessmentScoreId === undefined
+      ? null
+      : toPublicAssessment({
+        scoreId: row.assessmentScoreId,
+        totalScore: row.assessmentScore,
+        scoreModelVersion: row.assessmentScoreModelVersion,
+        ruleVersion: row.assessmentRuleVersion,
+        components: row.assessmentComponents,
+        evidence: row.assessmentEvidence,
+        generatedAt: row.assessmentGeneratedAt ?? row.updatedAt,
+      }),
     placementCandidate: null,
   };
 }
@@ -278,6 +281,8 @@ export function createOpportunitiesQuery(
              WHERE (s.organization_id,s.workspace_id,s.website_project_id,
                     s.recommendation_id)=(o.organization_id,o.workspace_id,
                     o.website_project_id,o.recommendation_id)
+               AND s.score_model_version<>
+                 'recommendation-commercial-fit.v3'
              ORDER BY s.generated_at DESC,s.id DESC LIMIT 1
           ) s ON true
          WHERE (o.organization_id,o.workspace_id,o.website_project_id,o.id)=($1,$2,$3,$4)

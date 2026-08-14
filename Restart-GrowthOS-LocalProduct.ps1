@@ -21,6 +21,8 @@ param(
     [int]$GmailMinimumIntervalSeconds = 120,
     [ValidateRange(15, 3600)]
     [int]$GmailPollingIntervalSeconds = 60,
+    [ValidateSet("normal", "quiesced")]
+    [string]$WorkerExecutionMode = "normal",
     [switch]$RestartInfrastructure,
     [switch]$SkipBuild
 )

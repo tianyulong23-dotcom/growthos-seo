@@ -21,6 +21,9 @@ param(
     [int]$GmailMinimumIntervalSeconds = 120,
     [ValidateRange(15, 3600)]
     [int]$GmailPollingIntervalSeconds = 60,
+    [ValidateSet("normal", "quiesced")]
+    [string]$WorkerExecutionMode = "normal",
+    [switch]$PreflightOnly,
     [switch]$SkipBuild
 )
 
@@ -28,20 +31,11 @@ $ErrorActionPreference = "Stop"
 
 $script = Join-Path $PSScriptRoot `
     "ops\local-product\Start-GrowthOS-LocalProduct.ps1"
-& $script `
-    -RuntimeRoot $RuntimeRoot `
-    -ManifestPath $ManifestPath `
-    -RepositoryRoot $PSScriptRoot `
-    -EnableAi:$EnableAi `
-    -EnableGmail:$EnableGmail `
-    -EnableGmailSend:$EnableGmailSend `
-    -EnableGmailSync:$EnableGmailSync `
-    -EnableDataForSeo:$EnableDataForSeo `
-    -EnableBrowser:$EnableBrowser `
-    -AiMaxCalls $AiMaxCalls `
-    -DataForSeoMaxPaidCalls $DataForSeoMaxPaidCalls `
-    -GmailRolling24HourSendLimit $GmailRolling24HourSendLimit `
-    -GmailMinimumIntervalSeconds $GmailMinimumIntervalSeconds `
-    -GmailPollingIntervalSeconds $GmailPollingIntervalSeconds `
-    -SkipBuild:$SkipBuild
+$arguments = @{
+    RepositoryRoot = $PSScriptRoot
+}
+foreach ($name in $PSBoundParameters.Keys) {
+    $arguments[$name] = $PSBoundParameters[$name]
+}
+& $script @arguments
 exit $LASTEXITCODE

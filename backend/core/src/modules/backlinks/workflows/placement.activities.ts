@@ -32,6 +32,7 @@ export function createPlacementTemporalActivities(
     safeFetch: SafeFetchPort;
     browserFetch?: SafeFetchPort;
     monitorRepository: PlacementMonitorRepository;
+    inventoryMonitorRepository?: PlacementMonitorRepository;
     staticMonitorActivity: PlacementStaticMonitorActivity;
   }>,
 ): PlacementTemporalActivities {
@@ -46,7 +47,10 @@ export function createPlacementTemporalActivities(
     backlinksRunPlacementMonitoringV1: (input) =>
       runPlacementMonitorWorkflow(
         input,
-        options.monitorRepository,
+        input.policyVersion === "inventory-monitoring-v1"
+          && options.inventoryMonitorRepository !== undefined
+          ? options.inventoryMonitorRepository
+          : options.monitorRepository,
         options.staticMonitorActivity,
       ),
   });

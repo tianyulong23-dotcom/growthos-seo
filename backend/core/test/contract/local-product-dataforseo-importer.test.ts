@@ -13,6 +13,10 @@ import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import {
+  localProductDataForSeoEndpoints,
+} from "../../src/modules/backlinks/runtime/local-product-dataforseo-bootstrap.js";
+
 const temporaryRoots: string[] = [];
 
 async function readTree(root: string): Promise<string> {
@@ -111,10 +115,7 @@ describe("LOCAL_PRODUCT DataForSEO credential importer", () => {
       websiteProjectKey: "elephtv",
       credentialSecretRef:
         "secret://growthos/local-product/dataforseo/provider-credential/v7",
-      endpointAllowlist: [
-        "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
-        "https://api.dataforseo.com/v3/backlinks/summary/live",
-      ],
+      endpointAllowlist: [...localProductDataForSeoEndpoints],
       timeoutMs: 60_000,
       estimatedCostMicros: 1_000,
       absoluteBudgetMicros: 5_000,
@@ -122,7 +123,6 @@ describe("LOCAL_PRODUCT DataForSEO credential importer", () => {
       candidateLimit: 25,
       locationCode: "2840",
       languageCode: "en",
-      discoveryTargets: ["competitor.example", "publisher.example"],
       keywords: ["video streaming"],
       products: ["streaming platform"],
       targetUrls: ["https://elephtv.com/"],
@@ -145,9 +145,14 @@ describe("LOCAL_PRODUCT DataForSEO credential importer", () => {
           "secret://growthos/local-product/dataforseo/provider-credential/v7",
       },
     });
-    expect(
-      await readFile(join(runtimeRoot, "backlinks-worker.env"), "utf8"),
-    ).toContain("DATAFORSEO_ENABLED=false");
+    const workerEnvironment = await readFile(
+      join(runtimeRoot, "backlinks-worker.env"),
+      "utf8",
+    );
+    expect(workerEnvironment).toContain("DATAFORSEO_ENABLED=false");
+    expect(workerEnvironment).not.toContain(
+      "DATAFORSEO_DISCOVERY_TARGETS_JSON",
+    );
     const allFiles = await readTree(root);
     expect(allFiles).not.toContain(login);
     expect(allFiles).not.toContain(password);

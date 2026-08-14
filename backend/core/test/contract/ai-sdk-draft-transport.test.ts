@@ -23,14 +23,19 @@ const draft: AiDraftInput = {
     value: "GrowthOS publishes SEO workflow research.",
   }],
 };
+const validBody = [
+  "Hello, I am reaching out from GrowthOS after reviewing publisher.test and the audience it serves. The published context appears relevant to teams researching practical SEO workflow topics, so I wanted to ask whether a focused editorial collaboration could be useful.",
+  "We would like to explore a relevant content partnership around GrowthOS. The proposed destination is https://growthos.test/. We can provide concise product context, factual source material, and a clear outline while leaving topic selection, wording, review standards, and publication decisions with your editorial team.",
+  "Any link treatment would remain entirely subject to your policy. We are not assuming acceptance, publication, ranking, indexing, placement, pricing, or a dofollow attribute, and the final format should only proceed if it is genuinely useful to your readers.",
+  "Would you be open to a brief review of the collaboration idea? If it is not a fit, no action is needed. If it may be relevant, please share the information or format your team would need before considering it.",
+].join("\n\n");
 const validOutput = JSON.stringify({
   subject: "SEO workflow collaboration",
-  bodyText: "Hello, I would like to discuss a relevant collaboration.",
-  personalizationClaims: [{
-    text: "You publish SEO workflow research.",
+  bodyText: validBody,
+  factsUsed: [{
+    claim: "You publish SEO workflow research.",
     evidenceIds: ["profile:1"],
   }],
-  missingInformation: [],
   riskFlags: [],
   requiresUserConfirmation: true,
   canAutoSend: false,
@@ -100,6 +105,86 @@ describe("ai@7 structured Draft Transport", () => {
       expect(request).not.toHaveProperty("tools");
       expect(JSON.stringify(request)).not.toContain("PROTECTED_API_KEY");
     }
+  });
+
+  it("repairs an otherwise valid draft that violates the length policy", async () => {
+    const generateProviderText = vi.fn()
+      .mockResolvedValueOnce({
+        text: JSON.stringify({
+          ...JSON.parse(validOutput),
+          bodyText: "Hello, I would like to discuss a relevant collaboration.",
+        }),
+        finishReason: "stop",
+        usage: { inputTokens: 20, outputTokens: 20 },
+      })
+      .mockResolvedValueOnce({
+        text: validOutput,
+        finishReason: "stop",
+        usage: { inputTokens: 30, outputTokens: 40 },
+      });
+    const transport = createAiSdkDraftTransport({
+      providerBaseUrl: "https://ai-gateway.vercel.sh/v1",
+      resolveSecret: async () => "PROTECTED_API_KEY",
+      inputCostUsdPerMillionTokens: 1,
+      outputCostUsdPerMillionTokens: 2,
+      createModel: () => ({ model: true }),
+      generateProviderText,
+    });
+
+    await expect(transport.generate(input)).resolves.toMatchObject({
+      repairCount: 1,
+    });
+    expect(JSON.parse(
+      generateProviderText.mock.calls[1]?.[0].prompt as string,
+    )).toMatchObject({
+      repair: {
+        validationIssues: [
+          "bodyText must contain at least 130 words; received 9.",
+          "bodyText must contain at least 3 paragraphs; received 1.",
+        ],
+      },
+    });
+  });
+
+  it("repairs an otherwise valid draft that violates content policy", async () => {
+    const generateProviderText = vi.fn()
+      .mockResolvedValueOnce({
+        text: JSON.stringify({
+          ...JSON.parse(validOutput),
+          bodyText: validBody.replace(
+            "We are not assuming acceptance",
+            "We promise publication and are not assuming acceptance",
+          ),
+        }),
+        finishReason: "stop",
+        usage: { inputTokens: 20, outputTokens: 20 },
+      })
+      .mockResolvedValueOnce({
+        text: validOutput,
+        finishReason: "stop",
+        usage: { inputTokens: 30, outputTokens: 40 },
+      });
+    const transport = createAiSdkDraftTransport({
+      providerBaseUrl: "https://ai-gateway.vercel.sh/v1",
+      resolveSecret: async () => "PROTECTED_API_KEY",
+      inputCostUsdPerMillionTokens: 1,
+      outputCostUsdPerMillionTokens: 2,
+      createModel: () => ({ model: true }),
+      generateProviderText,
+    });
+
+    await expect(transport.generate(input)).resolves.toMatchObject({
+      repairCount: 1,
+    });
+    expect(JSON.parse(
+      generateProviderText.mock.calls[1]?.[0].prompt as string,
+    )).toMatchObject({
+      repair: {
+        validationIssues: [
+          "Draft output contains a prohibited promise.",
+        ],
+      },
+    });
   });
 
   it("allows the approved direct OpenAI provider", async () => {

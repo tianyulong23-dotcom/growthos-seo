@@ -24,6 +24,8 @@ param(
     [int]$GmailMinimumIntervalSeconds = 120,
     [ValidateRange(15, 3600)]
     [int]$GmailPollingIntervalSeconds = 60,
+    [ValidateSet("normal", "quiesced")]
+    [string]$WorkerExecutionMode = "normal",
     [switch]$RestartInfrastructure,
     [switch]$SkipBuild
 )
@@ -94,6 +96,41 @@ $resolvedGmailMinimumIntervalSeconds = Resolve-IntegerValue `
 $resolvedGmailPollingIntervalSeconds = Resolve-IntegerValue `
     "GmailPollingIntervalSeconds" `
     $previousState.gmailPollingIntervalSeconds 60
+$resolvedWorkerExecutionMode = if (
+    $scriptBoundParameters.ContainsKey("WorkerExecutionMode")
+) {
+    $WorkerExecutionMode
+}
+elseif (
+    $null -ne $previousState -and
+    -not [string]::IsNullOrWhiteSpace(
+        [string]$previousState.workerExecutionMode
+    )
+) {
+    [string]$previousState.workerExecutionMode
+}
+else {
+    "normal"
+}
+
+if ($SkipBuild) {
+    Push-Location (Join-Path $RepositoryRoot "backend\core")
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & (Get-Command npm.cmd).Source `
+            "run" "local-product:build-identity:check" 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $buildCheckExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($buildCheckExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_STALE_BUILD"
+    }
+}
 
 if ($null -ne $previousState) {
     & (Join-Path $PSScriptRoot "Stop-GrowthOS-LocalProduct.ps1") `
@@ -119,5 +156,6 @@ if ($null -ne $previousState) {
         $resolvedGmailMinimumIntervalSeconds `
     -GmailPollingIntervalSeconds `
         $resolvedGmailPollingIntervalSeconds `
+    -WorkerExecutionMode $resolvedWorkerExecutionMode `
     -SkipBuild:$SkipBuild
 exit $LASTEXITCODE

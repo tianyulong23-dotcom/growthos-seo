@@ -38,6 +38,14 @@ test("Links matches all re-frozen public endpoints and reverify contract", async
     "backlinksListPlacementLifecycleEventsV1",
     "backlinksGetPlacementEvidenceV1",
     "backlinksReverifyPlacementV1",
+    "backlinksGetProfileV1",
+    "backlinksListInventoryV1",
+    "backlinksRequestProfileSyncV1",
+    "backlinksGetProfileSyncJobV1",
+    "backlinksImportInventoryItemV1",
+    "backlinksUpdateInventoryMonitoringPolicyV1",
+    "backlinksRequestInventoryCheckV1",
+    "backlinksListInventoryDirectObservationsV1",
   ]) {
     assert.match(api, new RegExp(`"${operationId}"`))
   }
@@ -48,6 +56,35 @@ test("Links matches all re-frozen public endpoints and reverify contract", async
   assert.match(api, /\{ signal \}/)
   assert.doesNotMatch(api, /apiRequest/)
   assert.doesNotMatch(api, /\/api\/v1\//)
+})
+
+test("Links mounts the project-scoped Backlink Profile and Inventory workspace", async () => {
+  const types = await read("types.ts")
+  const workspace = await read("links-workspace.tsx")
+  const panel = await read("backlink-profile-panel.tsx")
+
+  assert.match(types, /BacklinksResponse<"backlinksGetProfileV1">/)
+  assert.match(types, /BacklinksResponse<"backlinksListInventoryV1">/)
+  assert.match(workspace, /<BacklinkProfilePanel/)
+  assert.match(panel, /providerInputRequired/)
+  assert.match(panel, /Inventory coverage/)
+  assert.match(panel, /HealthComponents/)
+  assert.match(panel, /Distribution label="Anchor"/)
+  assert.match(panel, /DATAFORSEO/)
+  assert.match(panel, /USER_IMPORTED/)
+  assert.match(panel, /placementId/)
+  assert.match(panel, /opportunityId/)
+  assert.match(panel, /requestBacklinkProfileSync/)
+  assert.match(panel, /getBacklinkProfileSyncJob/)
+  assert.match(panel, /importBacklinkInventoryItem/)
+  assert.match(panel, /updateBacklinkInventoryPolicy/)
+  assert.match(panel, /requestBacklinkInventoryCheck/)
+  assert.match(panel, /listBacklinkInventoryDirectObservations/)
+  assert.match(panel, /Direct validation history/)
+  assert.match(panel, /Provider \{item\.providerStatus\}/)
+  assert.match(panel, /setPage\(\(current\) => current \+ 1\)/)
+  assert.match(panel, /disabled=\{itemBusy\}/)
+  assert.match(panel, /disabled=\{itemBusy \|\| providerOnly\}/)
 })
 
 test("Links renders Recovered, observations, evidence, events, stale and server job state", async () => {

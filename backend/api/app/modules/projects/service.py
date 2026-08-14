@@ -38,6 +38,8 @@ class ProjectProfileInput:
     products: tuple[str, ...]
     keywords: tuple[str, ...]
     target_urls: tuple[str, ...]
+    target_audiences: tuple[str, ...]
+    partnership_goals: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,8 @@ class ProjectProfilePatch:
     products: tuple[str, ...] | None = None
     keywords: tuple[str, ...] | None = None
     target_urls: tuple[str, ...] | None = None
+    target_audiences: tuple[str, ...] | None = None
+    partnership_goals: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,8 @@ class WebsiteProjectRecord:
     products: tuple[str, ...]
     keywords: tuple[str, ...]
     target_urls: tuple[str, ...]
+    target_audiences: tuple[str, ...]
+    partnership_goals: tuple[str, ...]
     input_required: tuple[str, ...]
     created_at: datetime
     updated_at: datetime
@@ -182,6 +188,20 @@ def normalize_profile(input: ProjectProfileInput) -> ProjectProfileInput:
     products = _dedupe_text(input.products, "products")
     keywords = _dedupe_text(input.keywords, "keywords")
     target_urls = _dedupe_text(input.target_urls, "target_urls")
+    target_audiences = _dedupe_text(input.target_audiences, "target_audiences")
+    partnership_goals = _dedupe_text(input.partnership_goals, "partnership_goals")
+    for field, values in (
+        ("products", products),
+        ("keywords", keywords),
+        ("target_urls", target_urls),
+        ("target_audiences", target_audiences),
+        ("partnership_goals", partnership_goals),
+    ):
+        if not values:
+            raise ProjectValidationError(
+                field,
+                f"At least one {field.replace('_', ' ')} entry is required.",
+            )
     for target_url in target_urls:
         parsed = urlsplit(target_url)
         try:
@@ -213,6 +233,8 @@ def normalize_profile(input: ProjectProfileInput) -> ProjectProfileInput:
         products=products,
         keywords=keywords,
         target_urls=target_urls,
+        target_audiences=target_audiences,
+        partnership_goals=partnership_goals,
     )
 
 
@@ -220,6 +242,8 @@ def _input_required(
     products: tuple[str, ...],
     keywords: tuple[str, ...],
     target_urls: tuple[str, ...],
+    target_audiences: tuple[str, ...],
+    partnership_goals: tuple[str, ...],
 ) -> tuple[str, ...]:
     return tuple(
         field
@@ -227,14 +251,24 @@ def _input_required(
             ("products", products),
             ("keywords", keywords),
             ("target_urls", target_urls),
+            ("target_audiences", target_audiences),
+            ("partnership_goals", partnership_goals),
         )
         if not value
     )
 
 
-def _profile_fallback(profile: SiteProfile | None) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+def _profile_fallback(
+    profile: SiteProfile | None,
+) -> tuple[
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
     if profile is None or not isinstance(profile.profile_json, dict):
-        return (), (), ()
+        return (), (), (), (), ()
     data = profile.profile_json
     products = tuple(
         item.strip()
@@ -253,7 +287,7 @@ def _profile_fallback(profile: SiteProfile | None) -> tuple[tuple[str, ...], tup
         and isinstance(page.get("url"), str)
         and page["url"].strip()
     )
-    return products, keywords, target_urls
+    return products, keywords, target_urls, (), ()
 
 
 class WebsiteProjectService:
@@ -303,7 +337,13 @@ class WebsiteProjectService:
         legacy_project_id: str,
         legacy_project_key: str,
     ) -> WebsiteProjectRecord:
-        fallback_products, fallback_keywords, fallback_urls = _profile_fallback(site_profile)
+        (
+            fallback_products,
+            fallback_keywords,
+            fallback_urls,
+            fallback_audiences,
+            fallback_goals,
+        ) = _profile_fallback(site_profile)
         products = (
             tuple(profile_version.products)
             if profile_version is not None
@@ -319,7 +359,23 @@ class WebsiteProjectService:
             if promotion_version is not None
             else fallback_urls
         )
-        required = _input_required(products, keywords, target_urls)
+        target_audiences = (
+            tuple(promotion_version.target_audiences)
+            if promotion_version is not None
+            else fallback_audiences
+        )
+        partnership_goals = (
+            tuple(promotion_version.partnership_goals)
+            if promotion_version is not None
+            else fallback_goals
+        )
+        required = _input_required(
+            products,
+            keywords,
+            target_urls,
+            target_audiences,
+            partnership_goals,
+        )
         return WebsiteProjectRecord(
             website_project_id=project.id,
             website_project_key=self._public_key(
@@ -367,6 +423,8 @@ class WebsiteProjectService:
             products=products,
             keywords=keywords,
             target_urls=target_urls,
+            target_audiences=target_audiences,
+            partnership_goals=partnership_goals,
             input_required=required,
             created_at=project.created_at,
             updated_at=project.updated_at,
@@ -498,11 +556,14 @@ class WebsiteProjectService:
             "canonicalDomain": project.domain,
             "locale": project.language,
             "countryCode": project.country,
+            "targetMarket": profile.target_market,
             "profileVersionId": profile_version_id,
             "promotionTargetVersionId": promotion_target_version_id,
             "products": list(profile.products),
             "keywords": list(profile.keywords),
             "targetUrls": list(profile.target_urls),
+            "targetAudiences": list(profile.target_audiences),
+            "partnershipGoals": list(profile.partnership_goals),
             "inputComplete": not input_required,
             "jobId": job_id,
             "outboxEventId": outbox_event_id,
@@ -522,6 +583,8 @@ class WebsiteProjectService:
             profile.products,
             profile.keywords,
             profile.target_urls,
+            profile.target_audiences,
+            profile.partnership_goals,
         )
         profile_version_id = str(uuid4())
         promotion_version_id = str(uuid4())
@@ -555,6 +618,8 @@ class WebsiteProjectService:
                     version=project.context_version,
                     keywords=list(profile.keywords),
                     target_urls=list(profile.target_urls),
+                    target_audiences=list(profile.target_audiences),
+                    partnership_goals=list(profile.partnership_goals),
                     input_required=list(input_required),
                     created_by=actor_id,
                 ),
@@ -667,10 +732,14 @@ class WebsiteProjectService:
             products=normalized.products,
             keywords=normalized.keywords,
             target_urls=normalized.target_urls,
+            target_audiences=normalized.target_audiences,
+            partnership_goals=normalized.partnership_goals,
             input_required=_input_required(
                 normalized.products,
                 normalized.keywords,
                 normalized.target_urls,
+                normalized.target_audiences,
+                normalized.partnership_goals,
             ),
             created_at=now,
             updated_at=now,
@@ -746,6 +815,16 @@ class WebsiteProjectService:
                             if patch and patch.target_urls is not None
                             else current.target_urls
                         ),
+                        target_audiences=(
+                            patch.target_audiences
+                            if patch and patch.target_audiences is not None
+                            else current.target_audiences
+                        ),
+                        partnership_goals=(
+                            patch.partnership_goals
+                            if patch and patch.partnership_goals is not None
+                            else current.partnership_goals
+                        ),
                     )
                 )
                 project.name = candidate.name
@@ -792,10 +871,14 @@ class WebsiteProjectService:
                     products=candidate.products,
                     keywords=candidate.keywords,
                     target_urls=candidate.target_urls,
+                    target_audiences=candidate.target_audiences,
+                    partnership_goals=candidate.partnership_goals,
                     input_required=_input_required(
                         candidate.products,
                         candidate.keywords,
                         candidate.target_urls,
+                        candidate.target_audiences,
+                        candidate.partnership_goals,
                     ),
                     created_at=project.created_at,
                     updated_at=project.updated_at,

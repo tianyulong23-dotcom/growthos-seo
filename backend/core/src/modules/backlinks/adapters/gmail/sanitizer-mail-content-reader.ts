@@ -26,19 +26,30 @@ const emptyBody = Object.freeze({
   sanitizedHtml: null,
 } satisfies SafeReplyMailBody);
 
-const projectObjectPrefix = (input: Readonly<{
+const objectPrefixes = (input: Readonly<{
   organizationId: string;
   workspaceId: string;
   websiteProjectId: string;
-}>): string => [
-  "backlinks",
-  "mail",
-  "raw",
-  input.organizationId,
-  input.workspaceId,
-  input.websiteProjectId,
-  "",
-].join("/");
+}>): readonly string[] => [
+  [
+    "backlinks",
+    "mail",
+    "raw",
+    input.organizationId,
+    input.workspaceId,
+    input.websiteProjectId,
+    "",
+  ].join("/"),
+  [
+    "backlinks",
+    "mail",
+    "raw",
+    input.organizationId,
+    input.workspaceId,
+    "gmail-connection",
+    "",
+  ].join("/"),
+];
 
 export function createSanitizedReplyMailContentReader(
   dependencies: Readonly<{
@@ -47,7 +58,11 @@ export function createSanitizedReplyMailContentReader(
 ): ReplyMailContentReader {
   return Object.freeze({
     async read(input) {
-      if (!input.rawObjectKey.startsWith(projectObjectPrefix(input))) {
+      if (
+        !objectPrefixes(input).some(
+          (prefix) => input.rawObjectKey.startsWith(prefix),
+        )
+      ) {
         throw new BacklinkError({
           code: backlinkErrorCodes.accessDenied,
           message: "Mail content is not available in this project.",

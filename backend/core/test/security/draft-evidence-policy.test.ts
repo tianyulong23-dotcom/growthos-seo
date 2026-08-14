@@ -34,6 +34,12 @@ const snapshot = (overrides: Record<string, unknown> = {}) => ({
   ],
   ...overrides,
 });
+const validBody = [
+  "Hello, I am reaching out from GrowthOS after reviewing publisher.test and the audience it serves. The published context appears relevant to teams researching practical outreach workflows, so I wanted to ask whether a focused editorial collaboration could be useful.",
+  "We would like to explore a relevant content partnership around GrowthOS. The proposed destination is https://growthos.test/. We can provide concise product context, factual source material, and a clear outline while leaving topic selection, wording, review standards, and publication decisions with your editorial team.",
+  "Any link treatment would remain entirely subject to your policy. We are not assuming acceptance, publication, ranking, indexing, placement, pricing, or a dofollow attribute, and the final format should only proceed if it is genuinely useful to your readers.",
+  "Would you be open to a brief review of the collaboration idea? If it is not a fit, no action is needed. If it may be relevant, please share the information or format your team would need before considering it.",
+].join("\n\n");
 
 describe("BL-AI-092 Draft evidence boundary", () => {
   it("allows only active, visible, confident, non-AI evidence", () => {
@@ -54,17 +60,16 @@ describe("BL-AI-092 Draft evidence boundary", () => {
     }), scope)).toThrow("Evidence Snapshot is outside the Draft scope.");
   });
 
-  it("rejects missing Evidence IDs in personalization claims", () => {
+  it("rejects missing Evidence IDs in facts used", () => {
     const approved = approveDraftEvidence(snapshot(), scope);
     expect(() => validateDraftOutputPolicy({
       output: {
         subject: "Collaboration",
         bodyText: "A relevant collaboration.",
-        personalizationClaims: [{
-          text: "Unsupported claim",
+        factsUsed: [{
+          claim: "Unsupported claim",
           evidenceIds: ["other-project:secret"],
         }],
-        missingInformation: [],
         riskFlags: [],
         requiresUserConfirmation: true,
         canAutoSend: false,
@@ -86,11 +91,10 @@ describe("BL-AI-092 Draft evidence boundary", () => {
         output: {
           subject: "Collaboration",
           bodyText: `A relevant collaboration. ${forbidden}`,
-          personalizationClaims: [{
-            text: "Evidence-backed claim",
+          factsUsed: [{
+            claim: "Evidence-backed claim",
             evidenceIds: ["profile:1"],
           }],
-          missingInformation: [],
           riskFlags: [],
           requiresUserConfirmation: true,
           canAutoSend: false,
@@ -104,5 +108,58 @@ describe("BL-AI-092 Draft evidence boundary", () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe("Draft output violated a data boundary.");
     expect((error as Error).message).not.toContain(name);
+  });
+
+  it("rejects a subject that is not semantically coherent with the body", () => {
+    const approved = approveDraftEvidence(snapshot(), scope);
+    expect(() => validateDraftOutputPolicy({
+      output: {
+        subject: "Quarterly payroll changes",
+        bodyText: validBody,
+        factsUsed: [{
+          claim: "Evidence-backed sender context.",
+          evidenceIds: ["profile:1"],
+        }],
+        riskFlags: [],
+        requiresUserConfirmation: true,
+        canAutoSend: false,
+      },
+      approvedEvidence: approved,
+      forbiddenValues: [],
+    })).toThrow("Draft output subject is not coherent with the body.");
+  });
+
+  it("rejects prohibited promises in outbound content but not metadata", () => {
+    const approved = approveDraftEvidence(snapshot(), scope);
+    const baseOutput = {
+      subject: "GrowthOS content collaboration",
+      bodyText: validBody,
+      factsUsed: [{
+        claim: "Evidence-backed sender context.",
+        evidenceIds: ["profile:1"],
+      }],
+      requiresUserConfirmation: true,
+      canAutoSend: false,
+    };
+    expect(() => validateDraftOutputPolicy({
+      output: {
+        ...baseOutput,
+        riskFlags: ["Avoid any promise publication language."],
+      },
+      approvedEvidence: approved,
+      forbiddenValues: [],
+    })).not.toThrow();
+    expect(() => validateDraftOutputPolicy({
+      output: {
+        ...baseOutput,
+        bodyText: validBody.replace(
+          "We are not assuming acceptance",
+          "We promise publication and are not assuming acceptance",
+        ),
+        riskFlags: [],
+      },
+      approvedEvidence: approved,
+      forbiddenValues: [],
+    })).toThrow("Draft output contains a prohibited promise.");
   });
 });

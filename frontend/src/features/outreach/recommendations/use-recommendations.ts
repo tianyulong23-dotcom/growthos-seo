@@ -19,7 +19,12 @@ export function useRecommendations(
   const [items, setItems] = useState<readonly RecommendationItem[]>([])
   const [status, setStatus] = useState<RecommendationsState>("loading")
   const key = useMemo(
-    () => createProjectQueryKey(websiteProjectKey, "recommendations", "ready"),
+    () =>
+      createProjectQueryKey(
+        websiteProjectKey,
+        "recommendations",
+        "active-pool"
+      ),
     [websiteProjectKey]
   )
 

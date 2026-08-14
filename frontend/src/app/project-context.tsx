@@ -28,7 +28,15 @@ export type Project = {
   keywords: readonly string[]
   products: readonly string[]
   targetUrls: readonly string[]
-  inputRequired: readonly ("keywords" | "products" | "target_urls")[]
+  targetAudiences: readonly string[]
+  partnershipGoals: readonly string[]
+  inputRequired: readonly (
+    | "keywords"
+    | "products"
+    | "target_urls"
+    | "target_audiences"
+    | "partnership_goals"
+  )[]
   createdAt: string
   updatedAt: string
 }
@@ -80,6 +88,8 @@ function toProject(project: WebsiteProjectResponse): Project {
     keywords: project.keywords,
     products: project.products,
     targetUrls: project.target_urls,
+    targetAudiences: project.target_audiences,
+    partnershipGoals: project.partnership_goals,
     inputRequired: project.input_required,
     createdAt: project.created_at,
     updatedAt: project.updated_at,

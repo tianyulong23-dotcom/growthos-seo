@@ -25,6 +25,7 @@ export type GmailConnectionView = Readonly<{
   mailSyncCapability: boolean;
   tokenExpiresAt: string;
   connectedAt: string;
+  affectedProjectCount?: number;
   recentErrorCategory?: string | null;
 }>;
 

@@ -1,6 +1,11 @@
 import { domainToASCII } from "node:url";
 import { getDomain } from "tldts";
 import { parseContactPage } from "../../adapters/html/contact-parser.adapter.js";
+import {
+  contactEvidenceConfidence,
+  contactEvidenceConfidenceRuleVersion,
+  type ContactDomainRelation,
+} from "../../domain/contacts/contact-evidence-confidence.js";
 import type {
   SafeFetchPort,
   SafeFetchResult,
@@ -16,13 +21,14 @@ export type ContactDiscoveryInput = Readonly<{
 }>;
 type DiscoveryRecord = Readonly<{
   candidateId: string; evidenceId: string; normalizedEmail: string;
-  emailDomainAscii: string; domainRelation: "same_registrable_domain" | "external_domain" | "unknown";
+  emailDomainAscii: string; domainRelation: ContactDomainRelation;
   syntaxValidatorVersion: string; confidence: number; sourceUrl: string;
   observedAt: Date;
   extractionMethod: "mailto" | "visible_text" | "obfuscated_text" | "json_ld";
   evidenceSnippet: string; parserVersion: string; contentSha256: string; expiresAt: Date;
   observedRole: string | null; inferredPurpose: string; purposeConfidence: number;
   purposeRuleVersion: string; purposeEvidence: readonly Readonly<Record<string, string>>[];
+  evidenceRuleVersion: string;
 }>;
 export type ContactDiscoveryWrite = Readonly<{
   organizationId: string; workspaceId: string; websiteProjectId: string;
@@ -80,14 +86,10 @@ export class ContactDiscoveryService {
       const emailDomainAscii = domainToASCII(rawDomain).toLowerCase();
       const domainRelation = emailDomainAscii && prospectDomain
         ? relation(emailDomainAscii, prospectDomain) : "unknown";
-      const sourceConfidence = {
-        mailto: 90,
-        visible_text: 80,
-        obfuscated_text: 75,
-        json_ld: 85,
-      }[candidate.evidence.source];
-      const confidence = sourceConfidence -
-        (domainRelation === "same_registrable_domain" ? 0 : 15);
+      const confidence = contactEvidenceConfidence({
+        source: candidate.evidence.source,
+        domainRelation,
+      });
       return [{
         candidateId: this.dependencies.newId(), evidenceId: this.dependencies.newId(),
         normalizedEmail: candidate.email, emailDomainAscii, domainRelation,
@@ -101,6 +103,7 @@ export class ContactDiscoveryService {
         purposeConfidence: candidate.purposeDecision.confidence,
         purposeRuleVersion: candidate.purposeDecision.ruleVersion,
         purposeEvidence: candidate.purposeDecision.evidence,
+        evidenceRuleVersion: contactEvidenceConfidenceRuleVersion,
       }];
     });
     if (records.length === 0) {

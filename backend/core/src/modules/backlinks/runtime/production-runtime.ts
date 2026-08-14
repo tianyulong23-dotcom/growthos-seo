@@ -55,6 +55,10 @@ import {
   type RecommendationsQuery,
 } from "../application/queries/recommendations.query.js";
 import {
+  createResourceLibraryQuery,
+  type ResourceLibraryQuery,
+} from "../application/queries/resource-library.query.js";
+import {
   createReplyMailQuery,
   type ReplyMailQuery,
 } from "../application/queries/reply-mail.query.js";
@@ -72,16 +76,29 @@ import {
   createDraftGenerationRepository,
   type DraftGenerationRepository,
 } from "../application/repositories/draft-generation.repository.js";
+import { createInventoryMonitorRepository } from "../application/repositories/inventory-monitor.repository.js";
 import { createPlacementMonitorRepository } from "../application/repositories/placement-monitor.repository.js";
 import { createPlacementReviewRepository } from "../application/repositories/placement-review.repository.js";
 import { createPlacementInitialValidationRepository } from "../application/repositories/placement-validation.repository.js";
 import { createPlacementStaticMonitorActivity } from "../application/activities/placement-static-monitor.activity.js";
 import { PostgresqlReplyMatchRepository } from "../application/services/reply-match.repository.js";
+import {
+  createBacklinkProfileService,
+  createBacklinkProfileStore,
+} from "../application/services/backlink-profile.service.js";
 import { SecretBackedGmailConnectionRepository } from "../application/services/gmail-connection-secret.repository.js";
 import { reserveRecommendationRefillJob } from "../application/services/recommendation-refill-reservation.service.js";
 import { ensureCommercialRecommendationRefill } from "../application/services/commercial-inventory-refill.service.js";
+import {
+  completeCommercialSupplyOperation,
+  planCommercialSupplyOperationStep,
+} from "../application/services/commercial-supply-operation.service.js";
 import { runProjectScopedLane } from "../application/services/project-scope-scheduler.js";
 import { GmailConnectionDisconnectWorkflow } from "../application/workflows/gmail-connection-disconnect.workflow.js";
+import {
+  createGmailPollingSyncCapabilityPausedResult,
+  type GmailPollingSyncWorkflowInput,
+} from "../application/workflows/gmail-polling-sync-workflow.js";
 import { runDraftGenerationWorkflow } from "../application/workflows/draft-generation-workflow.js";
 import {
   createReportExportWorkflow,
@@ -104,12 +121,16 @@ import {
   BacklinkError,
   backlinkErrorCodes,
 } from "../domain/errors/backlink-error.js";
+import { commercialSupplyPublishedTarget } from "../domain/recommendations/commercial-refill-cycle.js";
 import {
   PostgresqlGmailConnectionRefreshLock,
   PostgresqlGmailConnectionRepository,
 } from "../db/repositories/gmail-connection.repository.js";
 import { PostgresqlOAuthAttemptRepository } from "../db/repositories/oauth-attempt.repository.js";
-import { createMonitoringScheduleRepository } from "../db/repositories/monitoring-schedule.repository.js";
+import {
+  createInventoryMonitoringScheduleRepository,
+  createMonitoringScheduleRepository,
+} from "../db/repositories/monitoring-schedule.repository.js";
 import { createOpportunityRepository } from "../db/repositories/opportunity.repository.js";
 import { createProjectContextSnapshotRepository } from "../db/repositories/project-context-snapshot.repository.js";
 import {
@@ -124,14 +145,20 @@ import {
   type BacklinkTransactionClient,
 } from "../db/tenant-transaction.js";
 import type { ResolvedProjectContext } from "../ports/project-context.port.js";
-import { createBacklinkProjectAnalysisActivities } from "../activities/backlink-project-analysis.activity.js";
+import type { ActiveProjectScope } from "../ports/project-scope-provider.port.js";
+import {
+  createBacklinkProjectAnalysisActivities,
+  createProjectAnalysisJobWriter,
+} from "../activities/backlink-project-analysis.activity.js";
 import { createContactEnrichmentActivity } from "../activities/contact-enrichment.activity.js";
 import { createSharedBrowserWorkerAdapter } from "../adapters/browser/shared-browser-worker.adapter.js";
 import { SafeFetchAdapter } from "../adapters/http/safe-fetch.adapter.js";
 import {
+  createBacklinkOutboxRelay,
   createContactEnrichmentOutboxRelay,
   createPlacementMonitoringRequestedOutboxRelay,
   createRecommendationRefillOutboxRelay,
+  createTemporalBacklinkProjectAnalysisStarter,
   createTemporalContactEnrichmentConsumer,
   createTemporalPlacementInitialValidationStarter,
   createTemporalPlacementMonitoringInitializationConsumer,
@@ -140,6 +167,7 @@ import {
 } from "../workflows/outbox-relay.js";
 import { backlinksRuntimeContract } from "../workflows/namespaces.js";
 import { createTemporalDraftGenerationScheduler } from "../workflows/draft-generation.starter.js";
+import { createTemporalBacklinkProfileSyncScheduler } from "../workflows/backlink-profile-sync.starter.js";
 import { createPlacementTemporalActivities } from "../workflows/placement.activities.js";
 import { GoogleAuthClientAdapter } from "../adapters/gmail/auth-client.js";
 import { GoogleAuthLibraryClient } from "../adapters/gmail/google-auth-library-client.js";
@@ -160,6 +188,10 @@ import {
   readLocalProductDataForSeoConfiguration,
 } from "./local-product-dataforseo-runtime.js";
 import {
+  createLocalProductBacklinkProfileRuntime,
+  markBacklinkProfileInputRequired,
+} from "./local-product-backlink-profile-runtime.js";
+import {
   createLocalProductGmailSendRuntime,
   createLocalProductSendIntentCommands,
 } from "./local-product-gmail-runtime.js";
@@ -168,6 +200,16 @@ import {
   createLocalProductGmailPollingSyncRuntime,
 } from "./local-product-gmail-sync-runtime.js";
 import { createLocalProductReplyMailContentReader } from "./local-product-mail-store.js";
+
+export const gmailTokenHealthMaximumRetryDelaySeconds = 3_600;
+
+export const calculateGmailTokenHealthRetryDelaySeconds = (
+  consecutiveFailures: number,
+): number =>
+  Math.min(
+    gmailTokenHealthMaximumRetryDelaySeconds,
+    60 * 2 ** Math.min(Math.max(0, consecutiveFailures - 1), 16),
+  );
 
 type ContactCommands = ReturnType<typeof createContactCommands>;
 type ContactEnrichmentCommands = ReturnType<
@@ -186,6 +228,7 @@ type PlacementReverifyCommand = ReturnType<
 type PlacementReviewCommand = ReturnType<typeof createPlacementReviewCommand>;
 type RecommendationCommands = ReturnType<typeof createRecommendationCommands>;
 type SendIntentCommands = ReturnType<typeof createSendIntentCommands>;
+type BacklinkProfileStore = ReturnType<typeof createBacklinkProfileStore>;
 type QueryFactory<T extends object> = (client: BacklinkTransactionClient) => T;
 
 function providerDisabled(capability: string): never {
@@ -198,8 +241,7 @@ function providerDisabled(capability: string): never {
 function dataForSeoInputRequired(): never {
   throw new BacklinkError({
     code: backlinkErrorCodes.invalidRequest,
-    message:
-      "INPUT_REQUIRED: DataForSEO recommendation refill configuration is incomplete.",
+    message: "INPUT_REQUIRED: DataForSEO provider configuration is incomplete.",
     fieldErrors: [
       {
         field: "DATAFORSEO_CREDENTIAL_SECRET_REF",
@@ -331,6 +373,8 @@ function createScopedDraftGenerationRepository(
       scoped(input, (repository) => repository.completeJob(input)),
     failJob: (input) =>
       scoped(input, (repository) => repository.failJob(input)),
+    scheduleRetry: (input) =>
+      scoped(input, (repository) => repository.scheduleRetry(input)),
     getJob: (input) => scoped(input, (repository) => repository.getJob(input)),
     findLatestJob: (input) =>
       scoped(input, (repository) => repository.findLatestJob(input)),
@@ -405,6 +449,25 @@ function createScopedPlacementMonitorRepository(
     complete: (input) =>
       withBacklinkTenantTransaction(pool, tenantScopeFrom(input), (client) =>
         createPlacementMonitorRepository(client).complete(input),
+      ),
+  };
+}
+
+function createScopedInventoryMonitorRepository(
+  pool: BacklinkTenantPool,
+): ReturnType<typeof createInventoryMonitorRepository> {
+  return {
+    prepare: (input) =>
+      withBacklinkTenantTransaction(pool, tenantScopeFrom(input), (client) =>
+        createInventoryMonitorRepository(client).prepare(input),
+      ),
+    scheduleRetry: (input) =>
+      withBacklinkTenantTransaction(pool, tenantScopeFrom(input), (client) =>
+        createInventoryMonitorRepository(client).scheduleRetry(input),
+      ),
+    complete: (input) =>
+      withBacklinkTenantTransaction(pool, tenantScopeFrom(input), (client) =>
+        createInventoryMonitorRepository(client).complete(input),
       ),
   };
 }
@@ -835,14 +898,30 @@ function createSettingsGovernanceService(
         if (settingsRow === undefined || retentionRow === undefined) {
           throw new Error("BACKLINKS_RUNTIME_GOVERNANCE_NOT_INITIALIZED");
         }
+        const settingsValues = settingsRow.values as Readonly<
+          Record<string, unknown>
+        >;
+        const stringArray = (value: unknown): string[] =>
+          Array.isArray(value)
+            ? value.filter((item): item is string => typeof item === "string")
+            : [];
         return {
           settings: {
             id: String(settingsRow.id),
             version: Number(settingsRow.version),
-            values: settingsRow.values as {
-              reportingTimezone: string;
-              reportLookbackDays: number;
-              exportExpiryHours: number;
+            values: {
+              reportingTimezone: String(settingsValues.reportingTimezone),
+              reportLookbackDays: Number(settingsValues.reportLookbackDays),
+              exportExpiryHours: Number(settingsValues.exportExpiryHours),
+              discoveryTargetAudiences: stringArray(
+                settingsValues.discoveryTargetAudiences,
+              ),
+              discoveryPartnershipGoals: stringArray(
+                settingsValues.discoveryPartnershipGoals,
+              ),
+              discoveryExplicitCompetitorDomains: stringArray(
+                settingsValues.discoveryExplicitCompetitorDomains,
+              ),
             },
           },
           killSwitches: switches.rows.map((row) => ({
@@ -989,11 +1068,12 @@ async function createApiDependencies(
     createPlacementLinksQuery;
   const recommendationsFactory: QueryFactory<RecommendationsQuery> =
     createRecommendationsQuery;
-  const replyMailContentReader = capabilities.gmailSyncEnabled
+  const resourceLibraryFactory: QueryFactory<ResourceLibraryQuery> =
+    createResourceLibraryQuery;
+  const replyMailContentReader = capabilities.secretStoreRoot !== null
     ? createLocalProductReplyMailContentReader(
         resolve(
-          capabilities.secretStoreRoot ??
-            providerDisabled("Reply Mail object storage"),
+          capabilities.secretStoreRoot,
           "..",
           "mail-raw",
         ),
@@ -1014,6 +1094,18 @@ async function createApiDependencies(
       return Object.freeze({});
     },
   });
+  const profileConfiguration = capabilities.dataForSeoEnabled
+    ? readLocalProductDataForSeoConfiguration()
+    : null;
+  const profileEstimatedCostMicros =
+    (profileConfiguration?.estimatedCostMicros ??
+      Number(process.env.DATAFORSEO_ESTIMATED_COST_MICROS ?? 27_600)) * 2;
+  const profileFactory: QueryFactory<BacklinkProfileStore> = (client) =>
+    createBacklinkProfileStore(client, {
+      providerEnabled: capabilities.dataForSeoEnabled,
+      providerAvailable: capabilities.dataForSeoEnabled,
+      estimatedCostMicros: profileEstimatedCostMicros,
+    });
 
   const queries = Object.freeze({
     getAssessment: scopedMethod(pool, assessmentFactory, "getAssessment"),
@@ -1056,6 +1148,11 @@ async function createApiDependencies(
       pool,
       recommendationsFactory,
       "getRecommendationInventoryStatus",
+    ),
+    listResourceLibrary: scopedMethod(
+      pool,
+      resourceLibraryFactory,
+      "listResourceLibrary",
     ),
     listMailMessages: scopedMethod(pool, replyMailFactory, "listMailMessages"),
     getMailMessage: scopedMethod(pool, replyMailFactory, "getMailMessage"),
@@ -1123,9 +1220,10 @@ async function createApiDependencies(
     budget: aiRuntime?.budgetGate ?? { assertAvailable: async () => {} },
     newId: randomUUID,
     now: () => new Date(),
-    promptVersion: "backlinks-outreach-draft.v1",
-    outputSchemaVersion: "draft-document.v1",
-    generationMode: capabilities.aiProviderEnabled ? "MODEL" : "MANUAL",
+    promptVersion: "backlinks-outreach-draft.v2",
+    outputSchemaVersion: "outreach-draft-output.v2",
+    generationMode: "MODEL",
+    modelProviderAvailable: () => aiRuntime !== null,
     scheduler: createTemporalDraftGenerationScheduler(
       context.temporal.workflow,
       backlinksRuntimeContract.taskQueue,
@@ -1298,9 +1396,8 @@ async function createApiDependencies(
     createRecommendationCommands;
   const recommendationCommands: RecommendationCommands = Object.freeze({
     reject: scopedMethod(pool, recommendationFactory, "reject"),
-    requestRefill: capabilities.dataForSeoEnabled
-      ? scopedMethod(pool, recommendationFactory, "requestRefill")
-      : async () => dataForSeoInputRequired(),
+    requestRefill: scopedMethod(pool, recommendationFactory, "requestRefill"),
+    archivePool: scopedMethod(pool, recommendationFactory, "archivePool"),
   });
 
   const metricDashboardQuery: MetricDashboardQuery = Object.freeze({
@@ -1348,11 +1445,149 @@ async function createApiDependencies(
   const replyMatchCommands = createReplyMatchCommands({
     repository: new PostgresqlReplyMatchRepository({ pool }),
   });
-  const sendIntentCommands: SendIntentCommands = capabilities.gmailSendEnabled
-    ? createLocalProductSendIntentCommands(pool, capabilities)
-    : Object.freeze({
-        create: async () => providerDisabled("Gmail send"),
-      });
+  const sendIntentCommands: SendIntentCommands =
+    createLocalProductSendIntentCommands(pool, capabilities, async () => {
+      try {
+        const workflowService = context.temporal.connection
+          .workflowService as Readonly<{
+          describeTaskQueue(
+            input: Readonly<{
+              namespace: string;
+              taskQueue: Readonly<{ name: string; kind: number }>;
+              taskQueueType: number;
+              reportStats: boolean;
+            }>,
+          ): Promise<
+            Readonly<{
+              pollers?: readonly unknown[];
+            }>
+          >;
+        }>;
+        const status = await workflowService.describeTaskQueue({
+          namespace: context.temporal.workflow.options.namespace,
+          taskQueue: {
+            name: backlinksRuntimeContract.taskQueue,
+            kind: 1,
+          },
+          taskQueueType: 1,
+          reportStats: false,
+        });
+        return (status.pollers?.length ?? 0) > 0;
+      } catch {
+        return false;
+      }
+    });
+  const inventoryMonitoringStarter = createTemporalPlacementMonitoringStarter(
+    context.temporal.workflow,
+    backlinksRuntimeContract.taskQueue,
+  );
+  const backlinkProfileService = createBacklinkProfileService({
+    queryStore: Object.freeze({
+      getProfile: scopedMethod(pool, profileFactory, "getProfile"),
+      listInventory: scopedMethod(pool, profileFactory, "listInventory"),
+      getSyncJob: scopedMethod(pool, profileFactory, "getSyncJob"),
+      createSyncJob: scopedMethod(pool, profileFactory, "createSyncJob"),
+      importInventory: scopedMethod(pool, profileFactory, "importInventory"),
+      updateInventoryPolicy: scopedMethod(
+        pool,
+        profileFactory,
+        "updateInventoryPolicy",
+      ),
+      requestInventoryCheck: scopedMethod(
+        pool,
+        profileFactory,
+        "requestInventoryCheck",
+      ),
+      listDirectObservations: scopedMethod(
+        pool,
+        profileFactory,
+        "listDirectObservations",
+      ),
+    }),
+    commandStore: async (profileContext, input) =>
+      withBacklinkTenantTransaction(
+        pool,
+        tenantScopeFrom(profileContext),
+        async (client) => {
+          const endpointsAllowed =
+            profileConfiguration !== null &&
+            [
+              "https://api.dataforseo.com/v3/backlinks/summary/live",
+              "https://api.dataforseo.com/v3/backlinks/backlinks/live",
+            ].every((endpoint) =>
+              profileConfiguration.endpointAllowlist.includes(endpoint),
+            );
+          const gate = await client.query(
+            `
+            WITH budget AS (
+              SELECT COALESCE(bool_or(
+                limit_micros-spent_micros-reserved_micros >= $4
+              ),false) available,
+              max(period_start) period_start,max(period_end) period_end
+                FROM backlink_provider_budgets
+               WHERE organization_id=$1 AND workspace_id=$2
+                 AND provider='dataforseo'
+                 AND period_start<=now() AND period_end>now()
+            ), calls AS (
+              SELECT count(*)::integer count
+                FROM backlink_provider_requests request,budget
+               WHERE budget.period_start IS NOT NULL
+                 AND request.organization_id=$1
+                 AND request.workspace_id=$2
+                 AND request.provider='dataforseo'
+                 AND request.started_at>=budget.period_start
+                 AND request.started_at<budget.period_end
+            ), switches AS (
+              SELECT
+                COALESCE((
+                  SELECT NOT blocked
+                    FROM backlink_kill_switch_versions
+                   WHERE organization_id=$1 AND workspace_id=$2
+                     AND website_project_id=$3
+                     AND capability='backlinks.dataforseo.v1'
+                     AND layer='project' AND provider IS NULL
+                   ORDER BY version DESC LIMIT 1
+                ),false)
+                AND COALESCE((
+                  SELECT NOT blocked
+                    FROM backlink_kill_switch_versions
+                   WHERE organization_id=$1 AND workspace_id=$2
+                     AND website_project_id=$3
+                     AND capability='backlinks.dataforseo.v1'
+                     AND layer='provider' AND provider='dataforseo'
+                   ORDER BY version DESC LIMIT 1
+                ),false) available
+            )
+            SELECT budget.available
+                   AND switches.available
+                   AND calls.count+2 <= $5 AS available
+              FROM budget CROSS JOIN calls CROSS JOIN switches
+          `,
+            [
+              profileContext.tenant.organizationId,
+              profileContext.tenant.workspaceId,
+              profileContext.project.websiteProjectId,
+              profileEstimatedCostMicros,
+              profileConfiguration?.maxPaidCalls ?? 0,
+            ],
+          );
+          const providerAvailable =
+            capabilities.dataForSeoEnabled &&
+            endpointsAllowed &&
+            gate.rows[0]?.available === true;
+          return createBacklinkProfileStore(client, {
+            providerEnabled: capabilities.dataForSeoEnabled,
+            providerAvailable,
+            estimatedCostMicros: profileEstimatedCostMicros,
+          }).createSyncJob(profileContext, input);
+        },
+      ),
+    scheduler: createTemporalBacklinkProfileSyncScheduler(
+      context.temporal.workflow,
+      backlinksRuntimeContract.taskQueue,
+    ),
+    inventoryScheduler: inventoryMonitoringStarter,
+  });
 
   return Object.freeze({
     module: createBacklinksModule({
@@ -1377,6 +1612,7 @@ async function createApiDependencies(
     replyMatchCommands,
     sendIntentCommands,
     settingsGovernanceService: createSettingsGovernanceService(pool),
+    backlinkProfileService,
     projectContextProjectionCommand: createProjectContextProjectionCommand(
       pool,
       {
@@ -1410,6 +1646,17 @@ async function createWorkerRegistrations(
       backlinksRuntimeContract.taskQueue,
       workerId,
     );
+  const projectAnalysisStarter = createTemporalBacklinkProjectAnalysisStarter(
+    context.temporal.workflow,
+    backlinksRuntimeContract.taskQueue,
+  );
+  const projectAnalysisRelay =
+    workerAuthority === null
+      ? createBacklinkOutboxRelay({
+          repository: createOutboxRelayRepository(context.pool),
+          workflowStarter: projectAnalysisStarter,
+        })
+      : null;
   const relay =
     workerAuthority === null
       ? createPlacementMonitoringRequestedOutboxRelay({
@@ -1482,6 +1729,7 @@ async function createWorkerRegistrations(
       ? {}
       : { browserFetch: placementBrowserFetch }),
     monitorRepository: createScopedPlacementMonitorRepository(pool),
+    inventoryMonitorRepository: createScopedInventoryMonitorRepository(pool),
     staticMonitorActivity: createPlacementStaticMonitorActivity(
       placementSafeFetch,
       placementBrowserFetch,
@@ -1548,13 +1796,33 @@ async function createWorkerRegistrations(
             capabilities.secretStoreRoot ??
             providerDisabled("DataForSEO Secret Store"),
           configuration: dataForSeoConfiguration,
+          blueprintGenerator: aiRuntime?.blueprint,
+        });
+  const backlinkProfileRuntime =
+    dataForSeoConfiguration === null
+      ? null
+      : createLocalProductBacklinkProfileRuntime({
+          pool,
+          secretStoreRoot:
+            capabilities.secretStoreRoot ??
+            providerDisabled("DataForSEO Secret Store"),
+          configuration: dataForSeoConfiguration,
         });
   let relayTimer: NodeJS.Timeout | undefined;
   let relayRun: Promise<void> = Promise.resolve();
+  const maxConcurrentContactEnrichmentJobs = 2;
   let nextContactScanAt = 0;
   let nextPlacementMonitorScanAt = 0;
   let nextRecommendationInventoryScanAt = 0;
+  let nextBacklinkProfileScanAt = 0;
   let nextGmailTokenHealthCheckAt = 0;
+  const gmailTokenHealthRetryByConnection = new Map<
+    string,
+    Readonly<{
+      consecutiveFailures: number;
+      nextAttemptAt: number;
+    }>
+  >();
   const scopedWorkerId = (scope: BacklinkTenantContext, lane: string) =>
     [
       workerId,
@@ -1610,6 +1878,43 @@ async function createWorkerRegistrations(
     relayRun = relayRun
       .then(async () => {
         const staleClaimBefore = new Date(Date.now() - 30_000);
+        if (projectAnalysisRelay !== null) {
+          const outcome = await projectAnalysisRelay.runOnce({
+            workerId,
+            limit: 10,
+            staleClaimBefore,
+          });
+          if (outcome.claimed > 0) {
+            console.log(
+              JSON.stringify({
+                event: "backlinks.project-analysis.outbox.relay",
+                ...outcome,
+              }),
+            );
+          }
+        } else {
+          await runLocalProjectLane("project-analysis", async (scope) => {
+            const outcome = await createBacklinkOutboxRelay({
+              repository: createScopedOutboxRelayRepository(pool, scope),
+              workflowStarter: projectAnalysisStarter,
+            }).runOnce({
+              workerId: scopedWorkerId(scope, "project-analysis"),
+              limit: 10,
+              staleClaimBefore,
+            });
+            if (outcome.claimed > 0) {
+              console.log(
+                JSON.stringify({
+                  event: "backlinks.project-analysis.outbox.relay",
+                  organizationId: scope.organizationId,
+                  workspaceId: scope.workspaceId,
+                  websiteProjectId: scope.websiteProjectId,
+                  ...outcome,
+                }),
+              );
+            }
+          });
+        }
         if (relay !== null) {
           const outcome = await relay.runOnce({
             workerId,
@@ -1654,7 +1959,7 @@ async function createWorkerRegistrations(
             }
             if (!shouldScanPlacement) return;
             const now = new Date();
-            const due = await withBacklinkTenantTransaction(
+            const placementDue = await withBacklinkTenantTransaction(
               pool,
               scope,
               (client) =>
@@ -1664,7 +1969,17 @@ async function createWorkerRegistrations(
                   limit: 10,
                 }),
             );
-            for (const placement of due) {
+            const inventoryDue = await withBacklinkTenantTransaction(
+              pool,
+              scope,
+              (client) =>
+                createInventoryMonitoringScheduleRepository(client).listDue({
+                  ...scope,
+                  dueAt: now,
+                  limit: 10,
+                }),
+            );
+            for (const placement of [...placementDue, ...inventoryDue]) {
               const scheduledFor = placement.nextCheckAt;
               const runSeed = [
                 placement.placementId,
@@ -1684,14 +1999,15 @@ async function createWorkerRegistrations(
                 now,
               });
             }
-            if (due.length > 0) {
+            if (placementDue.length + inventoryDue.length > 0) {
               console.log(
                 JSON.stringify({
                   event: "backlinks.placement-monitoring.scheduled",
                   organizationId: scope.organizationId,
                   workspaceId: scope.workspaceId,
                   websiteProjectId: scope.websiteProjectId,
-                  count: due.length,
+                  placementCount: placementDue.length,
+                  inventoryCount: inventoryDue.length,
                 }),
               );
             }
@@ -1700,6 +2016,7 @@ async function createWorkerRegistrations(
             nextPlacementMonitorScanAt = Date.now() + 5_000;
           }
         }
+        let projectRecommendationWorkPending = false;
         if (recommendationRefillRelay !== null) {
           const recommendationOutcome = await recommendationRefillRelay.runOnce(
             {
@@ -1723,63 +2040,287 @@ async function createWorkerRegistrations(
         ) {
           const shouldScanRecommendationInventory =
             Date.now() >= nextRecommendationInventoryScanAt;
+          const recommendationScopes: Array<
+            Readonly<{
+              scope: ActiveProjectScope;
+              inventoryCount: number;
+              contextCreatedAtEpoch: number;
+            }>
+          > = [];
           await runLocalProjectLane("recommendation-refill", async (scope) => {
-            if (shouldScanRecommendationInventory) {
-              const refill = await withBacklinkTenantTransaction(
-                pool,
+            const priority = await withBacklinkTenantTransaction(
+              pool,
+              scope,
+              (client) =>
+                client.query(
+                  `
+                  SELECT
+                    EXTRACT(EPOCH FROM context.created_at)::double precision
+                      "contextCreatedAtEpoch",
+                    (
+                      SELECT count(*)::integer
+                        FROM backlink_recommendation_inventory inventory
+                       WHERE (
+                         inventory.organization_id,
+                         inventory.workspace_id,
+                         inventory.website_project_id,
+                         inventory.recommendation_context_version_id
+                       )=($1,$2,$3,$4)
+                    ) "inventoryCount"
+                    FROM backlink_project_context_snapshots context
+                   WHERE (
+                     context.organization_id,context.workspace_id,
+                     context.website_project_id,context.id
+                   )=($1,$2,$3,$4)
+                `,
+                  [
+                    scope.organizationId,
+                    scope.workspaceId,
+                    scope.websiteProjectId,
+                    scope.projectContextSnapshotId,
+                  ],
+                ),
+            );
+            recommendationScopes.push(
+              Object.freeze({
                 scope,
-                (client) =>
-                  ensureCommercialRecommendationRefill(client, {
-                    ...scope,
-                    projectContextVersionId: scope.projectContextSnapshotId,
-                    actorId: workerAuthority.actorId,
-                    estimatedCostMicros:
-                      dataForSeoConfiguration.estimatedCostMicros,
-                    candidateLimit: dataForSeoConfiguration.candidateLimit,
-                    now: new Date(),
-                  }),
-              );
-              if (refill.status === "queued") {
+                inventoryCount: Number(priority.rows[0]?.inventoryCount ?? 0),
+                contextCreatedAtEpoch: Number(
+                  priority.rows[0]?.contextCreatedAtEpoch ?? 0,
+                ),
+              }),
+            );
+          });
+          recommendationScopes.sort(
+            (left, right) =>
+              right.contextCreatedAtEpoch - left.contextCreatedAtEpoch ||
+              left.inventoryCount - right.inventoryCount ||
+              left.scope.websiteProjectId.localeCompare(
+                right.scope.websiteProjectId,
+              ),
+          );
+          for (const candidate of recommendationScopes) {
+            const scope = candidate.scope;
+            try {
+              let refillQueued = false;
+              if (shouldScanRecommendationInventory) {
+                const refill = await withBacklinkTenantTransaction(
+                  pool,
+                  scope,
+                  (client) =>
+                    ensureCommercialRecommendationRefill(client, {
+                      ...scope,
+                      projectContextVersionId: scope.projectContextSnapshotId,
+                      actorId: workerAuthority.actorId,
+                      estimatedCostMicros:
+                        dataForSeoConfiguration.estimatedCostMicros,
+                      candidateLimit: dataForSeoConfiguration.candidateLimit,
+                      now: new Date(),
+                    }),
+                );
+                if (refill.status === "queued") {
+                  refillQueued = true;
+                  console.log(
+                    JSON.stringify({
+                      event: "backlinks.commercial-inventory.refill.queued",
+                      organizationId: scope.organizationId,
+                      workspaceId: scope.workspaceId,
+                      websiteProjectId: scope.websiteProjectId,
+                      jobId: refill.jobId,
+                      requestedCandidateCount: refill.requestedCandidateCount,
+                    }),
+                  );
+                }
+              }
+              const outcome = await createRecommendationRefillOutboxRelay({
+                repository: createScopedOutboxRelayRepository(pool, scope),
+                consumer: recommendationRefillConsumer,
+              }).runOnce({
+                workerId: scopedWorkerId(scope, "recommendation-refill"),
+                limit: 1,
+                staleClaimBefore,
+              });
+              if (outcome.claimed > 0) {
                 console.log(
                   JSON.stringify({
-                    event: "backlinks.commercial-inventory.refill.queued",
+                    event: "backlinks.recommendation-refill.outbox.relay",
                     organizationId: scope.organizationId,
                     workspaceId: scope.workspaceId,
                     websiteProjectId: scope.websiteProjectId,
-                    jobId: refill.jobId,
-                    requestedCandidateCount: refill.requestedCandidateCount,
+                    ...outcome,
                   }),
                 );
               }
-            }
-            const outcome = await createRecommendationRefillOutboxRelay({
-              repository: createScopedOutboxRelayRepository(pool, scope),
-              consumer: recommendationRefillConsumer,
-            }).runOnce({
-              workerId: scopedWorkerId(scope, "recommendation-refill"),
-              limit: 1,
-              staleClaimBefore,
-            });
-            if (outcome.claimed > 0) {
-              console.log(
-                JSON.stringify({
-                  event: "backlinks.recommendation-refill.outbox.relay",
-                  organizationId: scope.organizationId,
-                  workspaceId: scope.workspaceId,
-                  websiteProjectId: scope.websiteProjectId,
-                  ...outcome,
-                }),
+              const priorityWork = await withBacklinkTenantTransaction(
+                pool,
+                scope,
+                (client) =>
+                  client.query(
+                    `
+                    SELECT EXISTS (
+                      SELECT 1
+                        FROM backlink_jobs
+                       WHERE (
+                          organization_id,workspace_id,website_project_id
+                        )=($1,$2,$3)
+                          AND job_type='recommendation_refill'
+                          AND status IN (
+                            'queued','running','waiting_provider'
+                          )
+                    )
+                    OR EXISTS (
+                      SELECT 1
+                        FROM backlink_commercial_inventory_policies
+                       WHERE (
+                         organization_id,workspace_id,website_project_id,
+                         project_context_version_id
+                       )=($1,$2,$3,$4)
+                         AND refill_state IN ('running','waiting_contact')
+                    ) pending
+                  `,
+                    [
+                      scope.organizationId,
+                      scope.workspaceId,
+                      scope.websiteProjectId,
+                      scope.projectContextSnapshotId,
+                    ],
+                  ),
               );
+              const scopeWorkPending = Boolean(priorityWork.rows[0]?.pending);
+              projectRecommendationWorkPending =
+                projectRecommendationWorkPending || scopeWorkPending;
+              if (refillQueued || scopeWorkPending) break;
+            } catch (error) {
+              await logProjectFailure("recommendation-refill", scope, error);
             }
-          });
+          }
           if (shouldScanRecommendationInventory) {
             nextRecommendationInventoryScanAt = Date.now() + 15_000;
           }
         }
+        if (
+          workerAuthority !== null &&
+          capabilities.dataForSeoEnabled &&
+          dataForSeoConfiguration !== null &&
+          !projectRecommendationWorkPending &&
+          Date.now() >= nextBacklinkProfileScanAt
+        ) {
+          const profileSyncScheduler =
+            createTemporalBacklinkProfileSyncScheduler(
+              context.temporal.workflow,
+              backlinksRuntimeContract.taskQueue,
+            );
+          await runLocalProjectLane("backlink-profile", async (scope) => {
+            const projectContext = await createWorkerProjectContext(
+              pool,
+              scope,
+              workerAuthority.actorId,
+            );
+            if (projectContext === null) return;
+            const due = await withBacklinkTenantTransaction(
+              pool,
+              scope,
+              async (client) => {
+                const result = await client.query(
+                  `
+                  SELECT search_after_token "searchAfterToken",
+                         next_sync_at "nextSyncAt",version
+                    FROM backlink_profile_sync_cursors cursor
+                   WHERE (
+                     organization_id,workspace_id,website_project_id,
+                     provider,endpoint
+                   )=($1,$2,$3,'dataforseo','/v3/backlinks/backlinks/live')
+                     AND next_sync_at IS NOT NULL
+                     AND next_sync_at<=now()
+                     AND NOT EXISTS (
+                       SELECT 1
+                         FROM backlink_profile_sync_jobs job
+                        WHERE (
+                          job.organization_id,job.workspace_id,
+                          job.website_project_id
+                        )=(
+                          cursor.organization_id,cursor.workspace_id,
+                          cursor.website_project_id
+                        )
+                          AND (
+                            job.status IN ('queued','running')
+                            OR (
+                            job.status='waiting_provider'
+                              AND job.trigger_source IN (
+                                'schedule','continuation'
+                              )
+                              AND job.sync_mode=CASE
+                                WHEN cursor.search_after_token IS NULL
+                                  THEN 'incremental'
+                                ELSE 'page'
+                              END
+                              AND job.requested_cursor IS NOT DISTINCT FROM
+                                  cursor.search_after_token
+                            )
+                          )
+                     )
+                   LIMIT 1
+                `,
+                  [
+                    scope.organizationId,
+                    scope.workspaceId,
+                    scope.websiteProjectId,
+                  ],
+                );
+                const row = result.rows[0];
+                if (row === undefined) return null;
+                const requestedCursor =
+                  row.searchAfterToken === null
+                    ? null
+                    : String(row.searchAfterToken);
+                return createBacklinkProfileStore(client, {
+                  providerEnabled: true,
+                  providerAvailable: true,
+                  estimatedCostMicros:
+                    dataForSeoConfiguration.estimatedCostMicros * 2,
+                }).createSyncJob(projectContext, {
+                  idempotencyKey: [
+                    "backlink-profile",
+                    "schedule",
+                    String(row.version),
+                    new Date(String(row.nextSyncAt)).toISOString(),
+                  ].join(":"),
+                  syncMode: requestedCursor === null ? "incremental" : "page",
+                  triggerSource:
+                    requestedCursor === null ? "schedule" : "continuation",
+                  requestedCursor,
+                });
+              },
+            );
+            if (due === null || due.status !== "queued") return;
+            await profileSyncScheduler.start({
+              organizationId: scope.organizationId,
+              workspaceId: scope.workspaceId,
+              websiteProjectId: scope.websiteProjectId,
+              profileSyncJobId: due.jobId,
+              canonicalDomain: due.canonicalDomain,
+            });
+          });
+          nextBacklinkProfileScanAt = Date.now() + 15_000;
+        } else if (
+          workerAuthority !== null &&
+          capabilities.dataForSeoEnabled &&
+          dataForSeoConfiguration !== null &&
+          projectRecommendationWorkPending &&
+          Date.now() >= nextBacklinkProfileScanAt
+        ) {
+          console.log(
+            JSON.stringify({
+              event: "backlinks.backlink-profile.deferred",
+              reason: "project_recommendation_work_pending",
+            }),
+          );
+          nextBacklinkProfileScanAt = Date.now() + 15_000;
+        }
         if (contactEnrichmentRelay !== null) {
           const contactOutcome = await contactEnrichmentRelay.runOnce({
             workerId,
-            limit: 10,
+            limit: maxConcurrentContactEnrichmentJobs,
             staleClaimBefore,
           });
           if (contactOutcome.claimed > 0) {
@@ -1792,44 +2333,142 @@ async function createWorkerRegistrations(
           }
         } else {
           const shouldEnsureContacts = Date.now() >= nextContactScanAt;
+          const contactScopes: Array<
+            Readonly<{
+              scope: ActiveProjectScope;
+              activeCount: number;
+              contextCreatedAtEpoch: number;
+            }>
+          > = [];
           await runLocalProjectLane("contact-enrichment", async (scope) => {
-            if (shouldEnsureContacts && workerAuthority !== null) {
-              const created = await withBacklinkTenantTransaction(
-                pool,
-                scope,
-                (client) =>
-                  ensureReadyContactEnrichmentJobs(client, {
-                    scope,
-                    actorId: workerAuthority.actorId,
-                    limit: 10,
-                    options: {
-                      maxPages: capabilities.contactEnrichmentMaxPages,
-                      maxDepth: capabilities.contactEnrichmentMaxDepth,
-                      maxAttempts: capabilities.contactEnrichmentMaxAttempts,
-                      browserAllowed: capabilities.browserProviderEnabled,
-                    },
-                  }),
-              );
-              if (created > 0) {
-                console.log(
-                  JSON.stringify({
-                    event: "backlinks.contact-enrichment.jobs.ensured",
-                    organizationId: scope.organizationId,
-                    workspaceId: scope.workspaceId,
-                    websiteProjectId: scope.websiteProjectId,
-                    created,
-                  }),
+            const state = await withBacklinkTenantTransaction(
+              pool,
+              scope,
+              async (client) => {
+                const created =
+                  shouldEnsureContacts && workerAuthority !== null
+                    ? await ensureReadyContactEnrichmentJobs(client, {
+                        scope,
+                        actorId: workerAuthority.actorId,
+                        limit: maxConcurrentContactEnrichmentJobs,
+                        options: {
+                          maxPages: capabilities.contactEnrichmentMaxPages,
+                          maxDepth: capabilities.contactEnrichmentMaxDepth,
+                          maxAttempts:
+                            capabilities.contactEnrichmentMaxAttempts,
+                          browserAllowed: capabilities.browserProviderEnabled,
+                        },
+                      })
+                    : 0;
+                const priority = await client.query(
+                  `
+                  SELECT
+                    EXTRACT(EPOCH FROM context.created_at)::double precision
+                      "contextCreatedAtEpoch",
+                    (
+                      SELECT count(*)::integer
+                        FROM backlink_contact_enrichment_jobs job
+                       WHERE (
+                         job.organization_id,
+                         job.workspace_id,
+                         job.website_project_id
+                       )=($1,$2,$3)
+                         AND (
+                           job.status='running'
+                           OR (
+                             job.status IN ('pending','retry_scheduled')
+                             AND EXISTS (
+                               SELECT 1
+                                 FROM backlink_outbox_events event
+                                WHERE (
+                                  event.organization_id,
+                                  event.workspace_id,
+                                  event.website_project_id
+                                )=(
+                                  job.organization_id,
+                                  job.workspace_id,
+                                  job.website_project_id
+                                )
+                                  AND event.event_type=
+                                    'backlinks.contact-enrichment.requested.v1'
+                                  AND event.aggregate_id=job.id
+                                  AND event.aggregate_version=job.version
+                                  AND event.status='published'
+                             )
+                           )
+                         )
+                    ) "activeCount"
+                    FROM backlink_project_context_snapshots context
+                   WHERE (
+                     context.organization_id,context.workspace_id,
+                     context.website_project_id,context.id
+                   )=($1,$2,$3,$4)
+                `,
+                  [
+                    scope.organizationId,
+                    scope.workspaceId,
+                    scope.websiteProjectId,
+                    scope.projectContextSnapshotId,
+                  ],
                 );
-              }
+                return Object.freeze({
+                  created,
+                  activeCount: Number(priority.rows[0]?.activeCount ?? 0),
+                  contextCreatedAtEpoch: Number(
+                    priority.rows[0]?.contextCreatedAtEpoch ?? 0,
+                  ),
+                });
+              },
+            );
+            if (state.created > 0) {
+              console.log(
+                JSON.stringify({
+                  event: "backlinks.contact-enrichment.jobs.ensured",
+                  organizationId: scope.organizationId,
+                  workspaceId: scope.workspaceId,
+                  websiteProjectId: scope.websiteProjectId,
+                  created: state.created,
+                }),
+              );
             }
+            contactScopes.push(
+              Object.freeze({
+                scope,
+                activeCount: state.activeCount,
+                contextCreatedAtEpoch: state.contextCreatedAtEpoch,
+              }),
+            );
+          });
+          contactScopes.sort(
+            (left, right) =>
+              right.contextCreatedAtEpoch - left.contextCreatedAtEpoch ||
+              left.scope.websiteProjectId.localeCompare(
+                right.scope.websiteProjectId,
+              ),
+          );
+          let availableContactSlots = Math.max(
+            0,
+            maxConcurrentContactEnrichmentJobs -
+              contactScopes.reduce(
+                (total, candidate) => total + candidate.activeCount,
+                0,
+              ),
+          );
+          for (const candidate of contactScopes) {
+            if (availableContactSlots <= 0) break;
+            const scope = candidate.scope;
             const outcome = await createContactEnrichmentOutboxRelay({
               repository: createScopedOutboxRelayRepository(pool, scope),
               consumer: contactEnrichmentConsumer,
             }).runOnce({
               workerId: scopedWorkerId(scope, "contact-enrichment"),
-              limit: 10,
+              limit: 1,
               staleClaimBefore,
             });
+            availableContactSlots = Math.max(
+              0,
+              availableContactSlots - outcome.claimed,
+            );
             if (outcome.claimed > 0) {
               console.log(
                 JSON.stringify({
@@ -1841,7 +2480,7 @@ async function createWorkerRegistrations(
                 }),
               );
             }
-          });
+          }
           if (shouldEnsureContacts) {
             nextContactScanAt = Date.now() + 5_000;
           }
@@ -1866,25 +2505,65 @@ async function createWorkerRegistrations(
               ].join(":");
               if (checkedConnections.has(connectionKey)) return;
               checkedConnections.add(connectionKey);
-              const result = await gmailSendRuntime.refreshTokenHealth({
-                context: projectContext,
-                connectionId: connection.connectionId,
-                expectedVersion: connection.version,
-              });
-              console.log(
-                JSON.stringify({
-                  event: "backlinks.gmail-token-health.checked",
-                  organizationId: scope.organizationId,
-                  workspaceId: scope.workspaceId,
+              const now = Date.now();
+              const retryState =
+                gmailTokenHealthRetryByConnection.get(connectionKey);
+              if (retryState !== undefined && retryState.nextAttemptAt > now)
+                return;
+              try {
+                const result = await gmailSendRuntime.refreshTokenHealth({
+                  context: projectContext,
                   connectionId: connection.connectionId,
-                  outcome: result.outcome,
-                  connectionStatus: result.connection.connectionStatus,
-                  recentErrorCategory:
-                    result.connection.recentErrorCategory ?? null,
-                }),
-              );
+                  expectedVersion: connection.version,
+                });
+                const nextAttemptAt = Date.now() + 86_400_000;
+                gmailTokenHealthRetryByConnection.set(connectionKey, {
+                  consecutiveFailures: 0,
+                  nextAttemptAt,
+                });
+                console.log(
+                  JSON.stringify({
+                    event: "backlinks.gmail-token-health.checked",
+                    organizationId: scope.organizationId,
+                    workspaceId: scope.workspaceId,
+                    connectionId: connection.connectionId,
+                    outcome: result.outcome,
+                    connectionStatus: result.connection.connectionStatus,
+                    recentErrorCategory:
+                      result.connection.recentErrorCategory ?? null,
+                    nextAttemptAt: new Date(nextAttemptAt).toISOString(),
+                  }),
+                );
+              } catch (error) {
+                const consecutiveFailures =
+                  (retryState?.consecutiveFailures ?? 0) + 1;
+                const retryDelaySeconds =
+                  calculateGmailTokenHealthRetryDelaySeconds(
+                    consecutiveFailures,
+                  );
+                const nextAttemptAt = Date.now() + retryDelaySeconds * 1_000;
+                gmailTokenHealthRetryByConnection.set(connectionKey, {
+                  consecutiveFailures,
+                  nextAttemptAt,
+                });
+                const errorCategory =
+                  typeof error === "object" && error !== null && "code" in error
+                    ? String(error.code)
+                    : "UNKNOWN";
+                console.error(
+                  JSON.stringify({
+                    event: "backlinks.gmail-token-health.failed",
+                    organizationId: scope.organizationId,
+                    workspaceId: scope.workspaceId,
+                    connectionId: connection.connectionId,
+                    errorCategory,
+                    consecutiveFailures,
+                    nextAttemptAt: new Date(nextAttemptAt).toISOString(),
+                  }),
+                );
+              }
             });
-            nextGmailTokenHealthCheckAt = Date.now() + 86_400_000;
+            nextGmailTokenHealthCheckAt = Date.now() + 60_000;
           }
           const gmailOutcome = await gmailSendRuntime.relay.runOnce({
             workerId,
@@ -1930,6 +2609,8 @@ async function createWorkerRegistrations(
         return withBacklinkTenantTransaction(pool, scope, (client) =>
           createBacklinkProjectAnalysisActivities(
             createProjectContextSnapshotRepository(client),
+            undefined,
+            createProjectAnalysisJobWriter(client),
           ).loadBacklinkProjectAnalysisContext(input),
         );
       },
@@ -1960,16 +2641,22 @@ async function createWorkerRegistrations(
           organizationId: string;
           workspaceId: string;
           websiteProjectId: string;
+          recommendationContextVersionId: string;
+          visiblePoolGeneration: number;
           jobId: string;
           lowWatermark: number;
+          highWatermark: number;
         }>,
       ) {
         const scope = tenantScopeFrom(input);
         return withBacklinkTenantTransaction(pool, scope, (client) =>
           reserveRecommendationRefillJob(client, {
             ...scope,
+            recommendationContextVersionId:
+              input.recommendationContextVersionId,
+            visiblePoolGeneration: input.visiblePoolGeneration,
             jobId: input.jobId,
-            lowWatermark: input.lowWatermark,
+            targetPublishedCount: commercialSupplyPublishedTarget,
           }),
         );
       },
@@ -1993,6 +2680,83 @@ async function createWorkerRegistrations(
         }
         return dataForSeoRuntime.store(input);
       },
+      async backlinksPlanRecommendationRefillSupplyV1(
+        input: Readonly<{
+          organizationId: string;
+          workspaceId: string;
+          websiteProjectId: string;
+          recommendationContextVersionId: string;
+          visiblePoolGeneration: number;
+          jobId: string;
+          actorId: string;
+          lowWatermark: number;
+          highWatermark: number;
+        }>,
+      ) {
+        const scope = tenantScopeFrom(input);
+        return withBacklinkTenantTransaction(pool, scope, (client) =>
+          planCommercialSupplyOperationStep(client, {
+            ...scope,
+            projectContextVersionId: input.recommendationContextVersionId,
+            visiblePoolGeneration: input.visiblePoolGeneration,
+            jobId: input.jobId,
+            actorId: input.actorId,
+            targetPublishedCount: commercialSupplyPublishedTarget,
+            candidateLimit: dataForSeoConfiguration?.candidateLimit ?? 25,
+            estimatedCostMicros:
+              dataForSeoConfiguration?.estimatedCostMicros ?? 1,
+            now: new Date(),
+          }),
+        );
+      },
+      async backlinksCompleteRecommendationRefillSupplyV1(
+        input: Readonly<{
+          organizationId: string;
+          workspaceId: string;
+          websiteProjectId: string;
+          recommendationContextVersionId: string;
+          visiblePoolGeneration: number;
+          jobId: string;
+          actorId: string;
+          outcome: "TARGET_REACHED" | "SUPPLY_FLOOR_REACHED";
+          lowWatermark: number;
+          highWatermark: number;
+          publishedCount: number;
+          addedCount: number;
+          evaluatedCount: number;
+          excludedCount: number;
+          insufficientDataCount: number;
+        }>,
+      ) {
+        const scope = tenantScopeFrom(input);
+        await withBacklinkTenantTransaction(pool, scope, (client) =>
+          completeCommercialSupplyOperation(client, {
+            ...scope,
+            jobId: input.jobId,
+            projectContextVersionId: input.recommendationContextVersionId,
+            visiblePoolGeneration: input.visiblePoolGeneration,
+            actorId: input.actorId,
+            outcome: input.outcome,
+            targetPublishedCount: commercialSupplyPublishedTarget,
+            publishedCount: input.publishedCount,
+            addedCount: input.addedCount,
+            evaluatedCount: input.evaluatedCount,
+            excludedCount: input.excludedCount,
+            insufficientDataCount: input.insufficientDataCount,
+            now: new Date(),
+          }),
+        );
+      },
+      async backlinksRunProfileSyncV1(
+        input: Parameters<
+          ReturnType<typeof createLocalProductBacklinkProfileRuntime>["execute"]
+        >[0],
+      ) {
+        if (backlinkProfileRuntime === null) {
+          return markBacklinkProfileInputRequired(pool, input);
+        }
+        return backlinkProfileRuntime.execute(input);
+      },
       async backlinksRecordRecommendationRefillFailureV1(
         input: Readonly<{
           organizationId: string;
@@ -2000,23 +2764,128 @@ async function createWorkerRegistrations(
           websiteProjectId: string;
           jobId: string;
           errorCode: string;
+          rootCause: string;
+          recovery: string;
+          diagnosticId: string;
+          message: string;
+          actorId: string;
         }>,
       ) {
         const scope = tenantScopeFrom(input);
         await withBacklinkTenantTransaction(pool, scope, async (client) => {
           await client.query(
-            `UPDATE backlink_jobs
-                 SET status='failed',step='provider_request_failed',
-                     progress=100,error=jsonb_build_object('code',$5::text),
-                     finished_at=now(),updated_at=now(),version=version+1
-               WHERE organization_id=$1 AND workspace_id=$2
-                 AND website_project_id=$3 AND id=$4`,
+            `WITH failed_refill AS (
+                SELECT refill.refill_window_key "refillWindowKey",
+                       refill.recommendation_context_version_id
+                         "recommendationContextVersionId",
+                       refill.visible_pool_generation
+                         "visiblePoolGeneration"
+                  FROM backlink_jobs AS job
+                  JOIN backlink_recommendation_refills AS refill
+                    ON (
+                      refill.organization_id,refill.workspace_id,
+                      refill.website_project_id,refill.job_id
+                    )=(
+                      job.organization_id,job.workspace_id,
+                      job.website_project_id,job.id
+                    )
+                 WHERE job.organization_id=$1 AND job.workspace_id=$2
+                   AND job.website_project_id=$3 AND job.id=$4::uuid
+              ),
+              provider_call AS (
+                SELECT (
+                  EXISTS (
+                    SELECT 1
+                      FROM failed_refill
+                      JOIN backlink_provider_usage_ledger AS usage
+                        ON usage.organization_id=$1
+                       AND usage.workspace_id=$2
+                       AND usage.website_project_id=$3
+                       AND usage.provider='dataforseo'
+                       AND usage.reservation_key LIKE
+                           failed_refill."refillWindowKey"||':%'
+                       AND usage.status IN ('reserved','settled')
+                  )
+                  OR EXISTS (
+                    SELECT 1
+                      FROM failed_refill
+                      JOIN provider_batch_requests AS request
+                        ON request.organization_id=$1
+                       AND request.workspace_id=$2
+                       AND request.website_project_id=$3
+                       AND request.request_id LIKE
+                           failed_refill."refillWindowKey"||':%'
+                       AND (
+                         request.status<>'failed'
+                         OR request.actual_cost_micros IS NOT NULL
+                         OR request.provider_task_id IS NOT NULL
+                       )
+                  )
+                ) occurred
+              ),
+              failed_job AS (
+                UPDATE backlink_jobs
+                  SET status='failed',step='provider_request_failed',
+                      progress=100,error=jsonb_build_object(
+                        'code',$5::text,
+                        'rootCause',$6::text,
+                        'recovery',$7::text,
+                        'providerCallOccurred',provider_call.occurred,
+                        'diagnosticId',$8::text,
+                        'message',$9::text
+                      ),
+                      finished_at=now(),updated_at=now(),version=version+1
+                 FROM provider_call
+                WHERE organization_id=$1 AND workspace_id=$2
+                  AND website_project_id=$3 AND id=$4::uuid
+              RETURNING id
+              ),
+              failed_policy AS (
+                UPDATE backlink_commercial_inventory_policies AS policy
+                   SET refill_state='paused',
+                       termination_reason=CASE $6::text
+                         WHEN 'BUDGET_PAUSED' THEN 'BUDGET'
+                         WHEN 'PROVIDER_UNAVAILABLE'
+                           THEN 'PROVIDER_UNAVAILABLE'
+                         WHEN 'PROJECT_CONTEXT_REQUIRED'
+                           THEN 'PROJECT_CONTEXT'
+                         ELSE NULL
+                       END,
+                       pause_reason=lower($6::text)||':'||$8::text,
+                       next_refill_at=CASE
+                         WHEN $6::text IN (
+                           'BUDGET_PAUSED','PROVIDER_UNAVAILABLE'
+                         ) THEN now()+interval '5 minutes'
+                         ELSE NULL
+                       END,
+                       updated_at=now(),updated_by=$10,version=version+1
+                  FROM failed_refill,failed_job
+                 WHERE (
+                   policy.organization_id,policy.workspace_id,
+                   policy.website_project_id,
+                   policy.project_context_version_id
+                 )=(
+                   $1,$2,$3,
+                   failed_refill."recommendationContextVersionId"
+                 )
+                   AND policy.visible_pool_generation=
+                       failed_refill."visiblePoolGeneration"
+              RETURNING policy.project_context_version_id
+              )
+              SELECT
+                (SELECT count(*) FROM failed_job) "failedJobCount",
+                (SELECT count(*) FROM failed_policy) "failedPolicyCount"`,
             [
               scope.organizationId,
               scope.workspaceId,
               scope.websiteProjectId,
               input.jobId,
               input.errorCode,
+              input.rootCause,
+              input.recovery,
+              input.diagnosticId,
+              input.message,
+              input.actorId,
             ],
           );
         });
@@ -2157,13 +3026,13 @@ async function createWorkerRegistrations(
               >[0],
             ) => gmailSendRuntime.activity.settleAttempt(input),
           }),
-      ...(gmailSyncRuntime === null
-        ? {}
-        : {
-            backlinksRunGmailPollingSyncV1: (
-              input: Parameters<typeof gmailSyncRuntime.run>[0],
-            ) => gmailSyncRuntime.run(input),
-          }),
+      backlinksRunGmailPollingSyncV1: (
+        input: GmailPollingSyncWorkflowInput,
+      ) => gmailSyncRuntime === null
+        ? Promise.resolve(
+            createGmailPollingSyncCapabilityPausedResult(input),
+          )
+        : gmailSyncRuntime.run(input),
     }),
     backgroundServices: Object.freeze([
       Object.freeze({

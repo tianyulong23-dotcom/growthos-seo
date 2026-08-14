@@ -12,6 +12,11 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
 
 
+class RuntimeStatusResponse(BaseModel):
+    status: Literal["ok", "maintenance"]
+    business_consumers_running: bool
+
+
 @router.get(
     "/health",
     response_model=HealthResponse,
@@ -33,3 +38,17 @@ async def ready(request: Request) -> HealthResponse:
     except Exception as error:
         raise HTTPException(status_code=503, detail="runtime dependencies unavailable") from error
     return HealthResponse(status="ok")
+
+
+@router.get(
+    "/api/v1/runtime-status",
+    response_model=RuntimeStatusResponse,
+    include_in_schema=False,
+)
+async def runtime_status(request: Request) -> RuntimeStatusResponse:
+    runtime: RuntimeDependencies = request.app.state.runtime_dependencies
+    consumers_running = await runtime.business_consumers_running()
+    return RuntimeStatusResponse(
+        status="ok" if consumers_running else "maintenance",
+        business_consumers_running=consumers_running,
+    )

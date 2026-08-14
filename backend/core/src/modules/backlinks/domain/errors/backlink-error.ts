@@ -5,6 +5,14 @@ export const backlinkErrorCodes = {
   notFound: "BACKLINK_NOT_FOUND",
   conflict: "BACKLINK_CONFLICT",
   rateLimited: "BACKLINK_RATE_LIMITED",
+  gmailConnectionNotSelected: "GMAIL_CONNECTION_NOT_SELECTED",
+  gmailReauthRequired: "GMAIL_REAUTH_REQUIRED",
+  gmailSendDisabled: "GMAIL_SEND_DISABLED",
+  gmailScopeInsufficient: "GMAIL_SCOPE_INSUFFICIENT",
+  gmailWorkerUnavailable: "GMAIL_WORKER_UNAVAILABLE",
+  contactVersionStale: "CONTACT_VERSION_STALE",
+  draftVersionStale: "DRAFT_VERSION_STALE",
+  sendPolicyRejected: "SEND_POLICY_REJECTED",
   internal: "BACKLINK_INTERNAL_ERROR",
 } as const;
 

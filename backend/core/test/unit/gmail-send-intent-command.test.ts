@@ -5,6 +5,7 @@ import {
 } from "../../src/modules/backlinks/application/commands/send-intent.command.js";
 import type {
   CreateSendIntentRecordInput,
+  SendIntentPreflightRepository,
   SendIntentRepository,
 } from "../../src/modules/backlinks/application/services/send-intent.repository.js";
 import {
@@ -25,6 +26,12 @@ const contactId = "018f0000-0000-7000-8000-000000000614";
 const sendSnapshotId = "018f0000-0000-7000-8000-000000000216";
 const contactVersion = 3;
 const requestedSendAt = new Date("2026-07-27T10:14:00.000Z");
+const tokenSecretReference = {
+  provider: "platform-secret-store",
+  secretKind: "GMAIL_TOKEN_SET" as const,
+  externalSecretId: "gmail_token_set/connection-114",
+  externalSecretVersion: "v1",
+};
 const context = {
   actor: createActorContext({
     userId: "user-114",
@@ -67,6 +74,28 @@ const createdIntent = {
   version: 1,
   requestedSendAt: requestedSendAt.toISOString(),
 };
+const allowedPreflight = {
+  state: "allowed" as const,
+  tokenSecretReference,
+  gmail: {
+    connectionId: gmailConnectionId,
+    primaryEmail: "sender@example.test",
+    connectionStatus: "CONNECTED" as const,
+    sendAvailability: "AVAILABLE" as const,
+    mailSyncCapability: true,
+  },
+};
+const withPreflight = (
+  repository: SendIntentRepository,
+): SendIntentRepository & SendIntentPreflightRepository => ({
+  preflight: async () => allowedPreflight,
+  create: (candidate) => repository.create(candidate),
+});
+const enabledRuntime = {
+  sendRuntimeEnabled: true,
+  workerAvailable: async () => true,
+  gmailCredentialAvailable: async () => true,
+};
 
 describe("BL-AI-114/115 Send Intent command", () => {
   it("derives the logical key and asks the repository for one atomic write", async () => {
@@ -84,7 +113,8 @@ describe("BL-AI-114/115 Send Intent command", () => {
       sendSnapshotId,
     ];
     const commands = createSendIntentCommands({
-      repository,
+      repository: withPreflight(repository),
+      ...enabledRuntime,
       newId: () => ids.shift() ?? "unexpected-id",
       now: () => requestedSendAt,
     });
@@ -140,7 +170,8 @@ describe("BL-AI-114/115 Send Intent command", () => {
       },
     };
     const commands = createSendIntentCommands({
-      repository,
+      repository: withPreflight(repository),
+      ...enabledRuntime,
       newId: () => sendIntentId,
       now: () => requestedSendAt,
     });
@@ -161,7 +192,8 @@ describe("BL-AI-114/115 Send Intent command", () => {
       },
     };
     const commands = createSendIntentCommands({
-      repository,
+      repository: withPreflight(repository),
+      ...enabledRuntime,
       newId: () => sendIntentId,
       now: () => requestedSendAt,
       quotaProfile: {
@@ -186,7 +218,8 @@ describe("BL-AI-114/115 Send Intent command", () => {
       },
     };
     const commands = createSendIntentCommands({
-      repository,
+      repository: withPreflight(repository),
+      ...enabledRuntime,
       newId: () => sendIntentId,
       now: () => requestedSendAt,
     });
@@ -220,10 +253,12 @@ describe("BL-AI-114/115 Send Intent command", () => {
 
   it.each([
     [{ state: "draft_not_found" }, "BACKLINK_NOT_FOUND"],
-    [{ state: "draft_not_approved" }, "BACKLINK_CONFLICT"],
-    [{ state: "gmail_connection_unavailable" }, "BACKLINK_NOT_FOUND"],
+    [{ state: "draft_not_approved" }, "DRAFT_VERSION_STALE"],
+    [{
+      state: "gmail_connection_unavailable",
+    }, "GMAIL_CONNECTION_NOT_SELECTED"],
     [{ state: "contact_unavailable" }, "BACKLINK_NOT_FOUND"],
-    [{ state: "contact_version_conflict" }, "BACKLINK_CONFLICT"],
+    [{ state: "contact_version_conflict" }, "CONTACT_VERSION_STALE"],
     [{ state: "conflict" }, "BACKLINK_CONFLICT"],
     [{
       state: "initial_outreach_cooldown",
@@ -241,7 +276,8 @@ describe("BL-AI-114/115 Send Intent command", () => {
       },
     };
     const commands = createSendIntentCommands({
-      repository,
+      repository: withPreflight(repository),
+      ...enabledRuntime,
       newId: () => sendIntentId,
       now: () => requestedSendAt,
     });
@@ -250,4 +286,181 @@ describe("BL-AI-114/115 Send Intent command", () => {
       Partial<BacklinkError>
     >({ code });
   });
+
+  it("returns a healthy NOT_SENT preflight without creating an Intent", async () => {
+    let creates = 0;
+    let credentialChecks = 0;
+    const commands = createSendIntentCommands({
+      repository: withPreflight({
+        async create() {
+          creates += 1;
+          return { state: "created", intent: createdIntent };
+        },
+      }),
+      sendRuntimeEnabled: true,
+      workerAvailable: async () => true,
+      gmailCredentialAvailable: async (candidate) => {
+        credentialChecks += 1;
+        expect(candidate).toEqual({
+          organizationId: context.tenant.organizationId,
+          gmailConnectionId,
+          tokenSecretReference,
+        });
+        return true;
+      },
+      newId: () => sendIntentId,
+      now: () => requestedSendAt,
+    });
+
+    await expect(commands.preflight(input)).resolves.toEqual({
+      allowed: true,
+      deliveryState: "NOT_SENT",
+      checkedAt: requestedSendAt.toISOString(),
+      gmail: allowedPreflight.gmail,
+    });
+    expect(creates).toBe(0);
+    expect(credentialChecks).toBe(1);
+  });
+
+  it.each([
+    [false, true, "GMAIL_SEND_DISABLED"],
+    [true, false, "GMAIL_WORKER_UNAVAILABLE"],
+  ] as const)(
+    "fails closed before persistence when runtime=%s worker=%s",
+    async (sendRuntimeEnabled, workerAvailable, code) => {
+      let preflights = 0;
+      let creates = 0;
+      let ids = 0;
+      const commands = createSendIntentCommands({
+        repository: {
+          async preflight() {
+            preflights += 1;
+            return allowedPreflight;
+          },
+          async create() {
+            creates += 1;
+            return { state: "created", intent: createdIntent };
+          },
+        },
+        sendRuntimeEnabled,
+        workerAvailable: async () => workerAvailable,
+        gmailCredentialAvailable: async () => true,
+        newId: () => {
+          ids += 1;
+          return sendIntentId;
+        },
+        now: () => requestedSendAt,
+      });
+
+      await expect(commands.create(input)).rejects.toMatchObject<
+        Partial<BacklinkError>
+      >({ code });
+      expect(preflights).toBe(0);
+      expect(creates).toBe(0);
+      expect(ids).toBe(0);
+    },
+  );
+
+  it("maps stale preflight state and does not allocate or create", async () => {
+    let creates = 0;
+    let ids = 0;
+    const commands = createSendIntentCommands({
+      repository: {
+        preflight: async () => ({ state: "draft_version_stale" }),
+        async create() {
+          creates += 1;
+          return { state: "created", intent: createdIntent };
+        },
+      },
+      ...enabledRuntime,
+      newId: () => {
+        ids += 1;
+        return sendIntentId;
+      },
+      now: () => requestedSendAt,
+    });
+
+    await expect(commands.create(input)).rejects.toMatchObject<
+      Partial<BacklinkError>
+    >({ code: "DRAFT_VERSION_STALE" });
+    expect(creates).toBe(0);
+    expect(ids).toBe(0);
+  });
+
+  it("fails closed when the selected Gmail Secret cannot be resolved", async () => {
+    let creates = 0;
+    let ids = 0;
+    const commands = createSendIntentCommands({
+      repository: {
+        preflight: async () => allowedPreflight,
+        async create() {
+          creates += 1;
+          return { state: "created", intent: createdIntent };
+        },
+      },
+      sendRuntimeEnabled: true,
+      workerAvailable: async () => true,
+      gmailCredentialAvailable: async () => false,
+      newId: () => {
+        ids += 1;
+        return sendIntentId;
+      },
+      now: () => requestedSendAt,
+    });
+
+    await expect(commands.create(input)).rejects.toMatchObject<
+      Partial<BacklinkError>
+    >({
+      code: "GMAIL_REAUTH_REQUIRED",
+      message: "The selected Gmail credentials cannot be resolved.",
+    });
+    expect(creates).toBe(0);
+    expect(ids).toBe(0);
+  });
+
+  it.each([
+    [{ state: "gmail_connection_not_selected" }, "GMAIL_CONNECTION_NOT_SELECTED"],
+    [{ state: "gmail_reauth_required" }, "GMAIL_REAUTH_REQUIRED"],
+    [{ state: "gmail_scope_insufficient" }, "GMAIL_SCOPE_INSUFFICIENT"],
+    [{ state: "contact_version_stale" }, "CONTACT_VERSION_STALE"],
+    [{ state: "draft_version_stale" }, "DRAFT_VERSION_STALE"],
+    [{
+      state: "send_policy_rejected",
+      message: "Gmail quota is unavailable.",
+      retryAt: null,
+    }, "SEND_POLICY_REJECTED"],
+  ] as const)(
+    "does not allocate or create when preflight returns $state",
+    async (preflightResult, code) => {
+      let creates = 0;
+      let ids = 0;
+      let credentialChecks = 0;
+      const commands = createSendIntentCommands({
+        repository: {
+          preflight: async () => preflightResult,
+          async create() {
+            creates += 1;
+            return { state: "created", intent: createdIntent };
+          },
+        },
+        ...enabledRuntime,
+        gmailCredentialAvailable: async () => {
+          credentialChecks += 1;
+          return true;
+        },
+        newId: () => {
+          ids += 1;
+          return sendIntentId;
+        },
+        now: () => requestedSendAt,
+      });
+
+      await expect(commands.create(input)).rejects.toMatchObject<
+        Partial<BacklinkError>
+      >({ code });
+      expect(credentialChecks).toBe(0);
+      expect(creates).toBe(0);
+      expect(ids).toBe(0);
+    },
+  );
 });

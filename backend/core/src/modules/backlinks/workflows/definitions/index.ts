@@ -20,6 +20,9 @@ export {
   backlinksDraftGenerationV1Workflow,
 } from "./draft-generation.workflow.js";
 export {
+  backlinksProfileSyncV1Workflow,
+} from "./backlink-profile-sync.workflow.js";
+export {
   backlinksGmailSendV1Workflow,
 } from "./gmail-send.workflow.js";
 export {

@@ -89,6 +89,7 @@ def request_app(
     headers: dict[str, str] | None = None,
     content: bytes | None = None,
     oauth_callback_frontend_origin: str | None = None,
+    business_consumers_running: bool | None = None,
 ) -> httpx.Response:
     async def run() -> httpx.Response:
         app = create_app(
@@ -96,6 +97,12 @@ def request_app(
             platform_context_resolver=resolver,
         )
         app.state.oauth_callback_frontend_origin = oauth_callback_frontend_origin
+        if business_consumers_running is not None:
+            class RuntimeStub:
+                async def business_consumers_running(self) -> bool:
+                    return business_consumers_running
+
+            app.state.runtime_dependencies = RuntimeStub()
         async with AsyncClient(
             transport=ASGITransport(app=app),
             base_url="http://gateway.test",
@@ -122,7 +129,7 @@ def runtime_api_routes(router: object) -> list[APIRoute]:
     return routes
 
 
-def test_registers_exactly_sixty_two_runtime_routes_without_schema_duplication() -> None:
+def test_registers_exactly_seventy_three_runtime_routes_without_schema_duplication() -> None:
     gateway = BacklinksGateway(
         base_url="http://backlinks.internal",
         signing_key=SIGNING_KEY,
@@ -139,13 +146,22 @@ def test_registers_exactly_sixty_two_runtime_routes_without_schema_duplication()
     ]
 
     route_keys = {(tuple(sorted(route.methods)), route.path) for route in runtime_routes}
-    assert len(runtime_routes) == 62
-    assert len(route_keys) == 62
+    assert len(runtime_routes) == 73
+    assert len(route_keys) == 73
     assert {
         (("GET",), "/api/v1/backlinks/gmail-connections/callback"),
         (
             ("GET",),
             "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-inventory",
+        ),
+        (
+            ("GET",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/resource-library",
+        ),
+        (
+            ("POST",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/"
+            "recommendation-pools/{visiblePoolGeneration}/archive",
         ),
         (("GET",), "/api/v1/projects/{websiteProjectKey}/backlinks/metrics/dashboard"),
         (("GET",), "/api/v1/projects/{websiteProjectKey}/backlinks/reports"),
@@ -220,12 +236,46 @@ def test_registers_exactly_sixty_two_runtime_routes_without_schema_duplication()
         ),
         (
             ("POST",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/drafts/"
+            "{draftId}/send-preflight",
+        ),
+        (
+            ("POST",),
             "/api/v1/projects/{websiteProjectKey}/backlinks/gmail-connections/select",
         ),
         (
             ("POST",),
             "/api/v1/projects/{websiteProjectKey}/backlinks/replies/"
             "{inboundMessageId}/match/unbind",
+        ),
+        (("GET",), "/api/v1/projects/{websiteProjectKey}/backlinks/profile"),
+        (("GET",), "/api/v1/projects/{websiteProjectKey}/backlinks/inventory"),
+        (
+            ("POST",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/inventory-items",
+        ),
+        (
+            ("PATCH",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/inventory-items/"
+            "{inventoryItemId}/monitoring-policy",
+        ),
+        (
+            ("POST",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/inventory-items/"
+            "{inventoryItemId}/checks",
+        ),
+        (
+            ("GET",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/inventory-items/"
+            "{inventoryItemId}/direct-observations",
+        ),
+        (
+            ("POST",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/profile-sync-jobs",
+        ),
+        (
+            ("GET",),
+            "/api/v1/projects/{websiteProjectKey}/backlinks/profile-sync-jobs/{jobId}",
         ),
     } <= route_keys
     assert all(route.include_in_schema is False for route in runtime_routes)
@@ -533,6 +583,59 @@ def test_forwards_send_intent_once_and_requires_idempotency() -> None:
     assert response.json()["status"] == "READY"
     assert len(calls) == 1
     assert calls[0].headers["idempotency-key"] == "send-intent-once"
+    assert calls[0].content == body
+
+
+def test_forwards_send_preflight_without_creating_an_idempotent_command() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(
+            200,
+            json={
+                "allowed": True,
+                "deliveryState": "NOT_SENT",
+            },
+        )
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    path = (
+        "/api/v1/projects/project-key/backlinks/drafts/"
+        "018f0000-0000-7000-8000-000000000011/send-preflight"
+    )
+    body = json.dumps(
+        {
+            "approvedDraftVersionId": "018f0000-0000-7000-8000-000000000012",
+            "contactId": "018f0000-0000-7000-8000-000000000013",
+            "contactVersion": 1,
+            "gmailConnectionId": "018f0000-0000-7000-8000-000000000020",
+            "messagePurpose": "INITIAL_OUTREACH",
+            "followUpIndex": 0,
+        }
+    ).encode()
+
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=path,
+        headers={"content-type": "application/json"},
+        content=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deliveryState"] == "NOT_SENT"
+    assert len(calls) == 1
+    assert calls[0].url.path.endswith(
+        "/backlinks/drafts/"
+        "018f0000-0000-7000-8000-000000000011/send-preflight"
+    )
+    assert "idempotency-key" not in calls[0].headers
     assert calls[0].content == body
 
 
@@ -987,6 +1090,206 @@ def test_preserves_public_assessment_availability_contract() -> None:
     assert '"value":0' not in response.text
 
 
+def test_forwards_unified_recommendation_inventory_as_read_only_get() -> None:
+    payload = {
+        "contractVersion": "backlinks.recommendation-operation.v1",
+        "runningBuildId": "local-product-source-fixture",
+        "operationId": "operation-037",
+        "jobId": "job-037",
+        "stage": "pause",
+        "terminal": False,
+        "terminalState": "PAUSED_BUDGET",
+        "targetCount": 20,
+        "rawCount": 42,
+        "fitCount": 12,
+        "contactCount": 8,
+        "publishedCount": 6,
+        "unpublishedCount": 2,
+        "tier": "curated_resource_library",
+        "round": 2,
+        "window": 3,
+        "paidCursor": {
+            "tier": "same_topic_target_market",
+            "round": 1,
+            "window": 4,
+        },
+        "resourceCursor": {
+            "tier": "curated_resource_library",
+            "round": 2,
+            "window": 3,
+        },
+        "nextRetryAt": None,
+        "errorCode": "BUDGET_PAUSED",
+        "recoveryAction": "RESUME_OPERATION",
+        "providerCallOccurred": False,
+    }
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200, json=payload)
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="GET",
+        path="/api/v1/projects/project-key/backlinks/recommendation-inventory",
+        business_consumers_running=False,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == payload
+    assert len(calls) == 1
+    assert calls[0].method == "GET"
+    assert calls[0].url.path == (
+        "/api/v1/projects/project-key/backlinks/recommendation-inventory"
+    )
+    assert calls[0].content == b""
+
+
+def test_rejects_business_writes_while_consumers_are_unavailable() -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> Response:
+        nonlocal calls
+        calls += 1
+        return Response(202)
+
+    resolver = StaticResolver(RESOLVED)
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    response = request_app(
+        gateway,
+        resolver,
+        method="POST",
+        path=(
+            "/api/v1/projects/project-key/backlinks/recommendations/"
+            "recommendation-1/contact-enrichment-jobs"
+        ),
+        headers={"idempotency-key": "maintenance-write"},
+        content=b"{}",
+        business_consumers_running=False,
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "BUSINESS_CONSUMERS_UNAVAILABLE"
+    assert response.json()["retryable"] is True
+    assert resolver.calls == []
+    assert calls == 0
+
+
+def test_quiesced_mail_status_remains_readable_but_manual_sync_is_rejected() -> None:
+    calls: list[httpx.Request] = []
+    sync_status = {
+        "state": "POLLING",
+        "acceptedSendCount": 1,
+        "cursor": None,
+        "lastError": "GMAIL_POLLING_STATUS_QUERY_TIMEOUT",
+        "lastErrorCategory": "UNKNOWN",
+    }
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200, json=sync_status)
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    path = (
+        "/api/v1/projects/project-key/backlinks/gmail-connections/"
+        "018f0000-0000-7000-8000-000000000020"
+    )
+
+    status = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="GET",
+        path=f"{path}/sync-status",
+        business_consumers_running=False,
+    )
+    sync = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=f"{path}/sync",
+        business_consumers_running=False,
+    )
+
+    assert status.status_code == 200
+    assert status.json() == sync_status
+    assert sync.status_code == 503
+    assert sync.json()["code"] == "BUSINESS_CONSUMERS_UNAVAILABLE"
+    assert [request.method for request in calls] == ["GET"]
+
+
+def test_allows_synchronous_draft_review_while_consumers_are_unavailable() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200, json={"accepted": True})
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    draft_path = (
+        "/api/v1/projects/project-key/backlinks/drafts/"
+        "018f0000-0000-7000-8000-000000000011"
+    )
+
+    approve = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=f"{draft_path}/approve",
+        headers={"content-type": "application/json"},
+        content=b'{"expectedVersion":2}',
+        business_consumers_running=False,
+    )
+    preflight = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=f"{draft_path}/send-preflight",
+        headers={"content-type": "application/json"},
+        content=b"{}",
+        business_consumers_running=False,
+    )
+    send_intent = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=f"{draft_path}/send-intents",
+        headers={
+            "content-type": "application/json",
+            "idempotency-key": "quiesced-send-intent",
+        },
+        content=b"{}",
+        business_consumers_running=False,
+    )
+
+    assert approve.status_code == 200
+    assert preflight.status_code == 200
+    assert send_intent.status_code == 503
+    assert send_intent.json()["code"] == "BUSINESS_CONSUMERS_UNAVAILABLE"
+    assert [request.url.path for request in calls] == [
+        f"{draft_path}/approve",
+        f"{draft_path}/send-preflight",
+    ]
+
+
 def test_rejects_untrusted_or_cross_project_context_before_forwarding() -> None:
     calls = 0
 
@@ -1263,3 +1566,66 @@ def test_forwards_idempotent_command_once_and_never_retries_transport_failure() 
         "retryable": True,
     }
     assert failure_calls == 1
+
+
+def test_forwards_recommendation_pool_archive_with_required_idempotency() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(
+            200,
+            json={
+                "archivedGeneration": 1,
+                "nextGeneration": 2,
+                "archivedCount": 20,
+                "state": "awaiting_refresh",
+            },
+        )
+
+    path = (
+        "/api/v1/projects/project-key/backlinks/"
+        "recommendation-pools/1/archive"
+    )
+    body = json.dumps(
+        {
+            "recommendationContextVersionId":
+                "018f0000-0000-7000-8000-000000000159",
+        }
+    ).encode()
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+
+    missing_key = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=path,
+        headers={"content-type": "application/json"},
+        content=body,
+    )
+    forwarded = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=path,
+        headers={
+            "content-type": "application/json",
+            "idempotency-key": "recommendation-pool-archive:context:g1",
+        },
+        content=body,
+    )
+
+    assert missing_key.status_code == 400
+    assert missing_key.json()["code"] == "PLATFORM_IDEMPOTENCY_REQUIRED"
+    assert forwarded.status_code == 200
+    assert len(calls) == 1
+    assert calls[0].url.path == path
+    assert (
+        calls[0].headers["idempotency-key"]
+        == "recommendation-pool-archive:context:g1"
+    )
+    assert calls[0].content == body

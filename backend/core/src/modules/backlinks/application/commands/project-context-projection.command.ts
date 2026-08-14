@@ -13,6 +13,9 @@ import {
   createOutboxRepository,
 } from "../../db/repositories/outbox.repository.js";
 import {
+  createRecommendationCommands,
+} from "./recommendations.command.js";
+import {
   withBacklinkTenantTransaction,
   type BacklinkTransactionClient,
   type BacklinkTenantPool,
@@ -33,6 +36,8 @@ export type ProjectContextProjectionInput = Readonly<{
   workspaceId: string;
   websiteProjectId: string;
   actorId: string;
+  actorSessionId: string;
+  actorRoles: readonly string[];
   correlationId: string;
   snapshotId: string;
   snapshotVersion: number;
@@ -40,11 +45,14 @@ export type ProjectContextProjectionInput = Readonly<{
   canonicalDomain: string;
   locale: string;
   countryCode: string;
+  targetMarket: string;
   profileVersionId: string;
   promotionTargetVersionId: string;
   products: readonly string[];
   keywords: readonly string[];
   targetUrls: readonly string[];
+  targetAudiences: readonly string[];
+  partnershipGoals: readonly string[];
   inputComplete: boolean;
   jobId: string;
   outboxEventId: string;
@@ -146,26 +154,49 @@ async function initializeProjectRuntimeGovernance(
     input.websiteProjectId,
   ] as const;
   await client.query(
-    `INSERT INTO backlink_project_settings_versions (
+    `WITH latest AS (
+       SELECT version, settings_values
+         FROM backlink_project_settings_versions
+        WHERE organization_id = $2
+          AND workspace_id = $3
+          AND website_project_id = $4
+        ORDER BY version DESC
+        LIMIT 1
+     ),
+     desired AS (
+       SELECT
+         COALESCE(latest.version, 0) + 1 AS version,
+         COALESCE(
+           latest.settings_values,
+           jsonb_build_object(
+             'reportingTimezone', 'Asia/Shanghai',
+             'reportLookbackDays', 30,
+             'exportExpiryHours', 24,
+             'discoveryExplicitCompetitorDomains', jsonb_build_array()
+           )
+         ) || jsonb_build_object(
+           'discoveryTargetAudiences', $6::jsonb,
+           'discoveryPartnershipGoals', $7::jsonb
+         ) AS settings_values,
+         latest.settings_values AS previous_settings_values
+       FROM (SELECT 1) seed
+       LEFT JOIN latest ON true
+     )
+     INSERT INTO backlink_project_settings_versions (
        id, organization_id, workspace_id, website_project_id,
        version, settings_values, created_by
      )
-     SELECT $1, $2, $3, $4, 1,
-            jsonb_build_object(
-              'reportingTimezone', 'Asia/Shanghai',
-              'reportLookbackDays', 30,
-              'exportExpiryHours', 24
-            ),
-            $5
-      WHERE NOT EXISTS (
-        SELECT 1
-          FROM backlink_project_settings_versions
-         WHERE organization_id = $2
-           AND workspace_id = $3
-           AND website_project_id = $4
-      )
+     SELECT $1, $2, $3, $4, version, settings_values, $5
+       FROM desired
+      WHERE previous_settings_values IS DISTINCT FROM settings_values
      ON CONFLICT DO NOTHING`,
-    [randomUUID(), ...scopeValues, input.actorId],
+    [
+      randomUUID(),
+      ...scopeValues,
+      input.actorId,
+      JSON.stringify(input.targetAudiences),
+      JSON.stringify(input.partnershipGoals),
+    ],
   );
   await client.query(
     `INSERT INTO backlink_retention_policy_versions (
@@ -276,11 +307,14 @@ function conflicts(
     || latest.canonicalDomain !== input.canonicalDomain
     || latest.locale !== input.locale
     || latest.countryCode !== input.countryCode
+    || latest.targetMarket !== input.targetMarket
     || latest.profileVersionId !== input.profileVersionId
     || latest.promotionTargetVersionId !== input.promotionTargetVersionId
     || !sameStrings(latest.products, input.products)
     || !sameStrings(latest.keywords, input.keywords)
     || !sameStrings(latest.targetUrls, input.targetUrls)
+    || !sameStrings(latest.targetAudiences, input.targetAudiences)
+    || !sameStrings(latest.partnershipGoals, input.partnershipGoals)
   );
 }
 
@@ -289,6 +323,47 @@ function conflict(message: string): BacklinkError {
     code: backlinkErrorCodes.conflict,
     message,
   });
+}
+
+async function requestInitialGeneration(
+  client: BacklinkTransactionClient,
+  input: ProjectContextProjectionInput,
+): Promise<boolean> {
+  if (!input.inputComplete || input.projectStatus !== "ACTIVE") {
+    return false;
+  }
+  const result = await createRecommendationCommands(client).requestRefill({
+    context: {
+      actor: {
+        userId: input.actorId,
+        sessionId: input.actorSessionId,
+        roles: input.actorRoles,
+      },
+      tenant: {
+        organizationId: input.organizationId,
+        workspaceId: input.workspaceId,
+      },
+      project: {
+        websiteProjectId: input.websiteProjectId,
+        canonicalDomain: input.canonicalDomain,
+        locale: input.locale,
+        countryCode: input.countryCode,
+        profileVersionId: input.profileVersionId,
+        promotionTargetVersionId: input.promotionTargetVersionId,
+      },
+    },
+    requestId:
+      `project-bootstrap:${input.websiteProjectId}:${input.snapshotVersion}`,
+    expectedVersion: 0,
+    recommendationContextVersionId: input.snapshotId,
+    visiblePoolGeneration: 1,
+    lowWatermark: 9,
+    highWatermark: 10,
+    refillWindowKey:
+      `project-bootstrap:${input.websiteProjectId}:${input.snapshotVersion}:g1`,
+    triggerReason: "inventory_low",
+  });
+  return !result.replayed;
 }
 
 export function createProjectContextProjectionCommand(
@@ -336,11 +411,14 @@ export function createProjectContextProjectionCommand(
           canonicalDomain: input.canonicalDomain,
           locale: input.locale,
           countryCode: input.countryCode,
+          targetMarket: input.targetMarket,
           profileVersionId: input.profileVersionId,
           promotionTargetVersionId: input.promotionTargetVersionId,
           products: input.products,
           keywords: input.keywords,
           targetUrls: input.targetUrls,
+          targetAudiences: input.targetAudiences,
+          partnershipGoals: input.partnershipGoals,
           actorId: input.actorId,
         });
         await initializeProjectRuntimeGovernance(
@@ -384,7 +462,8 @@ export function createProjectContextProjectionCommand(
           eventType: BACKLINK_PROJECT_ANALYSIS_REQUESTED,
           aggregateId: input.snapshotId,
           aggregateVersion: input.snapshotVersion,
-          idempotencyKey: `project-analysis:${input.snapshotVersion}`,
+          idempotencyKey:
+            `project-analysis:${input.websiteProjectId}:${input.snapshotVersion}`,
           payload: {
             ...scope,
             jobId: input.jobId,
@@ -393,6 +472,7 @@ export function createProjectContextProjectionCommand(
           },
           payloadSchemaVersion: 1,
         });
+        await requestInitialGeneration(client, input);
         return {
           state: "projected",
           snapshotVersion: input.snapshotVersion,

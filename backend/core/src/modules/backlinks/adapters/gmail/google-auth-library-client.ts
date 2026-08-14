@@ -76,6 +76,22 @@ const providerErrorCode = (error: unknown): string | undefined => {
   return typeof data.error === "string" ? data.error : undefined;
 };
 
+const transientTransportCodes = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "ESOCKETTIMEDOUT",
+  "ETIMEDOUT",
+]);
+
+const transportCode = (error: unknown): string | undefined => {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return undefined;
+  }
+  return typeof error.code === "string" ? error.code : undefined;
+};
+
 const googleScopeAliases = new Map([
   ["https://www.googleapis.com/auth/userinfo.email", "email"],
   ["https://www.googleapis.com/auth/userinfo.profile", "profile"],
@@ -102,14 +118,21 @@ export const normalizeGoogleGrantedScopes = (
   return Object.freeze(normalized);
 };
 
-const mapError = (operation: GoogleAuthOperation, error: unknown): GoogleAuthError => {
+export const mapGoogleAuthLibraryError = (
+  operation: GoogleAuthOperation,
+  error: unknown,
+): GoogleAuthError => {
   if (error instanceof GoogleAuthError) return error;
   const metadata = providerMetadata(error);
   const providerCode = providerErrorCode(error);
   if (metadata.httpStatus === 429) {
     return fail(operation, googleAuthFailureCodes.rateLimited, error);
   }
-  if (metadata.httpStatus !== undefined && metadata.httpStatus >= 500) {
+  if (
+    metadata.httpStatus === 408
+    || (metadata.httpStatus !== undefined && metadata.httpStatus >= 500)
+    || transientTransportCodes.has(transportCode(error) ?? "")
+  ) {
     return fail(operation, googleAuthFailureCodes.temporaryFailure, error);
   }
   if (providerCode === "access_denied") {
@@ -195,7 +218,7 @@ export class GoogleAuthLibraryClient implements GoogleAuthClient {
         }),
       };
     } catch (error) {
-      throw mapError("authorize", error);
+      throw mapGoogleAuthLibraryError("authorize", error);
     }
   }
 
@@ -237,7 +260,7 @@ export class GoogleAuthLibraryClient implements GoogleAuthClient {
         tokens: await tokenSet(client, tokens, "callback", true),
       };
     } catch (error) {
-      throw mapError("callback", error);
+      throw mapGoogleAuthLibraryError("callback", error);
     }
   }
 
@@ -250,7 +273,7 @@ export class GoogleAuthLibraryClient implements GoogleAuthClient {
       const { credentials } = await client.refreshAccessToken();
       return tokenSet(client, credentials, "refresh", false);
     } catch (error) {
-      throw mapError("refresh", error);
+      throw mapGoogleAuthLibraryError("refresh", error);
     }
   }
 
@@ -258,7 +281,7 @@ export class GoogleAuthLibraryClient implements GoogleAuthClient {
     try {
       await this.client().revokeToken(input.token);
     } catch (error) {
-      throw mapError("revoke", error);
+      throw mapGoogleAuthLibraryError("revoke", error);
     }
   }
 

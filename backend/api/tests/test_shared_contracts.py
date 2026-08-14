@@ -180,9 +180,9 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
     assert operation_count(seo4) == 27
     assert "/health" in aggregate["paths"]
     assert aggregate["paths"]["/health"]["get"]["operationId"] == "platformHealthV1"
-    assert len(backlinks["paths"]) == 57
-    assert len(aggregate["paths"]) == 77
-    assert operation_count(aggregate) == 83
+    assert len(backlinks["paths"]) == 72
+    assert len(aggregate["paths"]) == 92
+    assert operation_count(aggregate) == 98
     modules = [
         operation["x-growthos-module"]
         for path, path_item in aggregate["paths"].items()
@@ -192,7 +192,7 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
     ]
     assert modules.count("platform") == 6
     assert modules.count("audit") == 18
-    assert modules.count("backlinks") == 58
+    assert modules.count("backlinks") == 73
     assert all(
         "application/problem+json" in operation["responses"]["503"]["content"]
         for path, path_item in aggregate["paths"].items()

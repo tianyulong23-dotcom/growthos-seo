@@ -122,14 +122,15 @@ export function scoreCommercialRecommendation(input: Readonly<{
     ) {
       throw new TypeError(`${id}.normalizedValue must be between 0 and 1`);
     }
+    const normalizedValue = component.normalizedValue;
     const usable = ["observed", "derived"].includes(component.state)
-      && component.normalizedValue !== null;
+      && normalizedValue !== null;
     return Object.freeze({
       ...component,
       evidenceRefs: Object.freeze([...component.evidenceRefs]),
       weight: commercialScoreWeights[id],
       points: usable
-        ? roundFour(component.normalizedValue! * commercialScoreWeights[id])
+        ? roundFour(normalizedValue * commercialScoreWeights[id])
         : null,
     });
   });
@@ -145,13 +146,20 @@ export function scoreCommercialRecommendation(input: Readonly<{
     : uncertainGates.length > 0 || missingEvidence.length > 0
       ? requiresManualReview ? "manual_review" : "insufficient_data"
       : "ready";
+  const total = ordered.reduce<number | null>(
+    (sum, component) =>
+      sum === null || component.points === null
+        ? null
+        : sum + component.points,
+    0,
+  );
 
   return Object.freeze({
     decision,
     scoreModelVersion: commercialRecommendationScoreModelVersion,
     ruleVersion: commercialRecommendationScoreRuleVersion,
-    total: decision === "ready"
-      ? roundFour(ordered.reduce((sum, component) => sum + component.points!, 0))
+    total: decision === "ready" && total !== null
+      ? roundFour(total)
       : null,
     components: Object.freeze(ordered),
     hitGates: Object.freeze(hitGates),

@@ -6,6 +6,7 @@ const workflowKinds = [
   "placement-monitoring",
   "placement-monitoring-initialization",
   "draft-generation",
+  "backlink-profile-sync",
   "gmail-send",
   "gmail-polling-sync",
 ] as const;
@@ -46,6 +47,10 @@ export const backlinksRuntimeContract = Object.freeze({
       workflowType: "backlinksDraftGenerationV1Workflow",
       workflow: "draft-generation",
     },
+    backlinkProfileSync: {
+      workflowType: "backlinksProfileSyncV1Workflow",
+      workflow: "backlink-profile-sync",
+    },
     gmailSend: {
       workflowType: "backlinksGmailSendV1Workflow",
       workflow: "gmail-send",
@@ -60,6 +65,10 @@ export const backlinksRuntimeContract = Object.freeze({
     reserveRecommendationRefill: "backlinksReserveRecommendationRefillV1",
     executeRecommendationRefill: "backlinksExecuteRecommendationRefillV1",
     storeReadyRecommendations: "backlinksStoreReadyRecommendationsV1",
+    planRecommendationRefillSupply:
+      "backlinksPlanRecommendationRefillSupplyV1",
+    completeRecommendationRefillSupply:
+      "backlinksCompleteRecommendationRefillSupplyV1",
     recordRecommendationRefillFailure:
       "backlinksRecordRecommendationRefillFailureV1",
     runContactEnrichment: "backlinksRunContactEnrichmentV1",
@@ -69,6 +78,7 @@ export const backlinksRuntimeContract = Object.freeze({
     initializePlacementMonitoring:
       "backlinksInitializePlacementMonitoringV1",
     runDraftGeneration: "backlinksRunDraftGenerationV1",
+    runBacklinkProfileSync: "backlinksRunProfileSyncV1",
     claimGmailSendAttempt: "backlinksClaimGmailSendAttemptV1",
     dispatchGmailSendAttempt: "backlinksDispatchGmailSendAttemptV1",
     settleGmailSendAttempt: "backlinksSettleGmailSendAttemptV1",

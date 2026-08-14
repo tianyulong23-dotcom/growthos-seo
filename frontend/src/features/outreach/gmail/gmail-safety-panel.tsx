@@ -24,6 +24,20 @@ import {
 import { GmailAccountSelector } from "@/features/outreach/gmail/gmail-account-selector"
 import type { GmailConnectionController } from "@/features/outreach/gmail/use-gmail-connection"
 
+const oauthAttemptTimeoutMs = 10 * 60_000
+
+const connectingTimedOut = (
+  controller: GmailConnectionController
+): boolean => {
+  const connection = controller.connection
+  if (connection?.connectionStatus !== "CONNECTING") return false
+  const connectedAt = Date.parse(connection.connectedAt)
+  return (
+    Number.isFinite(connectedAt) &&
+    connectedAt <= Date.now() - oauthAttemptTimeoutMs
+  )
+}
+
 const statusPresentation = (
   controller: GmailConnectionController
 ): {
@@ -68,18 +82,29 @@ const statusPresentation = (
   if (controller.connection.connectionStatus === "REAUTH_REQUIRED") {
     return {
       label: "需要重连",
-      detail: "授权已过期或权限不再满足",
+      detail:
+        `组织 Gmail 授权已过期，重新连接一次可恢复 ` +
+        `${controller.connection.affectedProjectCount} 个项目`,
       variant: "destructive",
     }
   }
   if (controller.connection.connectionStatus === "TOKEN_REVOKED") {
     return {
       label: "需要重连",
-      detail: "授权已被撤销，需重新授权",
+      detail:
+        `组织 Gmail 授权已被撤销，需重新授权；重新连接一次可恢复 ` +
+        `${controller.connection.affectedProjectCount} 个项目`,
       variant: "destructive",
     }
   }
   if (controller.connection.connectionStatus === "CONNECTING") {
+    if (connectingTimedOut(controller)) {
+      return {
+        label: "连接未完成",
+        detail: "OAuth 回调未在 10 分钟内完成，请重新连接",
+        variant: "destructive",
+      }
+    }
     return {
       label: "连接中",
       detail: "等待 OAuth 回调完成",
@@ -160,7 +185,8 @@ export function GmailSafetyPanel({
     controller.connection.connectionStatus !== "DISCONNECTED"
   const needsReauthorization =
     controller.connection?.connectionStatus === "TOKEN_REVOKED" ||
-    controller.connection?.connectionStatus === "REAUTH_REQUIRED"
+    controller.connection?.connectionStatus === "REAUTH_REQUIRED" ||
+    connectingTimedOut(controller)
 
   return (
     <>

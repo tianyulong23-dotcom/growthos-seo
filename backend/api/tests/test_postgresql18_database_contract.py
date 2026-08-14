@@ -84,6 +84,28 @@ COMMERCIAL_DISCOVERY_TABLES = {
     "backlink_commercial_gold_sets",
     "backlink_commercial_inventory_policies",
 }
+CONTACT_PUBLICATION_TABLES = {
+    "backlink_contact_enrichment_batches",
+    "backlink_contact_evidence_snapshots",
+}
+DRAFT_REQUEST_TABLES = {"backlink_draft_request_snapshots"}
+GMAIL_REPLY_LOOP_TABLES = {"backlink_gmail_connection_sync_cursors"}
+PROFILE_INVENTORY_TABLES = {
+    "backlink_inventory_items",
+    "backlink_inventory_observations",
+    "backlink_profile_health_snapshots",
+    "backlink_profile_provider_artifacts",
+    "backlink_profile_snapshots",
+    "backlink_profile_sync_cursors",
+    "backlink_profile_sync_jobs",
+}
+INVENTORY_MONITORING_TABLES = {
+    "backlink_inventory_monitor_observations",
+    "backlink_inventory_monitor_policies",
+    "backlink_inventory_monitor_requests",
+    "backlink_inventory_monitor_runs",
+}
+RESOURCE_LIBRARY_TABLES = {"backlink_resource_library_items"}
 CONTACT_PURPOSE_COLUMNS = {
     "observed_role",
     "inferred_purpose",
@@ -92,8 +114,11 @@ CONTACT_PURPOSE_COLUMNS = {
     "purpose_evidence",
 }
 PROJECT_RECOMMENDATION_CONTEXT_COLUMNS = {
+    "partnership_goals",
     "products",
     "keywords",
+    "target_audiences",
+    "target_market",
     "target_urls",
 }
 
@@ -178,7 +203,7 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     assert int(fetch_scalar(connection, "SHOW server_version_num")) // 10000 == 18
     assert (
         fetch_scalar(connection, "SELECT version_num FROM public.alembic_version")
-        == "20260806_0009"
+        == "20260813_0010"
     )
 
     rows = connection.execute(
@@ -209,7 +234,7 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     assert by_schema["platform"] == PLATFORM_TABLES
     assert by_schema["crawling"] == CRAWLING_TABLES
     assert by_schema["audit"] == AUDIT_TABLES
-    assert len(by_schema["backlinks"]) == 83
+    assert len(by_schema["backlinks"]) == 99
     assert ASSESSMENT_TABLES <= by_schema["backlinks"]
     assert DRAFT_TABLES <= by_schema["backlinks"]
     assert GMAIL_AUTH_TABLES <= by_schema["backlinks"]
@@ -218,6 +243,12 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
     assert PLACEMENT_TABLES <= by_schema["backlinks"]
     assert COST_CONTROL_TABLES <= by_schema["backlinks"]
     assert COMMERCIAL_DISCOVERY_TABLES <= by_schema["backlinks"]
+    assert CONTACT_PUBLICATION_TABLES <= by_schema["backlinks"]
+    assert DRAFT_REQUEST_TABLES <= by_schema["backlinks"]
+    assert GMAIL_REPLY_LOOP_TABLES <= by_schema["backlinks"]
+    assert PROFILE_INVENTORY_TABLES <= by_schema["backlinks"]
+    assert INVENTORY_MONITORING_TABLES <= by_schema["backlinks"]
+    assert RESOURCE_LIBRARY_TABLES <= by_schema["backlinks"]
 
     for table in ("backlink_contact_candidates", "backlink_contacts"):
         columns = {
@@ -354,11 +385,14 @@ def test_postgresql18_dual_migration_contract(connection: psycopg.Connection) ->
         """
         INSERT INTO platform.promotion_target_versions (
           id, organization_id, workspace_id, project_id, version, keywords,
-          target_urls, input_required, created_by
+          target_urls, target_audiences, partnership_goals, input_required,
+          created_by
         ) VALUES (
           'seo4-int-004-promotion-v1', %s, %s, %s, 1,
           '["technical seo"]'::jsonb,
           '["https://seo4-int-004.example/"]'::jsonb,
+          '["SEO teams"]'::jsonb,
+          '["Earn editorial links"]'::jsonb,
           '[]'::jsonb, 'seo4-int-004'
         )
         """,

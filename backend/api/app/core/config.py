@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     database_url_file: Path | None = None
     redis_url: str = "redis://localhost:6379/0"
     temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    backlinks_task_queue: str = "growthos.backlinks.v1"
+    backlinks_business_consumers_expected: bool = True
     s3_endpoint_url: str | None = None
     backlinks_private_base_url: str = "http://127.0.0.1:7301"
     backlinks_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)

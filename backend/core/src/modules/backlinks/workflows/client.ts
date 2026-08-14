@@ -16,6 +16,7 @@ type TemporalWorkflowClient = Readonly<{
   }>): Promise<unknown>;
   getHandle(workflowId: string): Readonly<{
     signal(signalName: string): Promise<void>;
+    query<T>(queryName: string): Promise<T>;
   }>;
 }>;
 const require = createRequire(import.meta.url);

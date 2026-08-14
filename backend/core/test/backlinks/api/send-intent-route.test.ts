@@ -7,6 +7,7 @@ import {
 } from "../../../src/modules/backlinks/application/commands/send-intent.command.js";
 import type {
   CreateSendIntentRecordInput,
+  SendIntentPreflightRepositoryResult,
   SendIntentRepository,
   SendIntentRepositoryResult,
 } from "../../../src/modules/backlinks/application/services/send-intent.repository.js";
@@ -32,6 +33,12 @@ const sendSnapshotId = "018f0000-0000-7000-8000-000000000216";
 const sendAttemptId = "018f0000-0000-7000-8000-000000000217";
 const contactVersion = 3;
 const requestedSendAt = "2026-07-27T10:14:00.000Z";
+const tokenSecretReference = {
+  provider: "platform-secret-store",
+  secretKind: "GMAIL_TOKEN_SET" as const,
+  externalSecretId: "gmail_token_set/connection-114",
+  externalSecretVersion: "v1",
+};
 const createdIntent = {
   sendIntentId,
   sendSnapshotId,
@@ -50,11 +57,33 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
     state: "created",
     intent: createdIntent,
   };
+  let preflightState: SendIntentPreflightRepositoryResult = {
+    state: "allowed",
+    tokenSecretReference,
+    gmail: {
+      connectionId: gmailConnectionId,
+      primaryEmail: "sender@example.test",
+      connectionStatus: "CONNECTED",
+      sendAvailability: "AVAILABLE",
+      mailSyncCapability: true,
+    },
+  };
   let recorded: CreateSendIntentRecordInput | undefined;
   let queriedId: string | undefined;
 
   beforeEach(async () => {
     repositoryState = { state: "created", intent: createdIntent };
+    preflightState = {
+      state: "allowed",
+      tokenSecretReference,
+      gmail: {
+        connectionId: gmailConnectionId,
+        primaryEmail: "sender@example.test",
+        connectionStatus: "CONNECTED",
+        sendAvailability: "AVAILABLE",
+        mailSyncCapability: true,
+      },
+    };
     recorded = undefined;
     queriedId = undefined;
     const member = createActorContext({
@@ -62,7 +91,12 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
       sessionId: "session-114",
       roles: ["member"],
     });
-    const repository: SendIntentRepository = {
+    const repository: SendIntentRepository & {
+      preflight(): Promise<SendIntentPreflightRepositoryResult>;
+    } = {
+      async preflight() {
+        return preflightState;
+      },
       async create(input) {
         recorded = input;
         return repositoryState;
@@ -133,6 +167,9 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
       }),
       commands: createSendIntentCommands({
         repository,
+        sendRuntimeEnabled: true,
+        workerAvailable: async () => true,
+        gmailCredentialAvailable: async () => true,
         newId: () => ids.shift() ?? "unexpected-id",
         now: () => new Date("2026-07-27T10:14:00.000Z"),
       }),
@@ -223,6 +260,33 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
     });
   });
 
+  it("returns a NOT_SENT preflight without creating an Intent", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url:
+        `/api/v1/projects/project-key/backlinks/drafts/${draftId}/send-preflight`,
+      payload: {
+        approvedDraftVersionId,
+        contactId,
+        contactVersion,
+        gmailConnectionId,
+        messagePurpose: "INITIAL_OUTREACH",
+        followUpIndex: 0,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      allowed: true,
+      deliveryState: "NOT_SENT",
+      gmail: {
+        connectionId: gmailConnectionId,
+        primaryEmail: "sender@example.test",
+      },
+    });
+    expect(recorded).toBeUndefined();
+  });
+
   it("rejects missing idempotency, invalid follow-up index, and viewers", async () => {
     const url =
       `/api/v1/projects/project-key/backlinks/drafts/${draftId}/send-intents`;
@@ -288,7 +352,7 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
 
     expect(response.statusCode).toBe(409);
     expect(response.json()).toMatchObject({
-      code: "BACKLINK_CONFLICT",
+      code: "DRAFT_VERSION_STALE",
     });
   });
 
@@ -322,7 +386,9 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
 
   it.each([
     [{ state: "contact_unavailable" }, 404, "BACKLINK_NOT_FOUND"],
-    [{ state: "contact_version_conflict" }, 409, "BACKLINK_CONFLICT"],
+    [{
+      state: "contact_version_conflict",
+    }, 409, "CONTACT_VERSION_STALE"],
     [{
       state: "initial_outreach_cooldown",
       retryAt: "2026-08-26T10:14:00.000Z",

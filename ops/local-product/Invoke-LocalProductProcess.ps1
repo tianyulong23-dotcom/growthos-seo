@@ -53,7 +53,9 @@ function Assert-DataForSeoProcessEnvironment {
         "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
         "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
         "https://api.dataforseo.com/v3/backlinks/competitors/live",
-        "https://api.dataforseo.com/v3/backlinks/referring_domains/live"
+        "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
+        "https://api.dataforseo.com/v3/backlinks/summary/live",
+        "https://api.dataforseo.com/v3/backlinks/backlinks/live"
     )
     $parsedAllowlist = (
         Require-ProcessEnvironment "DATAFORSEO_ENDPOINT_ALLOWLIST"
@@ -103,6 +105,20 @@ $environmentFile = switch ($Component) {
 }
 Import-EnvironmentFile $environmentFile
 
+$workerExecutionMode = "normal"
+if ($Component -eq "worker") {
+    $configuredWorkerExecutionMode = [Environment]::GetEnvironmentVariable(
+        "BACKLINKS_WORKER_EXECUTION_MODE",
+        "Process"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($configuredWorkerExecutionMode)) {
+        $workerExecutionMode = $configuredWorkerExecutionMode.Trim()
+    }
+    if ($workerExecutionMode -notin @("normal", "quiesced")) {
+        throw "BACKLINKS_WORKER_EXECUTION_MODE_UNSUPPORTED"
+    }
+}
+
 if ($Component -in @("core-api", "worker", "fastapi")) {
     if (
         [Environment]::GetEnvironmentVariable(
@@ -111,6 +127,16 @@ if ($Component -in @("core-api", "worker", "fastapi")) {
         ) -ne "LOCAL_PRODUCT"
     ) {
         throw "BACKLINKS_RUNTIME_MODE must equal LOCAL_PRODUCT"
+    }
+    if (
+        $Component -eq "worker" -and
+        $workerExecutionMode -eq "quiesced" -and
+        [Environment]::GetEnvironmentVariable(
+            "BACKLINKS_RUNTIME_MODE",
+            "Process"
+        ) -ne "LOCAL_PRODUCT"
+    ) {
+        throw "BACKLINKS_WORKER_QUIESCED_MODE_REQUIRES_LOCAL_PRODUCT"
     }
     if (
         [Environment]::GetEnvironmentVariable(
@@ -207,10 +233,18 @@ $exitCode = switch ($Component) {
             (Join-Path $RepositoryRoot "backend\core")
     }
     "worker" {
-        Invoke-NativeProcess `
-            (Get-Command node).Source `
-            @("dist/index.js", "worker") `
-            (Join-Path $RepositoryRoot "backend\core")
+        if ($workerExecutionMode -eq "quiesced") {
+            Invoke-NativeProcess `
+                (Get-Command node).Source `
+                @("scripts/local-product-quiesced-worker.mjs") `
+                (Join-Path $RepositoryRoot "backend\core")
+        }
+        else {
+            Invoke-NativeProcess `
+                (Get-Command node).Source `
+                @("dist/index.js", "worker") `
+                (Join-Path $RepositoryRoot "backend\core")
+        }
     }
     "fastapi" {
         $python = Join-Path $RuntimeRoot "python\Scripts\python.exe"

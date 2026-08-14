@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ContactDiscoveryService } from "../../../src/modules/backlinks/application/services/contact-discovery.service.js";
+import { reassessStoredContactEvidence } from "../../../src/modules/backlinks/application/services/contact-evidence-reassessment.service.js";
 import { createContactDiscoveryRepository } from "../../../src/modules/backlinks/db/repositories/contact-discovery.repository.js";
 import type { SafeFetchPort, SafeFetchResult } from "../../../src/modules/backlinks/ports/safe-fetch.port.js";
 import { startBacklinksPostgresHarness, type BacklinksPostgresHarness } from "./harness/postgresql-container.js";
@@ -119,7 +120,7 @@ describe("BL-AI-072 contact discovery", () => {
     `)).rows[0]).toEqual({
       email: "editor@example.com", relation: "same_registrable_domain", confidence: 90,
       observedRole: "editor", inferredPurpose: "editorial", purposeConfidence: 98,
-      purposeRuleVersion: "contact-purpose-rules.v2",
+      purposeRuleVersion: "contact-purpose-rules.v4",
       purposeEvidence: [expect.objectContaining({
         tier: "high", field: "email_local_part", matchedToken: "editor",
         ruleId: "editorial.editor",
@@ -131,6 +132,9 @@ describe("BL-AI-072 contact discovery", () => {
         ruleId: "editorial.editor",
       }), expect.objectContaining({
         tier: "low", field: "page_title", matchedToken: "contact",
+        ruleId: "general.contact",
+      }), expect.objectContaining({
+        tier: "low", field: "page_url", matchedToken: "contact",
         ruleId: "general.contact",
       })],
       evidenceCount: 1, sourceUrl: input.targetUrl, method: "mailto",
@@ -149,6 +153,53 @@ describe("BL-AI-072 contact discovery", () => {
       FROM backlink_contact_candidates
     `)).rows[0]).toEqual({
       email: "legal@elephtv.com", purpose: "legal", confidence: 98, contacts: 0,
+    });
+  });
+
+  it("reassesses valid stored evidence under the current generic rules", async () => {
+    const externalPage: SafeFetchResult = {
+      ...page,
+      body: new TextEncoder().encode(
+        "<title>Publisher</title><body><a href='mailto:molly@vraidigital.com'>Molly</a></body>",
+      ),
+    };
+    await service({ fetch: async () => externalPage }).discover(input);
+    await client.query(`
+      UPDATE backlink_contact_candidates
+         SET confidence=75,inferred_purpose='unknown',purpose_confidence=0,
+             observed_role=NULL,purpose_rule_version='contact-purpose-rules.v3',
+             purpose_evidence='[]'::jsonb
+    `);
+    await client.query(`
+      UPDATE backlink_contact_evidence
+         SET confidence=75,rule_version='contact-purpose-rules.v3'
+    `);
+
+    expect(await reassessStoredContactEvidence(client, {
+      organizationId,
+      workspaceId,
+      websiteProjectId,
+      recommendationContextVersionId,
+      prospectId,
+      actorId: "test",
+    })).toEqual({ candidatesUpdated: 1, evidenceUpdated: 1 });
+    expect((await client.query(`
+      SELECT candidate.confidence,
+             candidate.inferred_purpose purpose,
+             candidate.purpose_confidence "purposeConfidence",
+             candidate.purpose_rule_version "purposeRuleVersion",
+             evidence.confidence "evidenceConfidence",
+             evidence.rule_version "evidenceRuleVersion"
+        FROM backlink_contact_candidates candidate
+        JOIN backlink_contact_evidence evidence
+          ON evidence.candidate_id=candidate.id
+    `)).rows[0]).toEqual({
+      confidence: 80,
+      purpose: "general",
+      purposeConfidence: 72,
+      purposeRuleVersion: "contact-purpose-rules.v4",
+      evidenceConfidence: 80,
+      evidenceRuleVersion: "contact-evidence-confidence.v2",
     });
   });
 });

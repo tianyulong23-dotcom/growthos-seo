@@ -315,8 +315,45 @@ describe("BL-AI-127 Gmail History Real Adapter shell", () => {
         retryable: false,
       });
     await expect(failed.watch(watchInput)).rejects.toMatchObject({
-      code: gmailSyncClientAdapterFailureCodes.providerFailure,
-      retryable: false,
+      code: gmailSyncClientAdapterFailureCodes.provider5xx,
+      retryable: true,
     });
   });
+
+  it.each([
+    [
+      new GmailSyncProviderError({ kind: "timeout" }),
+      gmailSyncClientAdapterFailureCodes.networkTimeout,
+    ],
+    [
+      new GmailSyncProviderError({
+        kind: "http_response",
+        httpStatus: 429,
+        retryAfterSeconds: 120,
+      }),
+      gmailSyncClientAdapterFailureCodes.rateLimited,
+    ],
+    [
+      new GmailSyncProviderError({
+        kind: "transport",
+      }),
+      gmailSyncClientAdapterFailureCodes.transportFailure,
+    ],
+  ] as const)(
+    "preserves retryable sync category %s",
+    async (providerError, code) => {
+      const adapter = enabledAdapter({
+        ...createClient().client,
+        listInitial: async () => {
+          throw providerError;
+        },
+      });
+
+      await expect(adapter.listInitialMessages(initialInput)).rejects
+        .toMatchObject({
+          code,
+          retryable: true,
+        });
+    },
+  );
 });

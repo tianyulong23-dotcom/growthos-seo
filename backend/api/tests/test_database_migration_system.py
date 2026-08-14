@@ -25,6 +25,9 @@ PROJECT_AUTHORITY_REVISION = "20260805_0008_website_project_authority.py"
 BACKLINKS_PROJECT_AUTHORITY_REVISION = (
     "20260806_0009_backlinks_project_scope_authority.py"
 )
+WEBSITE_PROJECT_CONTEXT_REVISION = (
+    "20260813_0010_website_project_audiences_goals.py"
+)
 BACKLINKS_REVISIONS = [
     "0001_backlink_foundation.sql",
     "0002_backlink_provider_seo.sql",
@@ -66,6 +69,19 @@ BACKLINKS_REVISIONS = [
     "0045_backlink_commercial_candidate_inventory.sql",
     "0046_backlink_contact_publication_gate.sql",
     "0047_backlink_gmail_organization_reuse.sql",
+    "0048_backlink_draft_request_snapshots.sql",
+    "0049_backlink_gmail_send_reply_loop.sql",
+    "0050_backlink_profile_inventory.sql",
+    "0051_backlink_inventory_monitoring.sql",
+    "0052_backlink_recommendation_publication_default.sql",
+    "0053_backlink_monitoring_continuity.sql",
+    "0054_backlink_recommendation_fit_contact_contract.sql",
+    "0055_backlink_publishable_refill_cycle.sql",
+    "0056_backlink_gmail_affected_project_count.sql",
+    "0057_backlink_resource_library.sql",
+    "0058_backlink_refill_reassessment_cursors.sql",
+    "0059_backlink_recommendation_pool_generations.sql",
+    "0060_backlink_v3_exact_ten_project_context.sql",
 ]
 
 
@@ -85,6 +101,7 @@ def test_imports_the_frozen_source_chain_and_adds_owned_platform_revisions() -> 
         BRIDGE_REVISION,
         PROJECT_AUTHORITY_REVISION,
         BACKLINKS_PROJECT_AUTHORITY_REVISION,
+        WEBSITE_PROJECT_CONTEXT_REVISION,
     ]
     actual = sorted(path.name for path in ALEMBIC_VERSIONS.glob("*.py"))
     assert actual == expected
@@ -128,6 +145,18 @@ def test_imports_the_frozen_source_chain_and_adds_owned_platform_revisions() -> 
     assert "growthos_backlinks_owner" in backlinks_project_authority
     assert "DROP FUNCTION" not in backlinks_project_authority.upper()
 
+    website_project_context = (
+        ALEMBIC_VERSIONS / WEBSITE_PROJECT_CONTEXT_REVISION
+    ).read_text(encoding="utf-8")
+    assert (
+        'down_revision: str | Sequence[str] | None = "20260806_0009"'
+        in website_project_context
+    )
+    assert "platform.promotion_target_versions" in website_project_context
+    assert "target_audiences" in website_project_context
+    assert "partnership_goals" in website_project_context
+    assert "DROP TABLE" not in website_project_context.upper()
+
 
 def test_shared_bootstrap_declares_crawling_roles_and_schema() -> None:
     sql = BOOTSTRAP.read_text(encoding="utf-8")
@@ -166,6 +195,7 @@ def test_deployment_manifest_covers_both_heads_with_fixed_checksums() -> None:
                 BRIDGE_REVISION,
                 PROJECT_AUTHORITY_REVISION,
                 BACKLINKS_PROJECT_AUTHORITY_REVISION,
+                WEBSITE_PROJECT_CONTEXT_REVISION,
             ]
         },
         *{
@@ -188,8 +218,8 @@ def test_deployment_manifest_covers_both_heads_with_fixed_checksums() -> None:
         )
 
     assert manifest["heads"] == {
-        "alembic": "20260806_0009",
-        "backlinks": "0047",
+        "alembic": "20260813_0010",
+        "backlinks": "0060",
     }
 
 

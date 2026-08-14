@@ -10,6 +10,7 @@ import {
 import { Link, useNavigate, useSearchParams } from "react-router"
 
 import { ApiError } from "@/api/client"
+import type { Project } from "@/app/project-context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -29,6 +30,7 @@ import {
   getLatestDraftJob,
   listOpportunityContacts,
   type DraftJob,
+  type DraftRequest,
   type DraftJobStatus,
   type ManualContactCandidate,
   type ManualContactRole,
@@ -40,6 +42,48 @@ import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-s
 
 const terminalStatuses: DraftJobStatus[] = ["SUCCEEDED", "FAILED", "REFUSED"]
 const pollIntervalMs = 1_500
+
+const cooperationOptions = [
+  ["GENERAL_PARTNERSHIP", "通用合作"],
+  ["GUEST_POST", "客座文章"],
+  ["LINK_INSERTION", "现有内容插入"],
+  ["RESOURCE_PAGE", "资源页收录"],
+  ["PRODUCT_REVIEW", "产品评测"],
+  ["CONTENT_PARTNERSHIP", "内容合作"],
+] as const
+
+const linkPreferenceOptions = [
+  ["NOT_SPECIFIED", "未指定"],
+  ["DOFOLLOW_PREFERRED", "偏好 dofollow（仅询问）"],
+  ["NOFOLLOW_ACCEPTABLE", "可接受 nofollow"],
+  ["EITHER", "两者均可"],
+] as const
+
+const toneOptions = [
+  ["NEUTRAL_BUSINESS", "中性商务"],
+  ["WARM_PROFESSIONAL", "友好专业"],
+  ["CONCISE_DIRECT", "简洁直接"],
+] as const
+
+const subjectStyleOptions = [
+  ["CLEAR_DIRECT", "清晰直接"],
+  ["BENEFIT_LED", "价值导向"],
+  ["QUESTION_LED", "问题导向"],
+] as const
+
+function defaultDraftRequest(project: Project): DraftRequest {
+  return {
+    cooperationType: "GENERAL_PARTNERSHIP",
+    linkAttributePreference: "NOT_SPECIFIED",
+    promotionTargetUrl: project.targetUrls[0] ?? "",
+    anchorTextSuggestion: null,
+    language: project.language || "English",
+    tone: "NEUTRAL_BUSINESS",
+    subjectStyle: "CLEAR_DIRECT",
+    additionalRequirements: "",
+    forbiddenPhrases: [],
+  }
+}
 
 function generationError(error: unknown) {
   if (error instanceof ApiError) {
@@ -70,13 +114,15 @@ function formatTimestamp(value: string | null) {
 }
 
 export function DraftGeneration({
-  websiteProjectKey,
+  project,
 }: {
-  websiteProjectKey: string
+  project: Project
 }) {
+  const websiteProjectKey = project.id
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const opportunityId = searchParams.get("opportunityId")?.trim() ?? ""
+  const regenerateRequested = searchParams.get("regenerate") === "1"
   const [status, setStatus] = React.useState<
     DraftJobStatus | "IDLE" | "CHECKING"
   >("IDLE")
@@ -98,6 +144,13 @@ export function DraftGeneration({
   const [evidenceSnapshotId, setEvidenceSnapshotId] = React.useState<
     string | null
   >(null)
+  const [requestSnapshotId, setRequestSnapshotId] = React.useState<
+    string | null
+  >(null)
+  const [draftRequest, setDraftRequest] = React.useState<DraftRequest>(() =>
+    defaultDraftRequest(project)
+  )
+  const [forbiddenPhrasesText, setForbiddenPhrasesText] = React.useState("")
   const [error, setError] = React.useState<string | null>(null)
   const [failureState, setFailureState] = React.useState<
     "error" | "offline" | null
@@ -129,6 +182,29 @@ export function DraftGeneration({
   const manualCandidateKey = React.useRef<string | null>(null)
   const createController = React.useRef<AbortController | null>(null)
   const createInFlight = React.useRef(false)
+
+  const applyRequestSnapshot = React.useCallback(
+    (request: DraftRequest | null) => {
+      if (request === null) return
+      setDraftRequest({
+        ...request,
+        anchorTextSuggestion: request.anchorTextSuggestion ?? null,
+      })
+      setForbiddenPhrasesText(request.forbiddenPhrases.join("\n"))
+    },
+    []
+  )
+
+  const updateDraftRequest = React.useCallback(
+    <Key extends keyof DraftRequest,>(
+      key: Key,
+      value: DraftRequest[Key]
+    ) => {
+      requestKey.current = null
+      setDraftRequest((current) => ({ ...current, [key]: value }))
+    },
+    []
+  )
 
   React.useEffect(() => {
     if (!opportunityId) {
@@ -197,10 +273,16 @@ export function DraftGeneration({
       setJob(nextJob)
       setJobId(nextJob.id)
       setStatus(nextJob.status)
+      setRequestSnapshotId(nextJob.requestSnapshotId)
+      applyRequestSnapshot(nextJob.request)
       setLastSuccessfulQueryAt(queriedAt)
       setPollCount((count) => count + 1)
 
-      if (nextJob.status === "QUEUED" || nextJob.status === "RUNNING") {
+      if (
+        nextJob.status === "QUEUED" ||
+        nextJob.status === "RUNNING" ||
+        nextJob.status === "RETRY_SCHEDULED"
+      ) {
         setPollingJobId(nextJob.id)
         setPollingScopeKey(draftScopeKey)
         setPollingState("polling")
@@ -230,7 +312,7 @@ export function DraftGeneration({
         setFailureState(null)
       }
     },
-    [draftScopeKey]
+    [applyRequestSnapshot, draftScopeKey]
   )
 
   React.useEffect(() => {
@@ -249,6 +331,7 @@ export function DraftGeneration({
       setLastSuccessfulQueryAt(null)
       setFrontendDiscoveryLatencyMs(null)
       setEvidenceSnapshotId(null)
+      setRequestSnapshotId(null)
       setError(null)
       setFailureState(null)
       setStatus("CHECKING")
@@ -262,6 +345,17 @@ export function DraftGeneration({
         )
         if (cancelled) return
         if (response.job === null) {
+          setLastSuccessfulQueryAt(new Date().toISOString())
+          setPollCount(1)
+          setStatus("IDLE")
+          return
+        }
+        applyRequestSnapshot(response.job.request)
+        if (
+          regenerateRequested &&
+          terminalStatuses.includes(response.job.status)
+        ) {
+          setRequestSnapshotId(response.job.requestSnapshotId)
           setLastSuccessfulQueryAt(new Date().toISOString())
           setPollCount(1)
           setStatus("IDLE")
@@ -282,8 +376,10 @@ export function DraftGeneration({
     }
   }, [
     applyJobSnapshot,
+    applyRequestSnapshot,
     logicalDraftKey,
     opportunityId,
+    regenerateRequested,
     websiteProjectKey,
   ])
 
@@ -422,12 +518,25 @@ export function DraftGeneration({
           contactId: selectedContact.id,
           contactVersion: selectedContact.version,
           logicalDraftKey,
+          request: {
+            ...draftRequest,
+            anchorTextSuggestion:
+              draftRequest.anchorTextSuggestion?.trim() || null,
+            language: draftRequest.language.trim(),
+            additionalRequirements:
+              draftRequest.additionalRequirements.trim(),
+            forbiddenPhrases: forbiddenPhrasesText
+              .split(/\r?\n|,/)
+              .map((phrase) => phrase.trim())
+              .filter(Boolean),
+          },
         },
         idempotencyKey,
         controller.signal
       )
       if (controller.signal.aborted) return
       setEvidenceSnapshotId(created.evidenceSnapshotId)
+      setRequestSnapshotId(created.requestSnapshotId)
       setJobId(created.jobId)
       setStatus(created.status)
       setPollingJobId(created.jobId)
@@ -531,13 +640,15 @@ export function DraftGeneration({
           ? "服务端排队中"
           : status === "RUNNING"
             ? "服务端生成、校验或保存中"
-            : status === "SUCCEEDED"
-              ? "服务端草稿已保存"
-              : status === "FAILED"
-                ? "服务端生成失败"
-                : status === "REFUSED"
-                  ? "服务端拒绝生成"
-                  : "等待用户提交"
+            : status === "RETRY_SCHEDULED"
+              ? "Provider 重试已排程"
+              : status === "SUCCEEDED"
+                ? "服务端草稿已保存"
+                : status === "FAILED"
+                  ? "服务端生成失败"
+                  : status === "REFUSED"
+                    ? "服务端拒绝生成"
+                    : "等待用户提交"
 
   if (!opportunityId) {
     return (
@@ -550,6 +661,7 @@ export function DraftGeneration({
         <Button
           variant="outline"
           className="w-fit"
+          nativeButton={false}
           render={
             <Link
               to={`/projects/${websiteProjectKey}/backlinks/opportunities`}
@@ -760,11 +872,211 @@ export function DraftGeneration({
               </Select>
             )}
           </div>
+          <div className="grid gap-4 border-t pt-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium">合作类型</span>
+                <Select
+                  value={draftRequest.cooperationType}
+                  onValueChange={(value) =>
+                    updateDraftRequest(
+                      "cooperationType",
+                      value as DraftRequest["cooperationType"]
+                    )
+                  }
+                  disabled={busy}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {cooperationOptions.map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium">链接属性偏好</span>
+                <Select
+                  value={draftRequest.linkAttributePreference}
+                  onValueChange={(value) =>
+                    updateDraftRequest(
+                      "linkAttributePreference",
+                      value as DraftRequest["linkAttributePreference"]
+                    )
+                  }
+                  disabled={busy}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {linkPreferenceOptions.map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+            </div>
+
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium">推广目标页</span>
+              {project.targetUrls.length > 0 ? (
+                <Select
+                  value={draftRequest.promotionTargetUrl}
+                  onValueChange={(value) => {
+                    if (value !== null) {
+                      updateDraftRequest("promotionTargetUrl", value);
+                    }
+                  }}
+                  disabled={busy}
+                >
+                  <SelectTrigger className="w-full min-w-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {project.targetUrls.map((targetUrl) => (
+                      <SelectItem key={targetUrl} value={targetUrl}>
+                        <span className="block max-w-[32rem] truncate">
+                          {targetUrl}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input
+                  value=""
+                  disabled
+                  placeholder="请先在项目设置中添加推广目标页"
+                />
+              )}
+            </label>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium">建议锚文本（未确认）</span>
+                <Input
+                  value={draftRequest.anchorTextSuggestion ?? ""}
+                  onChange={(event) =>
+                    updateDraftRequest(
+                      "anchorTextSuggestion",
+                      event.target.value || null
+                    )
+                  }
+                  disabled={busy}
+                  maxLength={200}
+                  placeholder="可选"
+                />
+              </label>
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium">语言</span>
+                <Input
+                  value={draftRequest.language}
+                  onChange={(event) =>
+                    updateDraftRequest("language", event.target.value)
+                  }
+                  disabled={busy}
+                  maxLength={35}
+                />
+              </label>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium">语气</span>
+                <Select
+                  value={draftRequest.tone}
+                  onValueChange={(value) =>
+                    updateDraftRequest(
+                      "tone",
+                      value as DraftRequest["tone"]
+                    )
+                  }
+                  disabled={busy}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {toneOptions.map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium">主题风格</span>
+                <Select
+                  value={draftRequest.subjectStyle}
+                  onValueChange={(value) =>
+                    updateDraftRequest(
+                      "subjectStyle",
+                      value as DraftRequest["subjectStyle"]
+                    )
+                  }
+                  disabled={busy}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {subjectStyleOptions.map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+            </div>
+
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium">附加要求</span>
+              <Textarea
+                value={draftRequest.additionalRequirements}
+                onChange={(event) =>
+                  updateDraftRequest(
+                    "additionalRequirements",
+                    event.target.value
+                  )
+                }
+                disabled={busy}
+                maxLength={2000}
+                rows={3}
+                placeholder="可选"
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium">
+                禁用措辞（每行一条）
+              </span>
+              <Textarea
+                value={forbiddenPhrasesText}
+                onChange={(event) => {
+                  requestKey.current = null
+                  setForbiddenPhrasesText(event.target.value)
+                }}
+                disabled={busy}
+                rows={3}
+                placeholder="可选"
+              />
+            </label>
+          </div>
           <Button
             className="w-fit"
             disabled={
               busy ||
               selectedContact === null ||
+              !draftRequest.promotionTargetUrl ||
+              !draftRequest.language.trim() ||
               (job !== null && status !== "IDLE")
             }
             onClick={() => void startGeneration()}
@@ -780,9 +1092,25 @@ export function DraftGeneration({
                 ? "正在等待后端"
                 : "已有 Draft Job"}
           </Button>
+          {(status === "FAILED" || status === "REFUSED") && (
+            <Button
+              variant="outline"
+              className="w-fit"
+              disabled={busy}
+              onClick={() => void startGeneration(true)}
+            >
+              <RefreshCw />
+              重新生成
+            </Button>
+          )}
         </section>
 
-        <section className="grid gap-2 border p-4 text-sm">
+        <section
+          data-testid="draft-job-diagnostics"
+          hidden
+          aria-hidden="true"
+          className="grid gap-2 border p-4 text-sm"
+        >
           <div className="flex items-center justify-between gap-3">
             <span className="font-medium">后端生成状态</span>
             {(status === "FAILED" || status === "REFUSED") && (
@@ -843,6 +1171,24 @@ export function DraftGeneration({
           {evidenceSnapshotId && (
             <span className="text-xs text-muted-foreground">
               已绑定当前 Opportunity Evidence Snapshot。
+            </span>
+          )}
+          {requestSnapshotId && (
+            <span className="text-xs text-muted-foreground">
+              生成参数已保存为不可变 Draft Request Snapshot。
+            </span>
+          )}
+          {job?.generator === "TEMPLATE_FALLBACK" && (
+            <div className="flex flex-wrap items-center gap-2 border-t pt-3">
+              <Badge variant="outline">确定性模板降级</Badge>
+              <span className="text-xs text-muted-foreground">
+                Provider 不可用，本次结果不是 AI 生成成功。
+              </span>
+            </div>
+          )}
+          {job?.generator === "AI" && (
+            <span className="text-xs text-muted-foreground">
+              当前草稿版本由受约束 AI 生成。
             </span>
           )}
           {jobId && (

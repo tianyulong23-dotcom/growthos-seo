@@ -1,0 +1,33 @@
+{
+  "format": "link-outreach-resource-library/v1",
+  "generatedAt": "20260728",
+  "inventory": {
+    "total": 455,
+    "free": 275,
+    "paid": 180
+  },
+  "qualityBuckets": {
+    "avoid": 47,
+    "unclassified": 284,
+    "recommend": 83,
+    "review": 41
+  },
+  "files": {
+    "resources.json": {
+      "sha256": "e6d85694f23b85b95440c17747842499f92c0ac8830f989eec9fac4fda4b6376",
+      "bytes": 668304
+    },
+    "schema.json": {
+      "sha256": "996e40ec5afa4ffe08ebfa0fd7678c64d3f74f0f63dcee78ebdffa1aaf9c64b2",
+      "bytes": 1289
+    },
+    "import_resources.py": {
+      "sha256": "2acb763a49b492c51ebc75a03c87110612f0a53d0f037471d5ad9471dd3a126e",
+      "bytes": 2102
+    },
+    "README.md": {
+      "sha256": "0a7924908027e229e1cc9211d926e0903b4db1b3ff213bc9c7b7e47d1fc99a63",
+      "bytes": 708
+    }
+  }
+}

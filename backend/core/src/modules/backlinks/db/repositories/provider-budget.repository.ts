@@ -22,6 +22,67 @@ export function createProviderBudgetRepository(
   client: ProviderArtifactQueryClient,
   now: () => Date = () => new Date(),
 ) {
+  const reserveBudgetFor = async (
+    input: ProviderBudgetReservationInput,
+    budgetId?: string,
+  ): Promise<"allow" | "deny"> => {
+    try {
+      const result = await client.query(`
+        WITH batch AS MATERIALIZED (
+          SELECT id
+          FROM provider_batch_requests
+          WHERE organization_id=$1::uuid
+            AND workspace_id=$2::uuid
+            AND website_project_id=$3::uuid
+            AND provider=$4
+            AND normalized_request_hash=$5
+            AND request_id=$6
+            AND budget_reservation_id=$7
+            AND status='running'
+          ORDER BY started_at DESC
+          LIMIT 1
+        ), budget AS MATERIALIZED (
+          SELECT id
+          FROM backlink_provider_budgets
+          WHERE organization_id=$1::uuid
+            AND workspace_id=$2::uuid
+            AND provider=$4
+            AND period_start<=$9
+            AND period_end>$9
+            AND ($10::uuid IS NULL OR id=$10::uuid)
+          ORDER BY period_start DESC
+          LIMIT 1
+        )
+        SELECT backlink_reserve_provider_cost(
+          batch.id,budget.id,$1::uuid,$2::uuid,$3::uuid,batch.id,$4,$7,$8,
+          $6
+        )
+        FROM batch CROSS JOIN budget
+      `, [
+        input.context.organizationId,
+        input.context.workspaceId,
+        input.context.websiteProjectId,
+        input.provider,
+        input.requestFingerprint,
+        input.context.requestId,
+        input.reservationKey,
+        input.estimatedCostMicros,
+        now(),
+        budgetId ?? null,
+      ]);
+      return result.rows[0] === undefined ? "deny" : "allow";
+    } catch (error) {
+      if (
+        errorCode(error) === "P0001" &&
+        error instanceof Error &&
+        error.message === "BACKLINK_PROVIDER_BUDGET_EXCEEDED"
+      ) {
+        return "deny";
+      }
+      throw error;
+    }
+  };
+
   return {
     async recordRequest(input: Readonly<{
       batchRequestId: string;
@@ -58,65 +119,66 @@ export function createProviderBudgetRepository(
     async reserveBudget(
       input: ProviderBudgetReservationInput,
     ): Promise<"allow" | "deny"> {
-      try {
-        const result = await client.query(`
-          WITH batch AS MATERIALIZED (
-            SELECT id
-            FROM provider_batch_requests
-            WHERE organization_id=$1::uuid
-              AND workspace_id=$2::uuid
-              AND website_project_id=$3::uuid
-              AND provider=$4
-              AND normalized_request_hash=$5
-              AND request_id=$6
-              AND budget_reservation_id=$7
-              AND status='running'
-            ORDER BY started_at DESC
-            LIMIT 1
-          ), budget AS MATERIALIZED (
-            SELECT id
-            FROM backlink_provider_budgets
-            WHERE organization_id=$1::uuid
-              AND workspace_id=$2::uuid
-              AND provider=$4
-              AND period_start<=$9
-              AND period_end>$9
-            ORDER BY period_start DESC
-            LIMIT 1
-          )
-          SELECT backlink_reserve_provider_cost(
-            batch.id,budget.id,$1::uuid,$2::uuid,$3::uuid,batch.id,$4,$7,$8,
-            $6
-          )
-          FROM batch CROSS JOIN budget
-        `, [
-          input.context.organizationId,
-          input.context.workspaceId,
-          input.context.websiteProjectId,
-          input.provider,
-          input.requestFingerprint,
-          input.context.requestId,
-          input.reservationKey,
-          input.estimatedCostMicros,
-          now(),
-        ]);
-        return result.rows[0] === undefined ? "deny" : "allow";
-      } catch (error) {
-        if (
-          errorCode(error) === "P0001" &&
-          error instanceof Error &&
-          error.message === "BACKLINK_PROVIDER_BUDGET_EXCEEDED"
-        ) {
-          return "deny";
-        }
-        throw error;
+      return reserveBudgetFor(input);
+    },
+
+    async reserveBudgetWithinPaidCallCeiling(
+      input: ProviderBudgetReservationInput,
+      maxPaidCalls: number,
+    ): Promise<"allow" | "deny"> {
+      const budget = await client.query(`
+        SELECT id
+        FROM backlink_provider_budgets
+        WHERE organization_id=$1::uuid
+          AND workspace_id=$2::uuid
+          AND provider=$3
+          AND period_start<=$4
+          AND period_end>$4
+        ORDER BY period_start DESC
+        LIMIT 1
+        FOR UPDATE
+      `, [
+        input.context.organizationId,
+        input.context.workspaceId,
+        input.provider,
+        now(),
+      ]);
+      const budgetId = budget.rows[0]?.id;
+      if (typeof budgetId !== "string") return "deny";
+
+      const usage = await client.query(`
+        SELECT count(*)::integer AS count,
+          COALESCE(bool_or(reservation_key=$5),false) AS "alreadyReserved"
+        FROM backlink_provider_usage_ledger
+        WHERE organization_id=$1::uuid
+          AND workspace_id=$2::uuid
+          AND website_project_id=$3::uuid
+          AND budget_id=$4::uuid
+          AND provider=$6
+          AND status IN ('reserved','settled')
+      `, [
+        input.context.organizationId,
+        input.context.workspaceId,
+        input.context.websiteProjectId,
+        budgetId,
+        input.reservationKey,
+        input.provider,
+      ]);
+      const paidCallCount = Number(usage.rows[0]?.count ?? 0);
+      if (
+        usage.rows[0]?.alreadyReserved !== true &&
+        paidCallCount >= maxPaidCalls
+      ) {
+        return "deny";
       }
+      return reserveBudgetFor(input, budgetId);
     },
 
     async settle(input: Readonly<{
       batchRequestId: string;
       actualCostMicros: number;
       settledAt: Date;
+      expectedRequestStatus?: "running" | "unknown_charge";
     }>): Promise<void> {
       const result = await client.query(`
         WITH ledger AS (
@@ -135,13 +197,14 @@ export function createProviderBudgetRepository(
         UPDATE backlink_provider_requests request
         SET status='succeeded',finished_at=$3
         WHERE request.id=$1::uuid
-          AND request.status='running'
+          AND request.status=$4
           AND EXISTS (SELECT 1 FROM budget)
         RETURNING request.id
       `, [
         input.batchRequestId,
         input.actualCostMicros,
         input.settledAt,
+        input.expectedRequestStatus ?? "running",
       ]);
       if (result.rows[0] === undefined) {
         throw new Error("DATAFORSEO_PROVIDER_BUDGET_RESERVATION_MISSING");

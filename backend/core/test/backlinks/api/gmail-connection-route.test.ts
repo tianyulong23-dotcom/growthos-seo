@@ -36,6 +36,9 @@ import type {
   GoogleAuthPort,
   GoogleAuthRequestInput,
 } from "../../../src/modules/backlinks/ports/google-auth.port.js";
+import type {
+  GmailPollingSyncCommands,
+} from "../../../src/modules/backlinks/application/workflows/gmail-polling-sync-workflow.js";
 
 type StoredAttempt = {
   readonly creation: NewOAuthAttempt;
@@ -139,6 +142,7 @@ afterEach(async () => {
 function setup(options?: Readonly<{
   grantedScopes?: readonly string[];
   syncError?: Error;
+  syncStatus?: Awaited<ReturnType<GmailPollingSyncCommands["status"]>>;
 }>) {
   const repository = new FakeOAuthAttemptRepository();
   let randomValue = 1;
@@ -345,12 +349,17 @@ function setup(options?: Readonly<{
             };
           },
           async status() {
-            return {
+            return options?.syncStatus ?? {
               state: "POLLING",
               workflowId: id(40),
               pollingIntervalSeconds: 60,
               killSwitchOpen: true,
               acceptedSendCount: 2,
+              lastSuccessfulSyncAt: "2026-08-04T00:01:00.000Z",
+              lastError: null,
+              lastErrorCategory: null,
+              nextRetryAt: null,
+              consecutiveFailures: 0,
               cursor: {
                 historyId: "166995",
                 initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",
@@ -490,6 +499,9 @@ describe("BL-AI-103 Gmail connection APIs", () => {
       pollingIntervalSeconds: 60,
       killSwitchOpen: true,
       acceptedSendCount: 2,
+      lastSuccessfulSyncAt: "2026-08-04T00:01:00.000Z",
+      lastError: null,
+      nextRetryAt: null,
       cursor: {
         historyId: "166995",
         initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",
@@ -504,6 +516,80 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     expect(response.body).not.toMatch(
       /accessToken|refreshToken|tokenSecretReference|credentialReference/,
     );
+  });
+
+  it("returns waiting_for_accepted_send before the first accepted send", async () => {
+    const test = setup({
+      syncStatus: {
+        state: "WAITING_FOR_ACCEPTED_SEND",
+        workflowId: id(40),
+        pollingIntervalSeconds: 60,
+        killSwitchOpen: true,
+        acceptedSendCount: 0,
+        lastSuccessfulSyncAt: null,
+        lastError: null,
+        lastErrorCategory: null,
+        nextRetryAt: null,
+        consecutiveFailures: 0,
+        cursor: null,
+      },
+    });
+    await test.ready();
+
+    const response = await test.app.inject({
+      method: "GET",
+      url: `${routeBase}/${connection.connectionId}/sync-status`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      state: "WAITING_FOR_ACCEPTED_SEND",
+      acceptedSendCount: 0,
+      cursor: null,
+      lastError: null,
+    });
+  });
+
+  it("returns persisted cursor and provider recovery details", async () => {
+    const test = setup({
+      syncStatus: {
+        state: "POLLING",
+        workflowId: id(40),
+        pollingIntervalSeconds: 60,
+        killSwitchOpen: true,
+        acceptedSendCount: 2,
+        lastSuccessfulSyncAt: "2026-08-04T00:01:00.000Z",
+        lastError: "Gmail provider returned 503.",
+        lastErrorCategory: "GOOGLE_5XX",
+        nextRetryAt: "2026-08-04T00:03:00.000Z",
+        consecutiveFailures: 2,
+        cursor: {
+          historyId: "166995",
+          initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",
+          lastSyncedAt: "2026-08-04T00:01:00.000Z",
+          version: 3,
+        },
+      },
+    });
+    await test.ready();
+
+    const response = await test.app.inject({
+      method: "GET",
+      url: `${routeBase}/${connection.connectionId}/sync-status`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      state: "POLLING",
+      lastError: "Gmail provider returned 503.",
+      lastErrorCategory: "GOOGLE_5XX",
+      nextRetryAt: "2026-08-04T00:03:00.000Z",
+      consecutiveFailures: 2,
+      cursor: {
+        historyId: "166995",
+        version: 3,
+      },
+    });
   });
 
   it("disconnects by resolved project scope without returning credentials", async () => {

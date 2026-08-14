@@ -141,6 +141,7 @@ async function main(): Promise<void> {
     for (const [name, value] of Object.entries(environmentUpdates)) {
       environment.set(name, value);
     }
+    environment.delete("DATAFORSEO_DISCOVERY_TARGETS_JSON");
     environment.set("DATAFORSEO_ENABLED", "false");
   }
 

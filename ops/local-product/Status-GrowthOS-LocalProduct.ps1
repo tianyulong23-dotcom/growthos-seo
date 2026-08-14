@@ -40,6 +40,47 @@ function Get-HttpStatus([string]$Uri) {
     }
 }
 
+function Get-HttpJson([string]$Uri) {
+    try {
+        return Invoke-RestMethod -Uri $Uri -TimeoutSec 5
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-WorkerRuntimeStatus(
+    [string]$LogsRoot,
+    [string]$RunId
+) {
+    if ([string]::IsNullOrWhiteSpace($RunId)) {
+        return $null
+    }
+    $path = Join-Path $LogsRoot "$RunId-worker.stdout.log"
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+    $lines = @(
+        Select-String `
+            -LiteralPath $path `
+            -SimpleMatch '"event":"backlinks.worker.ready"' |
+            ForEach-Object { $_.Line }
+    )
+    for ($index = $lines.Count - 1; $index -ge 0; $index--) {
+        $line = $lines[$index]
+        if ($line -notmatch '"event":"backlinks.worker.ready"') {
+            continue
+        }
+        try {
+            return ($line | ConvertFrom-Json)
+        }
+        catch {
+            return $null
+        }
+    }
+    return $null
+}
+
 function Get-ContainerHealth([string]$Name) {
     $health = docker inspect `
         --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}" `
@@ -152,6 +193,9 @@ function Get-RecentErrorSummary(
 
 $coreEnvironment = Read-EnvironmentFile (
     Join-Path $RuntimeRoot "backlinks-api.env"
+)
+$workerEnvironment = Read-EnvironmentFile (
+    Join-Path $RuntimeRoot "backlinks-worker.env"
 )
 $providerConfiguration = [pscustomobject]@{
     dataForSeo = [pscustomobject]@{
@@ -677,7 +721,553 @@ SELECT (
   )
 )::text;
 "@
+            $draftRequestSnapshotGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regclass(
+    'backlinks.backlink_draft_request_snapshots'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_evidence_snapshots'
+       AND column_name='context_data'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_model_runs'
+       AND column_name='request_snapshot_id'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_draft_versions'
+       AND column_name='request_snapshot_id'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_trigger t
+      JOIN pg_class r ON r.oid=t.tgrelid
+      JOIN pg_namespace n ON n.oid=r.relnamespace
+     WHERE n.nspname='backlinks'
+       AND r.relname='backlink_draft_request_snapshots'
+       AND t.tgname='backlink_draft_request_snapshot_immutable'
+       AND NOT t.tgisinternal
+  )
+)::text;
+"@
+            $gmailSendReplyLoopGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regclass(
+    'backlinks.backlink_gmail_connection_sync_cursors'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid=
+       'backlinks.backlink_gmail_connection_sync_cursors'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_send_snapshots'
+       AND column_name='approval_fact_id'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid='backlinks.backlink_send_snapshots'::regclass
+       AND conname='backlink_send_snapshot_approval_fact_fk'
+  )
+)::text;
+"@
+            $backlinkProfileInventoryGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regclass('backlinks.backlink_profile_sync_jobs') IS NOT NULL
+  AND to_regclass('backlinks.backlink_profile_snapshots') IS NOT NULL
+  AND to_regclass('backlinks.backlink_inventory_items') IS NOT NULL
+  AND to_regclass('backlinks.backlink_profile_health_snapshots') IS NOT NULL
+  AND to_regclass('backlinks.backlink_profile_sync_cursors') IS NOT NULL
+  AND to_regclass('backlinks.backlink_inventory_monitor_policies') IS NOT NULL
+  AND to_regclass('backlinks.backlink_inventory_monitor_runs') IS NOT NULL
+  AND to_regclass('backlinks.backlink_inventory_monitor_observations') IS NOT NULL
+  AND to_regclass('backlinks.backlink_inventory_monitor_requests') IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid='backlinks.backlink_inventory_items'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid=to_regclass('backlinks.backlink_inventory_monitor_policies')
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+)::text;
+"@
+            $backlinkRecommendationPublicationDefaultGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  SELECT column_default = '''CONTACT_PENDING''::text'
+    FROM information_schema.columns
+   WHERE table_schema='backlinks'
+     AND table_name='backlink_recommendation_inventory'
+     AND column_name='publication_status'
+)::text;
+"@
+            $backlinkMonitoringContinuityGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  position(
+    'provider_inventory_requires_pin_or_management' IN pg_get_functiondef(
+      'backlinks.backlink_apply_inventory_monitor_policy()'::regprocedure
+    )
+  ) > 0
+  AND NOT EXISTS (
+    SELECT 1
+      FROM backlinks.backlink_inventory_monitor_policies policy
+      JOIN backlinks.backlink_inventory_items inventory ON (
+        inventory.organization_id,
+        inventory.workspace_id,
+        inventory.website_project_id,
+        inventory.id
+      )=(
+        policy.organization_id,
+        policy.workspace_id,
+        policy.website_project_id,
+        policy.inventory_item_id
+      )
+     WHERE inventory.source_type='DATAFORSEO'
+       AND inventory.placement_id IS NULL
+       AND NOT inventory.pinned
+       AND NOT inventory.managed
+       AND policy.monitoring_status<>'provider_only'
+  )
+)::text;
+"@
+            $backlinkRecommendationFitContactGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_recommendation_inventory'
+       AND column_name IN (
+         'fit_decision',
+         'contact_decision',
+         'contact_reason_code',
+         'fit_score_model_version'
+       )
+  ) = 4
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_recommendation_inventory'::regclass
+       AND conname='backlink_rec_inventory_publication_gate_check'
+       AND position(
+         'fit_decision = ''eligible''::text' IN pg_get_constraintdef(oid)
+       ) > 0
+       AND position(
+         'contact_decision = ''eligible''::text' IN pg_get_constraintdef(oid)
+       ) > 0
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_commercial_candidates'::regclass
+       AND conname=
+         'backlink_commercial_candidate_context_domain_model_uq'
+  )
+)::text;
+"@
+            $backlinkPublishableRefillCycleGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_commercial_inventory_policies'
+       AND column_name IN (
+         'refill_state',
+         'current_refill_tier',
+         'current_refill_round',
+         'attempted_refill_tiers',
+         'termination_reason',
+         'last_publishable_count',
+         'last_raw_candidate_count',
+         'elimination_reason_counts'
+       )
+  ) = 8
+  AND (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_commercial_discovery_batches'
+       AND column_name IN (
+         'refill_tier',
+         'refill_round',
+         'raw_candidate_count',
+         'eligible_candidate_count',
+         'elimination_reason_counts'
+       )
+  ) = 5
+)::text;
+"@
+            $backlinkGmailAffectedProjectCountGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regprocedure(
+    'backlinks.backlink_count_selected_gmail_projects(uuid,uuid)'
+  ) IS NOT NULL
+)::text;
+"@
+            $backlinkResourceLibraryGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  to_regclass('backlinks.backlink_resource_library_items') IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid=to_regclass('backlinks.backlink_resource_library_items')
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_policies
+     WHERE schemaname='backlinks'
+       AND tablename='backlink_resource_library_items'
+       AND policyname='backlink_resource_library_tenant_policy'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_commercial_inventory_policies'::regclass
+       AND conname='backlink_commercial_refill_tier_check'
+       AND position(
+         'curated_resource_library' IN pg_get_constraintdef(oid)
+       ) > 0
+  )
+)::text;
+"@
+            $backlinkReassessmentCursorGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_commercial_inventory_policies'
+       AND column_name IN (
+         'paid_refill_tier','paid_refill_round',
+         'resource_refill_tier','resource_refill_round'
+       )
+  ) = 4
+  AND (
+    SELECT count(*)
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_commercial_inventory_policies'::regclass
+       AND conname IN (
+         'backlink_commercial_paid_refill_cursor_check',
+         'backlink_commercial_resource_refill_cursor_check'
+       )
+  ) = 2
+)::text;
+"@
+            $backlinkVisiblePoolGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND (
+         (
+           table_name='backlink_commercial_inventory_policies'
+           AND column_name IN (
+             'visible_pool_generation','visible_pool_state',
+             'visible_pool_target_count','archived_visible_pool_count',
+             'visible_pool_archived_at','visible_pool_archived_by'
+           )
+         )
+         OR (
+           table_name IN (
+             'backlink_recommendation_inventory',
+             'backlink_recommendation_refills',
+             'backlink_commercial_discovery_batches',
+             'backlink_commercial_candidates'
+           )
+           AND column_name='visible_pool_generation'
+         )
+       )
+  ) = 10
+  AND (
+    SELECT count(*)
+      FROM pg_constraint
+     WHERE conname IN (
+       'backlink_commercial_visible_pool_generation_check',
+       'backlink_commercial_visible_pool_state_check',
+       'backlink_commercial_visible_pool_target_check',
+       'backlink_rec_inventory_pool_generation_check',
+       'backlink_rec_refill_pool_generation_check',
+       'backlink_commercial_batch_pool_generation_check',
+       'backlink_commercial_candidate_pool_generation_check'
+     )
+  ) = 7
+)::text;
+"@
+            $backlinkExactTenProjectContextGateReady = docker exec `
+                growthos-live001-postgres psql -U postgres `
+                -d growthos_live001 -Atqc @"
+SELECT (
+  (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_project_context_snapshots'
+       AND column_name IN (
+         'target_market','target_audiences','partnership_goals'
+       )
+  ) = 3
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_commercial_inventory_policies'::regclass
+       AND conname='backlink_commercial_visible_pool_target_check'
+       AND position('10' IN pg_get_constraintdef(oid)) > 0
+       AND position('20' IN pg_get_constraintdef(oid)) = 0
+  )
+)::text;
+"@
             $backlinksHead = if (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkExactTenProjectContextGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkVisiblePoolGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkReassessmentCursorGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkResourceLibraryGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkGmailAffectedProjectCountGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkPublishableRefillCycleGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationFitContactGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkMonitoringContinuityGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0060"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkVisiblePoolGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkReassessmentCursorGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkResourceLibraryGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkGmailAffectedProjectCountGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkPublishableRefillCycleGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationFitContactGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkMonitoringContinuityGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0059"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkReassessmentCursorGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkResourceLibraryGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkGmailAffectedProjectCountGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkPublishableRefillCycleGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationFitContactGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkMonitoringContinuityGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0058"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkResourceLibraryGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkGmailAffectedProjectCountGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkPublishableRefillCycleGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationFitContactGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkMonitoringContinuityGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0057"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkGmailAffectedProjectCountGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkPublishableRefillCycleGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationFitContactGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkMonitoringContinuityGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0056"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkPublishableRefillCycleGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationFitContactGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkMonitoringContinuityGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0055"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkRecommendationFitContactGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkMonitoringContinuityGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0054"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkMonitoringContinuityGateReady.Trim() `
+                        -eq "true" `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0053"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and `
+                    $backlinkRecommendationPublicationDefaultGateReady.Trim() `
+                        -eq "true"
+            ) {
+                "0052"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and $backlinkProfileInventoryGateReady.Trim() -eq "true"
+            ) {
+                "0051"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and $gmailSendReplyLoopGateReady.Trim() -eq "true"
+            ) {
+                "0049"
+            }
+            elseif (
+                $LASTEXITCODE -eq 0 `
+                -and $draftRequestSnapshotGateReady.Trim() -eq "true"
+            ) {
+                "0048"
+            }
+            elseif (
                 $LASTEXITCODE -eq 0 `
                 -and $gmailOrganizationReuseGateReady.Trim() -eq "true"
             ) {
@@ -758,6 +1348,7 @@ $manifest = Get-Content `
     -Encoding UTF8 |
     ConvertFrom-Json
 $coreStatus = Get-HttpStatus "http://127.0.0.1:7301/ready"
+$coreReadiness = Get-HttpJson "http://127.0.0.1:7301/ready"
 $fastApiStatus = Get-HttpStatus "http://127.0.0.1:7200/ready"
 $frontendStatus = Get-HttpStatus "http://127.0.0.1:5173"
 $browserStatus = Get-HttpStatus "http://127.0.0.1:7401/health"
@@ -766,6 +1357,97 @@ $recentErrors = @(
     Get-RecentErrorSummary `
         (Join-Path $RuntimeRoot "logs") `
         $(if ($null -eq $state) { $null } else { [string]$state.runId })
+)
+$buildManifestPath = Join-Path $RepositoryRoot `
+    "backend\core\dist\local-product-build-identity.json"
+$expectedBuild = if (Test-Path -LiteralPath $buildManifestPath) {
+    try {
+        Get-Content -LiteralPath $buildManifestPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+    }
+    catch {
+        $null
+    }
+}
+else {
+    $null
+}
+$workerRuntimeStatus = Get-WorkerRuntimeStatus `
+    (Join-Path $RuntimeRoot "logs") `
+    $(if ($null -eq $state) { $null } else { [string]$state.runId })
+$workerBuildId = if ($null -eq $workerRuntimeStatus) {
+    $null
+}
+else {
+    [string]$workerRuntimeStatus.buildId
+}
+$apiConfiguredBuildId = if ($coreEnvironment.Contains("TEMPORAL_BUILD_ID")) {
+    [string]$coreEnvironment["TEMPORAL_BUILD_ID"]
+}
+else {
+    $null
+}
+$workerConfiguredBuildId = if (
+    $workerEnvironment.Contains("TEMPORAL_BUILD_ID")
+) {
+    [string]$workerEnvironment["TEMPORAL_BUILD_ID"]
+}
+else {
+    $null
+}
+$expectedBuildId = if ($null -eq $expectedBuild) {
+    $null
+}
+else {
+    [string]$expectedBuild.buildId
+}
+$apiBuildId = if ($null -eq $coreReadiness) {
+    $null
+}
+else {
+    [string]$coreReadiness.build.buildId
+}
+$workerExecutionMode = if ($null -ne $workerRuntimeStatus -and
+    -not [string]::IsNullOrWhiteSpace(
+        [string]$workerRuntimeStatus.workerExecutionMode
+    )) {
+    [string]$workerRuntimeStatus.workerExecutionMode
+}
+elseif ($null -ne $state -and -not [string]::IsNullOrWhiteSpace(
+    [string]$state.workerExecutionMode
+)) {
+    [string]$state.workerExecutionMode
+}
+elseif ($workerEnvironment.Contains("BACKLINKS_WORKER_EXECUTION_MODE")) {
+    [string]$workerEnvironment["BACKLINKS_WORKER_EXECUTION_MODE"]
+}
+else {
+    "normal"
+}
+$businessConsumersRunning = if (
+    $null -ne $workerRuntimeStatus -and
+    $null -ne $workerRuntimeStatus.businessConsumersRunning
+) {
+    [bool]$workerRuntimeStatus.businessConsumersRunning
+}
+elseif ($workerExecutionMode -eq "quiesced") {
+    $false
+}
+else {
+    [bool]$processes.worker.running
+}
+$postgresReady = $postgresHealth -eq "healthy" -and $null -ne $databaseFacts
+$temporalReady = (
+    $temporalHealth -eq "healthy" -and $temporalNamespaceReady
+)
+$buildReady = (
+    -not [string]::IsNullOrWhiteSpace($expectedBuildId) `
+    -and $null -ne $state `
+    -and [string]$state.buildId -eq $expectedBuildId `
+    -and $apiConfiguredBuildId -eq $expectedBuildId `
+    -and $workerConfiguredBuildId -eq $expectedBuildId `
+    -and $apiBuildId -eq $expectedBuildId `
+    -and $workerBuildId -eq $expectedBuildId
 )
 $healthy = (
     $null -ne $state `
@@ -784,6 +1466,7 @@ $healthy = (
     -and $coreStatus -eq 200 `
     -and $fastApiStatus -eq 200 `
     -and $frontendStatus -eq 200 `
+    -and $buildReady `
     -and $postgresHealth -eq "healthy" `
     -and $temporalHealth -eq "healthy" `
     -and $temporalNamespaceReady `
@@ -798,13 +1481,86 @@ $healthy = (
     -and 55432 -in $listenerPorts `
     -and 57233 -in $listenerPorts
 )
+$maintenanceReady = (
+    $null -ne $state `
+    -and $workerExecutionMode -eq "quiesced" `
+    -and -not $businessConsumersRunning `
+    -and $processes.coreApi.running `
+    -and $processes.worker.running `
+    -and $processes.fastApi.running `
+    -and $processes.frontend.running `
+    -and (
+        -not $browserRequired `
+        -or (
+            $processes.browser.running `
+            -and $browserStatus -eq 200 `
+            -and 7401 -in $listenerPorts
+        )
+    ) `
+    -and $coreStatus -eq 200 `
+    -and $fastApiStatus -eq 200 `
+    -and $frontendStatus -eq 200 `
+    -and $buildReady `
+    -and $postgresReady `
+    -and $temporalReady `
+    -and $workerRuntimeStatus.postgresReady -eq $true `
+    -and $workerRuntimeStatus.temporalReady -eq $true `
+    -and $workerRuntimeStatus.namespaceReady -eq $true `
+    -and $null -ne $databaseGovernance `
+    -and $databaseGovernance.rlsReady -eq $true `
+    -and ([string]$databaseHead) -eq ([string]$manifest.heads.alembic) `
+    -and ([string]$backlinksHead) -eq ([string]$manifest.heads.backlinks) `
+    -and 5173 -in $listenerPorts `
+    -and 7200 -in $listenerPorts `
+    -and 7301 -in $listenerPorts `
+    -and 55432 -in $listenerPorts `
+    -and 57233 -in $listenerPorts
+)
 
 $result = [pscustomobject]@{
-    status = if ($healthy) { "ok" } else { "not_ready" }
+    status = if ($maintenanceReady) {
+        "maintenance_ready"
+    }
+    elseif ($healthy) {
+        "ok"
+    }
+    else {
+        "not_ready"
+    }
     checkedAt = Get-Date -Format o
     runtimeMode = if ($null -eq $state) { $null } else { $state.runtimeMode }
     runId = if ($null -eq $state) { $null } else { $state.runId }
     projectKey = if ($null -eq $state) { $null } else { $state.projectKey }
+    apiBuildId = $apiBuildId
+    workerBuildId = $workerBuildId
+    workerExecutionMode = $workerExecutionMode
+    businessConsumersRunning = $businessConsumersRunning
+    postgresReady = $postgresReady
+    temporalReady = $temporalReady
+    build = [pscustomobject]@{
+        matches = $buildReady
+        expected = if ($null -eq $expectedBuild) {
+            $null
+        }
+        else {
+            [pscustomobject]@{
+                buildId = [string]$expectedBuild.buildId
+                sourceFingerprint = [string]$expectedBuild.sourceFingerprint
+                artifactFingerprint = (
+                    [string]$expectedBuild.artifactFingerprint
+                )
+                builtAt = [string]$expectedBuild.builtAt
+            }
+        }
+        configured = [pscustomobject]@{
+            api = $apiConfiguredBuildId
+            worker = $workerConfiguredBuildId
+        }
+        running = [pscustomobject]@{
+            api = $apiBuildId
+            worker = $workerBuildId
+        }
+    }
     providers = $providerConfiguration
     endpoints = [pscustomobject]@{
         browserWorker = [pscustomobject]@{
@@ -823,6 +1579,7 @@ $result = [pscustomobject]@{
         privateCore = [pscustomobject]@{
             url = "http://127.0.0.1:7301"
             statusCode = $coreStatus
+            buildId = $apiBuildId
         }
     }
     processes = [pscustomobject]$processes
@@ -855,5 +1612,7 @@ else {
     $result
 }
 if (-not $healthy -and -not $NoFail) {
-    exit 1
+    if (-not $maintenanceReady) {
+        exit 1
+    }
 }

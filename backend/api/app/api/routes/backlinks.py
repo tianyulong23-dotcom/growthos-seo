@@ -10,6 +10,7 @@ from app.core.backlinks_gateway import (
     PlatformContextResolver,
     problem_response,
 )
+from app.core.runtime import RuntimeDependencies
 
 router = APIRouter(tags=["backlinks"])
 
@@ -17,6 +18,44 @@ _GOOGLE_OAUTH_CALLBACK_QUERY_KEYS = frozenset(
     {"code", "state", "iss", "scope", "authuser", "prompt"}
 )
 _GOOGLE_OAUTH_ISSUER = "https://accounts.google.com"
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_QUIESCED_SYNCHRONOUS_DRAFT_SUFFIXES = (
+    "/approve",
+    "/send-preflight",
+)
+
+
+def _is_quiesced_synchronous_draft_write(request: Request) -> bool:
+    path = request.url.path
+    return (
+        request.method == "POST"
+        and "/backlinks/drafts/" in path
+        and path.endswith(_QUIESCED_SYNCHRONOUS_DRAFT_SUFFIXES)
+    )
+
+
+async def _business_consumers_unavailable(request: Request) -> Response | None:
+    if request.method in _SAFE_METHODS:
+        return None
+    if "/settings/kill-switches/" in request.url.path:
+        return None
+    if _is_quiesced_synchronous_draft_write(request):
+        return None
+    runtime: RuntimeDependencies = request.app.state.runtime_dependencies
+    if await runtime.business_consumers_running():
+        return None
+    return problem_response(
+        status=503,
+        problem_type="urn:growthos:problem:runtime:business-consumers-unavailable",
+        title="Background processing unavailable",
+        detail=(
+            "The request was not accepted because background processing "
+            "is unavailable."
+        ),
+        code="BUSINESS_CONSUMERS_UNAVAILABLE",
+        request_id=request.headers.get("x-request-id", "unresolved"),
+        retryable=True,
+    )
 
 
 async def _forward(
@@ -25,6 +64,9 @@ async def _forward(
     *,
     query_params: Sequence[tuple[str, str]] | None = None,
 ) -> Response:
+    unavailable = await _business_consumers_unavailable(request)
+    if unavailable is not None:
+        return unavailable
     resolver: PlatformContextResolver = request.app.state.platform_context_resolver
     gateway: BacklinksGateway = request.app.state.backlinks_gateway
     try:
@@ -55,6 +97,9 @@ async def _forward_collection(
     *,
     query_params: Sequence[tuple[str, str]] | None = None,
 ) -> Response:
+    unavailable = await _business_consumers_unavailable(request)
+    if unavailable is not None:
+        return unavailable
     resolver: PlatformContextResolver = request.app.state.platform_context_resolver
     gateway: BacklinksGateway = request.app.state.backlinks_gateway
     try:
@@ -214,6 +259,17 @@ async def backlinks_recommendation_inventory(
     return await _forward(request, websiteProjectKey)
 
 
+@router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/resource-library",
+    include_in_schema=False,
+)
+async def backlinks_resource_library(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
 @router.post(
     "/api/v1/projects/{websiteProjectKey}/backlinks/placement-candidates",
     include_in_schema=False,
@@ -255,6 +311,102 @@ async def backlinks_links(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/profile",
+    include_in_schema=False,
+)
+async def backlinks_profile(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/inventory",
+    include_in_schema=False,
+)
+async def backlinks_inventory(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/inventory-items",
+    include_in_schema=False,
+)
+async def import_backlinks_inventory_item(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.patch(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/inventory-items/{inventoryItemId}/monitoring-policy",
+    include_in_schema=False,
+)
+async def update_backlinks_inventory_monitoring_policy(
+    request: Request,
+    websiteProjectKey: str,
+    inventoryItemId: str,
+) -> Response:
+    del inventoryItemId
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/inventory-items/{inventoryItemId}/checks",
+    include_in_schema=False,
+)
+async def request_backlinks_inventory_check(
+    request: Request,
+    websiteProjectKey: str,
+    inventoryItemId: str,
+) -> Response:
+    del inventoryItemId
+    return await _forward(request, websiteProjectKey)
+
+
+@router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/inventory-items/{inventoryItemId}/direct-observations",
+    include_in_schema=False,
+)
+async def backlinks_inventory_direct_observations(
+    request: Request,
+    websiteProjectKey: str,
+    inventoryItemId: str,
+) -> Response:
+    del inventoryItemId
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/profile-sync-jobs",
+    include_in_schema=False,
+)
+async def request_backlinks_profile_sync(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/profile-sync-jobs/{jobId}",
+    include_in_schema=False,
+)
+async def backlinks_profile_sync_job(
+    request: Request,
+    websiteProjectKey: str,
+    jobId: str,
+) -> Response:
+    del jobId
     return await _forward(request, websiteProjectKey)
 
 
@@ -450,6 +602,20 @@ async def create_backlinks_recommendation_refill_job(
     return await _forward(request, websiteProjectKey)
 
 
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/"
+    "recommendation-pools/{visiblePoolGeneration}/archive",
+    include_in_schema=False,
+)
+async def archive_backlinks_recommendation_pool(
+    request: Request,
+    websiteProjectKey: str,
+    visiblePoolGeneration: int,
+) -> Response:
+    del visiblePoolGeneration
+    return await _forward(request, websiteProjectKey)
+
+
 @router.get(
     "/api/v1/projects/{websiteProjectKey}/backlinks/opportunities",
     include_in_schema=False,
@@ -555,6 +721,17 @@ async def save_backlinks_draft_version(
     include_in_schema=False,
 )
 async def approve_backlinks_draft(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/drafts/{draftId}/send-preflight",
+    include_in_schema=False,
+)
+async def preflight_backlinks_send_intent(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:

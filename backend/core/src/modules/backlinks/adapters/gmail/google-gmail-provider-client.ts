@@ -1,5 +1,4 @@
-import { gmail, type gmail_v1 } from "@googleapis/gmail";
-import { OAuth2Client } from "google-auth-library";
+import { auth, gmail, type gmail_v1 } from "@googleapis/gmail";
 
 import {
   GmailSendProviderError,
@@ -101,13 +100,18 @@ const providerReason = (
 const isTimeout = (error: unknown): boolean => {
   if (typeof error !== "object" || error === null) return false;
   const code = "code" in error ? error.code : undefined;
-  return code === "ETIMEDOUT" || code === "ESOCKETTIMEDOUT";
+  return [
+    "ECONNRESET",
+    "EAI_AGAIN",
+    "ESOCKETTIMEDOUT",
+    "ETIMEDOUT",
+  ].includes(String(code));
 };
 
 const defaultCreateClient = (accessToken: string): gmail_v1.Gmail => {
-  const auth = new OAuth2Client();
-  auth.setCredentials({ access_token: accessToken });
-  return gmail({ version: "v1", auth });
+  const oauthClient = new auth.OAuth2();
+  oauthClient.setCredentials({ access_token: accessToken });
+  return gmail({ version: "v1", auth: oauthClient });
 };
 
 export class GoogleGmailProviderClient
@@ -234,11 +238,23 @@ implements GmailSendProviderClient, GmailSyncProviderClient {
     try {
       return await operation(await this.client(connectionId));
     } catch (error) {
+      if (error instanceof GmailSyncProviderError) throw error;
       const status = httpStatus(error);
+      if (status !== undefined) {
+        throw new GmailSyncProviderError({
+          kind: "http_response",
+          httpStatus: status,
+          ...(providerReason(error) === undefined
+            ? {}
+            : { reason: providerReason(error) }),
+          ...(retryAfterSeconds(error) === undefined
+            ? {}
+            : { retryAfterSeconds: retryAfterSeconds(error) }),
+        }, { cause: error });
+      }
       throw new GmailSyncProviderError({
-        kind: "http_response",
-        httpStatus: status ?? 503,
-      });
+        kind: isTimeout(error) ? "timeout" : "transport",
+      }, { cause: error });
     }
   }
 }

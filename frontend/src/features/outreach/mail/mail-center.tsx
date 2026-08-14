@@ -17,6 +17,7 @@ import {
 } from "@/features/outreach/api/project-query"
 import { isOutreachOffline } from "@/features/outreach/shared/outreach-network-state"
 import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
+import { getRuntimeStatus } from "@/runtime-status"
 
 import {
   confirmReplyMatchCandidate,
@@ -198,6 +199,8 @@ export function MailCenter({
     useState<GmailPollingSyncStatus | null>(null)
   const [syncStatusState, setSyncStatusState] =
     useState<LoadState>("loading")
+  const [businessConsumersRunning, setBusinessConsumersRunning] =
+    useState<boolean | null>(null)
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
     null
   )
@@ -257,6 +260,15 @@ export function MailCenter({
     }
   }, [connectionId, websiteProjectKey])
 
+  const loadRuntimeStatus = useCallback(async () => {
+    try {
+      const runtime = await getRuntimeStatus()
+      setBusinessConsumersRunning(runtime.business_consumers_running)
+    } catch {
+      setBusinessConsumersRunning(false)
+    }
+  }, [])
+
   const applyFirstPage = (
     response: Awaited<ReturnType<typeof listReplyMailMessages>>
   ) => {
@@ -285,7 +297,13 @@ export function MailCenter({
   }
 
   const syncAndRefresh = async () => {
-    if (connectionId === null || syncing) return
+    if (
+      connectionId === null ||
+      syncing ||
+      businessConsumersRunning !== true
+    ) {
+      return
+    }
     setSyncing(true)
     setSyncNotice(null)
     try {
@@ -322,6 +340,15 @@ export function MailCenter({
     }, 0)
     return () => window.clearTimeout(loadTimer)
   }, [loadSyncStatus])
+
+  useEffect(() => {
+    const initialCheck = window.setTimeout(() => void loadRuntimeStatus(), 0)
+    const poller = window.setInterval(() => void loadRuntimeStatus(), 5_000)
+    return () => {
+      window.clearTimeout(initialCheck)
+      window.clearInterval(poller)
+    }
+  }, [loadRuntimeStatus])
 
   useEffect(() => {
     let active = true
@@ -653,9 +680,26 @@ export function MailCenter({
         </div>
       </div>
 
-      <div className="mt-4 border-y bg-muted/20 px-3 py-3 text-xs">
+      <div
+        data-testid="mail-sync-diagnostics"
+        className="mt-4 border-y bg-muted/20 px-3 py-3 text-xs"
+      >
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <Badge
+            variant={businessConsumersRunning === true ? "secondary" : "outline"}
+          >
+            {businessConsumersRunning === true
+              ? "后台 Worker 运行中"
+              : "维护模式：后台 Worker 未运行"}
+          </Badge>
+          {businessConsumersRunning !== true ? (
+            <span className="text-muted-foreground">
+              已保存邮件仍可读取；立即同步暂不可用。
+            </span>
+          ) : null}
+        </div>
         {syncStatusState === "ready" && syncStatus ? (
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+          <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,auto)]">
             <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
               <span className="font-medium">
                 同步状态：
@@ -675,7 +719,7 @@ export function MailCenter({
                 Kill Switch {syncStatus.killSwitchOpen ? "已开启" : "已关闭"}
               </span>
             </div>
-            <div className="min-w-0 text-muted-foreground">
+            <div className="min-w-0 text-muted-foreground lg:text-right">
               {syncStatus.cursor ? (
                 <span className="break-all">
                   游标 {syncStatus.cursor.historyId} · 版本{" "}
@@ -685,6 +729,24 @@ export function MailCenter({
               ) : (
                 <span>当前项目尚未建立 Gmail History 游标</span>
               )}
+            </div>
+            <div className="min-w-0 text-muted-foreground">
+              最近成功：{dateTime(syncStatus.lastSuccessfulSyncAt)}
+            </div>
+            <div
+              className={
+                syncStatus.lastError
+                  ? "min-w-0 break-words text-destructive lg:text-right"
+                  : "min-w-0 text-muted-foreground lg:text-right"
+              }
+            >
+              {syncStatus.lastError
+                ? `错误分类：${syncStatus.lastErrorCategory ?? "UNKNOWN"} · ` +
+                  `最近错误：${syncStatus.lastError} · ` +
+                  (syncStatus.lastErrorCategory === "GOOGLE_AUTH_EXPIRED"
+                    ? "下次重试：等待重新授权"
+                    : `下次重试 ${dateTime(syncStatus.nextRetryAt)}`)
+                : `下次重试：${dateTime(syncStatus.nextRetryAt)}`}
             </div>
           </div>
         ) : syncStatusState === "loading" ? (
@@ -731,9 +793,17 @@ export function MailCenter({
             <Button
               aria-label="立即同步并刷新邮件"
               size="icon-xs"
-              title="立即同步并刷新邮件"
+              title={
+                businessConsumersRunning === true
+                  ? "立即同步并刷新邮件"
+                  : "后台 Worker 未运行，立即同步暂不可用"
+              }
               variant="ghost"
-              disabled={connectionId === null || syncing}
+              disabled={
+                connectionId === null ||
+                syncing ||
+                businessConsumersRunning !== true
+              }
               onClick={() => void syncAndRefresh()}
             >
               <RefreshCw className={syncing ? "animate-spin" : undefined} />

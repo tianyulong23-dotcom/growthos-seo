@@ -114,6 +114,71 @@ describe("BL-AI-040 Outbox Relay", () => {
     expect(stored.rows[0]).toEqual({ status: "published", attempt_count: 2 });
   });
 
+  it("publishes a replay when the project-analysis Workflow already exists", async () => {
+    const { eventId, repository } = await append(11);
+    const alreadyStarted = new Error("workflow execution already started");
+    alreadyStarted.name = "WorkflowExecutionAlreadyStartedError";
+    const relay = createBacklinkOutboxRelay({
+      repository,
+      workflowStarter: createTemporalBacklinkProjectAnalysisStarter(
+        {
+          start: async () => {
+            throw alreadyStarted;
+          },
+        },
+        backlinksRuntimeContract.taskQueue,
+      ),
+    });
+
+    await expect(relay.runOnce({
+      workerId: "replay-relay",
+      limit: 1,
+      staleClaimBefore: new Date(0),
+    })).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
+
+    const stored = await client.query(
+      "SELECT status, attempt_count FROM backlink_outbox_events WHERE id=$1",
+      [eventId],
+    );
+    expect(stored.rows[0]).toEqual({ status: "published", attempt_count: 1 });
+  });
+
+  it("canonicalizes a legacy project-analysis Workflow id before delivery", async () => {
+    const temporalStart = vi.fn(async () => undefined);
+    const starter = createTemporalBacklinkProjectAnalysisStarter(
+      { start: temporalStart },
+      backlinksRuntimeContract.taskQueue,
+    );
+    const input: BacklinkProjectAnalysisInput = {
+      ...scope,
+      jobId: id(4, 12),
+      workflowId: [
+        "backlinks",
+        scope.workspaceId,
+        scope.websiteProjectId,
+        "project-analysis",
+        "v1",
+        id(4, 12),
+      ].join(":"),
+      snapshotVersion: 12,
+    };
+    const workflowId = buildBacklinksWorkflowId({
+      ...scope,
+      workflow: "project-analysis",
+      instanceId: input.jobId,
+    });
+
+    await expect(starter.start(input)).resolves.toBeUndefined();
+    expect(temporalStart).toHaveBeenCalledWith(
+      backlinksRuntimeContract.workflows.projectAnalysis.workflowType,
+      {
+        workflowId,
+        taskQueue: backlinksRuntimeContract.taskQueue,
+        args: [{ ...input, workflowId }],
+      },
+    );
+  });
+
   it("does not duplicate a Job when delivery repeats after its side effect", async () => {
     const { eventId, repository } = await append(2);
     const jobs = createJobRepository(client);
@@ -175,13 +240,14 @@ describe("BL-AI-040 Outbox Relay", () => {
       contractVersion: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
       ...scope,
       recommendationContextVersionId,
+      visiblePoolGeneration: 1,
       jobId,
       workflowId,
       correlationId: "request-recommendation-refill-30",
       actorId: "relay-test",
       refillWindowKey: "manual-2026-08-04",
-      lowWatermark: 5,
-      highWatermark: 20,
+      lowWatermark: 9,
+      highWatermark: 10,
     };
     await repository.append({
       eventId,

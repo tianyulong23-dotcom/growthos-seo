@@ -94,5 +94,8 @@ export type SendIntentMessagePurpose =
 export type SendIntentResult =
   BacklinksResponse<"backlinksCreateSendIntentV1">
 
+export type SendIntentPreflight =
+  BacklinksResponse<"backlinksPreflightSendIntentV1">
+
 export type SendIntentView =
   BacklinksResponse<"backlinksGetSendIntentV1">["sendIntent"]

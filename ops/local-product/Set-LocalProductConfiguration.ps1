@@ -17,12 +17,18 @@ param(
     [int]$AiMaxCalls = 25,
     [ValidateRange(1, 1000)]
     [int]$DataForSeoMaxPaidCalls = 25,
+    [ValidateRange(1, 300000)]
+    [int]$DataForSeoRequestTimeoutMs = 300000,
     [ValidateRange(1, 1000)]
     [int]$GmailRolling24HourSendLimit = 20,
     [ValidateRange(0, 86400)]
     [int]$GmailMinimumIntervalSeconds = 120,
     [ValidateRange(15, 3600)]
-    [int]$GmailPollingIntervalSeconds = 60
+    [int]$GmailPollingIntervalSeconds = 60,
+    [ValidateSet("normal", "quiesced")]
+    [string]$WorkerExecutionMode = "normal",
+    [string]$BuildId,
+    [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -223,7 +229,6 @@ function Assert-DataForSeoEnvironment(
         "DATAFORSEO_CANDIDATE_LIMIT",
         "DATAFORSEO_LOCATION_CODE",
         "DATAFORSEO_LANGUAGE_CODE",
-        "DATAFORSEO_DISCOVERY_TARGETS_JSON",
         "DATAFORSEO_PROJECT_KEYWORDS_JSON",
         "DATAFORSEO_PROJECT_PRODUCTS_JSON",
         "DATAFORSEO_TARGET_URLS_JSON"
@@ -240,7 +245,9 @@ function Assert-DataForSeoEnvironment(
         "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
         "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
         "https://api.dataforseo.com/v3/backlinks/competitors/live",
-        "https://api.dataforseo.com/v3/backlinks/referring_domains/live"
+        "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
+        "https://api.dataforseo.com/v3/backlinks/summary/live",
+        "https://api.dataforseo.com/v3/backlinks/backlinks/live"
     )
     $parsedEndpoints =
         $Values["DATAFORSEO_ENDPOINT_ALLOWLIST"] | ConvertFrom-Json
@@ -286,7 +293,6 @@ function Assert-DataForSeoEnvironment(
         throw "LOCAL_PRODUCT_DATAFORSEO_BUDGET_INVALID"
     }
     foreach ($name in @(
-        "DATAFORSEO_DISCOVERY_TARGETS_JSON",
         "DATAFORSEO_PROJECT_KEYWORDS_JSON",
         "DATAFORSEO_PROJECT_PRODUCTS_JSON",
         "DATAFORSEO_TARGET_URLS_JSON"
@@ -388,11 +394,14 @@ $manifest.runtime.websiteProjectKey = $projectKey
 $manifest.google.redirectUri = $expectedRedirectUri
 $manifest.gmail.maxSendCalls = $GmailRolling24HourSendLimit
 $manifestJson = $manifest | ConvertTo-Json -Depth 16
-Write-Utf8File $ManifestPath @($manifestJson)
+if (-not $ValidateOnly) {
+    Write-Utf8File $ManifestPath @($manifestJson)
+}
 
 $secretRoot = Join-Path $RuntimeRoot "secrets"
 $runtimeModule = Join-Path $RepositoryRoot `
     "backend\core\dist\modules\backlinks\runtime\production-runtime.js"
+$businessConsumersExpected = $WorkerExecutionMode -eq "normal"
 $commonCore = [ordered]@{
     BACKLINKS_RUNTIME_MODULE = $runtimeModule
     BACKLINKS_RUNTIME_MODE = "LOCAL_PRODUCT"
@@ -423,8 +432,10 @@ $commonCore = [ordered]@{
     GMAIL_MINIMUM_INTERVAL_SECONDS = [string]$GmailMinimumIntervalSeconds
     DATAFORSEO_ENABLED = $(if ($EnableDataForSeo) { "true" } else { "false" })
     DATAFORSEO_MAX_PAID_CALLS = [string]$DataForSeoMaxPaidCalls
+    DATAFORSEO_REQUEST_TIMEOUT_MS = [string]$DataForSeoRequestTimeoutMs
     AI_PROVIDER_ENABLED = $(if ($EnableAi) { "true" } else { "false" })
     AI_PROVIDER_MAX_CALLS = [string]$AiMaxCalls
+    AI_PROVIDER_TIMEOUT_MS = "45000"
     BROWSER_PROVIDER_ENABLED = $(if ($EnableBrowser) { "true" } else { "false" })
     BROWSER_WORKER_ENDPOINT = "http://127.0.0.1:7401"
     BROWSER_WORKER_TIMEOUT_MS = "20000"
@@ -432,6 +443,12 @@ $commonCore = [ordered]@{
     CONTACT_ENRICHMENT_MAX_PAGES = "8"
     CONTACT_ENRICHMENT_MAX_DEPTH = "2"
     CONTACT_ENRICHMENT_MAX_ATTEMPTS = "3"
+    BACKLINKS_BUSINESS_CONSUMERS_EXPECTED = $(
+        if ($businessConsumersExpected) { "true" } else { "false" }
+    )
+}
+if (-not [string]::IsNullOrWhiteSpace($BuildId)) {
+    $commonCore["TEMPORAL_BUILD_ID"] = $BuildId.Trim()
 }
 $proxyEnvironmentNames = @(
     "HTTP_PROXY",
@@ -459,10 +476,14 @@ foreach ($name in @("backlinks-api.env", "backlinks-worker.env")) {
         "DATAFORSEO_CANARY_MAX_PAID_CALLS"
     )
     if ($name -eq "backlinks-worker.env") {
+        $values["BACKLINKS_WORKER_EXECUTION_MODE"] = $WorkerExecutionMode
         Remove-Values $values @(
             "LOCAL_PRODUCT_WEBSITE_PROJECT_ID",
             "LOCAL_PRODUCT_WEBSITE_PROJECT_KEY"
         )
+    }
+    else {
+        Remove-Values $values @("BACKLINKS_WORKER_EXECUTION_MODE")
     }
     if ($null -eq $loopbackProxy) {
         Remove-Values $values $proxyEnvironmentNames
@@ -473,7 +494,9 @@ foreach ($name in @("backlinks-api.env", "backlinks-worker.env")) {
     if ($EnableDataForSeo) {
         Assert-DataForSeoEnvironment $values
     }
-    Write-EnvironmentFile $path $values
+    if (-not $ValidateOnly) {
+        Write-EnvironmentFile $path $values
+    }
 }
 
 $fastApiPath = Join-Path $RuntimeRoot "fastapi.env"
@@ -484,6 +507,12 @@ Set-Values $fastApi ([ordered]@{
     CORS_ORIGINS = '["http://localhost:5173"]'
     BACKLINKS_PRIVATE_BASE_URL = "http://127.0.0.1:7301"
     BACKLINKS_RUNTIME_MODE = "LOCAL_PRODUCT"
+    BACKLINKS_BUSINESS_CONSUMERS_EXPECTED = $(
+        if ($businessConsumersExpected) { "true" } else { "false" }
+    )
+    BACKLINKS_TASK_QUEUE = "growthos.backlinks.v1"
+    RUNTIME_DEPENDENCY_CHECKS_ENABLED = "true"
+    TEMPORAL_NAMESPACE = "growthos-backlinks-canary"
     LOCAL_PRODUCT_FRONTEND_ORIGIN = "http://localhost:5173"
     LOCAL_PRODUCT_ORGANIZATION_ID = (
         Require-Text $identity.organizationId "identity.organizationId"
@@ -510,35 +539,43 @@ Set-Values $fastApi ([ordered]@{
     BROWSER_PROVIDER_ENABLED = $(if ($EnableBrowser) { "true" } else { "false" })
 })
 Remove-Values $fastApi @("BACKLINKS_LIVE_CANARY_STAGE")
-Write-EnvironmentFile $fastApiPath $fastApi
+if (-not $ValidateOnly) {
+    Write-EnvironmentFile $fastApiPath $fastApi
+}
 
-Write-EnvironmentFile (Join-Path $RuntimeRoot "browser-worker.env") ([ordered]@{
-    BROWSER_WORKER_HOST = "127.0.0.1"
-    BROWSER_WORKER_PORT = "7401"
-    BROWSER_WORKER_TIMEOUT_MS = "20000"
-    BROWSER_WORKER_MAX_HTML_BYTES = "2000000"
-})
+if (-not $ValidateOnly) {
+    Write-EnvironmentFile `
+        (Join-Path $RuntimeRoot "browser-worker.env") `
+        ([ordered]@{
+            BROWSER_WORKER_HOST = "127.0.0.1"
+            BROWSER_WORKER_PORT = "7401"
+            BROWSER_WORKER_TIMEOUT_MS = "20000"
+            BROWSER_WORKER_MAX_HTML_BYTES = "2000000"
+        })
 
-Write-EnvironmentFile (Join-Path $RuntimeRoot "frontend.env") ([ordered]@{
-    VITE_API_BASE_URL = "http://localhost:7200"
-    VITE_WEBSITE_PROJECT_KEY = $projectKey
-    VITE_WEBSITE_PROJECT_NAME = $projectName
-    VITE_WEBSITE_PROJECT_DOMAIN = $projectDomain
-})
+    Write-EnvironmentFile `
+        (Join-Path $RuntimeRoot "frontend.env") `
+        ([ordered]@{
+            VITE_API_BASE_URL = "http://localhost:7200"
+            VITE_WEBSITE_PROJECT_KEY = $projectKey
+            VITE_WEBSITE_PROJECT_NAME = $projectName
+            VITE_WEBSITE_PROJECT_DOMAIN = $projectDomain
+        })
 
-& (Join-Path $RepositoryRoot "ops\live\Set-LocalProductSecretAcl.ps1") `
-    -SecretRoot $secretRoot | Out-Null
+    & (Join-Path $RepositoryRoot "ops\live\Set-LocalProductSecretAcl.ps1") `
+        -SecretRoot $secretRoot | Out-Null
 
-[Environment]::SetEnvironmentVariable(
-    "LIVE_AUTH_MANIFEST_PATH",
-    $ManifestPath,
-    "Process"
-)
-[Environment]::SetEnvironmentVariable(
-    "LIVE_AUTH_MANIFEST_PATH",
-    $ManifestPath,
-    "User"
-)
+    [Environment]::SetEnvironmentVariable(
+        "LIVE_AUTH_MANIFEST_PATH",
+        $ManifestPath,
+        "Process"
+    )
+    [Environment]::SetEnvironmentVariable(
+        "LIVE_AUTH_MANIFEST_PATH",
+        $ManifestPath,
+        "User"
+    )
+}
 
 [pscustomobject]@{
     runtimeMode = "LOCAL_PRODUCT"
@@ -556,5 +593,9 @@ Write-EnvironmentFile (Join-Path $RuntimeRoot "frontend.env") ([ordered]@{
     aiMaxCalls = $AiMaxCalls
     dataForSeo = [bool]$EnableDataForSeo
     dataForSeoMaxPaidCalls = $DataForSeoMaxPaidCalls
+    dataForSeoRequestTimeoutMs = $DataForSeoRequestTimeoutMs
     browserProvider = [bool]$EnableBrowser
+    workerExecutionMode = $WorkerExecutionMode
+    businessConsumersExpected = $businessConsumersExpected
+    validateOnly = [bool]$ValidateOnly
 }

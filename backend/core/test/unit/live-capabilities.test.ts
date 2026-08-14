@@ -58,6 +58,8 @@ const localProductDataForSeo = {
     "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
     "https://api.dataforseo.com/v3/backlinks/competitors/live",
     "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
+    "https://api.dataforseo.com/v3/backlinks/summary/live",
+    "https://api.dataforseo.com/v3/backlinks/backlinks/live",
   ]),
   DATAFORSEO_REQUEST_TIMEOUT_MS: "60000",
   DATAFORSEO_ESTIMATED_COST_MICROS: "1000",
@@ -66,8 +68,6 @@ const localProductDataForSeo = {
   DATAFORSEO_CANDIDATE_LIMIT: "25",
   DATAFORSEO_LOCATION_CODE: "2840",
   DATAFORSEO_LANGUAGE_CODE: "en",
-  DATAFORSEO_DISCOVERY_TARGETS_JSON:
-    '["competitor.example","publisher.example"]',
   DATAFORSEO_PROJECT_KEYWORDS_JSON: '["video streaming"]',
   DATAFORSEO_PROJECT_PRODUCTS_JSON: '["streaming platform"]',
   DATAFORSEO_TARGET_URLS_JSON: '["https://elephtv.com/"]',
@@ -269,6 +269,7 @@ describe("local product capability matrix", () => {
   it("allows bounded LOCAL_PRODUCT DataForSEO controls", () => {
     expect(readBacklinksLiveCapabilities({
       ...localProductDataForSeo,
+      DATAFORSEO_REQUEST_TIMEOUT_MS: "300000",
     })).toMatchObject({
       mode: "LOCAL_PRODUCT",
       dataForSeoEnabled: true,
@@ -292,6 +293,12 @@ describe("local product capability matrix", () => {
       "DATAFORSEO_MAX_PAID_CALLS",
       "1001",
       "BACKLINKS_DATAFORSEO_CALL_LIMIT_INVALID",
+    ],
+    [
+      "DATAFORSEO_REQUEST_TIMEOUT_MS",
+      "300001",
+      "BACKLINKS_DATAFORSEO_CONFIGURATION_INVALID:"
+        + "DATAFORSEO_REQUEST_TIMEOUT_MS",
     ],
   ])(
     "fails closed when %s is unsafe",

@@ -70,6 +70,20 @@ export const createSendIntentResponseSchema = z.object({
   meta: metaSchema,
 }).strict();
 
+export const preflightSendIntentResponseSchema = z.object({
+  allowed: z.literal(true),
+  deliveryState: z.literal("NOT_SENT"),
+  checkedAt: z.string().datetime(),
+  gmail: z.object({
+    connectionId: z.uuid(),
+    primaryEmail: z.email(),
+    connectionStatus: z.literal("CONNECTED"),
+    sendAvailability: z.literal("AVAILABLE"),
+    mailSyncCapability: z.boolean(),
+  }).strict(),
+  meta: metaSchema,
+}).strict();
+
 export const getSendIntentResponseSchema = z.object({
   sendIntent: z.object({
     sendIntentId: z.uuid(),

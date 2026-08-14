@@ -19,11 +19,10 @@ param(
         "https://api.dataforseo.com/v3/serp/google/organic/task_get/advanced",
         "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
         "https://api.dataforseo.com/v3/backlinks/competitors/live",
-        "https://api.dataforseo.com/v3/backlinks/referring_domains/live"
+        "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
+        "https://api.dataforseo.com/v3/backlinks/summary/live",
+        "https://api.dataforseo.com/v3/backlinks/backlinks/live"
     ),
-    [Parameter(Mandatory = $true)]
-    [Alias("DiscoveryTarget")]
-    [string[]]$DiscoveryTargets,
     [Parameter(Mandatory = $true)]
     [string[]]$Keywords,
     [Parameter(Mandatory = $true)]
@@ -88,7 +87,6 @@ try {
         candidateLimit = $CandidateLimit
         locationCode = $LocationCode
         languageCode = $LanguageCode
-        discoveryTargets = @($DiscoveryTargets)
         keywords = @($Keywords)
         products = @($Products)
         targetUrls = @($TargetUrls)

@@ -17,6 +17,7 @@ export type GmailConnectionView = {
   mailSyncCapability: boolean
   tokenExpiresAt: string
   connectedAt: string
+  affectedProjectCount: number
   recentErrorCategory: string | null
 }
 

@@ -46,8 +46,10 @@ describe("commercial recommendation score v2", () => {
 
   it("does not convert missing facts to zero", () => {
     const input = components();
+    const first = input[0];
+    if (first === undefined) throw new Error("Expected score components");
     input[0] = {
-      ...input[0]!,
+      ...first,
       state: "insufficient_data",
       rawValue: null,
       normalizedValue: null,
@@ -61,7 +63,9 @@ describe("commercial recommendation score v2", () => {
 
   it("applies hard gates before scoring and ranks deterministically", () => {
     const gated = gates();
-    gated[0] = { ...gated[0]!, matched: true };
+    const firstGate = gated[0];
+    if (firstGate === undefined) throw new Error("Expected hard gates");
+    gated[0] = { ...firstGate, matched: true };
     expect(scoreCommercialRecommendation({
       gates: gated,
       components: components(),

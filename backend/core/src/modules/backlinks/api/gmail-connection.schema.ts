@@ -49,6 +49,7 @@ export const gmailConnectionViewSchema = z.object({
   mailSyncCapability: z.boolean(),
   tokenExpiresAt: timestamp,
   connectedAt: timestamp,
+  affectedProjectCount: z.number().int().nonnegative(),
   recentErrorCategory: nonBlank.max(255).nullable(),
 }).strict();
 
@@ -93,6 +94,20 @@ export const gmailPollingSyncStatusResponseSchema = z.object({
   pollingIntervalSeconds: z.number().int().min(15).max(3_600),
   killSwitchOpen: z.boolean(),
   acceptedSendCount: z.number().int().nonnegative(),
+  lastSuccessfulSyncAt: timestamp.nullable(),
+  lastError: nonBlank.max(1_000).nullable(),
+  lastErrorCategory: z.enum([
+    "AUTHENTICATION_FAILED",
+    "FORBIDDEN",
+    "GOOGLE_AUTH_EXPIRED",
+    "GOOGLE_5XX",
+    "NETWORK_TIMEOUT",
+    "RATE_LIMITED",
+    "TRANSPORT_FAILURE",
+    "UNKNOWN",
+  ]).nullable(),
+  nextRetryAt: timestamp.nullable(),
+  consecutiveFailures: z.number().int().nonnegative(),
   cursor: z.object({
     historyId: nonBlank,
     initialSyncCompletedAt: timestamp.nullable(),

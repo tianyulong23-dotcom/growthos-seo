@@ -190,7 +190,9 @@ const mapHttpResponse = (
     return definitelyNotSent(gmailSendFailureCodes.invalidRequest);
   }
   if (status === 401) {
-    return definitelyNotSent(gmailSendFailureCodes.reauthRequired);
+    return retryableDefinitelyNotSent(
+      gmailSendFailureCodes.preRequestFailed,
+    );
   }
   if (status === 403) {
     return definitelyNotSent(gmailSendFailureCodes.forbidden);

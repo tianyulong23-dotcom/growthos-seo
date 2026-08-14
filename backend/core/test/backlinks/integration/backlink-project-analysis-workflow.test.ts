@@ -3,7 +3,15 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { bundleWorkflowCode } from "@temporalio/worker";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { DataForSeoProviderError } from "../../../src/modules/backlinks/adapters/dataforseo/error-mapper.js";
 import { FakeDataForSeoAdapter } from "../../../src/modules/backlinks/adapters/dataforseo/fake-dataforseo.adapter.js";
@@ -11,16 +19,13 @@ import { DataForSeoCallPolicy } from "../../../src/modules/backlinks/application
 import { DataForSeoRequestService } from "../../../src/modules/backlinks/application/services/dataforseo-request.service.js";
 import {
   createBacklinkProjectAnalysisActivities,
+  createProjectAnalysisJobWriter,
 } from "../../../src/modules/backlinks/activities/backlink-project-analysis.activity.js";
 import { createJobRepository } from "../../../src/modules/backlinks/db/repositories/job.repository.js";
 import { createProviderAnalysisRepository } from "../../../src/modules/backlinks/db/repositories/provider-analysis.repository.js";
-import {
-  createProjectContextSnapshotRepository,
-} from "../../../src/modules/backlinks/db/repositories/project-context-snapshot.repository.js";
+import { createProjectContextSnapshotRepository } from "../../../src/modules/backlinks/db/repositories/project-context-snapshot.repository.js";
 import type { DataForSeoPort } from "../../../src/modules/backlinks/ports/dataforseo.port.js";
-import {
-  runBacklinkProjectAnalysisWorkflow,
-} from "../../../src/modules/backlinks/workflows/definitions/backlink-project-analysis.orchestration.js";
+import { runBacklinkProjectAnalysisWorkflow } from "../../../src/modules/backlinks/workflows/definitions/backlink-project-analysis.orchestration.js";
 import {
   backlinksRuntimeContract,
   buildBacklinksWorkflowId,
@@ -33,7 +38,10 @@ import {
 type RuntimeClient = {
   connect(): Promise<void>;
   end(): Promise<void>;
-  query(text: string, values?: readonly unknown[]): Promise<{
+  query(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<{
     rows: Record<string, unknown>[];
   }>;
 };
@@ -65,10 +73,11 @@ const providerMigration = new URL(
   "../../../src/modules/backlinks/db/migrations/0002_backlink_provider_seo.sql",
   import.meta.url,
 );
-const migration = (name: string) => new URL(
-  `../../../src/modules/backlinks/db/migrations/${name}`,
-  import.meta.url,
-);
+const migration = (name: string) =>
+  new URL(
+    `../../../src/modules/backlinks/db/migrations/${name}`,
+    import.meta.url,
+  );
 const roles = new URL(
   "../../../../database/roles/0001_growthos_schema_roles.sql",
   import.meta.url,
@@ -100,28 +109,33 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       await client.query(await readFile(migration(name), "utf8"));
     }
     await client.query(await readFile(roles, "utf8"));
-    await client.query(await readFile(
-      migration("0005_backlink_schema_role_ownership.sql"),
-      "utf8",
-    ));
-    await client.query(await readFile(
-      migration("0032_dataforseo_cost_control.sql"),
-      "utf8",
-    ));
-    await client.query(await readFile(
-      migration("0042_backlink_project_recommendation_context.sql"),
-      "utf8",
-    ));
+    await client.query(
+      await readFile(
+        migration("0005_backlink_schema_role_ownership.sql"),
+        "utf8",
+      ),
+    );
+    await client.query(
+      await readFile(migration("0032_dataforseo_cost_control.sql"), "utf8"),
+    );
+    await client.query(
+      await readFile(
+        migration("0042_backlink_project_recommendation_context.sql"),
+        "utf8",
+      ),
+    );
     await client.query("SET search_path = backlinks, pg_catalog");
   }, 120_000);
-  beforeEach(() => client.query(
-    `TRUNCATE provider_artifact_usages, workspace_evidence_projections,
+  beforeEach(() =>
+    client.query(
+      `TRUNCATE provider_artifact_usages, workspace_evidence_projections,
        provider_artifacts, provider_fetch_leases, provider_batch_requests,
        backlink_provider_usage_ledger, backlink_provider_cache_entries,
        backlink_seo_snapshots, backlink_provider_requests,
        backlink_provider_budgets, backlink_audit_events, backlink_lifecycle_events,
        backlink_project_context_snapshots, backlink_jobs CASCADE`,
-  ));
+    ),
+  );
   afterAll(async () => {
     await client.end();
     await harness.stop();
@@ -143,10 +157,15 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
     const activities = await createProviderActivities(provider);
     const load = activities.loadBacklinkProjectAnalysisContext;
     const first = await runBacklinkProjectAnalysisWorkflow(workflowInput, load);
-    const replay = await runBacklinkProjectAnalysisWorkflow(workflowInput, load);
+    const replay = await runBacklinkProjectAnalysisWorkflow(
+      workflowInput,
+      load,
+    );
     expect(replay).toEqual(first);
     expect(provider.calls).toHaveLength(1);
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(`
       SELECT l.status, l.actual_cost_micros, b.spent_micros, b.reserved_micros,
         batch.status AS batch_status,
         count(usage.id)::int AS usage_count
@@ -158,14 +177,18 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
         ON usage.artifact_id=artifact.id
       GROUP BY l.status,l.actual_cost_micros,b.spent_micros,b.reserved_micros,
         batch.status
-    `)).rows).toEqual([{
-      status: "settled",
-      actual_cost_micros: "20000",
-      spent_micros: "20000",
-      reserved_micros: "0",
-      batch_status: "succeeded",
-      usage_count: 2,
-    }]);
+    `)
+      ).rows,
+    ).toEqual([
+      {
+        status: "settled",
+        actual_cost_micros: "20000",
+        spent_micros: "20000",
+        reserved_micros: "0",
+        batch_status: "succeeded",
+        usage_count: 2,
+      },
+    ]);
   }, 60_000);
 
   async function createProviderActivities(provider: DataForSeoPort) {
@@ -185,16 +208,19 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       targetUrls: ["https://example.com/"],
       actorId: "user-051",
     });
-    await client.query(`INSERT INTO backlink_provider_budgets (
+    await client.query(
+      `INSERT INTO backlink_provider_budgets (
       id, organization_id, workspace_id, provider, period_start, period_end,
       limit_micros, created_by
-    ) VALUES ($1,$2,$3,'dataforseo',$4,$5,100000,'user-051')`, [
-      uuid(30),
-      scope.organizationId,
-      scope.workspaceId,
-      "2026-07-01T00:00:00.000Z",
-      "2026-08-01T00:00:00.000Z",
-    ]);
+    ) VALUES ($1,$2,$3,'dataforseo',$4,$5,100000,'user-051')`,
+      [
+        uuid(30),
+        scope.organizationId,
+        scope.workspaceId,
+        "2026-07-01T00:00:00.000Z",
+        "2026-08-01T00:00:00.000Z",
+      ],
+    );
     const repository = createProviderAnalysisRepository(client, () => now);
     const gate = new DataForSeoCallPolicy({
       checkKillSwitch: async () => "allow",
@@ -227,14 +253,18 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       fetchBacklinkSnapshot,
     });
 
-    await expect(runBacklinkProjectAnalysisWorkflow(
-      workflowInput,
-      activities.loadBacklinkProjectAnalysisContext,
-    )).rejects.toMatchObject({ providerRequestStatus: "unknown_charge" });
-    await expect(runBacklinkProjectAnalysisWorkflow(
-      workflowInput,
-      activities.loadBacklinkProjectAnalysisContext,
-    )).rejects.toThrow("BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED");
+    await expect(
+      runBacklinkProjectAnalysisWorkflow(
+        workflowInput,
+        activities.loadBacklinkProjectAnalysisContext,
+      ),
+    ).rejects.toMatchObject({ providerRequestStatus: "unknown_charge" });
+    await expect(
+      runBacklinkProjectAnalysisWorkflow(
+        workflowInput,
+        activities.loadBacklinkProjectAnalysisContext,
+      ),
+    ).rejects.toThrow("BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED");
 
     expect(fetchBacklinkSnapshot).toHaveBeenCalledOnce();
     const stored = await client.query(`
@@ -247,16 +277,18 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
         JOIN provider_fetch_leases lease
           ON lease.artifact_fingerprint=batch.normalized_request_hash
     `);
-    expect(stored.rows).toEqual([{
-      status: "unknown_charge",
-      ledger_status: "reserved",
-      reserved_micros: "20000",
-      batch_status: "unknown_charge",
-      lease_status: "unknown_charge",
-    }]);
+    expect(stored.rows).toEqual([
+      {
+        status: "unknown_charge",
+        ledger_status: "reserved",
+        reserved_micros: "20000",
+        batch_status: "unknown_charge",
+        lease_status: "unknown_charge",
+      },
+    ]);
   }, 60_000);
 
-  it("keeps the Activity read-only and rejects a second Job for one workflow ID", async () => {
+  it("closes the Analysis Job and rejects a second Job for one workflow ID", async () => {
     const snapshots = createProjectContextSnapshotRepository(client);
     await snapshots.append({
       ...scope,
@@ -273,20 +305,11 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       targetUrls: ["https://example.com/"],
       actorId: "user-039",
     });
-    const activities = createBacklinkProjectAnalysisActivities(snapshots);
-    await expect(
-      activities.loadBacklinkProjectAnalysisContext(workflowInput),
-    ).resolves.toMatchObject({
-      workflowId: workflowInput.workflowId,
-      snapshotId: uuid(20),
-      snapshotVersion: 1,
-    });
-
     const jobs = createJobRepository(client);
     const job = {
       ...scope,
       jobId: workflowInput.jobId,
-      jobType: "backlink_project_analysis",
+      jobType: "project-analysis",
       sourceObjectType: "website_project",
       sourceObjectId: scope.websiteProjectId,
       workflowId: workflowInput.workflowId,
@@ -294,6 +317,35 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       actorId: "user-039",
     } as const;
     await expect(jobs.create(job)).resolves.toBe(true);
+    const activities = createBacklinkProjectAnalysisActivities(
+      snapshots,
+      undefined,
+      createProjectAnalysisJobWriter(client),
+    );
+    await expect(
+      activities.loadBacklinkProjectAnalysisContext(workflowInput),
+    ).resolves.toMatchObject({
+      workflowId: workflowInput.workflowId,
+      snapshotId: uuid(20),
+      snapshotVersion: 1,
+    });
+    const completed = await client.query(
+      `SELECT status,step,progress,started_at,finished_at,result_summary
+         FROM backlink_jobs WHERE id=$1`,
+      [workflowInput.jobId],
+    );
+    expect(completed.rows[0]).toMatchObject({
+      status: "success",
+      step: "completed",
+      progress: 100,
+      result_summary: {
+        snapshotId: uuid(20),
+        snapshotVersion: 1,
+        canonicalDomain: "example.com",
+      },
+    });
+    expect(completed.rows[0]?.started_at).not.toBeNull();
+    expect(completed.rows[0]?.finished_at).not.toBeNull();
     await expect(jobs.create({ ...job, jobId: uuid(11) })).resolves.toBe(false);
     const stored = await client.query(
       "SELECT count(*)::int AS count FROM backlink_jobs WHERE workflow_id=$1",
@@ -301,5 +353,4 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
     );
     expect(stored.rows[0]).toEqual({ count: 1 });
   }, 60_000);
-
 });

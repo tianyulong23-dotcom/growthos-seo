@@ -7,8 +7,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Badge } from "@/components/ui/badge"
 import type { GmailConnectionView } from "@/features/outreach/gmail/types"
 import type { GmailConnectionController } from "@/features/outreach/gmail/use-gmail-connection"
+
+const connectingTimedOut = (account: GmailConnectionView): boolean => {
+  const connectedAt = Date.parse(account.connectedAt)
+  return (
+    account.connectionStatus === "CONNECTING" &&
+    Number.isFinite(connectedAt) &&
+    connectedAt <= Date.now() - 10 * 60_000
+  )
+}
 
 const accountStatus = (account: GmailConnectionView) => {
   if (account.connectionStatus === "CONNECTED") {
@@ -20,7 +30,10 @@ const accountStatus = (account: GmailConnectionView) => {
   ) {
     return "需重新授权"
   }
-  return account.connectionStatus === "CONNECTING" ? "连接中" : "已断开"
+  if (account.connectionStatus === "CONNECTING") {
+    return connectingTimedOut(account) ? "连接未完成" : "连接中"
+  }
+  return "已断开"
 }
 
 export function GmailAccountSelector({
@@ -32,10 +45,29 @@ export function GmailAccountSelector({
 }) {
   if (controller.accounts.length === 0) return null
 
+  const sendCapable =
+    controller.connection?.connectionStatus === "CONNECTED" &&
+    controller.connection.sendAvailability === "AVAILABLE"
+  const syncCapable =
+    controller.connection?.connectionStatus === "CONNECTED" &&
+    controller.connection.mailSyncCapability
+
   return (
     <div className={className}>
-      <div className="mb-1 text-xs font-medium text-muted-foreground">
-        当前项目发件账号
+      <div className="mb-1 flex flex-wrap items-center gap-1.5">
+        <div className="mr-auto text-xs font-medium text-muted-foreground">
+          当前项目发件账号
+        </div>
+        {controller.connection && (
+          <>
+            <Badge variant={sendCapable ? "secondary" : "outline"}>
+              Send {sendCapable ? "可用" : "暂停"}
+            </Badge>
+            <Badge variant={syncCapable ? "secondary" : "outline"}>
+              Sync {syncCapable ? "可用" : "暂停"}
+            </Badge>
+          </>
+        )}
       </div>
       <Select
         value={controller.connection?.connectionId ?? null}

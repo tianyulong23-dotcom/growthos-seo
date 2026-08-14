@@ -4,13 +4,12 @@
     "output": {
       "subject": "Technical SEO collaboration",
       "bodyText": "Hello, I am reaching out about a relevant collaboration.",
-      "personalizationClaims": [
+      "factsUsed": [
         {
-          "text": "You publish technical SEO research.",
+          "claim": "You publish technical SEO research.",
           "evidenceIds": ["profile:1"]
         }
       ],
-      "missingInformation": [],
       "riskFlags": [],
       "requiresUserConfirmation": true,
       "canAutoSend": false

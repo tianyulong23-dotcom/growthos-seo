@@ -67,7 +67,7 @@ export function createContactDiscoveryRepository(
         `, [input.organizationId, input.workspaceId, input.websiteProjectId,
           candidateId, record.sourceUrl, record.extractionMethod,
           record.contentSha256, record.observedAt, record.confidence,
-          record.expiresAt, record.purposeRuleVersion, record.domainRelation]);
+          record.expiresAt, record.evidenceRuleVersion, record.domainRelation]);
         if (merged.rows[0] !== undefined) {
           evidenceMerged++;
           continue;
@@ -83,7 +83,7 @@ export function createContactDiscoveryRepository(
           input.websiteProjectId, candidateId, record.sourceUrl, record.observedAt,
           record.extractionMethod, record.evidenceSnippet, record.parserVersion,
           record.contentSha256, record.confidence, record.expiresAt, input.actorId,
-          record.purposeRuleVersion, record.domainRelation]);
+          record.evidenceRuleVersion, record.domainRelation]);
         evidenceInserted++;
     }
     return { candidateCount: input.records.length, evidenceInserted, evidenceMerged };

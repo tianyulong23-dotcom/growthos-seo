@@ -61,6 +61,9 @@ describe("BL-AI-175/194 backup/restore validation", () => {
 
     expect(text).toMatch(/temporary restore database/i);
     expect(text).toMatch(/pg_dump[\s\S]*--format=custom/i);
+    expect(text).toMatch(
+      /0001_growthos_schema_roles\.sql[\s\S]*pg_restore/i,
+    );
     expect(text).toMatch(/pg_restore/i);
     expect(text).toMatch(/migration head/i);
     expect(text).toMatch(/key table counts/i);

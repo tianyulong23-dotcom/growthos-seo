@@ -3,6 +3,7 @@ import type {
 } from "../db/tenant-transaction.js";
 
 export const projectScopeLanes = [
+  "project-analysis",
   "recommendation-refill",
   "contact-enrichment",
   "draft-generation",

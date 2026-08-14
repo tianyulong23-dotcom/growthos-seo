@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   GoogleAuthLibraryClient,
+  mapGoogleAuthLibraryError,
   normalizeGoogleGrantedScopes,
 } from "../../src/modules/backlinks/adapters/gmail/google-auth-library-client.js";
 import { gmailOAuthScopes } from "../../src/modules/backlinks/domain/sending/oauth-attempt.js";
+import {
+  googleAuthFailureCodes,
+} from "../../src/modules/backlinks/ports/google-auth.port.js";
 
 const redirectUri =
   "http://localhost:7200/api/v1/backlinks/gmail-connections/callback";
@@ -54,4 +58,41 @@ describe("Google Auth official client", () => {
       "https://www.googleapis.com/auth/gmail.readonly",
     ])).toEqual(gmailOAuthScopes);
   });
+
+  it.each([
+    [
+      { code: "ETIMEDOUT" },
+      googleAuthFailureCodes.temporaryFailure,
+      true,
+    ],
+    [
+      { response: { status: 429, data: {} } },
+      googleAuthFailureCodes.rateLimited,
+      true,
+    ],
+    [
+      { response: { status: 503, data: {} } },
+      googleAuthFailureCodes.temporaryFailure,
+      true,
+    ],
+    [
+      {
+        response: {
+          status: 400,
+          data: { error: "invalid_grant" },
+        },
+      },
+      googleAuthFailureCodes.authExpired,
+      false,
+    ],
+  ] as const)(
+    "maps provider failure to %s retry semantics",
+    (error, code, retryable) => {
+      expect(mapGoogleAuthLibraryError("refresh", error)).toMatchObject({
+        operation: "refresh",
+        code,
+        retryable,
+      });
+    },
+  );
 });

@@ -63,6 +63,8 @@ disposable container are:
 
 ```powershell
 pg_dump -U postgres -d seo_upgrade --format=custom --file=/tmp/seo4-int-004.dump
+docker cp backend/database/roles/0001_growthos_schema_roles.sql <postgres-container>:/tmp/0001_growthos_schema_roles.sql
+psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/0001_growthos_schema_roles.sql
 createdb -U postgres seo_restore
 pg_restore -U postgres -d seo_restore --exit-on-error /tmp/seo4-int-004.dump
 ```
@@ -77,11 +79,15 @@ The script:
 4. Captures every `backlinks` table row count before backup, which includes and
    broadens the prior key table counts.
 5. Creates a PostgreSQL custom-format backup with `pg_dump`.
-6. Restores it with `pg_restore` into the temporary `seo_restore` database.
-7. Re-runs database contracts and DataForSEO compatibility checks.
-8. Captures every restored `backlinks` table row count and fails if any table
+6. Bootstraps the repository's cluster roles against the disposable
+   maintenance database before restoring schemas whose policies reference
+   those roles.
+7. Restores the archive with `pg_restore` into the temporary `seo_restore`
+   database.
+8. Re-runs database contracts and DataForSEO compatibility checks.
+9. Captures every restored `backlinks` table row count and fails if any table
    differs from the source.
-9. Removes the disposable container and network in `finally`.
+10. Removes the disposable container and network in `finally`.
 
 The declared objectives are RPO: 60 minutes and RTO: 4 hours. The local drill
 passes only when migration/schema contracts pass, the source contains at least

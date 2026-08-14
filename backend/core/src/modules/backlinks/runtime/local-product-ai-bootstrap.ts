@@ -55,7 +55,7 @@ export const localProductAiBootstrapInputSchema = z.object({
   modelId: safeIdentifier,
   modelVersion: safeIdentifier,
   maxCalls: positiveInteger.max(10_000),
-  timeoutMs: positiveInteger.max(120_000),
+  timeoutMs: positiveInteger.max(45_000),
   maxInputTokens: positiveInteger.max(100_000),
   maxOutputTokens: positiveInteger.max(20_000),
   absoluteBudgetUsd: positiveNumber.max(maxLocalProductBudgetUsd),

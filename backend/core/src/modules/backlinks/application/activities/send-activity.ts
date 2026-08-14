@@ -32,26 +32,54 @@ export interface GmailSendPolicyInputLoader {
   }>): Promise<GmailSendPolicyInput>;
 }
 
+export interface GmailConnectionHealthCheck {
+  run(input: Readonly<{
+    context: SendExecutionContext;
+    attempt: SendAttemptReference;
+  }>): Promise<void>;
+}
+
+export interface GmailAcceptedSendHandler {
+  run(input: Readonly<{
+    context: SendExecutionContext;
+    attempt: SendAttemptReference;
+    settlement: Extract<
+      SendAttemptSettlement,
+      { status: "PROVIDER_ACCEPTED" }
+    >;
+    result: Extract<
+      SendAttemptSettlementResult,
+      { state: "completed" }
+    >;
+  }>): Promise<void>;
+}
+
 type GmailSendActivityDependencies = Readonly<{
   repository: SendAttemptRepository;
   commandLoader: GmailSendCommandLoader;
+  connectionHealthCheck: GmailConnectionHealthCheck;
   policyInputLoader: GmailSendPolicyInputLoader;
   gmail: GmailSendPort;
+  acceptedSendHandler?: GmailAcceptedSendHandler;
   clock?: () => Date;
 }>;
 
 export class GmailSendActivity {
   readonly #repository: SendAttemptRepository;
   readonly #commandLoader: GmailSendCommandLoader;
+  readonly #connectionHealthCheck: GmailConnectionHealthCheck;
   readonly #policyInputLoader: GmailSendPolicyInputLoader;
   readonly #gmail: GmailSendPort;
+  readonly #acceptedSendHandler: GmailAcceptedSendHandler | undefined;
   readonly #clock: () => Date;
 
   constructor(dependencies: GmailSendActivityDependencies) {
     this.#repository = dependencies.repository;
     this.#commandLoader = dependencies.commandLoader;
+    this.#connectionHealthCheck = dependencies.connectionHealthCheck;
     this.#policyInputLoader = dependencies.policyInputLoader;
     this.#gmail = dependencies.gmail;
+    this.#acceptedSendHandler = dependencies.acceptedSendHandler;
     this.#clock = dependencies.clock ?? (() => new Date());
   }
 
@@ -83,6 +111,7 @@ export class GmailSendActivity {
         "Gmail Send command does not match the claimed Attempt.",
       );
     }
+    await this.#connectionHealthCheck.run({ context, attempt });
     const policyInput = await this.#policyInputLoader.load({
       context,
       attempt,
@@ -107,7 +136,7 @@ export class GmailSendActivity {
             + input.settlement.retryAfterSeconds * 1_000,
           )
         : null;
-    return this.#repository.settle({
+    const result = await this.#repository.settle({
       ...context,
       ...input.attempt,
       status: input.settlement.status,
@@ -126,5 +155,18 @@ export class GmailSendActivity {
       completedAt,
       retryEligibleAt,
     });
+    if (
+      input.settlement.status === "PROVIDER_ACCEPTED"
+      && result.state === "completed"
+      && this.#acceptedSendHandler !== undefined
+    ) {
+      await this.#acceptedSendHandler.run({
+        context,
+        attempt: input.attempt,
+        settlement: input.settlement,
+        result,
+      });
+    }
+    return result;
   }
 }

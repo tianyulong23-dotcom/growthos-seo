@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-06",
+  "generatedAt": "2026-08-13",
   "postgresql": {
     "requiredMajor": 18,
     "image": "postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296"
@@ -13,8 +13,8 @@
     "backlinks": "ROLE-BACKLINKS"
   },
   "heads": {
-    "alembic": "20260806_0009",
-    "backlinks": "0047"
+    "alembic": "20260813_0010",
+    "backlinks": "0060"
   },
   "steps": [
     {
@@ -142,6 +142,18 @@
       "prerequisites": ["alembic-20260805-0008"],
       "recovery": "forward-only",
       "recoveryNote": "The narrow active Website Project read contract is restored from backup or repaired with a reviewed forward migration."
+    },
+    {
+      "order": 29,
+      "migrationId": "alembic-20260813-0010",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260813_0010_website_project_audiences_goals.py",
+      "sha256": "4820206f7b54ec9b8e65cc06faa327131920acedb02e68770ba9a8b0741c5564",
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": ["platform"],
+      "prerequisites": ["alembic-20260806-0009"],
+      "recovery": "forward-only",
+      "recoveryNote": "Website Project audience and partnership-goal facts are immutable inputs; corrections use a reviewed forward migration."
     },
     {
       "order": 30,
@@ -626,6 +638,162 @@
       "prerequisites": ["backlinks-0046"],
       "recovery": "forward-only",
       "recoveryNote": "Organization Gmail credentials are reused through workspace bindings while project mailbox selections remain tokenless and project-scoped."
+    },
+    {
+      "order": 70,
+      "migrationId": "backlinks-0048",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0048_backlink_draft_request_snapshots.sql",
+      "sha256": "a62313261d97e9b18caac32539af2649d33f7e04b737d06674ee9ab3cf1b103d",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0047"],
+      "recovery": "forward-only",
+      "recoveryNote": "Draft requests and evidence context are frozen per generation job, retries are durable, and deterministic template fallback versions remain auditable and human-confirm only."
+    },
+    {
+      "order": 71,
+      "migrationId": "backlinks-0049",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0049_backlink_gmail_send_reply_loop.sql",
+      "sha256": "88b59164f3ffffcbba381fdcca260d770b2196f27a188ba36dd00b1715268c72",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0048"],
+      "recovery": "forward-only",
+      "recoveryNote": "Approved send facts are frozen into immutable snapshots and Gmail reply cursors are durable per workspace connection while project message projections remain isolated."
+    },
+    {
+      "order": 72,
+      "migrationId": "backlinks-0050",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0050_backlink_profile_inventory.sql",
+      "sha256": "26a61271db939c61cf95ee2e42096fe2347c1293a35de97c60d4bab7535814c3",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0049"],
+      "recovery": "forward-only",
+      "recoveryNote": "Backlink profile snapshots, pageable inventory, observations, health scores, provider artifacts, and sync cursors remain project-scoped with honest partial coverage."
+    },
+    {
+      "order": 73,
+      "migrationId": "backlinks-0051",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0051_backlink_inventory_monitoring.sql",
+      "sha256": "a904d372a2520c4b21caf8999a224ceb768ac54cc561ef16921b0079cbe1ad98",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0050"],
+      "recovery": "forward-only",
+      "recoveryNote": "Every canonical source-target inventory item receives one tenant-scoped tiered direct-monitoring policy while immutable observations preserve provider and direct-validation authority separately."
+    },
+    {
+      "order": 74,
+      "migrationId": "backlinks-0052",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0052_backlink_recommendation_publication_default.sql",
+      "sha256": "517e3dfd9659a4c00375959109d3da6980a615635288501625fa17833589b62f",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0051"],
+      "recovery": "forward-only",
+      "recoveryNote": "New recommendation inventory rows default to the current contact-publication gate state so inserts remain valid without weakening verified-contact publication requirements."
+    },
+    {
+      "order": 75,
+      "migrationId": "backlinks-0053",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0053_backlink_monitoring_continuity.sql",
+      "sha256": "f8cba0bb44c0e203e46b476fc539f5101206b4dd272404a0defd182229ce9a5a",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0052"],
+      "recovery": "forward-only",
+      "recoveryNote": "Provider-only inventory remains site-profile evidence until imported, pinned, managed, or linked to a confirmed Placement; existing direct-monitoring history remains intact."
+    },
+    {
+      "order": 76,
+      "migrationId": "backlinks-0054",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0054_backlink_recommendation_fit_contact_contract.sql",
+      "sha256": "b2efa73b72da267440a1b7abc898f5d78836d782b763146f65b0718215a69e58",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0053"],
+      "recovery": "forward-only",
+      "recoveryNote": "Historical v2 commercial scores remain read-only while v3 fit and public-contact decisions become independent, auditable publication gates."
+    },
+    {
+      "order": 77,
+      "migrationId": "backlinks-0055",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0055_backlink_publishable_refill_cycle.sql",
+      "sha256": "44771dd1473f5c6ad6f3216d2630dbd07ac94c0899ee42cb8a85f5bf9a10009a",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0054"],
+      "recovery": "forward-only",
+      "recoveryNote": "Project and Context scoped refill tiers, rounds, terminal reasons, and elimination counts persist on the existing commercial inventory policy and discovery batch."
+    },
+    {
+      "order": 78,
+      "migrationId": "backlinks-0056",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0056_backlink_gmail_affected_project_count.sql",
+      "sha256": "fbc2f9880c8502e270aa01c74831d2edd8c1e82e4f4600f027d7d318fad274cb",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0055"],
+      "recovery": "forward-only",
+      "recoveryNote": "Organization-scoped Gmail impact counts remain accurate across project RLS boundaries without exposing project identities."
+    },
+    {
+      "order": 79,
+      "migrationId": "backlinks-0057",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0057_backlink_resource_library.sql",
+      "sha256": "a6a364e711c01d7cb927c90899255ff3e82de2668c5551f7fbc09f26830016b2",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0056"],
+      "recovery": "forward-only",
+      "recoveryNote": "Workspace-scoped curated resources and the zero-paid terminal refill tier are additive; corrections are applied by forward migration."
+    },
+    {
+      "order": 80,
+      "migrationId": "backlinks-0058",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0058_backlink_refill_reassessment_cursors.sql",
+      "sha256": "b10af8c2b69b47587b68888ea5400eaf01784d032b29d580c704c7bd7315ec90",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0057"],
+      "recovery": "forward-only",
+      "recoveryNote": "Paid-provider and curated-resource refill cursors remain separately traceable; restore the verified backup or apply a reviewed forward repair."
+    },
+    {
+      "order": 81,
+      "migrationId": "backlinks-0059",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0059_backlink_recommendation_pool_generations.sql",
+      "sha256": "e60a1515a44516b551ba4428648965941d69f7c8c0f6657740b4ac2feba8089f",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0058"],
+      "recovery": "forward-only",
+      "recoveryNote": "Visible recommendation pools advance by immutable generation, archive as a whole, and wait for an explicit user refresh before the next generation starts."
+    },
+    {
+      "order": 82,
+      "migrationId": "backlinks-0060",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0060_backlink_v3_exact_ten_project_context.sql",
+      "sha256": "d051cf84e321d53093eb82779a3e06193d860c948cc53344e431cef010316cc4",
+      "executionOwner": "ROLE-BACKLINKS",
+      "schemas": ["backlinks"],
+      "prerequisites": ["backlinks-0059"],
+      "recovery": "forward-only",
+      "recoveryNote": "The exact-ten visible pool and complete Website Project context are forward-only product contracts."
     }
   ]
 }

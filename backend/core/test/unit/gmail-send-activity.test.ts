@@ -35,6 +35,7 @@ const command = {
 };
 
 const createActivity = () => {
+  const dispatchOrder: string[] = [];
   const repository: SendAttemptRepository = {
     claim: vi.fn().mockResolvedValue({
       state: "claimed",
@@ -50,50 +51,75 @@ const createActivity = () => {
   const commandLoader: GmailSendCommandLoader = {
     load: vi.fn().mockResolvedValue(command),
   };
+  const connectionHealthCheck = {
+    run: vi.fn().mockImplementation(async () => {
+      dispatchOrder.push("health");
+    }),
+  };
+  const acceptedSendHandler = {
+    run: vi.fn().mockResolvedValue(undefined),
+  };
   const policyInputLoader: GmailSendPolicyInputLoader = {
-    load: vi.fn().mockResolvedValue({
-      evaluatedAt: "2026-07-28T09:18:00.000Z",
-      draft: {
-        status: "approved",
-        approvedVersionId:
-          "018f0000-0000-7000-8000-000000000318",
-        requestedVersionId:
-          "018f0000-0000-7000-8000-000000000318",
-      },
-      suppression: { suppressed: false },
-      connection: {
-        connectionStatus: "CONNECTED",
-        sendAvailability: "AVAILABLE",
-      },
-      quota: {
-        status: "RESERVED",
-        eligibleAt: "2026-07-28T09:17:00.000Z",
-        expiresAt: "2026-07-28T09:28:00.000Z",
-      },
-      killSwitches: {
-        GLOBAL: false,
-        ORGANIZATION: false,
-        WORKSPACE: false,
-        WEBSITE_PROJECT: false,
-        GMAIL_SEND: false,
-      },
-      cooldownUntil: null,
+    load: vi.fn().mockImplementation(async () => {
+      dispatchOrder.push("policy");
+      return {
+        evaluatedAt: "2026-07-28T09:18:00.000Z",
+        draft: {
+          status: "approved",
+          approvedVersionId:
+            "018f0000-0000-7000-8000-000000000318",
+          requestedVersionId:
+            "018f0000-0000-7000-8000-000000000318",
+        },
+        suppression: { suppressed: false },
+        connection: {
+          connectionStatus: "CONNECTED",
+          sendAvailability: "AVAILABLE",
+        },
+        quota: {
+          status: "RESERVED",
+          eligibleAt: "2026-07-28T09:17:00.000Z",
+          expiresAt: "2026-07-28T09:28:00.000Z",
+        },
+        killSwitches: {
+          GLOBAL: false,
+          ORGANIZATION: false,
+          WORKSPACE: false,
+          WEBSITE_PROJECT: false,
+          GMAIL_SEND: false,
+        },
+        cooldownUntil: null,
+      };
     }),
   };
   const gmail: GmailSendPort = {
-    send: vi.fn().mockResolvedValue({
-      kind: "accepted",
-      providerMessageId: "gmail-message-118",
+    send: vi.fn().mockImplementation(async () => {
+      dispatchOrder.push("send");
+      return {
+        kind: "accepted" as const,
+        providerMessageId: "gmail-message-118",
+      };
     }),
   };
   const activity = new GmailSendActivity({
     repository,
     commandLoader,
+    connectionHealthCheck,
     policyInputLoader,
     gmail,
+    acceptedSendHandler,
     clock: () => new Date("2026-07-28T09:18:00.000Z"),
   });
-  return { activity, repository, commandLoader, policyInputLoader, gmail };
+  return {
+    activity,
+    repository,
+    commandLoader,
+    connectionHealthCheck,
+    acceptedSendHandler,
+    policyInputLoader,
+    gmail,
+    dispatchOrder,
+  };
 };
 
 describe("BL-AI-118 Gmail Send Activity", () => {
@@ -125,6 +151,11 @@ describe("BL-AI-118 Gmail Send Activity", () => {
     });
     expect(fixture.gmail.send).toHaveBeenCalledTimes(1);
     expect(fixture.gmail.send).toHaveBeenCalledWith(command);
+    expect(fixture.connectionHealthCheck.run).toHaveBeenCalledWith({
+      context,
+      attempt,
+    });
+    expect(fixture.dispatchOrder).toEqual(["health", "policy", "send"]);
   });
 
   it("rejects a command that does not carry the claimed RFC Message-ID", async () => {
@@ -164,6 +195,37 @@ describe("BL-AI-118 Gmail Send Activity", () => {
       errorCode: "GMAIL_SEND_RATE_LIMITED",
       completedAt: new Date("2026-07-28T09:18:00.000Z"),
       retryEligibleAt: new Date("2026-07-28T09:18:30.000Z"),
+    });
+    expect(fixture.acceptedSendHandler.run).not.toHaveBeenCalled();
+  });
+
+  it("ensures reply polling after Gmail acceptance is persisted", async () => {
+    const fixture = createActivity();
+
+    await fixture.activity.settleAttempt({
+      context,
+      attempt,
+      settlement: {
+        status: "PROVIDER_ACCEPTED",
+        providerMessageId: "gmail-message-118",
+        providerThreadId: "gmail-thread-118",
+      },
+    });
+
+    expect(fixture.acceptedSendHandler.run).toHaveBeenCalledWith({
+      context,
+      attempt,
+      settlement: {
+        status: "PROVIDER_ACCEPTED",
+        providerMessageId: "gmail-message-118",
+        providerThreadId: "gmail-thread-118",
+      },
+      result: {
+        state: "completed",
+        providerMessageId: "gmail-message-118",
+        providerThreadId: null,
+        rfcMessageId: attempt.rfcMessageId,
+      },
     });
   });
 });

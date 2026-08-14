@@ -4,9 +4,11 @@ import { createRequire } from "node:module";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { runProjectScopedLane } from "../../../src/modules/backlinks/application/services/project-scope-scheduler.js";
 import { createIdempotencyRepository } from "../../../src/modules/backlinks/db/repositories/idempotency.repository.js";
 import { createJobRepository } from "../../../src/modules/backlinks/db/repositories/job.repository.js";
 import { withBacklinkTenantTransaction } from "../../../src/modules/backlinks/db/tenant-transaction.js";
+import { buildBacklinksWorkflowId } from "../../../src/modules/backlinks/workflows/namespaces.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -56,6 +58,34 @@ const ids = {
   concurrentJob: "018f0000-0000-7000-8000-000000000501",
   sourceObject: "018f0000-0000-7000-8000-000000000601",
 } as const;
+const saasMatrix = Array.from({ length: 2 }, (_, organizationIndex) =>
+  Array.from({ length: 2 }, (_, workspaceIndex) =>
+    Array.from({ length: 2 }, (_, projectIndex) => {
+      const suffix =
+        (organizationIndex + 1) * 100
+        + (workspaceIndex + 1) * 10
+        + projectIndex
+        + 1;
+      return {
+        organizationId:
+          `11000000-0000-4000-8000-${String(organizationIndex + 1).padStart(12, "0")}`,
+        workspaceId:
+          `22000000-0000-4000-8000-${String(
+            (organizationIndex + 1) * 10 + workspaceIndex + 1,
+          ).padStart(12, "0")}`,
+        websiteProjectId:
+          `33000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`,
+        projectContextSnapshotId:
+          `66000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`,
+        projectContextSnapshotVersion: 1,
+        jobId:
+          `44000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`,
+        sourceObjectId:
+          `55000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`,
+      };
+    }),
+  ),
+).flat(2);
 
 describe("BL-AI-036 foundation isolation and idempotency", () => {
   const role = `bl_ai_036_role_${process.pid}_${Date.now()}`;
@@ -106,7 +136,7 @@ describe("BL-AI-036 foundation isolation and idempotency", () => {
       await admin.end();
     }
     await harness?.stop();
-  });
+  }, 30_000);
 
   it("blocks every foundation table across Project and Workspace tenants", async () => {
     await admin.query(fixture);
@@ -168,6 +198,126 @@ describe("BL-AI-036 foundation isolation and idempotency", () => {
       );
       expect(retained.rows).toEqual([{ count: 2 }]);
     }
+  });
+
+  it("isolates a 2x2x2 SaaS matrix and continues after one project fails", async () => {
+    for (const scope of saasMatrix) {
+      await admin.query(
+        `INSERT INTO backlink_jobs (
+           id, organization_id, workspace_id, website_project_id, job_type,
+           source_object_type, source_object_id, workflow_id, correlation_id,
+           created_by, updated_by
+         ) VALUES ($1,$2,$3,$4,'local_product_022_isolation_probe','project',
+           $5,$6,$7,'local-product-022','local-product-022')`,
+        [
+          scope.jobId,
+          scope.organizationId,
+          scope.workspaceId,
+          scope.websiteProjectId,
+          scope.sourceObjectId,
+          buildBacklinksWorkflowId({
+            organizationId: scope.organizationId,
+            workspaceId: scope.workspaceId,
+            websiteProjectId: scope.websiteProjectId,
+            workflow: "draft-generation",
+            instanceId: scope.jobId,
+          }),
+          `local-product-022:${scope.websiteProjectId}`,
+        ],
+      );
+    }
+
+    for (const scope of saasMatrix) {
+      const visible = await withBacklinkTenantTransaction(
+        tenantPool,
+        scope,
+        async (transaction) => {
+          const rows = await transaction.query(
+            `SELECT id, organization_id, workspace_id, website_project_id,
+                    workflow_id
+               FROM backlink_jobs`,
+          );
+          const foreignUpdate = await transaction.query(
+            `UPDATE backlink_jobs
+                SET step = 'cross-tenant-write'
+              WHERE id <> $1`,
+            [scope.jobId],
+          );
+          return { rows: rows.rows, foreignUpdate: foreignUpdate.rowCount };
+        },
+      );
+      expect(visible).toMatchObject({
+        rows: [{
+          id: scope.jobId,
+          organization_id: scope.organizationId,
+          workspace_id: scope.workspaceId,
+          website_project_id: scope.websiteProjectId,
+        }],
+        foreignUpdate: 0,
+      });
+      expect(String(visible.rows[0]?.workflow_id)).toContain(
+        `${scope.organizationId}:${scope.workspaceId}:${scope.websiteProjectId}`,
+      );
+    }
+
+    const workflowIds = await admin.query(
+      `SELECT workflow_id
+         FROM backlink_jobs
+        WHERE job_type = 'local_product_022_isolation_probe'`,
+    );
+    expect(new Set(workflowIds.rows.map(({ workflow_id }) => workflow_id)).size)
+      .toBe(8);
+
+    const failedProjectId = saasMatrix[3]?.websiteProjectId;
+    const visited: string[] = [];
+    const failures: string[] = [];
+    let completed = 0;
+    let failed = 0;
+    const workspaceScopes = Map.groupBy(
+      saasMatrix,
+      ({ organizationId, workspaceId }) => `${organizationId}:${workspaceId}`,
+    );
+    for (const [workspaceKey, scopes] of workspaceScopes) {
+      const [organizationId, workspaceId] = workspaceKey.split(":");
+      const outcome = await runProjectScopedLane({
+        provider: {
+          async listActiveProjectScopes(input) {
+            expect(input).toMatchObject({
+              organizationId,
+              workspaceId,
+              cursor: null,
+            });
+            return { scopes, nextCursor: null };
+          },
+        },
+        organizationId: organizationId ?? "",
+        workspaceId: workspaceId ?? "",
+        lane: "placement-monitoring",
+        pageLimit: 2,
+        async run(scope) {
+          visited.push(scope.websiteProjectId);
+          if (scope.websiteProjectId === failedProjectId) {
+            throw new Error("LOCAL_PRODUCT_022_EXPECTED_SCOPE_FAILURE");
+          }
+        },
+        onProjectError(scope, error) {
+          failures.push(
+            `${scope.websiteProjectId}:${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        },
+      });
+      completed += outcome.completed;
+      failed += outcome.failed;
+    }
+
+    expect(visited).toHaveLength(8);
+    expect(completed).toBe(7);
+    expect(failed).toBe(1);
+    expect(failures).toEqual([
+      `${failedProjectId}:LOCAL_PRODUCT_022_EXPECTED_SCOPE_FAILURE`,
+    ]);
   });
 
   it("creates one logical Job for 20 concurrent identical commands", async () => {

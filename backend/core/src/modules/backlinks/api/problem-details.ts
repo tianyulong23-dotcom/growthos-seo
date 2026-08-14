@@ -30,6 +30,14 @@ const problemDefinitions = {
   [backlinkErrorCodes.notFound]: defineProblem(404, "Resource not found", "not-found"),
   [backlinkErrorCodes.conflict]: defineProblem(409, "Conflict", "conflict"),
   [backlinkErrorCodes.rateLimited]: defineProblem(429, "Rate limit exceeded", "rate-limited"),
+  [backlinkErrorCodes.gmailConnectionNotSelected]: defineProblem(409, "Gmail connection not selected", "gmail-connection-not-selected"),
+  [backlinkErrorCodes.gmailReauthRequired]: defineProblem(409, "Gmail reauthorization required", "gmail-reauth-required"),
+  [backlinkErrorCodes.gmailSendDisabled]: defineProblem(409, "Gmail send disabled", "gmail-send-disabled"),
+  [backlinkErrorCodes.gmailScopeInsufficient]: defineProblem(409, "Gmail scope insufficient", "gmail-scope-insufficient"),
+  [backlinkErrorCodes.gmailWorkerUnavailable]: defineProblem(409, "Gmail worker unavailable", "gmail-worker-unavailable"),
+  [backlinkErrorCodes.contactVersionStale]: defineProblem(409, "Contact version stale", "contact-version-stale"),
+  [backlinkErrorCodes.draftVersionStale]: defineProblem(409, "Draft version stale", "draft-version-stale"),
+  [backlinkErrorCodes.sendPolicyRejected]: defineProblem(409, "Send policy rejected", "send-policy-rejected"),
   [backlinkErrorCodes.internal]: defineProblem(500, "Internal server error", "internal-error"),
 } satisfies Record<BacklinkErrorCode, ProblemDefinition>;
 
@@ -40,6 +48,14 @@ const backlinkErrorCodeSchema = z.union([
   z.literal(backlinkErrorCodes.notFound),
   z.literal(backlinkErrorCodes.conflict),
   z.literal(backlinkErrorCodes.rateLimited),
+  z.literal(backlinkErrorCodes.gmailConnectionNotSelected),
+  z.literal(backlinkErrorCodes.gmailReauthRequired),
+  z.literal(backlinkErrorCodes.gmailSendDisabled),
+  z.literal(backlinkErrorCodes.gmailScopeInsufficient),
+  z.literal(backlinkErrorCodes.gmailWorkerUnavailable),
+  z.literal(backlinkErrorCodes.contactVersionStale),
+  z.literal(backlinkErrorCodes.draftVersionStale),
+  z.literal(backlinkErrorCodes.sendPolicyRejected),
   z.literal(backlinkErrorCodes.internal),
 ]);
 

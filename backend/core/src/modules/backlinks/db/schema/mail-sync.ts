@@ -1,6 +1,9 @@
 import { createRequire } from "node:module";
 import { projectIdentityColumns } from "./common.js";
-import { backlinkGmailConnections } from "./gmail-connections.js";
+import {
+  backlinkGmailConnections,
+  backlinkGmailWorkspaceBindings,
+} from "./gmail-connections.js";
 import { backlinkOpportunities } from "./opportunities.js";
 
 type Builder = {
@@ -81,6 +84,54 @@ export const backlinkMailSyncCursors = pg.pgTable(
       foreignColumns: [
         backlinkGmailConnections.organizationId,
         backlinkGmailConnections.id,
+      ],
+    }),
+  ],
+);
+
+export const backlinkGmailConnectionSyncCursors = pg.pgTable(
+  "backlink_gmail_connection_sync_cursors",
+  {
+    id: pg.uuid("id").primaryKey(),
+    organizationId: pg.uuid("organization_id").notNull(),
+    workspaceId: pg.uuid("workspace_id").notNull(),
+    gmailConnectionId: pg.uuid("gmail_connection_id").notNull(),
+    historyId: pg.text("history_id"),
+    nextPageToken: pg.text("next_page_token"),
+    initialSyncCompletedAt: timestamp("initial_sync_completed_at"),
+    lastSyncedAt: timestamp("last_synced_at"),
+    version: pg.integer("version").notNull().default(1),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+    createdBy: pg.text("created_by").notNull(),
+    updatedBy: pg.text("updated_by").notNull(),
+  },
+  (table) => [
+    pg.uniqueIndex(
+      "backlink_gmail_connection_sync_cursor_identity_uq",
+    ).on(
+      table.organizationId,
+      table.workspaceId,
+      table.id,
+    ),
+    pg.uniqueIndex(
+      "backlink_gmail_connection_sync_cursor_connection_uq",
+    ).on(
+      table.organizationId,
+      table.workspaceId,
+      table.gmailConnectionId,
+    ),
+    pg.foreignKey({
+      name: "backlink_gmail_connection_sync_cursor_binding_fk",
+      columns: [
+        table.organizationId,
+        table.workspaceId,
+        table.gmailConnectionId,
+      ],
+      foreignColumns: [
+        backlinkGmailWorkspaceBindings.organizationId,
+        backlinkGmailWorkspaceBindings.workspaceId,
+        backlinkGmailWorkspaceBindings.gmailConnectionId,
       ],
     }),
   ],

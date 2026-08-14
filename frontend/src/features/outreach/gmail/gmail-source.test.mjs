@@ -28,6 +28,7 @@ test("BL-AI-121 Gmail connection UI distinguishes reauthorization and restricted
   const api = read("./api.ts")
   const hook = read("./use-gmail-connection.ts")
   const panel = read("./gmail-safety-panel.tsx")
+  const selector = read("./gmail-account-selector.tsx")
 
   assert.match(api, /requestBacklinks/)
   assert.match(hook, /createProjectQueryKey/)
@@ -41,6 +42,10 @@ test("BL-AI-121 Gmail connection UI distinguishes reauthorization and restricted
   assert.match(hook, /界面不会推断为已连接/)
   assert.match(panel, /授权已被撤销，需重新授权/)
   assert.match(panel, /发送受限/)
+  assert.match(selector, /当前项目发件账号/)
+  assert.match(selector, /选择已有账号不会再次打开/)
+  assert.match(selector, /Send \{sendCapable \? "可用" : "暂停"\}/)
+  assert.match(selector, /Sync \{syncCapable \? "可用" : "暂停"\}/)
   assert.match(panel, /确认断开/)
   assert.doesNotMatch(
     `${api}\n${hook}\n${panel}`,
@@ -53,6 +58,7 @@ test("BL-AI-122 creates only an approved Send Intent after an explicit review", 
   const draftPage = read("../drafts/draft-page.tsx")
 
   assert.match(draftApi, /backlinksListOpportunityContactsV1/)
+  assert.match(draftApi, /backlinksPreflightSendIntentV1/)
   assert.match(draftApi, /backlinksCreateSendIntentV1/)
   assert.match(draftApi, /backlinksGetSendIntentV1/)
   assert.match(draftApi, /approvedDraftVersionId/)
@@ -60,7 +66,8 @@ test("BL-AI-122 creates only an approved Send Intent after an explicit review", 
   assert.match(draftApi, /idempotency-key/)
   assert.doesNotMatch(draftApi, /apiRequest|send-intents/)
   assert.match(draftPage, /发送前最终确认/)
-  assert.match(draftPage, /发送身份/)
+  assert.match(draftPage, /确定未发送/)
+  assert.match(draftPage, /NOT_SENT/)
   assert.match(draftPage, /收件人/)
   assert.match(draftPage, /已批准版本/)
   assert.match(draftPage, /最终确认并发送/)

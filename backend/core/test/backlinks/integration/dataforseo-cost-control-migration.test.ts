@@ -467,6 +467,136 @@ describe("DFS-COST-003/004 PostgreSQL cost control", () => {
     }
   }, 30_000);
 
+  it("serializes concurrent reservations at the paid-call ceiling", async () => {
+    const observedAt = new Date("2026-08-12T08:00:00.000Z");
+    const budgetId = id(390);
+    const requestIds = Array.from({ length: 5 }, (_, index) => id(391 + index));
+    await insertBudget(client, workspaceA, budgetId);
+    for (const [index, requestId] of requestIds.entries()) {
+      const requestFingerprint = String(index + 1).repeat(64);
+      const reservationKey = `paid-call-ceiling-${index}`;
+      await client.query(`
+        INSERT INTO provider_batch_requests (
+          id,organization_id,workspace_id,website_project_id,provider,endpoint,
+          request_intent,refresh_mode,location_code,language_code,
+          request_schema_version,response_schema_version,
+          normalized_request_hash,request_count,estimated_cost_micros,status,
+          started_at,request_id,budget_reservation_id,created_by
+        ) VALUES (
+          $1::uuid,$2::uuid,$3::uuid,$4::uuid,'dataforseo','endpoint',
+          'DISCOVERY','BACKGROUND_REFRESH','US','en-US',1,'response.v1',
+          $5,1,10,'running',$6,$7,$8,'test'
+        )
+      `, [
+        requestId,
+        organization,
+        workspaceA,
+        projectA,
+        requestFingerprint,
+        observedAt,
+        `paid-call-request-${index}`,
+        reservationKey,
+      ]);
+      await createProviderBudgetRepository(client, () => observedAt)
+        .recordRequest({
+          batchRequestId: requestId,
+          context: {
+            organizationId: organization,
+            workspaceId: workspaceA,
+            websiteProjectId: projectA,
+            requestId: `paid-call-request-${index}`,
+            idempotencyKey: reservationKey,
+            budgetReservationId: reservationKey,
+          },
+          endpoint: "endpoint",
+          requestFingerprint,
+          requestSchemaVersion: 1,
+          requestPayload: { index },
+          startedAt: observedAt,
+        });
+    }
+
+    const clients = requestIds.map(
+      () => new PgClient({ connectionString: harness.connectionString }),
+    );
+    await Promise.all(clients.map(async (opened) => {
+      await opened.connect();
+      await configureOwner(opened);
+    }));
+    const reservationInput = (index: number) => ({
+      context: {
+        organizationId: organization,
+        workspaceId: workspaceA,
+        websiteProjectId: projectA,
+        requestId: `paid-call-request-${index}`,
+        idempotencyKey: `paid-call-ceiling-${index}`,
+        budgetReservationId: `paid-call-ceiling-${index}`,
+      },
+      provider: "dataforseo" as const,
+      requestFingerprint: String(index + 1).repeat(64),
+      reservationKey: `paid-call-ceiling-${index}`,
+      estimatedCostMicros: 10,
+    });
+    try {
+      const decisions = await Promise.all(clients.map(async (opened, index) => {
+        await opened.query("BEGIN");
+        try {
+          await opened.query(`
+            SELECT set_config('app.current_organization_id',$1,true),
+              set_config('app.current_workspace_id',$2,true),
+              set_config('app.current_website_project_id',$3,true)
+          `, [organization, workspaceA, projectA]);
+          const decision = await createProviderBudgetRepository(
+            opened,
+            () => observedAt,
+          ).reserveBudgetWithinPaidCallCeiling(reservationInput(index), 3);
+          await opened.query("COMMIT");
+          return decision;
+        } catch (error) {
+          await opened.query("ROLLBACK");
+          throw error;
+        }
+      }));
+      expect(decisions.filter((decision) => decision === "allow")).toHaveLength(3);
+      expect(decisions.filter((decision) => decision === "deny")).toHaveLength(2);
+
+      const allowedIndex = decisions.findIndex(
+        (decision) => decision === "allow",
+      );
+      const retryClient = clients[allowedIndex];
+      if (retryClient === undefined) {
+        throw new Error("Missing allowed reservation client");
+      }
+      await retryClient.query("BEGIN");
+      await retryClient.query(`
+        SELECT set_config('app.current_organization_id',$1,true),
+          set_config('app.current_workspace_id',$2,true),
+          set_config('app.current_website_project_id',$3,true)
+      `, [organization, workspaceA, projectA]);
+      const retryDecision = await createProviderBudgetRepository(
+        retryClient,
+        () => observedAt,
+      ).reserveBudgetWithinPaidCallCeiling(
+        reservationInput(allowedIndex),
+        3,
+      );
+      await retryClient.query("COMMIT");
+      expect(retryDecision).toBe("allow");
+      expect((await client.query(`
+        SELECT count(*)::integer count
+          FROM backlink_provider_usage_ledger
+         WHERE budget_id=$1::uuid AND status='reserved'
+      `, [budgetId])).rows).toEqual([{ count: 3 }]);
+      expect((await client.query(`
+        SELECT reserved_micros AS "reservedMicros"
+          FROM backlink_provider_budgets
+         WHERE id=$1::uuid
+      `, [budgetId])).rows).toEqual([{ reservedMicros: "30" }]);
+    } finally {
+      await Promise.all(clients.map((opened) => opened.end()));
+    }
+  }, 30_000);
+
   it("persists partial Bulk results for later single-domain reuse", async () => {
     await configureOwner(client);
     const completedAt = new Date("2026-07-30T10:00:01.000Z");

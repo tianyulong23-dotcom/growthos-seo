@@ -1,5 +1,14 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
+import {
+  localProductAiProviderCredentialReference,
+  LocalProductSecretStoreClient,
+  parseLocalProductSecretReference,
+} from "../../src/modules/backlinks/adapters/security/local-product-secret-store-client.js";
 import {
   createLocalProductAiRuntime,
   readLocalProductAiConfiguration,
@@ -7,6 +16,9 @@ import {
 import type {
   BacklinkTenantPool,
 } from "../../src/modules/backlinks/db/tenant-transaction.js";
+import {
+  secretKinds,
+} from "../../src/modules/backlinks/ports/secret-store.port.js";
 
 const configuration = {
   providerRef: "vercel-ai-gateway",
@@ -110,6 +122,62 @@ const environment = {
 } as const;
 
 describe("LOCAL_PRODUCT AI runtime", () => {
+  it("resolves the fixed credential with its import-time context", async () => {
+    const secretStoreRoot = await mkdtemp(join(tmpdir(), "growthos-ai-"));
+    try {
+      const secretStore = new LocalProductSecretStoreClient({
+        rootDirectory: secretStoreRoot,
+      });
+      await secretStore.importFixed({
+        reference: parseLocalProductSecretReference(
+          localProductAiProviderCredentialReference,
+          secretKinds.aiProviderCredential,
+        ),
+        plaintext: "encrypted-test-credential",
+        context: {
+          organizationId: "local-product",
+          subjectProvider: "ai",
+        },
+        replace: true,
+      });
+      const runtime = createLocalProductAiRuntime({
+        pool: poolFor({
+          blocked: null,
+          usedUsd: 0,
+          usedCalls: 0,
+          status: "QUEUED",
+          quality: { generationMode: "MODEL" },
+        }),
+        secretStoreRoot,
+        configuration,
+      });
+
+      await expect(runtime.blueprint.generate({
+        ...scope,
+        context: {
+          projectContextVersionId: "context-version-1",
+          projectSettingsVersionId: "settings-version-1",
+          projectSettingsVersion: 1,
+          canonicalDomain: "example.com",
+          countries: ["US"],
+          languages: ["en"],
+          products: ["example product"],
+          keywords: ["example keyword"],
+          promotionTargetUrls: ["https://example.com/"],
+          declaredTargetAudiences: [],
+          partnershipGoals: [],
+          explicitCompetitorDomains: [],
+          evidenceRefs: ["project-context:1"],
+        },
+      })).rejects.toMatchObject({
+        code: "UNAVAILABLE",
+        retryable: false,
+      });
+    } finally {
+      await rm(secretStoreRoot, { recursive: true, force: true });
+    }
+  });
+
   it("parses approved providers and same-kind local Secret References", () => {
     expect(readLocalProductAiConfiguration({ ...environment })).toEqual(
       configuration,
@@ -159,6 +227,12 @@ describe("LOCAL_PRODUCT AI runtime", () => {
     })).toThrow(
       "BACKLINKS_AI_CONFIGURATION_INVALID:"
         + "AI_PROVIDER_CREDENTIAL_SECRET_REF",
+    );
+    expect(() => readLocalProductAiConfiguration({
+      ...environment,
+      AI_PROVIDER_TIMEOUT_MS: "45001",
+    })).toThrow(
+      "BACKLINKS_AI_CONFIGURATION_INVALID:AI_PROVIDER_TIMEOUT_MS",
     );
   });
 

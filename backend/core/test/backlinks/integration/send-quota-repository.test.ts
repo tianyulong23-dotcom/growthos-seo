@@ -275,6 +275,32 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
         WHERE id = $2`,
       [draftVersionId, draftId],
     );
+    await admin.query(
+      `INSERT INTO backlinks.backlink_lifecycle_events (
+         id, organization_id, workspace_id, website_project_id,
+         aggregate_type, aggregate_id, sequence, aggregate_version,
+         event_type, actor_type, actor_id, after_state, reason,
+         correlation_id, idempotency_key
+       ) VALUES (
+         $1, $2, $3, $4, 'email_draft', $5, 1, 2,
+         'draft.approval.recorded', 'user', 'test',
+         jsonb_build_object(
+           'approvedVersionId', $6::text,
+           'occurredAt', statement_timestamp()
+         ),
+         'test approval', $7, $8
+       )`,
+      [
+        id(seed + 10),
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        draftId,
+        draftVersionId,
+        `quota-approval-${seed}`,
+        `quota-approval:${seed}`,
+      ],
+    );
   };
 
   beforeAll(async () => {
@@ -317,6 +343,7 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
       "0023_backlink_send_quota_connection_scope.sql",
       "0024_backlink_send_attempt_settlement.sql",
       "0025_backlink_send_reconciliation.sql",
+      "0033_backlink_runtime_governance.sql",
       "0035_backlink_contact_send_snapshots.sql",
       "0041_backlink_gmail_project_bindings.sql",
     ]) {
@@ -367,8 +394,8 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
          statement_timestamp() + interval '1 hour', 'test', 'test'
        ),
        (
-         $5, $2, 'user-quota', 'google-subject-quota',
-         'quota-sender@example.test', $3::jsonb, $6,
+         $5, $2, 'user-quota', 'google-subject-quota-second',
+         'quota-sender-second@example.test', $3::jsonb, $6,
          statement_timestamp() + interval '1 hour', 'test', 'test'
        )`,
       [
@@ -415,7 +442,7 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
          statement_timestamp(), 'test', 'test'
        ),
        (
-         $4, $2, $5, 'quota-sender@example.test',
+         $4, $2, $5, 'quota-sender-second@example.test',
          true, true, 'accepted', false, 'OIDC_PRIMARY',
          statement_timestamp(), 'test', 'test'
        )`,
@@ -425,6 +452,35 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
         gmailConnectionId,
         secondGmailIdentityId,
         secondGmailConnectionId,
+      ],
+    );
+    for (const name of [
+      "0047_backlink_gmail_organization_reuse.sql",
+      "0048_backlink_draft_request_snapshots.sql",
+      "0049_backlink_gmail_send_reply_loop.sql",
+    ]) {
+      await admin.query(await readFile(migration(name), "utf8"));
+    }
+    await admin.query(
+      `INSERT INTO backlinks.backlink_kill_switch_versions (
+         id, organization_id, workspace_id, website_project_id,
+         layer, capability, provider, version, blocked, reason, created_by
+       ) VALUES
+       (
+         $1, $2, $3, $4, 'project', 'GMAIL_SEND', NULL, 1, false,
+         'integration test send preflight enabled', 'test'
+       ),
+       (
+         $5, $2, $3, $6, 'project', 'GMAIL_SEND', NULL, 1, false,
+         'integration test send preflight enabled', 'test'
+       )`,
+      [
+        id(708),
+        organizationId,
+        workspaceId,
+        firstProjectId,
+        id(709),
+        secondProjectId,
       ],
     );
 
@@ -1002,6 +1058,42 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
   });
 
   describe("BL-AI-115 atomic Send Intent creation", () => {
+    it("preflights the approved draft without persisting a Send Intent", async () => {
+      const repo = new PostgresqlSendIntentRepository({ pool: tenantPool });
+      const before = await admin.query(
+        `SELECT count(*)::integer AS total
+           FROM backlinks.backlink_send_intents`,
+      );
+
+      await expect(repo.preflight({
+        ...firstContext,
+        draftId: id(106),
+        approvedDraftVersionId: id(107),
+        contactId: id(109),
+        contactVersion: 1,
+        gmailConnectionId,
+        messagePurpose: "INITIAL_OUTREACH",
+        followUpIndex: 0,
+        checkedAt: new Date("2026-07-27T10:15:00.000Z"),
+        rolling24HourSendLimit: 100,
+      })).resolves.toMatchObject({
+        state: "allowed",
+        gmail: {
+          connectionId: gmailConnectionId,
+          primaryEmail: "quota-sender@example.test",
+          connectionStatus: "CONNECTED",
+          sendAvailability: "AVAILABLE",
+          mailSyncCapability: expect.any(Boolean),
+        },
+      });
+
+      const after = await admin.query(
+        `SELECT count(*)::integer AS total
+           FROM backlinks.backlink_send_intents`,
+      );
+      expect(after.rows).toEqual(before.rows);
+    });
+
     it("serializes retries and persists one Intent, Reservation, and Outbox event", async () => {
       const repo = new PostgresqlSendIntentRepository({ pool: tenantPool });
       const shared = {
@@ -1145,7 +1237,87 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
       await expect(repo.create(atomicInput(5))).resolves.toMatchObject({
         state: "created",
       });
+      await admin.query(
+        `INSERT INTO backlinks.backlink_email_drafts (
+           id, organization_id, workspace_id, website_project_id,
+           opportunity_id, logical_draft_key, status, contact_id,
+           contact_version, created_by, updated_by
+         ) VALUES (
+           $1, $2, $3, $4, $5, 'quota-draft-cooldown',
+           'draft', $6, 1, 'test', 'test'
+         )`,
+        [
+          id(1306),
+          organizationId,
+          workspaceId,
+          firstProjectId,
+          id(104),
+          id(109),
+        ],
+      );
+      await admin.query(
+        `INSERT INTO backlinks.backlink_draft_versions (
+           id, organization_id, workspace_id, website_project_id, draft_id,
+           opportunity_id, version_no, source, evidence_snapshot_id,
+           subject_text, body_text, structured_output, evidence_ids,
+           prompt_version, output_schema_version, contact_id, contact_version,
+           created_by
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, 1, 'MANUAL', $7,
+           'Second approved subject', 'Second approved body', '{}', '[]',
+           'manual.v1', 'manual.v1', $8, 1, 'test'
+         )`,
+        [
+          id(1307),
+          organizationId,
+          workspaceId,
+          firstProjectId,
+          id(1306),
+          id(104),
+          id(105),
+          id(109),
+        ],
+      );
+      await admin.query(
+        `UPDATE backlinks.backlink_email_drafts
+            SET status = 'approved',
+                current_version_id = $1,
+                approved_version_id = $1,
+                version = 2,
+                updated_at = statement_timestamp(),
+                updated_by = 'test'
+          WHERE id = $2`,
+        [id(1307), id(1306)],
+      );
+      await admin.query(
+        `INSERT INTO backlinks.backlink_lifecycle_events (
+           id, organization_id, workspace_id, website_project_id,
+           aggregate_type, aggregate_id, sequence, aggregate_version,
+           event_type, actor_type, actor_id, after_state, reason,
+           correlation_id, idempotency_key
+         ) VALUES (
+           $1, $2, $3, $4, 'email_draft', $5, 1, 2,
+           'draft.approval.recorded', 'user', 'test',
+           jsonb_build_object(
+             'approvedVersionId', $6::text,
+             'occurredAt', statement_timestamp()
+           ),
+           'test approval', $7, $8
+         )`,
+        [
+          id(1310),
+          organizationId,
+          workspaceId,
+          firstProjectId,
+          id(1306),
+          id(1307),
+          "quota-approval-cooldown",
+          "quota-approval:cooldown",
+        ],
+      );
       await expect(repo.create(atomicInput(6, {
+        draftId: id(1306),
+        approvedDraftVersionId: id(1307),
         requestedSendAt: new Date("2026-07-28T10:15:00.000Z"),
       }))).resolves.toEqual({
         state: "initial_outreach_cooldown",

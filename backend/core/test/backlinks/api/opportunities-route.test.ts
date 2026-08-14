@@ -113,6 +113,9 @@ describe("BL-AI-080 Opportunity query API", () => {
     expect(calls[2]?.values).toEqual([
       "org-80", "workspace-80", "project-80", rows[0]?.id,
     ]);
+    expect(calls[2]?.text).toContain(
+      "s.score_model_version<>\n                 'recommendation-commercial-fit.v3'",
+    );
 
     const missing = await app.inject({ method: "GET",
       url: "/api/v1/projects/project-key/backlinks/opportunities"

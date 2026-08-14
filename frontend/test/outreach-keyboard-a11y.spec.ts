@@ -23,6 +23,20 @@ async function tabTo(page: Page, locator: Locator, maxTabs = 100) {
   throw new Error(`Keyboard focus did not reach ${await locator.toString()}`)
 }
 
+async function arrowToTab(page: Page, locator: Locator, maxArrows = 10) {
+  for (let index = 0; index < maxArrows; index += 1) {
+    await page.keyboard.press("ArrowRight")
+    if (
+      await locator
+        .evaluate((element) => element === document.activeElement)
+        .catch(() => false)
+    ) {
+      return
+    }
+  }
+  throw new Error(`Arrow-key focus did not reach ${await locator.toString()}`)
+}
+
 async function expectNoSeriousA11yViolations(page: Page) {
   const results = await new AxeBuilder({ page }).analyze()
   const severe = results.violations.filter(
@@ -48,8 +62,21 @@ test("critical Outreach commands are keyboard operable with no serious a11y viol
 
   await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
   await expectNoSeriousA11yViolations(page)
+  await tabTo(page, page.getByRole("button", { name: "加入 Opportunity" }))
+  await page.keyboard.press("Enter")
+  await expect(page.getByRole("button", { name: "已加入" })).toBeVisible()
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/${projectKey}/backlinks/recommendations$`)
+  )
+  expect(
+    session.capturedRequests.filter(
+      (request) =>
+        request.method === "POST" &&
+        request.pathname.endsWith("/backlinks/opportunities")
+    )
+  ).toHaveLength(1)
   await tabTo(page, page.getByRole("tab", { name: "推荐池" }))
-  await page.keyboard.press("ArrowRight")
+  await arrowToTab(page, page.getByRole("tab", { name: "外链机会" }))
   if (!page.url().endsWith("/backlinks/opportunities")) {
     await page.keyboard.press("Enter")
   }
@@ -103,7 +130,7 @@ test("critical Outreach commands are keyboard operable with no serious a11y viol
   await expectNoSeriousA11yViolations(page)
 
   await page.goto(`/projects/${projectKey}/performance/links`)
-  await tabTo(page, page.getByRole("tab", { name: "Confirmed" }))
+  await tabTo(page, page.getByRole("tab", { name: "Confirmed" }), 180)
   await page.keyboard.press("Enter")
   await expect(
     page.getByText("https://publisher.example.test/article")

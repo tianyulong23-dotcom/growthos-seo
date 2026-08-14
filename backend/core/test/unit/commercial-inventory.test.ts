@@ -46,9 +46,101 @@ describe("commercial candidate inventory", () => {
       budgetAvailable: false,
     })).toMatchObject({
       shouldRefill: false,
-      requestedCandidateCount: 40,
+      requestedCandidateCount: 13,
       effectiveEmailHitRate: 0.8,
       pauseReason: "budget",
+    });
+  });
+
+  it("counts only publishable websites when raw inventory is 68 but 24 qualify", () => {
+    expect(decideCommercialInventoryRefill({
+      policy: {
+        ...policy,
+        publishedLowWatermark: 25,
+        publishedHighWatermark: 30,
+      },
+      candidateReadyCount: 68,
+      publishedContactReadyCount: 24,
+      historicalVerifiedEmailCount: 5,
+      historicalCandidateCount: 20,
+      inflight: false,
+      cooldownActive: false,
+      budgetAvailable: true,
+    })).toMatchObject({
+      shouldRefill: true,
+      requestedCandidateCount: 24,
+      effectiveEmailHitRate: 0.25,
+      pauseReason: null,
+    });
+  });
+
+  it("continues an active cycle until the publishable high watermark", () => {
+    expect(decideCommercialInventoryRefill({
+      policy,
+      candidateReadyCount: 68,
+      publishedContactReadyCount: 7,
+      historicalVerifiedEmailCount: 5,
+      historicalCandidateCount: 20,
+      refillCycleActive: true,
+      inflight: false,
+      cooldownActive: true,
+      budgetAvailable: true,
+    })).toMatchObject({
+      shouldRefill: true,
+      requestedCandidateCount: 12,
+      pauseReason: null,
+    });
+  });
+
+  it("restores a twenty-site pool after one recommendation is consumed", () => {
+    const stablePoolPolicy = {
+      ...policy,
+      publishedLowWatermark: 19,
+      publishedHighWatermark: 20,
+    };
+
+    expect(decideCommercialInventoryRefill({
+      policy: stablePoolPolicy,
+      candidateReadyCount: 20,
+      publishedContactReadyCount: 20,
+      historicalVerifiedEmailCount: 20,
+      historicalCandidateCount: 20,
+      refillCycleActive: false,
+      inflight: false,
+      cooldownActive: false,
+      budgetAvailable: true,
+    })).toMatchObject({
+      shouldRefill: false,
+      requestedCandidateCount: 0,
+    });
+    expect(decideCommercialInventoryRefill({
+      policy: stablePoolPolicy,
+      candidateReadyCount: 19,
+      publishedContactReadyCount: 19,
+      historicalVerifiedEmailCount: 19,
+      historicalCandidateCount: 19,
+      refillCycleActive: true,
+      inflight: false,
+      cooldownActive: false,
+      budgetAvailable: true,
+    })).toMatchObject({
+      shouldRefill: true,
+      requestedCandidateCount: 2,
+      pauseReason: null,
+    });
+    expect(decideCommercialInventoryRefill({
+      policy: stablePoolPolicy,
+      candidateReadyCount: 20,
+      publishedContactReadyCount: 20,
+      historicalVerifiedEmailCount: 20,
+      historicalCandidateCount: 20,
+      refillCycleActive: true,
+      inflight: false,
+      cooldownActive: false,
+      budgetAvailable: true,
+    })).toMatchObject({
+      shouldRefill: false,
+      requestedCandidateCount: 0,
     });
   });
 });

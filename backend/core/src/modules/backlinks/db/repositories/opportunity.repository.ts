@@ -135,7 +135,7 @@ source AS (
      AND c.confidence>=80
      AND c.purpose_confidence>=70
      AND c.inferred_purpose IN (
-       'editorial','partnerships','advertising','business',
+       'press','editorial','partnerships','advertising','business',
        'marketing','site_owner','general'
      )
      AND lower(c.normalized_email) ~

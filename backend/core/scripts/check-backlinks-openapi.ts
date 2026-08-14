@@ -22,6 +22,7 @@ import type { createSendIntentCommands } from "../src/modules/backlinks/applicat
 import { createAssessmentQuery } from "../src/modules/backlinks/application/queries/assessment.query.js";
 import { createOpportunitiesQuery } from "../src/modules/backlinks/application/queries/opportunities.query.js";
 import { createRecommendationsQuery } from "../src/modules/backlinks/application/queries/recommendations.query.js";
+import { createResourceLibraryQuery } from "../src/modules/backlinks/application/queries/resource-library.query.js";
 import { createEmptySummaryQuery } from "../src/modules/backlinks/application/queries/summary.query.js";
 import { createDisabledGmailPushWebhook } from "../src/modules/backlinks/application/workflows/mail-push-webhook.js";
 import { registerBacklinksAssessmentRoute } from "../src/modules/backlinks/api/assessment.route.js";
@@ -34,6 +35,7 @@ import {
   registerBacklinksDraftEditingRoutes,
   registerBacklinksDraftRoutes,
 } from "../src/modules/backlinks/api/draft.route.js";
+import { registerBacklinkProfileRoutes } from "../src/modules/backlinks/api/backlink-profile.route.js";
 import { registerBacklinksHealthRoute } from "../src/modules/backlinks/api/health.route.js";
 import { registerBacklinksGmailConnectionRoutes } from "../src/modules/backlinks/api/gmail-connection.route.js";
 import { registerBacklinksGmailMailPushRoute } from "../src/modules/backlinks/api/gmail-mail-push.route.js";
@@ -44,6 +46,7 @@ import { registerBacklinksPlacementCandidateRoutes } from "../src/modules/backli
 import { registerBacklinksPlacementReviewRoutes } from "../src/modules/backlinks/api/placement-review.route.js";
 import { registerBacklinksRecommendationCommandsRoutes } from "../src/modules/backlinks/api/recommendation-commands.route.js";
 import { registerBacklinksRecommendationsRoute } from "../src/modules/backlinks/api/recommendations.route.js";
+import { registerBacklinksResourceLibraryRoute } from "../src/modules/backlinks/api/resource-library.route.js";
 import { registerBacklinksReplyMailRoutes } from "../src/modules/backlinks/api/reply-mail.route.js";
 import { registerBacklinksReplyMatchRoutes } from "../src/modules/backlinks/api/reply-match.route.js";
 import { registerBacklinksSendIntentRoute } from "../src/modules/backlinks/api/send-intent.route.js";
@@ -226,6 +229,18 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
       }),
     };
     const sendIntentCommands: SendIntentCommands = {
+      preflight: async () => ({
+        allowed: true,
+        deliveryState: "NOT_SENT",
+        checkedAt: "2026-08-07T10:14:00.000Z",
+        gmail: {
+          connectionId: "018f0000-0000-7000-8000-000000000020",
+          primaryEmail: "owner@example.com",
+          connectionStatus: "CONNECTED",
+          sendAvailability: "AVAILABLE",
+          mailSyncCapability: true,
+        },
+      }),
       create: async () => ({
         sendIntentId: "018f0000-0000-7000-8000-000000000114",
         sendSnapshotId: "018f0000-0000-7000-8000-000000000115",
@@ -248,8 +263,11 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
       grantedScopes: gmailOAuthScopes,
       connectionStatus: "CONNECTED",
       sendAvailability: "AVAILABLE",
+      mailSyncCapability: true,
       tokenExpiresAt: "2026-07-27T06:00:00.000Z",
       connectedAt: "2026-07-27T05:00:00.000Z",
+      affectedProjectCount: 2,
+      recentErrorCategory: null,
     };
     const replyMailMessage = {
       id: "018f0000-0000-7000-8000-000000000139",
@@ -345,7 +363,8 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         }),
         ...createOpportunitiesQuery({ query: async () => ({ rows: [] }) }),
         ...createPlacementLinksQuery({ query: async () => ({ rows: [] }) }),
-        ...createRecommendationsQuery({ query: async () => ({ rows: [] }) }) },
+        ...createRecommendationsQuery({ query: async () => ({ rows: [] }) }),
+        ...createResourceLibraryQuery({ query: async () => ({ rows: [] }) }) },
     });
     await registerBacklinksOpenApi(app);
     registerBacklinksHealthRoute(app, { BACKLINKS_API_ENABLED: true });
@@ -363,7 +382,11 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         },
       ),
     });
-    registerBacklinksRecommendationsRoute(app, { module });
+    registerBacklinksRecommendationsRoute(app, {
+      module,
+      runningBuildId: "openapi-build",
+    });
+    registerBacklinksResourceLibraryRoute(app, { module });
     registerBacklinksOpportunitiesRoutes(app, { module });
     registerBacklinksOpportunityCommandsRoutes(app, { module,
       commands: createOpportunityCommands({
@@ -431,6 +454,102 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
             status: "scheduled",
             scheduledFor: "2026-07-29T00:00:00.000Z",
           },
+        }),
+      },
+    });
+    registerBacklinkProfileRoutes(app, {
+      module,
+      service: {
+        getProfile: async () => ({
+          canonicalDomain: "example.com",
+          snapshot: null,
+          health: null,
+          sync: {
+            providerEnabled: false,
+            status: "waiting_provider",
+            lastSyncAt: null,
+            nextSyncAt: null,
+            estimatedCostMicros: 27_600,
+            actualCostMicros: 0,
+            stale: false,
+            partial: false,
+            providerInputRequired: true,
+          },
+        }),
+        listInventory: async (_context, input) => ({
+          items: [],
+          page: input.page,
+          pageSize: input.pageSize,
+          totalCount: 0,
+          totalPages: 0,
+        }),
+        importInventory: async () => ({
+          inventoryItemId: "018f0000-0000-7000-8000-000000000211",
+          sourceUrl: "https://publisher.example/article",
+          targetUrl: "https://example.com/",
+          tier: "C",
+          monitoringStatus: "enabled",
+          nextCheckAt: "2026-08-06T00:00:00.000Z",
+          replayed: false,
+        }),
+        updateInventoryPolicy: async () => ({
+          inventoryItemId: "018f0000-0000-7000-8000-000000000211",
+          tier: "A",
+          importance: "important",
+          monitoringStatus: "enabled",
+          policyVersion: "inventory-monitoring-v1",
+          policyRevision: 2,
+          nextCheckAt: "2026-08-06T00:00:00.000Z",
+          providerOnlyReason: null,
+        }),
+        requestInventoryCheck: async () => ({
+          inventoryItemId: "018f0000-0000-7000-8000-000000000211",
+          runId: "018f0000-0000-7000-8000-000000000212",
+          observationId: "018f0000-0000-7000-8000-000000000213",
+          workflowId:
+            "backlinks:placement-monitoring:018f0000-0000-7000-8000-000000000212",
+          scheduledFor: "2026-08-06T00:00:00.000Z",
+          replayed: false,
+          monitorInput: {
+            organizationId: "018f0000-0000-7000-8000-000000000001",
+            workspaceId: "018f0000-0000-7000-8000-000000000002",
+            websiteProjectId: "018f0000-0000-7000-8000-000000000003",
+            placementId: "018f0000-0000-7000-8000-000000000211",
+            monitorPolicyId: "018f0000-0000-7000-8000-000000000211",
+            policyVersion: "inventory-monitoring-v1",
+            scheduledFor: "2026-08-06T00:00:00.000Z",
+            runId: "018f0000-0000-7000-8000-000000000212",
+            observationId: "018f0000-0000-7000-8000-000000000213",
+            workerId: "user-openapi",
+            now: "2026-08-06T00:00:00.000Z",
+          },
+        }),
+        listDirectObservations: async () => ({ items: [] }),
+        requestSync: async () => ({
+          jobId: "018f0000-0000-7000-8000-000000000201",
+          workflowId:
+            "backlinks:backlink-profile-sync:018f0000-0000-7000-8000-000000000201",
+          status: "waiting_provider",
+          canonicalDomain: "example.com",
+          estimatedCostMicros: 27_600,
+          providerInputRequired: true,
+          replayed: false,
+        }),
+        getSyncJob: async () => ({
+          jobId: "018f0000-0000-7000-8000-000000000201",
+          status: "waiting_provider",
+          canonicalDomain: "example.com",
+          totalCount: null,
+          pulledCount: 0,
+          inventoryCoverage: null,
+          estimatedCostMicros: 27_600,
+          actualCostMicros: 0,
+          nextSyncAt: null,
+          errorCode: "PROVIDER_INPUT_REQUIRED",
+          startedAt: null,
+          finishedAt: null,
+          createdAt: "2026-08-06T00:00:00.000Z",
+          updatedAt: "2026-08-06T00:00:00.000Z",
         }),
       },
     });
@@ -590,6 +709,9 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
           pollingIntervalSeconds: 60,
           killSwitchOpen: true,
           acceptedSendCount: 1,
+          lastSuccessfulSyncAt: "2026-08-04T00:01:00.000Z",
+          lastError: null,
+          nextRetryAt: null,
           cursor: {
             historyId: "12345",
             initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",

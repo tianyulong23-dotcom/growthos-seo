@@ -4,11 +4,13 @@ import {
   ArrowRight,
   CircleAlert,
   Globe2,
+  Handshake,
   ListChecks,
   Pencil,
   Plus,
   RotateCcw,
   Target,
+  Users,
 } from "lucide-react"
 import { useNavigate, useSearchParams } from "react-router"
 
@@ -44,6 +46,8 @@ const inputLabels: Record<string, string> = {
   keywords: "核心关键词",
   products: "产品与服务",
   target_urls: "目标 URL",
+  target_audiences: "目标受众",
+  partnership_goals: "合作目标",
 }
 
 type ProfileFormValue = {
@@ -55,6 +59,8 @@ type ProfileFormValue = {
   products: string
   keywords: string
   targetUrls: string
+  targetAudiences: string
+  partnershipGoals: string
 }
 
 const emptyProfile: ProfileFormValue = {
@@ -66,6 +72,8 @@ const emptyProfile: ProfileFormValue = {
   products: "",
   keywords: "",
   targetUrls: "",
+  targetAudiences: "",
+  partnershipGoals: "",
 }
 
 function projectProfile(project: Project): ProfileFormValue {
@@ -78,6 +86,8 @@ function projectProfile(project: Project): ProfileFormValue {
     products: project.products.join("\n"),
     keywords: project.keywords.join("\n"),
     targetUrls: project.targetUrls.join("\n"),
+    targetAudiences: project.targetAudiences.join("\n"),
+    partnershipGoals: project.partnershipGoals.join("\n"),
   }
 }
 
@@ -102,6 +112,8 @@ function requestBody(value: ProfileFormValue): WebsiteProjectProfileRequest {
     products: listValue(value.products),
     keywords: listValue(value.keywords),
     target_urls: listValue(value.targetUrls),
+    target_audiences: listValue(value.targetAudiences),
+    partnership_goals: listValue(value.partnershipGoals),
   }
 }
 
@@ -119,7 +131,7 @@ function mutationMessage(
     return `${prefix}，但后台任务需要重试。`
   }
   if (mutation.backgroundStatus === "input_required") {
-    return `${prefix}，仍需补全产品、关键词或目标 URL。`
+    return `${prefix}，仍需补全产品、关键词、目标 URL、受众或合作目标。`
   }
   return `${prefix}，推荐准备中。`
 }
@@ -175,19 +187,25 @@ function ListField({
   value,
   onChange,
   placeholder,
+  required,
 }: {
   label: string
   value: string
   onChange: (value: string) => void
   placeholder: string
+  required?: boolean
 }) {
   return (
     <label className="space-y-2 text-sm">
-      <span className="font-medium">{label}</span>
+      <span className="font-medium">
+        {label}
+        {required ? " *" : ""}
+      </span>
       <Textarea
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
+        required={required}
         className="min-h-24"
       />
     </label>
@@ -256,24 +274,41 @@ function ProjectProfileForm({
           required
         />
       </div>
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-4 lg:grid-cols-2">
         <ListField
           label="产品与服务"
           value={value.products}
           onChange={(next) => set("products", next)}
           placeholder="每行一项"
+          required
         />
         <ListField
           label="核心关键词"
           value={value.keywords}
           onChange={(next) => set("keywords", next)}
           placeholder="每行一项"
+          required
         />
         <ListField
           label="目标 URL"
           value={value.targetUrls}
           onChange={(next) => set("targetUrls", next)}
           placeholder="每行一个完整 URL"
+          required
+        />
+        <ListField
+          label="目标受众"
+          value={value.targetAudiences}
+          onChange={(next) => set("targetAudiences", next)}
+          placeholder="每行一类受众"
+          required
+        />
+        <ListField
+          label="合作目标"
+          value={value.partnershipGoals}
+          onChange={(next) => set("partnershipGoals", next)}
+          placeholder="每行一个合作目标"
+          required
         />
       </div>
       {error && (
@@ -404,6 +439,26 @@ function ProjectCard({
               目标 URL
             </div>
             <ValueList values={project.targetUrls} emptyLabel="INPUT_REQUIRED" />
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Users className="size-4 text-muted-foreground" />
+              目标受众
+            </div>
+            <ValueList
+              values={project.targetAudiences}
+              emptyLabel="INPUT_REQUIRED"
+            />
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Handshake className="size-4 text-muted-foreground" />
+              合作目标
+            </div>
+            <ValueList
+              values={project.partnershipGoals}
+              emptyLabel="INPUT_REQUIRED"
+            />
           </div>
         </div>
 

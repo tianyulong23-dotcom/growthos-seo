@@ -16,6 +16,7 @@ from app.core.platform_request_context import (
     ResolvedPlatformCollectionContext,
     ResolvedPlatformRequestContext,
 )
+from app.core.runtime import RuntimeDependencies
 from app.modules.projects.service import (
     ProjectConflictError,
     ProjectMutationResult,
@@ -39,9 +40,11 @@ class WebsiteProjectProfileRequest(BaseModel):
     country: str = Field(min_length=2, max_length=2)
     target_market: str = Field(min_length=1, max_length=120)
     language: str = Field(min_length=2, max_length=10)
-    products: list[str] = Field(default_factory=list, max_length=100)
-    keywords: list[str] = Field(default_factory=list, max_length=200)
-    target_urls: list[str] = Field(default_factory=list, max_length=200)
+    products: list[str] = Field(min_length=1, max_length=100)
+    keywords: list[str] = Field(min_length=1, max_length=200)
+    target_urls: list[str] = Field(min_length=1, max_length=200)
+    target_audiences: list[str] = Field(min_length=1, max_length=100)
+    partnership_goals: list[str] = Field(min_length=1, max_length=100)
 
 
 class WebsiteProjectProfilePatchRequest(BaseModel):
@@ -52,9 +55,11 @@ class WebsiteProjectProfilePatchRequest(BaseModel):
     country: str | None = Field(default=None, min_length=2, max_length=2)
     target_market: str | None = Field(default=None, min_length=1, max_length=120)
     language: str | None = Field(default=None, min_length=2, max_length=10)
-    products: list[str] | None = Field(default=None, max_length=100)
-    keywords: list[str] | None = Field(default=None, max_length=200)
-    target_urls: list[str] | None = Field(default=None, max_length=200)
+    products: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    keywords: list[str] | None = Field(default=None, min_length=1, max_length=200)
+    target_urls: list[str] | None = Field(default=None, min_length=1, max_length=200)
+    target_audiences: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    partnership_goals: list[str] | None = Field(default=None, min_length=1, max_length=100)
 
 
 class WebsiteProjectResponse(BaseModel):
@@ -74,7 +79,17 @@ class WebsiteProjectResponse(BaseModel):
     keywords: list[str]
     products: list[str]
     target_urls: list[str]
-    input_required: list[Literal["keywords", "products", "target_urls"]]
+    target_audiences: list[str]
+    partnership_goals: list[str]
+    input_required: list[
+        Literal[
+            "keywords",
+            "products",
+            "target_urls",
+            "target_audiences",
+            "partnership_goals",
+        ]
+    ]
     created_at: datetime
     updated_at: datetime
 
@@ -107,6 +122,8 @@ def _project_response(project: WebsiteProjectRecord) -> WebsiteProjectResponse:
         keywords=list(project.keywords),
         products=list(project.products),
         target_urls=list(project.target_urls),
+        target_audiences=list(project.target_audiences),
+        partnership_goals=list(project.partnership_goals),
         input_required=list(project.input_required),
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -169,6 +186,8 @@ def _profile_input(body: WebsiteProjectProfileRequest) -> ProjectProfileInput:
         products=tuple(body.products),
         keywords=tuple(body.keywords),
         target_urls=tuple(body.target_urls),
+        target_audiences=tuple(body.target_audiences),
+        partnership_goals=tuple(body.partnership_goals),
     )
 
 
@@ -184,6 +203,12 @@ def _profile_patch(
         products=None if body.products is None else tuple(body.products),
         keywords=None if body.keywords is None else tuple(body.keywords),
         target_urls=None if body.target_urls is None else tuple(body.target_urls),
+        target_audiences=(
+            None if body.target_audiences is None else tuple(body.target_audiences)
+        ),
+        partnership_goals=(
+            None if body.partnership_goals is None else tuple(body.partnership_goals)
+        ),
     )
 
 
@@ -196,6 +221,22 @@ def _mutation_error(error: Exception) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail=str(error),
+    )
+
+
+async def _require_business_consumers(request: Request) -> None:
+    runtime: RuntimeDependencies = request.app.state.runtime_dependencies
+    if await runtime.business_consumers_running():
+        return
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "BUSINESS_CONSUMERS_UNAVAILABLE",
+            "message": (
+                "Background processing is unavailable. "
+                "No Website Project change was accepted."
+            ),
+        },
     )
 
 
@@ -277,6 +318,7 @@ async def create_website_project(
     request: Request,
     body: WebsiteProjectProfileRequest,
 ) -> WebsiteProjectMutationResponse:
+    await _require_business_consumers(request)
     settings: Settings = request.app.state.settings
     resolved = await _resolve_collection(request)
     service: WebsiteProjectService = request.app.state.website_project_service
@@ -326,6 +368,7 @@ async def update_website_project(
     websiteProjectKey: str,
     body: WebsiteProjectProfilePatchRequest,
 ) -> WebsiteProjectMutationResponse:
+    await _require_business_consumers(request)
     settings: Settings = request.app.state.settings
     resolved = await _resolve(request, websiteProjectKey)
     service: WebsiteProjectService = request.app.state.website_project_service
@@ -378,6 +421,7 @@ async def restore_website_project(
     request: Request,
     websiteProjectKey: str,
 ) -> WebsiteProjectMutationResponse:
+    await _require_business_consumers(request)
     settings: Settings = request.app.state.settings
     resolved = await _resolve_collection(request)
     service: WebsiteProjectService = request.app.state.website_project_service

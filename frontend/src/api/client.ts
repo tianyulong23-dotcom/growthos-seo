@@ -27,9 +27,14 @@ export async function apiRequest<T>(
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as
-      | { detail?: unknown }
+      | { detail?: unknown; code?: unknown; message?: unknown }
       | null
-    const detail = payload?.detail
+    const detail =
+      payload &&
+      typeof payload === "object" &&
+      typeof payload.code === "string"
+        ? payload
+        : payload?.detail
     const message =
       typeof detail === "string"
         ? detail

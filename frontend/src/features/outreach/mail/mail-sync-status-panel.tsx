@@ -22,12 +22,31 @@ function ConnectionStatus({
   const isLoading =
     controller.status === "loading" || controller.status === "idle"
   const isConnected =
-    controller.connection?.connectionStatus === "CONNECTED" &&
-    controller.connection.mailSyncCapability
+    controller.connection?.connectionStatus === "CONNECTED"
+  const isSendReady =
+    isConnected && controller.connection?.sendAvailability === "AVAILABLE"
+  const isSyncReady =
+    isConnected && controller.connection?.mailSyncCapability === true
   const needsAuthorization =
     controller.connection === null ||
     controller.connection.connectionStatus !== "CONNECTED" ||
     !controller.connection.mailSyncCapability
+  const affectedProjectCount =
+    controller.connection?.affectedProjectCount ?? 0
+  const authorizationMessage =
+    controller.connection?.connectionStatus === "REAUTH_REQUIRED"
+      ? `组织 Gmail 授权已过期，重新连接一次可恢复 ${affectedProjectCount} 个项目`
+      : controller.connection?.connectionStatus === "TOKEN_REVOKED"
+        ? `组织 Gmail 授权已被撤销，需重新授权；重新连接一次可恢复 ${affectedProjectCount} 个项目`
+        : null
+  const readinessMessage =
+    isConnected && !isSendReady && !isSyncReady
+      ? "Gmail 已连接，但发送和同步能力尚未就绪。"
+      : isConnected && !isSendReady
+        ? "Gmail 已连接，但发送能力尚未就绪。"
+        : isConnected && !isSyncReady
+          ? "Gmail 已连接，但同步能力尚未就绪；已保存邮件仍可读取。"
+          : null
 
   return (
     <div className="flex flex-col gap-3 rounded-md border bg-muted/20 px-4 py-3 lg:flex-row lg:items-center">
@@ -60,16 +79,31 @@ function ConnectionStatus({
                 ? controller.connection?.primaryEmail
                 : controller.status === "error"
                   ? "暂时无法获取 Gmail 状态"
-                  : "连接 Gmail 后开始管理邮件"}
+                  : authorizationMessage ??
+                    "连接 Gmail 后开始管理邮件"}
           </span>
-          {isConnected && <Badge variant="secondary">已连接</Badge>}
+          {!isLoading && controller.connection ? (
+            <>
+              <Badge variant={isConnected ? "secondary" : "outline"}>
+                连接：{isConnected ? "CONNECTED" : "未连接"}
+              </Badge>
+              <Badge variant={isSendReady ? "secondary" : "outline"}>
+                Send Ready：{isSendReady ? "是" : "否"}
+              </Badge>
+              <Badge variant={isSyncReady ? "secondary" : "outline"}>
+                Sync Ready：{isSyncReady ? "是" : "否"}
+              </Badge>
+            </>
+          ) : null}
         </div>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
           {isConnected
-            ? "新邮件和需要确认的回复会集中显示在下方。"
+            ? readinessMessage ??
+              "新邮件和需要确认的回复会集中显示在下方。"
             : controller.status === "error"
               ? "你仍可查看当前邮件列表，稍后可重新检查连接。"
-              : "连接后可查看往来邮件，并人工确认未匹配的回复。"}
+              : authorizationMessage ??
+                "连接后可查看往来邮件，并人工确认未匹配的回复。"}
         </p>
       </div>
 
@@ -117,6 +151,18 @@ function ConnectionStatus({
           最近错误：{controller.connection.recentErrorCategory}
         </div>
       )}
+      {controller.connection && (!isConnected || !isSendReady || !isSyncReady) ? (
+        <div className="text-xs text-destructive lg:max-w-56">
+          缺少门槛：
+          {[
+            !isConnected ? "CONNECTED" : null,
+            !isSendReady ? "Send Ready" : null,
+            !isSyncReady ? "Sync Ready" : null,
+          ]
+            .filter(Boolean)
+            .join("、")}
+        </div>
+      ) : null}
     </div>
   )
 }

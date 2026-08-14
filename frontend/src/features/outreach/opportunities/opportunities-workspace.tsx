@@ -600,7 +600,10 @@ export function OpportunitiesWorkspace({
                   )
                 }
               >
-                <SelectTrigger className="w-full xl:w-36">
+                <SelectTrigger
+                  className="w-full xl:w-36"
+                  aria-label="按推进阶段筛选"
+                >
                   <SelectValue>
                     {stageFilter === "ALL"
                       ? "全部阶段"
@@ -624,7 +627,10 @@ export function OpportunitiesWorkspace({
                   )
                 }
               >
-                <SelectTrigger className="w-full xl:w-32">
+                <SelectTrigger
+                  className="w-full xl:w-32"
+                  aria-label="按管理状态筛选"
+                >
                   <SelectValue>
                     {managementFilter === "CURRENT"
                       ? "当前工作"
@@ -648,7 +654,10 @@ export function OpportunitiesWorkspace({
                   )
                 }
               >
-                <SelectTrigger className="w-full xl:w-28">
+                <SelectTrigger
+                  className="w-full xl:w-28"
+                  aria-label="按结果筛选"
+                >
                   <SelectValue>
                     {outcomeFilter === "ALL"
                       ? "全部结果"
@@ -672,7 +681,10 @@ export function OpportunitiesWorkspace({
                   )
                 }
               >
-                <SelectTrigger className="w-full xl:w-32">
+                <SelectTrigger
+                  className="w-full xl:w-32"
+                  aria-label="按履约状态筛选"
+                >
                   <SelectValue>
                     {fulfillmentFilter === "ALL"
                       ? "全部履约"
@@ -887,15 +899,15 @@ export function OpportunitiesWorkspace({
                   </span>
                   <span className="text-muted-foreground">评估分数</span>
                   <span className="text-right">
-                    {detail.assessment.score ?? "不可用"}
+                    {detail.assessment?.score ?? "不可用"}
                   </span>
                   <span className="text-muted-foreground">数据状态</span>
                   <span className="text-right">
-                    {detail.assessment.availability === "available"
+                    {detail.assessment?.availability === "available"
                       ? "完整"
-                      : detail.assessment.availability === "partial"
+                      : detail.assessment?.availability === "partial"
                         ? "部分可用"
-                        : "待补数据"}
+                        : "不适用"}
                   </span>
                   <span className="text-muted-foreground">更新时间</span>
                   <span className="text-right">

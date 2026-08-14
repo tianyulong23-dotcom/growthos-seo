@@ -141,6 +141,8 @@ class PromotionTargetVersion(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     keywords: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     target_urls: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    target_audiences: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    partnership_goals: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     input_required: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

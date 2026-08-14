@@ -20,6 +20,9 @@ import {
   draftDocumentSchema,
 } from "../application/schemas/draft-document.schema.js";
 import {
+  draftRequestSchema,
+} from "../application/schemas/draft-request.schema.js";
+import {
   backlinkProblemContentType,
   backlinkProblemDetailsSchema,
   toBacklinkProblemDetails,
@@ -50,10 +53,12 @@ export const createDraftJobBodySchema = z.object({
   contactId: z.uuid(),
   contactVersion: z.number().int().positive(),
   logicalDraftKey: nonBlank.max(200),
+  request: draftRequestSchema,
 }).strict();
 const jobStatuses = [
   "QUEUED",
   "RUNNING",
+  "RETRY_SCHEDULED",
   "SUCCEEDED",
   "FAILED",
   "REFUSED",
@@ -73,6 +78,7 @@ const createResponseSchema = z.object({
   contactId: z.uuid(),
   contactVersion: z.number().int().positive(),
   evidenceSnapshotId: z.uuid(),
+  requestSnapshotId: z.uuid(),
   workflowId: nonBlank,
   generationMode: z.enum(["MODEL", "MANUAL"]),
   replayed: z.boolean(),
@@ -84,6 +90,9 @@ const jobSchema = z.object({
   status: z.enum(jobStatuses),
   contactId: z.uuid().nullable(),
   contactVersion: z.number().int().positive().nullable(),
+  requestSnapshotId: z.uuid().nullable(),
+  request: draftRequestSchema.nullable(),
+  generator: z.enum(["AI", "TEMPLATE_FALLBACK"]).nullable(),
   versionId: z.uuid().nullable(),
   lastSuccessfulVersionId: z.uuid().nullable(),
   queuedAt: z.string().datetime(),
@@ -119,7 +128,12 @@ const draftResponseSchema = z.object({
       subjectText: nonBlank.max(500),
       bodyText: nonBlank.max(50_000),
       bodyDocument: draftDocumentSchema,
-      source: z.enum(["MODEL", "MANUAL", "RESTORED"]),
+      source: z.enum([
+        "MODEL",
+        "TEMPLATE_FALLBACK",
+        "MANUAL",
+        "RESTORED",
+      ]),
       createdAt: z.string().datetime(),
     }).strict().nullable(),
   }).strict(),

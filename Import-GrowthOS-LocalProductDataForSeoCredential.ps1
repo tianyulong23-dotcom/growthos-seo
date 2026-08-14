@@ -17,8 +17,6 @@ param(
         "https://api.dataforseo.com/v3/backlinks/competitors/live",
         "https://api.dataforseo.com/v3/backlinks/referring_domains/live"
     ),
-    [Alias("DiscoveryTarget")]
-    [string[]]$DiscoveryTargets = @("showmax.com"),
     [string[]]$Keywords = @(
         "live sports",
         "streaming movies",
@@ -51,7 +49,6 @@ $ErrorActionPreference = "Stop"
     -RepositoryRoot $PSScriptRoot `
     -CredentialSecretReference $CredentialSecretReference `
     -EndpointAllowlist $EndpointAllowlist `
-    -DiscoveryTargets $DiscoveryTargets `
     -Keywords $Keywords `
     -Products $Products `
     -TargetUrls $TargetUrls `

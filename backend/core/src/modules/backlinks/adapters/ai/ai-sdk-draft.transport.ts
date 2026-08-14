@@ -6,13 +6,15 @@ import {
   type AiDraftInput,
   type AiDraftOutput,
 } from "../../ports/ai-draft.port.js";
+import { draftOutputContentPolicyIssues } from
+  "../../domain/drafts/evidence-policy.js";
 import type { AiDraftTransport } from "./ai-draft-client.js";
 import {
   generateStructuredDraftWithRepair,
   type AiDraftRepairRequest,
 } from "./structured-draft-output.js";
 
-type ProviderResult = Readonly<{
+export type AiSdkProviderResult = Readonly<{
   text: string;
   finishReason: string;
   usage: Readonly<{
@@ -21,19 +23,19 @@ type ProviderResult = Readonly<{
   }>;
 }>;
 
-type LanguageModel = unknown;
-type StructuredOutput = unknown;
+export type AiSdkLanguageModel = unknown;
+export type AiSdkStructuredOutput = unknown;
 
-type GenerateProviderText = (input: Readonly<{
-  model: LanguageModel;
+export type AiSdkGenerateProviderText = (input: Readonly<{
+  model: AiSdkLanguageModel;
   system: string;
   prompt: string;
-  output: StructuredOutput;
+  output: AiSdkStructuredOutput;
   maxRetries: number;
   maxOutputTokens: number;
   timeout: number;
   telemetry: Readonly<{ isEnabled: false }>;
-}>) => Promise<ProviderResult>;
+}>) => Promise<AiSdkProviderResult>;
 
 const require = createRequire(import.meta.url);
 const aiSdk = require("ai") as Readonly<{
@@ -42,7 +44,7 @@ const aiSdk = require("ai") as Readonly<{
       schema: unknown;
       name?: string;
       description?: string;
-    }>): StructuredOutput;
+    }>): AiSdkStructuredOutput;
   }>;
   NoObjectGeneratedError: Readonly<{
     isInstance(error: unknown): error is Readonly<{
@@ -55,12 +57,12 @@ const aiSdk = require("ai") as Readonly<{
     }>;
   }>;
   createGateway(options: Readonly<{ apiKey: string }>):
-    (modelId: string) => LanguageModel;
+    (modelId: string) => AiSdkLanguageModel;
   generateText(options: Readonly<{
-    model: LanguageModel;
+    model: AiSdkLanguageModel;
     system: string;
     prompt: string;
-    output: StructuredOutput;
+    output: AiSdkStructuredOutput;
     maxRetries: number;
     maxOutputTokens: number;
     timeout: number;
@@ -77,15 +79,24 @@ const aiSdk = require("ai") as Readonly<{
 }>;
 const openAiSdk = require("@ai-sdk/openai") as Readonly<{
   createOpenAI(options: Readonly<{ apiKey: string; baseURL: string }>):
-    (modelId: string) => LanguageModel;
+    (modelId: string) => AiSdkLanguageModel;
 }>;
 
-const structuredDraftOutput = aiSdk.Output.object({
-  schema: aiDraftOutputSchema,
-  name: "growthos_backlinks_email_draft",
-  description:
-    "A human-review-only outreach email draft grounded in supplied evidence.",
+export const createAiSdkObjectOutput = (
+  schema: unknown,
+  name?: string,
+  description?: string,
+): AiSdkStructuredOutput => aiSdk.Output.object({
+  schema,
+  ...(name === undefined ? {} : { name }),
+  ...(description === undefined ? {} : { description }),
 });
+
+const structuredDraftOutput = createAiSdkObjectOutput(
+  aiDraftOutputSchema,
+  "growthos_backlinks_email_draft",
+  "A human-review-only outreach email draft grounded in supplied evidence.",
+);
 
 export type AiSdkDraftTransportOptions = Readonly<{
   providerBaseUrl: string;
@@ -108,15 +119,15 @@ export type AiSdkDraftTransportOptions = Readonly<{
     baseUrl: string;
     modelId: string;
     providerRef: string;
-  }>) => LanguageModel;
-  generateProviderText?: GenerateProviderText;
+  }>) => AiSdkLanguageModel;
+  generateProviderText?: AiSdkGenerateProviderText;
   now?: () => number;
 }>;
 
-const safeTokenCount = (value: number | undefined): number =>
+export const safeAiSdkTokenCount = (value: number | undefined): number =>
   Number.isInteger(value) && value !== undefined && value >= 0 ? value : 0;
 
-const calculateCost = (
+export const calculateAiSdkCost = (
   inputTokens: number,
   outputTokens: number,
   inputRate: number,
@@ -174,7 +185,8 @@ const mapProviderError = (error: unknown): AiDraftError => {
   });
 };
 
-const defaultGenerateProviderText: GenerateProviderText = async (input) => {
+export const defaultGenerateProviderText: AiSdkGenerateProviderText =
+  async (input) => {
   try {
     const result = await aiSdk.generateText({
       model: input.model,
@@ -211,14 +223,14 @@ const defaultGenerateProviderText: GenerateProviderText = async (input) => {
     }
     throw error;
   }
-};
+  };
 
-const createProviderModel = (input: Readonly<{
+export const createAiSdkProviderModel = (input: Readonly<{
   apiKey: string;
   baseUrl: string;
   modelId: string;
   providerRef: string;
-}>): LanguageModel => {
+}>): AiSdkLanguageModel => {
   switch (input.providerRef) {
     case "openai":
       return openAiSdk.createOpenAI({
@@ -257,7 +269,7 @@ export function createAiSdkDraftTransport(
   const now = options.now ?? Date.now;
   const generateProviderText = options.generateProviderText
     ?? defaultGenerateProviderText;
-  const createModel = options.createModel ?? createProviderModel;
+  const createModel = options.createModel ?? createAiSdkProviderModel;
 
   return Object.freeze({
     async generate(input) {
@@ -296,64 +308,67 @@ export function createAiSdkDraftTransport(
         providerRef: input.providerRef,
       });
       try {
-        return await generateStructuredDraftWithRepair(async ({ repair }) => {
-          await options.beforeProviderCall?.({
-            organizationId: input.draft.organizationId,
-            workspaceId: input.draft.workspaceId,
-            websiteProjectId: input.draft.websiteProjectId,
-            providerRef: input.providerRef,
-            modelId: input.modelId,
-            attempt: repair === null ? 1 : 2,
-          });
-          const startedAt = now();
-          const result = await generateProviderText({
-            model,
-            system: input.draft.systemInstruction,
-            prompt: serializePrompt(input.draft, repair),
-            output: structuredDraftOutput,
-            maxRetries: 0,
-            maxOutputTokens: input.maxOutputTokens,
-            timeout: input.timeoutMs,
-            telemetry: { isEnabled: false },
-          });
-          if (
-            result.finishReason === "content-filter"
-            || result.text.trim() === ""
-          ) {
-            throw new AiDraftError({
-              code: "REFUSED",
-              message: "AI Draft provider refused to generate a draft.",
-              retryable: false,
-            });
-          }
-          const usage = {
-            inputTokens: safeTokenCount(result.usage.inputTokens),
-            outputTokens: safeTokenCount(result.usage.outputTokens),
-          };
-          if (usage.inputTokens > input.maxInputTokens) {
-            throw new AiDraftError({
-              code: "BUDGET_EXCEEDED",
-              message: "AI Draft input token limit was exceeded.",
-              retryable: false,
-            });
-          }
-          return {
-            content: result.text,
-            usage,
-            estimatedCostUsd: calculateCost(
-              usage.inputTokens,
-              usage.outputTokens,
-              options.inputCostUsdPerMillionTokens,
-              options.outputCostUsdPerMillionTokens,
-            ),
-            model: {
+        return await generateStructuredDraftWithRepair(
+          async ({ repair }) => {
+            await options.beforeProviderCall?.({
+              organizationId: input.draft.organizationId,
+              workspaceId: input.draft.workspaceId,
+              websiteProjectId: input.draft.websiteProjectId,
               providerRef: input.providerRef,
               modelId: input.modelId,
-              modelVersion: input.modelVersion,
-            },
-            latencyMs: Math.max(0, now() - startedAt),
-          };
-        });
+              attempt: repair === null ? 1 : 2,
+            });
+            const startedAt = now();
+            const result = await generateProviderText({
+              model,
+              system: input.draft.systemInstruction,
+              prompt: serializePrompt(input.draft, repair),
+              output: structuredDraftOutput,
+              maxRetries: 0,
+              maxOutputTokens: input.maxOutputTokens,
+              timeout: input.timeoutMs,
+              telemetry: { isEnabled: false },
+            });
+            if (
+              result.finishReason === "content-filter"
+              || result.text.trim() === ""
+            ) {
+              throw new AiDraftError({
+                code: "REFUSED",
+                message: "AI Draft provider refused to generate a draft.",
+                retryable: false,
+              });
+            }
+            const usage = {
+              inputTokens: safeAiSdkTokenCount(result.usage.inputTokens),
+              outputTokens: safeAiSdkTokenCount(result.usage.outputTokens),
+            };
+            if (usage.inputTokens > input.maxInputTokens) {
+              throw new AiDraftError({
+                code: "BUDGET_EXCEEDED",
+                message: "AI Draft input token limit was exceeded.",
+                retryable: false,
+              });
+            }
+            return {
+              content: result.text,
+              usage,
+              estimatedCostUsd: calculateAiSdkCost(
+                usage.inputTokens,
+                usage.outputTokens,
+                options.inputCostUsdPerMillionTokens,
+                options.outputCostUsdPerMillionTokens,
+              ),
+              model: {
+                providerRef: input.providerRef,
+                modelId: input.modelId,
+                modelVersion: input.modelVersion,
+              },
+              latencyMs: Math.max(0, now() - startedAt),
+            };
+          },
+          draftOutputContentPolicyIssues,
+        );
       } catch (error) {
         if (error instanceof AiDraftError) throw error;
         throw mapProviderError(error);

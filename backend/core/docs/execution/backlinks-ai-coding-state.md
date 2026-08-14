@@ -30,6 +30,10 @@
 > `LP-FINAL-003 = PASS`, `LP-FINAL-004 = PASS`,
 > `LP-FINAL-005 = PASS`, `LP-FINAL-006 = PASS`,
 > `LP-FINAL-GATE = PASS_LOCAL_PRODUCT`,
+> `LOCAL-PRODUCT-023..027 = PASS`,
+> `LOCAL-PRODUCT-028 = PASS_LOCAL_REAL_READY`,
+> `LOCAL-PRODUCT-029..032 = PASS`,
+> `LOCAL-PRODUCT-033 = PASS_CODE_AI_INPUT_REQUIRED`,
 > `BL-AI-083 = DONE`, `BL-AI-082 = DONE`, `BL-AI-081 = DONE`,
 > `BL-AI-080 = DONE`,
 > `SEO4-INT-001 = DONE`,
@@ -226,6 +230,23 @@ PB-LOCAL-PRODUCT-FINAL (`2026-08-03`):
 | `LP-FINAL-005` | PASS | Opportunity-driven compose from the Opportunity detail page; formal Contact selection; AI/manual Draft lifecycle; approval, recipient and Gmail identity confirmation; durable SendIntent status projection; desktop, exact `390x844` mobile, and keyboard Playwright flows | Core status query/API and FastAPI Gateway focused tests passed; aggregate OpenAPI now has Backlinks `48` paths and Platform `70` public paths/`75` operations; Frontend source tests `40/40`, typecheck, lint, build, desktop, mobile, keyboard, and accessibility checks passed | Users no longer paste UUIDs or use fixed Canary recipients/content. The Worker remains bound to immutable SendSnapshot data. Real Provider and GSC calls remained `0`; final real AI/Gmail acceptance remains gated |
 | `LP-FINAL-006` | PASS | Local-product Start/Status/Stop scripts, persistent runtime configuration, and local-only runbook | Full build/start/status/graceful stop/cold restart passed; persistent PostgreSQL and Temporal volumes plus Gmail/draft/thread facts survived; unmanaged port conflicts are rejected without killing the owner; script and runtime-log secret scans passed | DataForSEO, AI, GSC, and external browser calls remained `0`. Historical Canary data is retained only as evidence and is not accepted as the final product context |
 | `LP-FINAL-GATE` | PASS_LOCAL_PRODUCT | Full automated gate; protected AI credential import; persistent ElephTV Project, Opportunity, confirmed Contact, Gmail connection, real MODEL Draft, immutable SendSnapshot, real Gmail send/reply Projections, runtime facts, Provider counters, Secret scan, and cleanup evidence | Core verify/build passed with Unit `446`, API `96`, Contract `165`, Integration `179` plus `13` skips, Security `102`, Resilience `8`; FastAPI Ruff and `65 passed/1 skipped`; Frontend `41/41`, typecheck/lint/build, desktop `2/2`, exact mobile, keyboard and accessibility Playwright passed with installed local Chrome; PostgreSQL `18.4` clean/upgrade/RLS/backup/restore passed with RPO `0.268s` and RTO `73.533s`; six local listeners and both persistent containers are healthy | Current Draft/Model Run/SendIntent/SendSnapshot/SendAttempt counts are `1/3/1/1/1`. One company-account OpenAI-compatible MODEL run succeeded with `4,859/250` tokens and recorded cost `USD 0.000636`; two earlier failures stayed fail-closed without blind retry. Human approval and final confirmation produced exactly one accepted Gmail send. The recipient replied, one real polling Workflow synchronized and matched it, Email Center displayed the two-message thread, full restart retained all facts, and replay added zero duplicates. Alternate-tenant RLS reads/writes returned `0`. DataForSEO/GSC calls are `0`; AI, Gmail Send/Sync, DataForSEO, and Browser Kill Switches are all blocked. Rotate the previously exposed AI credential and reconcile any Provider-side failed-attempt charge |
+
+LOCAL-PRODUCT-023..028 (`2026-08-07`):
+
+| Task | Status | Changed files | Verification | Notes |
+| --- | --- | --- | --- | --- |
+| `LOCAL-PRODUCT-023..027` | PASS | Result ledgers `parallel-blocks/LOCAL-PRODUCT-023-result.md` through `parallel-blocks/LOCAL-PRODUCT-027-result.md`; governed DataForSEO budget and runtime operations; Project Context, Recommendation, Gmail, Profile, Inventory, monitoring, Gateway, frontend, migration, and runbook changes | Each block was executed serially. Real DataForSEO discovery and profile data were persisted for ElephTV and AWOL; only recommendations with compliant public email evidence were published; Gmail selection, send preflight, stable polling sync, direct-link verification, refresh idempotency, restart continuity, and PostgreSQL/Temporal persistence were verified | Historical budgets and Usage Ledger remain intact. No second Provider, Queue, Crawler, Worker, Scheduler, or business authority was created. Recommendation remains separate from Opportunity and Gmail send remains human-confirmed |
+| `LOCAL-PRODUCT-028` | PASS_LOCAL_REAL_READY | Startup preflight/configuration non-regression; bounded contact parsing and startup recovery; focused regression tests; `ops/local-product/LOCAL-PRODUCT-runbook.md`; `parallel-blocks/LOCAL-PRODUCT-028-result.md`; this state file | Normal Restart retained DataForSEO, Gmail Send, and Gmail Sync. Frontend/FastAPI/Core returned HTTP 200; PostgreSQL 18 and Temporal were healthy; the Worker was responsive without the prior CPU loop. Full Core, FastAPI, frontend, Playwright desktop/mobile/keyboard, PostgreSQL 18 migration/manifest/backup/restore, portability, Secret, refresh-idempotency, and runtime gates passed | Official DataForSEO account balance was not queried. The current GrowthOS cycle is `1,000,000 micros`, spent `182,616`, reserved `0`, remaining `817,384`; the global retained Ledger has `51` entries and `1,288,356` settled actual micros. Published recommendations are AWOL `8/8` and ElephTV `16/16` with compliant public email evidence. No new real send/reply occurred, so the permitted final status is READY rather than E2E. `QUALITY-BACKLOG-001` was not executed; no commit or push occurred |
+
+LOCAL-PRODUCT-029..033 (`2026-08-10`):
+
+| Task | Status | Changed files | Verification | Notes |
+| --- | --- | --- | --- | --- |
+| `LOCAL-PRODUCT-029` | PASS | Project Context/Settings Blueprint inputs; AI Blueprint port/adapter; project-scoped commercial discovery runtime and tests; `parallel-blocks/LOCAL-PRODUCT-029-result.md` | Aiper, AWOL, and ElephTV settings/Blueprint versions remained isolated; old versions stayed immutable; project-safe deterministic fallback and structured AI Schema validation tests passed | Production code no longer uses a global DataForSEO discovery-target list or product-domain branch |
+| `LOCAL-PRODUCT-030` | PASS | `recommendation-commercial-fit.v3`; Fit/Contact publication contract; migration `0054`; Core/Gateway/OpenAPI/generated client/frontend synchronization; `parallel-blocks/LOCAL-PRODUCT-030-result.md` | Core, FastAPI, frontend, generated-client, migration, and targeted Playwright gates passed | Only Fit-eligible and Contact-eligible recommendations with compliant public email evidence can be published; historical v2 facts remain read-only |
+| `LOCAL-PRODUCT-031` | PASS | Publishable inventory watermarks; five-tier refill policy; migration `0055`; Provider fingerprint/Ledger scoping; API/frontend refill state; `parallel-blocks/LOCAL-PRODUCT-031-result.md` | Project-scoped refill, terminal reason, refresh-no-paid-call, migration, Gateway, frontend, and PostgreSQL tests passed | Raw Candidate count no longer satisfies the watermark. Budget, Provider unavailable, project context, high watermark, and tier exhaustion are explicit terminal reasons |
+| `LOCAL-PRODUCT-032` | PASS | Server-authoritative Recommendation Inventory/Job/Batch/Contact Batch projection; frontend single-flight polling and reconnect; migration `0056`; `parallel-blocks/LOCAL-PRODUCT-032-result.md` | Core/FastAPI/frontend gates and Playwright desktop `6`, mobile `2`, keyboard `1` passed, including navigation and refresh reconnect to the same server batch | Page reads and refreshes do not dispatch Provider work. One user command tracks the existing batch until server terminal state and refreshes the recommendation list once |
+| `LOCAL-PRODUCT-033` | PASS_CODE_AI_INPUT_REQUIRED | Project-analysis Outbox project scoping and legacy ID recovery; DataForSEO timeout/manual refill recovery; three-category isolation test; governed Aiper v7 live discovery; runbook; `parallel-blocks/LOCAL-PRODUCT-033-result.md`; this state file | Final Core verify passed with Unit `568`, API `103`, Contract `183`, Integration `203` plus `13` skips, Security `107`, Resilience `8`; Core build passed. FastAPI `71 passed/1 skipped`; frontend typecheck/lint/build and Playwright desktop/mobile/keyboard passed; PostgreSQL 18.4 migration/manifest/RLS/backup/restore passed. Runtime `20260810-185843` is healthy with DataForSEO and Gmail Send/Sync enabled | Aiper Context `3e00af13-61e2-4a0d-9d68-d06cf8fed613` attempted all five tiers through real governed DataForSEO. Final inventory is `5` candidate-ready and `1` published contact-ready, with `TIERS_EXHAUSTED`; cycle usage is `710,616/1,000,000 micros`, reserved `0`. AI was enabled but the active Blueprint remained `DETERMINISTIC_FALLBACK` with no model version, so the explicit AI structured-input gap remains. No real Gmail send, link-monitoring mutation, second Provider/Queue/Worker, commit, or push occurred |
 
 PB-LIVE-ACTIVATION (`2026-07-30`):
 
@@ -443,3 +464,51 @@ Integration-controller additions (`2026-07-29`):
 | `BL-AI-129` | INTEGRATED | `2026-07-28` | Incremental Gmail History Sync Workflow; PostgreSQL cursor/message-reference Repository; opaque raw-object-store boundary; Unit and disposable PostgreSQL integration tests; PB-D result; this state file | Failure-first focused executions exited 1 because the Incremental Workflow and Repository modules were absent. After implementation, focused Unit passed 4/4 and PostgreSQL integration passed 3/3; the combined Gmail Initial/Incremental/Port/Adapter regression passed 30/30. Full `npm run verify:backlinks` exited 0 with TypeScript, ESLint, source manifest 23 records, dependency allowlist, licenses 604 packages, OpenAPI 23 paths, migration check, Unit 220/220, API 59/59, Contract 128/128, Integration 122 passed with 13 environment-gated skips, Security 95/95, and Resilience 3/3. Published Migration 0014 retained SHA-256 `e95a3de354bbffdf902b59827378b7fd6cbae00aec0fc8f5331a2f5b5af0f0b5` | Across paginated history reads, the committed original History ID remains unchanged while only the page token advances; the final provider History ID is committed only after the final page's de-duplicated raw-message references are inserted in the same tenant transaction. Object-store or database failure leaves the durable cursor recoverable, and stale workers resume from the current checkpoint without rewinding. Explicit `history_expired` returns without cursor mutation or repair scanning; the bounded repair is recorded separately in BL-AI-130 below. Raw MIME remains opaque and is not parsed or stored in PostgreSQL. No API, MIME parser, sanitizer, matching, webhook, real Gmail call, production database/resource mutation, credential, Git commit, or push occurred |
 | `BL-AI-130` | INTEGRATED | `2026-07-28` | Fixed-window History repair policy; bounded repair Workflow; PostgreSQL cursor/message-reference/audit Repository transaction; Unit and disposable PostgreSQL integration tests; BL-AI-121..130 frontend synchronization; PB-D and PB-FE-GMAIL results; protected frontend baseline; this state file | Failure-first Unit execution failed because the repair policy, Workflow, and Repository modules were absent. After implementation, focused policy/Workflow Unit passed 6/6 and the extended incremental/repair PostgreSQL suite passed 5/5. Full `npm run verify:backlinks` exited 0 with TypeScript, ESLint, source manifest 23 records, dependency allowlist, licenses 604 packages, OpenAPI 23 paths, migration check through 0026, Unit 226/226, API 59/59, Contract 128/128, Integration 124 passed with 13 environment-gated skips, Security 95/95, and Resilience 3/3. Frontend Gmail source tests passed 5/5; changed-file Prettier, typecheck, ESLint, production build, HTTP 200, and desktop/mobile Playwright passed. Published Migration 0014 retained SHA-256 `e95a3de354bbffdf902b59827378b7fd6cbae00aec0fc8f5331a2f5b5af0f0b5` | Repair is accepted only for the exact expired durable checkpoint. It anchors one seven-day window, reads at most ten 100-item pages and 1,000 unique messages, de-duplicates across pages, rejects snapshot changes, and keeps MIME opaque behind the existing object-reference boundary. The tenant Repository rechecks connection capability, locks the cursor, and atomically inserts unique references, advances to the repaired History ID, and appends `gmail.history.repair.completed` to the audit chain. Stale workers and limit breaches leave the cursor and audit unchanged. The frontend exposes only capability and policy facts, with no sync action or success claim. No new or modified migration, real Gmail/provider call, credential, production database/resource mutation, BL-AI-131, Git commit, or push occurred |
 | `BL-AI-131` | INTEGRATED | `2026-07-28` | Exact PostalMime `2.7.5` dependency and lockfile; `OSS-MAIL-02` source manifest record; parse-only boundary README; multipart, encoded, attachment, nested, and malformed MIME fixtures; MIT-0 license policy; generated NOTICE and SBOM; supply-chain Unit tests; PB-SHARED-DEPS result; this state file | The required failure-first dependency/manifest/fixture/NOTICE suite exited 1 with 4 expected failures and 14 passes. After implementation, the focused suite passed 18/18. `npm ci --ignore-scripts`, source manifest 24/24, dependency allowlist, licenses for 605 packages, deterministic NOTICE/SBOM regeneration, production Audit with 0 vulnerabilities, TypeScript, ESLint, Unit 229/229, and Contract 128/128 all exited 0. Full `npm run verify:backlinks` exited 0 with API 59/59, Integration 124 passed with 13 environment-gated skips, Security 95/95, Resilience 3/3, OpenAPI 23 paths, and migrations 19 files through 0026 | PostalMime is restricted to parsing raw RFC 5322/MIME input inside the Gmail adapter boundary and exposing decoded structural data for later Core-owned validation and mapping. Parsed HTML and attachments remain untrusted. No Gmail message-parser Adapter, `MailMessage` mapping, sanitizer, reply/thread matching, API, workflow, migration, provider call, credential, production database/resource mutation, DataForSEO removal, BL-AI-132 implementation, Git commit, or push occurred. The complete development-inclusive `npm ci` audit summary reported eight high-severity findings, while the required production-only `npm audit --omit=dev` reported zero |
+
+## 2026-08-12 LOCAL-PRODUCT-038 Closure Correction
+
+`LOCAL-PRODUCT-038` is historical and remains `NOT_PASSED`. Its earlier
+`PASS_WITH_EXTERNAL_ACTION` evidence does not prove current product acceptance
+because only one recommendation was published and the final user requirements
+for fixed-batch supply, Resource Library invisibility, real AI Draft generation,
+and Gmail send readiness were not proven.
+
+The historical 038-specific contract is:
+
+`backend/core/docs/execution/LOCAL-PRODUCT-038-website-project-real-closure-contract.md`
+
+The reusable project-wide Blueprint and fixed-generation authority is:
+
+`docs/architecture/website-project-recommendation-blueprint-v3.md`
+
+The current execution task and manual are:
+
+`WEBSITE-PROJECT-V3-E2E-001`
+
+`docs/execution/WEBSITE-PROJECT-V3-E2E-001-execution-manual.md`
+
+The execution must remain project-generic and use the existing Core, PostgreSQL,
+Temporal, DataForSEO, Resource Library, AI, Gmail, Job, Workflow, Cache,
+Reservation, Usage Ledger, and idempotency paths. It must not introduce
+project-name/domain branches, a second supply architecture, a second resource
+catalog, or a second provider budget system.
+
+The required real acceptance project is `https://manitosilk.com/`, United
+States, pajamas. It must be created through the normal product path, publish a
+fixed generation of 10 contact-ready recommendations, preserve that generation
+while recommendations move to Opportunity, archive the whole generation only
+on user command, start the next generation only on user command, generate a
+real schema-valid AI Draft, and reach Gmail send-ready state while waiting for
+the user's final confirmation.
+
+The `2026-08-13` fixed-generation amendment supersedes every earlier
+consume-one/refill statement. It applies to all future Website Projects:
+generation 1 may initialize once idempotently for a complete new project;
+generation 2 and later require `Generate next generation` or
+`Archive and generate next generation`. Archive-only creates no refill Job.
+
+The architecture document owns the reusable Blueprint V3 inputs, adaptive
+paid/resource tier order, soft-versus-hard gates, durable cursor identity,
+fixed 10-item generation state machine, archive semantics, next-generation
+command, UI contract, acceptance matrix, and prohibited regressions. The 038
+contract and result remain historical evidence rather than active authority.

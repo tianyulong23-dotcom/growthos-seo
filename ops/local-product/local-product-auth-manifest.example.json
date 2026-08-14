@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "growthos.local-product-auth.v1",
+  "runtime": {
+    "websiteProjectKey": "replace-with-project-key",
+    "mode": "LOCAL_PRODUCT",
+    "publicBaseUrl": "http://localhost:7200",
+    "organizationMaskedId": "org-***",
+    "workspaceMaskedId": "workspace-***"
+  },
+  "google": {
+    "cloudProjectId": "replace-with-google-cloud-project",
+    "oauthClientId": "replace-me.apps.googleusercontent.com",
+    "oauthClientSecretRef": "secret://growthos/local-product/google/oauth-client-secret/v1",
+    "redirectUri": "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
+    "testUserMaskedId": "user-***",
+    "secretStoreProvider": "platform-secret-store"
+  },
+  "gmail": {
+    "syncMode": "polling",
+    "maxSendCalls": 20
+  }
+}

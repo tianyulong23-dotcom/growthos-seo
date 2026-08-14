@@ -20,6 +20,7 @@ import type {
 import type {
   BacklinkRecommendationRefillInput,
 } from "./definitions/backlink-recommendation-refill.orchestration.js";
+import { commercialSupplyPublishedTarget } from "../domain/recommendations/commercial-refill-cycle.js";
 import {
   sendIntentCreatedEventType,
 } from "../application/services/send-intent.repository.js";
@@ -405,10 +406,12 @@ function parseRecommendationRefillRequest(
     || payload.websiteProjectId !== event.websiteProjectId
     || payload.jobId !== event.aggregateId
     || payload.workflowId !== event.idempotencyKey
+    || !Number.isInteger(payload.visiblePoolGeneration)
+    || Number(payload.visiblePoolGeneration) < 1
     || !Number.isInteger(payload.lowWatermark)
     || !Number.isInteger(payload.highWatermark)
-    || Number(payload.lowWatermark) < 0
-    || Number(payload.highWatermark) <= Number(payload.lowWatermark)
+    || Number(payload.lowWatermark) !== commercialSupplyPublishedTarget - 1
+    || Number(payload.highWatermark) !== commercialSupplyPublishedTarget
   ) {
     throw new Error("BACKLINK_RECOMMENDATION_REFILL_OUTBOX_EVENT_INVALID");
   }
@@ -549,11 +552,39 @@ export function createTemporalBacklinkProjectAnalysisStarter(
   assertBacklinksTaskQueue(taskQueue);
   return {
     async start(input) {
-      assertBacklinksWorkflowId(input.workflowId);
-      return await client.start(
-        backlinksRuntimeContract.workflows.projectAnalysis.workflowType,
-        { workflowId: input.workflowId, taskQueue, args: [input] },
-      );
+      const workflowId = buildBacklinksWorkflowId({
+        organizationId: input.organizationId,
+        workspaceId: input.workspaceId,
+        websiteProjectId: input.websiteProjectId,
+        workflow: "project-analysis",
+        instanceId: input.jobId,
+      });
+      assertBacklinksWorkflowId(workflowId);
+      const legacyWorkflowId = [
+        "backlinks",
+        input.workspaceId,
+        input.websiteProjectId,
+        "project-analysis",
+        "v1",
+        input.jobId,
+      ].join(":");
+      if (
+        input.workflowId !== workflowId
+        && input.workflowId !== legacyWorkflowId
+      ) {
+        assertBacklinksWorkflowId(input.workflowId);
+        throw new Error("BACKLINKS_PROJECT_ANALYSIS_WORKFLOW_ID_MISMATCH");
+      }
+      const canonicalInput = { ...input, workflowId };
+      try {
+        return await client.start(
+          backlinksRuntimeContract.workflows.projectAnalysis.workflowType,
+          { workflowId, taskQueue, args: [canonicalInput] },
+        );
+      } catch (error) {
+        if (!workflowAlreadyStarted(error)) throw error;
+        return { workflowId, state: "existing" as const };
+      }
     },
   };
 }

@@ -11,7 +11,7 @@ type DraftGenerationActivities = Readonly<{
 }>;
 
 const activities = proxyActivities<DraftGenerationActivities>({
-  startToCloseTimeout: "2 minutes",
+  startToCloseTimeout: "4 minutes",
   retry: { maximumAttempts: 1 },
 });
 

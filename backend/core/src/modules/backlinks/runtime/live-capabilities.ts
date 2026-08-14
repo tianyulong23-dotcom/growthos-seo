@@ -9,6 +9,7 @@ import {
 import { secretKinds } from "../ports/secret-store.port.js";
 import {
   localProductDataForSeoEndpointAllowlistSchema,
+  localProductDataForSeoMaximumTimeoutMs,
 } from "./local-product-dataforseo-bootstrap.js";
 import { localProductGoogleRedirectUri } from "./local-product-oauth-bootstrap.js";
 
@@ -362,7 +363,7 @@ const assertDataForSeoConfiguration = (
     environment,
     "DATAFORSEO_REQUEST_TIMEOUT_MS",
     1,
-    120_000,
+    localProductDataForSeoMaximumTimeoutMs,
   );
   readDataForSeoInteger(
     environment,

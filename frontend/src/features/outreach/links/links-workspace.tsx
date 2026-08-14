@@ -40,6 +40,7 @@ import { isOutreachOffline } from "@/features/outreach/shared/outreach-network-s
 import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
 
 import { isLinksApiStatus, linksApi } from "./api"
+import { BacklinkProfilePanel } from "./backlink-profile-panel"
 import type {
   LifecycleEventsPage,
   LinkDetail,
@@ -1712,6 +1713,12 @@ export function LinksWorkspace({
           </Button>
         </div>
       </div>
+
+      <BacklinkProfilePanel
+        key={websiteProjectKey}
+        client={client}
+        websiteProjectKey={websiteProjectKey}
+      />
 
       <PlacementEntryPanel
         entryMessage={entryMessage}

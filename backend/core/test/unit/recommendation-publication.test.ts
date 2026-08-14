@@ -5,7 +5,7 @@ import {
 } from "../../src/modules/backlinks/application/services/recommendation-publication.service.js";
 
 describe("recommendation publication gate", () => {
-  it("publishes only from a current valid public email evidence count", async () => {
+  it("publishes from current valid evidence without rewriting job history", async () => {
     const query = vi.fn().mockResolvedValue({
       rows: [{ emailCount: 1 }],
     });
@@ -21,7 +21,7 @@ describe("recommendation publication gate", () => {
     expect(count).toBe(1);
     const sql = String(query.mock.calls[0]?.[0]);
     expect(sql).toContain("publication_status=CASE");
-    expect(sql).toContain(
+    expect(sql).not.toContain(
       "latest_job.terminal_reason_code='PUBLIC_EMAIL_FOUND'",
     );
     expect(sql).toContain(
@@ -33,5 +33,17 @@ describe("recommendation publication gate", () => {
     expect(sql).toContain("contact_evidence_snapshot_id=COALESCE");
     expect(sql).toContain("evidence.expires_at>now()");
     expect(sql).toContain("candidate.email_domain_ascii NOT LIKE '%.invalid'");
+    expect(sql).toContain("FOR UPDATE");
+    expect(sql).toContain(
+      "published_capacity.published_count<\n            pool_policy.visible_pool_target_count",
+    );
+    expect(sql).toContain("LIMIT 1");
+    expect(sql).toContain(
+      "current_pool.published_count>=\n                pool_policy.visible_pool_target_count",
+    );
+    expect(sql).toContain(
+      "last_publishable_count=current_pool.published_count",
+    );
+    expect(sql).toContain("pause_reason=NULL");
   });
 });

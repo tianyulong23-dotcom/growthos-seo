@@ -14,7 +14,7 @@ const input = {
   modelId: "provider/model",
   modelVersion: "2026-08-03",
   maxCalls: 25,
-  timeoutMs: 60_000,
+  timeoutMs: 45_000,
   maxInputTokens: 8_000,
   maxOutputTokens: 1_200,
   absoluteBudgetUsd: 0.1,

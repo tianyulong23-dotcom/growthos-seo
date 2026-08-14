@@ -1,8 +1,7 @@
 import { BacklinkError, backlinkErrorCodes } from "../../domain/errors/backlink-error.js";
-import {
-  toPublicAssessment,
-  type PublicAssessment,
-} from "../../domain/assessments/public-assessment.js";
+import type {
+  RecommendationRefillFailure,
+} from "../../domain/recommendations/refill-failure.js";
 import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
 
 export const recommendationInventoryStatuses = [
@@ -75,10 +74,92 @@ export type RecommendationContactJob = {
   retryAfter: string | null;
   completedAt: string | null;
 };
+export type RecommendationFitDecision = {
+  decision: "eligible";
+  matchTier: "high_fit" | "qualified_fit";
+  overallFit: number;
+  scoreModelVersion: "recommendation-commercial-fit.v3";
+  ruleVersion: string;
+  reasonCodes: string[];
+  matchedProducts: string[];
+  matchedTopics: string[];
+  matchedKeywords: string[];
+  matchedTargetPages: string[];
+  matchedAudiences: string[];
+  market: {
+    targetCountry: string;
+    candidateCountry: string | null;
+    targetLanguage: string;
+    candidateLanguage: string | null;
+    tier: "target_market" | "same_language_expansion";
+    reasonCode: string;
+  };
+  cooperationAngles: string[];
+  dataForSeo: {
+    rank: number | null;
+    traffic: number | null;
+    backlinks: number | null;
+    referringDomains: number | null;
+    spamScore: number | null;
+    evidenceRefs: string[];
+    collectedAt: string;
+  };
+  safeFetch: {
+    relatedContentPages: string[];
+    evidenceUrls: string[];
+    evidenceRefs: string[];
+    failedUrls: string[];
+    technicalAccessibility: number | null;
+  };
+  components: {
+    id: string;
+    state: string;
+    rawValue: number | string | boolean | null;
+    normalizedValue: number | null;
+    weight: number;
+    points: number | null;
+    evidenceRefs: string[];
+    normalizationRuleVersion: string;
+    collectedAt: string;
+  }[];
+};
+export type RecommendationContactDecision = {
+  decision: "eligible";
+  reasonCode: "PUBLIC_EMAIL_FOUND";
+  sourceUrl: string;
+  inferredPurpose: string;
+  contactConfidence: number;
+  purposeConfidence: number;
+  evidenceConfidence: number;
+  collectedAt: string;
+  rulesVersion: string;
+};
 export type RecommendationListItem = {
   id: string;
   hostname: string;
   score: number;
+  priority: "high" | "standard";
+  candidateSource:
+    | "paid_discovery"
+    | "resource_library"
+    | "mixed"
+    | "existing_history";
+  resourceType: "free" | "paid" | null;
+  metricsSource:
+    | "dataforseo"
+    | "resource_library_snapshot"
+    | "mixed_snapshot"
+    | "historical_snapshot";
+  risk: Readonly<{
+    level: "low" | "medium" | "high" | "unknown";
+    spamScore: number | null;
+  }>;
+  relevantPages: string[];
+  emailSource: Readonly<{
+    url: string;
+    extractionMethod: RecommendationContactEvidence["extractionMethod"];
+    observedAt: string;
+  }>;
   status: RecommendationInventoryStatus;
   publicationStatus: "PUBLISHED";
   verifiedPublicEmailCount: number;
@@ -86,17 +167,11 @@ export type RecommendationListItem = {
   version: number;
   scoreModelVersion: string;
   ruleVersion: string;
-  assessment: PublicAssessment;
+  fitDecision: RecommendationFitDecision;
+  contactDecision: RecommendationContactDecision;
   rootUrl: string;
   faviconUrl: string;
   acquiredAt: string;
-  matchReasons: string[];
-  dataSources: string[];
-  seoMetrics: {
-    authority: number | null;
-    editorialQuality: number | null;
-    technicalHealth: number | null;
-  };
   contactStatus: "contactable" | "running" | "review" | "not_found";
   contactJob: RecommendationContactJob | null;
   contacts: RecommendationContactCandidate[];
@@ -120,7 +195,81 @@ export type RecommendationPage = Readonly<{
   hasMore: boolean;
 }>;
 export type RecommendationInventorySummary = Readonly<{
+  contractVersion: "backlinks.recommendation-operation.v1";
+  runningBuildId: string;
+  visiblePoolGeneration: number;
+  visiblePoolState: "idle" | "building" | "active" | "awaiting_refresh";
+  visiblePoolTargetCount: number;
+  archivedVisiblePoolCount: number;
+  visiblePoolArchivedAt: string | null;
+  operationId: string | null;
+  jobId: string | null;
+  stage:
+    | "blueprint"
+    | "discovery"
+    | "match"
+    | "contact"
+    | "publish"
+    | "complete"
+    | "pause";
+  terminal: boolean;
+  terminalState:
+    | "TARGET_REACHED"
+    | "PAUSED_BUDGET"
+    | "PAUSED_PROVIDER"
+    | "PROJECT_CONTEXT_REQUIRED"
+    | "SUPPLY_FLOOR_REACHED"
+    | null;
+  targetCount: number;
+  rawCount: number;
+  fitCount: number;
+  contactCount: number;
+  publishedCount: number;
+  unpublishedCount: number;
+  tier:
+    | "exact_product_target_market"
+    | "same_topic_target_market"
+    | "adjacent_industry_same_audience"
+    | "resource_media_review_partner_ecosystem"
+    | "same_language_expansion"
+    | "curated_resource_library";
+  round: number;
+  window: number;
+  paidCursor: Readonly<{
+    tier:
+      | "exact_product_target_market"
+      | "same_topic_target_market"
+      | "adjacent_industry_same_audience"
+      | "resource_media_review_partner_ecosystem"
+      | "same_language_expansion";
+    round: number;
+    window: number;
+  }> | null;
+  resourceCursor: Readonly<{
+    tier: "curated_resource_library";
+    round: number;
+    window: number;
+  }> | null;
+  nextRetryAt: string | null;
+  errorCode: string | null;
+  recoveryAction:
+    | "RESUME_OPERATION"
+    | "WAIT_PROVIDER"
+    | "COMPLETE_PROJECT_CONTEXT"
+    | "RESTART_SERVICE"
+    | "ACCEPT_SUPPLY_FLOOR"
+    | "CONTACT_SUPPORT"
+    | null;
+  providerCallOccurred: boolean;
+  providerActualCostMicros: number;
+  providerReservedCostMicros: number;
+  providerPaidCallCount: number;
+  providerUnknownChargeCount: number;
+  providerUniqueCallCount: number;
+  recommendationContextVersionId: string | null;
+  serverUpdatedAt: string | null;
   candidateReadyCount: number;
+  rawCandidateCount: number;
   publishedContactReadyCount: number;
   historicalEmailHitRate: number;
   candidateLowWatermark: number;
@@ -134,6 +283,64 @@ export type RecommendationInventorySummary = Readonly<{
   providerCollectedAt: string | null;
   pauseReason: string | null;
   refillInFlight: boolean;
+  refillState:
+    | "idle"
+    | "running"
+    | "waiting_contact"
+    | "completed"
+    | "paused"
+    | "exhausted";
+  currentRefillTier:
+    | "exact_product_target_market"
+    | "same_topic_target_market"
+    | "adjacent_industry_same_audience"
+    | "resource_media_review_partner_ecosystem"
+    | "same_language_expansion"
+    | "curated_resource_library";
+  currentRefillRound: number;
+  attemptedRefillTiers: Readonly<{
+    tier: RecommendationInventorySummary["currentRefillTier"];
+    round: number;
+    window: number;
+  }>[];
+  terminationReason:
+    | "HIGH_WATERMARK"
+    | "BUDGET"
+    | "PROVIDER_UNAVAILABLE"
+    | "TIERS_EXHAUSTED"
+    | "PROJECT_CONTEXT"
+    | null;
+  eliminationReasonCounts: Readonly<{
+    reasonCode: string;
+    count: number;
+  }>[];
+  refillJob: Readonly<{
+    operationId: string;
+    id: string;
+    workflowId: string;
+    status:
+      | "queued"
+      | "running"
+      | "waiting_provider"
+      | "partial_success"
+      | "success"
+      | "failed"
+      | "cancelled";
+    step: string | null;
+    progress: number;
+    errorCode: string | null;
+    errorMessage: string | null;
+    failure: RecommendationRefillFailure | null;
+    retryCount: number;
+    lowWatermark: number;
+    highWatermark: number;
+    refillWindowKey: string;
+    startedAt: string | null;
+    finishedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+    version: number;
+  }> | null;
   contactBatch: Readonly<{
     id: string;
     status: "running" | "completed" | "stale_context";
@@ -142,6 +349,7 @@ export type RecommendationInventorySummary = Readonly<{
     publishedCount: number;
     unpublishedCount: number;
     retryableUnpublishedCount: number;
+    nextRetryAt: string | null;
     reasonCounts: {
       reasonCode: string;
       count: number;
@@ -157,6 +365,7 @@ export type RecommendationsQuery = Readonly<{
   ): Promise<RecommendationPage>;
   getRecommendationInventoryStatus(
     context: ResolvedProjectContext,
+    runningBuildId?: string,
   ): Promise<RecommendationInventorySummary>;
 }>;
 export type RecommendationsQueryClient = Readonly<{
@@ -216,6 +425,155 @@ const arrayValue = (value: unknown): readonly unknown[] =>
   Array.isArray(value) ? value : [];
 const nullableString = (value: unknown): string | null =>
   value === null || value === undefined ? null : String(value);
+const stringArray = (value: unknown): string[] =>
+  arrayValue(value).map(String).filter(Boolean);
+const nullableNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+const paidCandidateSourceTypes = new Set([
+  "BLUEPRINT_SERP_STANDARD_QUEUE",
+  "VERIFIED_COMPETITOR_REFERRING_DOMAINS",
+  "VERIFIED_COMPETITOR_BACKLINK_GAP",
+  "USER_REFERRING_DOMAINS",
+]);
+
+function recommendationSource(
+  sourceTypes: readonly string[],
+  evidenceRefs: readonly string[],
+): Pick<
+  RecommendationListItem,
+  "candidateSource" | "resourceType" | "metricsSource"
+> {
+  const resourceEvidence = evidenceRefs.find(
+    (reference) => reference.startsWith("resource-type:"),
+  );
+  const resourceType = resourceEvidence?.slice("resource-type:".length);
+  const normalizedResourceType = resourceType === "free" || resourceType === "paid"
+    ? resourceType
+    : null;
+  const hasResource = sourceTypes.includes("CURATED_RESOURCE_LIBRARY")
+    || normalizedResourceType !== null;
+  const hasPaidDiscovery = sourceTypes.some(
+    (sourceType) => paidCandidateSourceTypes.has(sourceType),
+  ) || evidenceRefs.some((reference) => reference.startsWith("dataforseo:"));
+
+  if (hasResource && hasPaidDiscovery) {
+    return {
+      candidateSource: "mixed",
+      resourceType: normalizedResourceType,
+      metricsSource: "mixed_snapshot",
+    };
+  }
+  if (hasResource) {
+    return {
+      candidateSource: "resource_library",
+      resourceType: normalizedResourceType,
+      metricsSource: "resource_library_snapshot",
+    };
+  }
+  if (hasPaidDiscovery) {
+    return {
+      candidateSource: "paid_discovery",
+      resourceType: null,
+      metricsSource: "dataforseo",
+    };
+  }
+  return {
+    candidateSource: "existing_history",
+    resourceType: null,
+    metricsSource: "historical_snapshot",
+  };
+}
+
+function recommendationRisk(
+  spamScore: number | null,
+): RecommendationListItem["risk"] {
+  return Object.freeze({
+    spamScore,
+    level: spamScore === null
+      ? "unknown"
+      : spamScore >= 30
+        ? "high"
+        : spamScore >= 10 ? "medium" : "low",
+  });
+}
+
+function cursorWindow(
+  attempts: RecommendationInventorySummary["attemptedRefillTiers"],
+  tier: RecommendationInventorySummary["currentRefillTier"] | null,
+  round: number | null,
+): number {
+  if (tier === null || round === null) return 1;
+  return attempts.findLast(
+    (attempt) => attempt.tier === tier && attempt.round === round,
+  )?.window ?? 1;
+}
+
+function recommendationTerminalState(
+  terminationReason: RecommendationInventorySummary["terminationReason"],
+  publishedCount: number,
+  targetCount: number,
+): RecommendationInventorySummary["terminalState"] {
+  if (publishedCount >= targetCount || terminationReason === "HIGH_WATERMARK") {
+    return "TARGET_REACHED";
+  }
+  switch (terminationReason) {
+    case "BUDGET":
+      return "PAUSED_BUDGET";
+    case "PROVIDER_UNAVAILABLE":
+      return "PAUSED_PROVIDER";
+    case "PROJECT_CONTEXT":
+      return "PROJECT_CONTEXT_REQUIRED";
+    case "TIERS_EXHAUSTED":
+      return "SUPPLY_FLOOR_REACHED";
+    default:
+      return null;
+  }
+}
+
+function recommendationStage(input: Readonly<{
+  terminalState: RecommendationInventorySummary["terminalState"];
+  refillState: RecommendationInventorySummary["refillState"];
+  refillJob: Record<string, unknown> | null;
+  contactBatch: Record<string, unknown> | null;
+  blueprintVersion: number | null;
+}>): RecommendationInventorySummary["stage"] {
+  if (
+    input.terminalState === "PAUSED_BUDGET"
+    || input.terminalState === "PAUSED_PROVIDER"
+  ) {
+    return "pause";
+  }
+  if (input.terminalState !== null) return "complete";
+  if (input.blueprintVersion === null) return "blueprint";
+  if (
+    input.refillState === "waiting_contact"
+    || input.contactBatch?.status === "running"
+  ) {
+    return "contact";
+  }
+  const step = nullableString(input.refillJob?.step);
+  if (step?.includes("score") === true || step?.includes("match") === true) {
+    return "match";
+  }
+  if (
+    step?.includes("contact") === true
+    || step?.includes("publish") === true
+  ) {
+    return "publish";
+  }
+  if (
+    input.refillState === "running"
+    || input.refillJob?.status === "queued"
+    || input.refillJob?.status === "running"
+    || input.refillJob?.status === "waiting_provider"
+  ) {
+    return "discovery";
+  }
+  return "complete";
+}
 
 function toContactEvidence(value: unknown): RecommendationContactEvidence {
   const item = objectValue(value);
@@ -271,20 +629,163 @@ function toContactJob(value: unknown): RecommendationContactJob | null {
   };
 }
 
-function metric(
-  assessment: PublicAssessment,
-  id: PublicAssessment["components"][number]["id"],
-): number | null {
-  return assessment.components.find((component) => component.id === id)?.points
-    ?? null;
-}
-
 function toWebsiteUrl(hostname: string, value: unknown): string {
   try {
     return new URL(String(value)).toString();
   } catch {
     return `https://${hostname}/`;
   }
+}
+
+function toFitDecision(
+  value: unknown,
+  score: number,
+  scoreModelVersion: unknown,
+  ruleVersion: unknown,
+): RecommendationFitDecision {
+  const fit = objectValue(value);
+  const fitTotal = nullableNumber(fit.total);
+  const fitRuleVersion = String(fit.ruleVersion ?? "");
+  if (
+    fit.decision !== "eligible"
+    || fit.scoreModelVersion !== "recommendation-commercial-fit.v3"
+    || scoreModelVersion !== "recommendation-commercial-fit.v3"
+    || fitTotal === null
+    || Math.abs(fitTotal - score) > 0.0001
+    || fitRuleVersion === ""
+    || fitRuleVersion !== String(ruleVersion)
+  ) {
+    throw new Error("PUBLISHED_RECOMMENDATION_FIT_SCORE_MISMATCH");
+  }
+  const details = objectValue(fit.details);
+  const components: RecommendationFitDecision["components"] =
+    arrayValue(fit.components).map((value) => {
+      const component = objectValue(value);
+      return {
+        id: String(component.id),
+        state: String(component.state),
+        rawValue: (component.rawValue ?? null) as
+          number | string | boolean | null,
+        normalizedValue: nullableNumber(component.normalizedValue),
+        weight: Number(component.weight),
+        points: nullableNumber(component.points),
+        evidenceRefs: stringArray(component.evidenceRefs),
+        normalizationRuleVersion: String(
+          component.normalizationRuleVersion,
+        ),
+        collectedAt: toIsoString(component.collectedAt),
+      };
+    });
+  if (details.reassessmentReason === "HISTORICAL_V2_REASSESSED") {
+    const projectContext = objectValue(details.projectContext);
+    const targetCountry = String(projectContext.countryCode ?? "")
+      .trim()
+      .toUpperCase();
+    const targetLanguage = String(projectContext.locale ?? "")
+      .trim()
+      .split(/[-_]/u)[0]
+      ?.toLowerCase() ?? "";
+    if (targetCountry === "" || targetLanguage === "") {
+      throw new Error("PUBLISHED_RECOMMENDATION_HISTORICAL_CONTEXT_MISSING");
+    }
+    const evidenceRefs = (componentIds: readonly string[]) => [
+      ...new Set(components
+        .filter(({ id }) => componentIds.includes(id))
+        .flatMap(({ evidenceRefs }) => evidenceRefs)),
+    ];
+    const technicalComponent = components.find(
+      ({ id }) => id === "safefetch_technical_access",
+    );
+    return {
+      decision: "eligible",
+      matchTier: fitTotal >= 75 ? "high_fit" : "qualified_fit",
+      overallFit: fitTotal,
+      scoreModelVersion: "recommendation-commercial-fit.v3",
+      ruleVersion: fitRuleVersion,
+      reasonCodes: [
+        "HISTORICAL_V2_REASSESSED",
+        "SAME_LANGUAGE_EXPANSION",
+      ],
+      matchedProducts: [],
+      matchedTopics: [],
+      matchedKeywords: [],
+      matchedTargetPages: [],
+      matchedAudiences: [],
+      market: {
+        targetCountry,
+        candidateCountry: null,
+        targetLanguage,
+        candidateLanguage: null,
+        tier: "same_language_expansion",
+        reasonCode: "SAME_LANGUAGE_EXPANSION",
+      },
+      cooperationAngles: [],
+      dataForSeo: {
+        rank: null,
+        traffic: null,
+        backlinks: null,
+        referringDomains: null,
+        spamScore: null,
+        evidenceRefs: evidenceRefs([
+          "dataforseo_authority_risk",
+          "dataforseo_traffic_visibility",
+        ]),
+        collectedAt: toIsoString(details.sourceEvidenceCollectedAt),
+      },
+      safeFetch: {
+        relatedContentPages: [],
+        evidenceUrls: [],
+        evidenceRefs: evidenceRefs(["safefetch_technical_access"]),
+        failedUrls: [],
+        technicalAccessibility:
+          technicalComponent?.normalizedValue ?? null,
+      },
+      components,
+    };
+  }
+  const market = objectValue(details.market);
+  const dataForSeo = objectValue(details.dataForSeo);
+  const safeFetch = objectValue(details.safeFetch);
+  return {
+    decision: "eligible",
+    matchTier: details.matchTier as RecommendationFitDecision["matchTier"],
+    overallFit: fitTotal,
+    scoreModelVersion: "recommendation-commercial-fit.v3",
+    ruleVersion: fitRuleVersion,
+    reasonCodes: stringArray(details.reasonCodes),
+    matchedProducts: stringArray(details.matchedProducts),
+    matchedTopics: stringArray(details.matchedTopics),
+    matchedKeywords: stringArray(details.matchedKeywords),
+    matchedTargetPages: stringArray(details.matchedTargetPages),
+    matchedAudiences: stringArray(details.matchedAudiences),
+    market: {
+      targetCountry: String(market.targetCountry),
+      candidateCountry: nullableString(market.candidateCountry),
+      targetLanguage: String(market.targetLanguage),
+      candidateLanguage: nullableString(market.candidateLanguage),
+      tier: market.tier as RecommendationFitDecision["market"]["tier"],
+      reasonCode: String(market.reasonCode),
+    },
+    cooperationAngles: stringArray(details.cooperationAngles),
+    dataForSeo: {
+      rank: nullableNumber(dataForSeo.rank),
+      traffic: nullableNumber(dataForSeo.traffic),
+      backlinks: nullableNumber(dataForSeo.backlinks),
+      referringDomains: nullableNumber(dataForSeo.referringDomains),
+      spamScore: nullableNumber(dataForSeo.spamScore),
+      evidenceRefs: stringArray(dataForSeo.evidenceRefs),
+      collectedAt: toIsoString(dataForSeo.collectedAt),
+    },
+    safeFetch: {
+      relatedContentPages: stringArray(safeFetch.relatedContentPages),
+      evidenceUrls: stringArray(safeFetch.evidenceUrls),
+      evidenceRefs: stringArray(safeFetch.evidenceRefs),
+      failedUrls: stringArray(safeFetch.failedUrls),
+      technicalAccessibility:
+        nullableNumber(safeFetch.technicalAccessibility),
+    },
+    components,
+  };
 }
 
 export function createRecommendationsQuery(
@@ -302,9 +803,19 @@ export function createRecommendationsQuery(
                i.recommendation_context_version_id
                  "recommendationContextVersionId",
                i.version,i.created_at "acquiredAt",
-               s.id "scoreId",s.score_model_version "scoreModelVersion",
-               s.rule_version "ruleVersion",s.components "scoreComponents",
-               s.evidence "scoreEvidence",s.generated_at "scoreGeneratedAt",
+               s.score_model_version "scoreModelVersion",
+               s.rule_version "ruleVersion",s.generated_at "scoreGeneratedAt",
+               fit.commercial_score "fitScore",
+               fit.source_types "sourceTypes",
+               snapshot.source_url "contactDecisionSourceUrl",
+               snapshot.inferred_purpose "contactDecisionPurpose",
+               snapshot.contact_confidence "contactDecisionConfidence",
+               snapshot.purpose_confidence
+                 "contactDecisionPurposeConfidence",
+               snapshot.evidence_confidence
+                 "contactDecisionEvidenceConfidence",
+               snapshot.collected_at "contactDecisionCollectedAt",
+               snapshot.rules_version "contactDecisionRulesVersion",
                COALESCE(
                  j.root_url,'https://' || p.hostname_ascii || '/'
                ) "rootUrl",
@@ -333,6 +844,16 @@ export function createRecommendationsQuery(
                ) END "contactJob",
                o.id "existingOpportunityId"
           FROM backlink_recommendation_inventory i
+          JOIN backlink_commercial_inventory_policies AS policy ON
+            (
+              policy.organization_id,policy.workspace_id,
+              policy.website_project_id,policy.project_context_version_id
+            )=(
+              i.organization_id,i.workspace_id,
+              i.website_project_id,i.recommendation_context_version_id
+            )
+           AND policy.visible_pool_state='active'
+           AND policy.visible_pool_generation=i.visible_pool_generation
           JOIN backlink_recommendations r ON
             (r.organization_id,r.workspace_id,r.website_project_id,r.id)=
             (i.organization_id,i.workspace_id,i.website_project_id,
@@ -349,9 +870,38 @@ export function createRecommendationsQuery(
                     s.website_project_id,s.recommendation_id)=
                    (i.organization_id,i.workspace_id,
                     i.website_project_id,i.recommendation_id)
+               AND s.score_model_version=
+                 'recommendation-commercial-fit.v3'
              ORDER BY s.generated_at DESC,s.id DESC
              LIMIT 1
-          ) s ON true
+           ) s ON true
+          JOIN LATERAL (
+            SELECT commercial_score,source_types
+              FROM backlink_commercial_candidates AS candidate
+             WHERE (
+               candidate.organization_id,candidate.workspace_id,
+               candidate.website_project_id,candidate.recommendation_id,
+               candidate.project_context_version_id
+             )=(
+               i.organization_id,i.workspace_id,i.website_project_id,
+               i.recommendation_id,i.recommendation_context_version_id
+             )
+               AND candidate.visible_pool_generation=
+                 i.visible_pool_generation
+               AND candidate.score_model_version=
+                 'recommendation-commercial-fit.v3'
+               AND candidate.commercial_score->>'decision'='eligible'
+             ORDER BY candidate.updated_at DESC,candidate.id DESC
+             LIMIT 1
+          ) fit ON true
+          JOIN backlink_contact_evidence_snapshots AS snapshot ON
+            (
+              snapshot.organization_id,snapshot.workspace_id,
+              snapshot.website_project_id,snapshot.id
+            )=(
+              i.organization_id,i.workspace_id,
+              i.website_project_id,i.contact_evidence_snapshot_id
+            )
           LEFT JOIN backlink_contact_enrichment_jobs j ON
             (j.organization_id,j.workspace_id,j.website_project_id,
              j.recommendation_id,j.recommendation_context_version_id)=
@@ -399,7 +949,7 @@ export function createRecommendationsQuery(
                   AND c.confidence>=80
                   AND c.purpose_confidence>=70
                   AND c.inferred_purpose IN (
-                    'editorial','partnerships','advertising','business',
+                    'press','editorial','partnerships','advertising','business',
                     'marketing','site_owner','general'
                   )
                   AND evidence.has_valid_evidence
@@ -471,6 +1021,11 @@ export function createRecommendationsQuery(
                ($1,$2,$3)
            AND ($4::text IS NULL OR i.status=$4)
            AND i.publication_status='PUBLISHED'
+           AND i.fit_decision='eligible'
+           AND i.fit_score_model_version=
+             'recommendation-commercial-fit.v3'
+           AND i.contact_decision='eligible'
+           AND i.contact_reason_code='PUBLIC_EMAIL_FOUND'
            AND i.verified_public_email_count>=1
            AND i.contact_evidence_snapshot_id IS NOT NULL
            AND i.default_contact_candidate_id IS NOT NULL
@@ -499,19 +1054,38 @@ export function createRecommendationsQuery(
       const items = result.rows.slice(0, input.limit).map((row) => {
         const hostname = String(row.hostname);
         const rootUrl = toWebsiteUrl(hostname, row.rootUrl);
-        const assessment = toPublicAssessment({
-          scoreId: row.scoreId,
-          totalScore: row.score,
-          scoreModelVersion: row.scoreModelVersion,
-          ruleVersion: row.ruleVersion,
-          components: row.scoreComponents,
-          evidence: row.scoreEvidence,
-          generatedAt: row.scoreGeneratedAt,
-        });
+        const contacts = arrayValue(row.contacts).map(toContactCandidate);
+        const selectedContact = contacts.find(
+          (contact) =>
+            contact.id === nullableString(row.recommendedContactCandidateId),
+        );
+        const selectedEvidence = selectedContact?.evidence[0];
+        if (selectedContact === undefined || selectedEvidence === undefined) {
+          throw new Error("PUBLISHED_RECOMMENDATION_CONTACT_EVIDENCE_MISSING");
+        }
+        const fitDecision = toFitDecision(
+          row.fitScore,
+          Number(row.score),
+          row.scoreModelVersion,
+          row.ruleVersion,
+        );
+        const source = recommendationSource(
+          stringArray(row.sourceTypes),
+          fitDecision.dataForSeo.evidenceRefs,
+        );
         return {
           id: String(row.id),
           hostname,
           score: Number(row.score),
+          priority: Number(row.score) >= 80 ? "high" as const : "standard" as const,
+          ...source,
+          risk: recommendationRisk(fitDecision.dataForSeo.spamScore),
+          relevantPages: fitDecision.safeFetch.relatedContentPages,
+          emailSource: {
+            url: selectedEvidence.sourceUrl,
+            extractionMethod: selectedEvidence.extractionMethod,
+            observedAt: selectedEvidence.observedAt,
+          },
           status: row.status as RecommendationListItem["status"],
           publicationStatus: "PUBLISHED" as const,
           verifiedPublicEmailCount: Number(row.verifiedPublicEmailCount),
@@ -520,30 +1094,27 @@ export function createRecommendationsQuery(
           version: Number(row.version),
           scoreModelVersion: String(row.scoreModelVersion),
           ruleVersion: String(row.ruleVersion),
-          assessment,
+          fitDecision,
+          contactDecision: {
+            decision: "eligible" as const,
+            reasonCode: "PUBLIC_EMAIL_FOUND" as const,
+            sourceUrl: String(row.contactDecisionSourceUrl),
+            inferredPurpose: String(row.contactDecisionPurpose),
+            contactConfidence: Number(row.contactDecisionConfidence),
+            purposeConfidence:
+              Number(row.contactDecisionPurposeConfidence),
+            evidenceConfidence:
+              Number(row.contactDecisionEvidenceConfidence),
+            collectedAt: toIsoString(row.contactDecisionCollectedAt),
+            rulesVersion: String(row.contactDecisionRulesVersion),
+          },
           rootUrl,
           faviconUrl: new URL("/favicon.ico", rootUrl).toString(),
           acquiredAt: toIsoString(row.acquiredAt ?? row.scoreGeneratedAt),
-          matchReasons: assessment.components
-            .filter((component) => component.points !== null)
-            .sort((left, right) => (right.points ?? 0) - (left.points ?? 0))
-            .slice(0, 3)
-            .map((component) => component.id),
-          dataSources: [...new Set(
-            assessment.components.map((component) => component.sourceType),
-          )],
-          seoMetrics: {
-            authority: metric(assessment, "graph_authority_diversity"),
-            editorialQuality: metric(
-              assessment,
-              "topic_content_editorial_quality",
-            ),
-            technicalHealth: metric(assessment, "technical_health"),
-          },
           contactStatus: (row.contactStatus ?? "not_found") as
             RecommendationListItem["contactStatus"],
           contactJob: toContactJob(row.contactJob),
-          contacts: arrayValue(row.contacts).map(toContactCandidate),
+          contacts,
           recommendedContactCandidateId:
             nullableString(row.recommendedContactCandidateId),
           existingOpportunityId: nullableString(row.existingOpportunityId),
@@ -562,15 +1133,23 @@ export function createRecommendationsQuery(
           : null,
       };
     },
-    async getRecommendationInventoryStatus(context) {
+    async getRecommendationInventoryStatus(context, runningBuildId = "unknown") {
       const result = await client.query(`
         WITH current_context AS (
-          SELECT id
+          SELECT id,created_at
             FROM backlink_project_context_snapshots
            WHERE (organization_id,workspace_id,website_project_id)=
                  ($1,$2,$3)
              AND project_status='ACTIVE'
            ORDER BY snapshot_version DESC,created_at DESC,id DESC
+           LIMIT 1
+        ),
+        pool_policy AS (
+          SELECT *
+            FROM backlink_commercial_inventory_policies
+           WHERE (organization_id,workspace_id,website_project_id)=
+                 ($1,$2,$3)
+             AND project_context_version_id=(SELECT id FROM current_context)
            LIMIT 1
         ),
         latest_blueprint AS (
@@ -587,30 +1166,102 @@ export function createRecommendationsQuery(
           SELECT
             count(*) FILTER (
               WHERE state IN ('candidate_ready','contact_enrichment')
+                AND score_model_version=
+                  'recommendation-commercial-fit.v3'
+                AND commercial_score->>'decision'='eligible'
             )::integer candidate_ready_count,
-            count(*)::integer historical_candidate_count,
-            max(provider_collected_at) provider_collected_at
+            count(*) FILTER (
+              WHERE score_model_version=
+                'recommendation-commercial-fit.v3'
+            )::integer historical_candidate_count,
+            count(*) FILTER (
+              WHERE score_model_version=
+                'recommendation-commercial-fit.v3'
+            )::integer raw_candidate_count,
+            count(*) FILTER (
+              WHERE score_model_version=
+                'recommendation-commercial-fit.v3'
+                AND commercial_score->>'decision'='eligible'
+            )::integer fit_count,
+            max(provider_collected_at) FILTER (
+              WHERE score_model_version=
+                'recommendation-commercial-fit.v3'
+            ) provider_collected_at,
+            max(updated_at) latest_updated_at
             FROM backlink_commercial_candidates
            WHERE (organization_id,workspace_id,website_project_id)=
                  ($1,$2,$3)
              AND project_context_version_id=(SELECT id FROM current_context)
+             AND visible_pool_generation=(
+               SELECT visible_pool_generation FROM pool_policy
+             )
         ),
         publication_counts AS (
           SELECT
             count(*) FILTER (
-              WHERE publication_status='PUBLISHED'
-                AND verified_public_email_count>=1
-                AND status IN ('ready','shown')
+              WHERE inventory.publication_status='PUBLISHED'
+                AND inventory.fit_decision='eligible'
+                AND inventory.fit_score_model_version=
+                  'recommendation-commercial-fit.v3'
+                AND inventory.contact_decision='eligible'
+                AND inventory.contact_reason_code='PUBLIC_EMAIL_FOUND'
+                AND inventory.verified_public_email_count>=1
+                AND inventory.status IN ('ready','shown','accepted')
+                AND recommendation.status IN ('ready','shown','accepted')
             )::integer published_count,
             count(*) FILTER (
-              WHERE verified_public_email_count>=1
+              WHERE inventory.fit_decision='eligible'
+                AND inventory.fit_score_model_version=
+                  'recommendation-commercial-fit.v3'
+                AND inventory.contact_decision='eligible'
+                AND inventory.contact_reason_code='PUBLIC_EMAIL_FOUND'
+                AND inventory.verified_public_email_count>=1
+            )::integer contact_count,
+            count(*) FILTER (
+              WHERE inventory.fit_decision='eligible'
+                AND inventory.fit_score_model_version=
+                  'recommendation-commercial-fit.v3'
+                AND inventory.publication_status<>'PUBLISHED'
+            )::integer unpublished_count,
+            count(*) FILTER (
+              WHERE inventory.verified_public_email_count>=1
+                AND inventory.fit_decision='eligible'
+                AND inventory.fit_score_model_version=
+                  'recommendation-commercial-fit.v3'
+                AND inventory.contact_decision='eligible'
             )::integer
               historical_verified_email_count
-            FROM backlink_recommendation_inventory
-           WHERE (organization_id,workspace_id,website_project_id)=
+            FROM backlink_recommendation_inventory AS inventory
+            JOIN backlink_recommendations AS recommendation
+              ON (
+                recommendation.organization_id,
+                recommendation.workspace_id,
+                recommendation.website_project_id,
+                recommendation.id
+              )=(
+                inventory.organization_id,
+                inventory.workspace_id,
+                inventory.website_project_id,
+                inventory.recommendation_id
+              )
+            JOIN backlink_prospects AS prospect
+              ON (
+                prospect.organization_id,prospect.workspace_id,
+                prospect.website_project_id,prospect.id
+              )=(
+                inventory.organization_id,inventory.workspace_id,
+                inventory.website_project_id,inventory.prospect_id
+              )
+           WHERE (
+             inventory.organization_id,inventory.workspace_id,
+             inventory.website_project_id
+           )=
                  ($1,$2,$3)
-             AND recommendation_context_version_id=
+             AND inventory.recommendation_context_version_id=
                  (SELECT id FROM current_context)
+             AND inventory.visible_pool_generation=(
+               SELECT visible_pool_generation FROM pool_policy
+             )
         ),
         running_batch AS (
           SELECT EXISTS (
@@ -619,11 +1270,158 @@ export function createRecommendationsQuery(
              WHERE (organization_id,workspace_id,website_project_id)=
                    ($1,$2,$3)
                AND project_context_version_id=(SELECT id FROM current_context)
+               AND visible_pool_generation=(
+                 SELECT visible_pool_generation FROM pool_policy
+               )
                AND status='running'
           ) value
         ),
+        generation_refills AS (
+          SELECT DISTINCT refill_window_key
+            FROM backlink_recommendation_refills
+           WHERE (
+             organization_id,workspace_id,website_project_id
+           )=($1,$2,$3)
+             AND recommendation_context_version_id=
+                 (SELECT id FROM current_context)
+             AND visible_pool_generation=(
+               SELECT visible_pool_generation FROM pool_policy
+             )
+        ),
+        latest_refill_job AS (
+          SELECT refill.id refill_id,job.id,job.workflow_id,job.status,job.step,job.progress,
+                 job.error,job.retry_count,job.started_at,job.finished_at,
+                 job.created_at,job.updated_at,job.version,
+                 refill.low_watermark,refill.high_watermark,
+                 refill.refill_window_key
+            FROM backlink_recommendation_refills AS refill
+            JOIN backlink_jobs AS job ON
+              (
+                job.organization_id,job.workspace_id,
+                job.website_project_id,job.id
+              )=(
+                refill.organization_id,refill.workspace_id,
+                refill.website_project_id,refill.job_id
+              )
+           WHERE (
+             refill.organization_id,refill.workspace_id,
+             refill.website_project_id
+           )=($1,$2,$3)
+             AND refill.recommendation_context_version_id=
+                 (SELECT id FROM current_context)
+             AND refill.visible_pool_generation=(
+               SELECT visible_pool_generation FROM pool_policy
+             )
+           ORDER BY job.created_at DESC,job.id DESC
+           LIMIT 1
+        ),
+        provider_call_state AS (
+          SELECT
+          (
+            EXISTS (
+              SELECT 1
+                FROM backlink_provider_usage_ledger AS usage
+                JOIN generation_refills AS refill
+                  ON usage.reservation_key LIKE
+                     refill.refill_window_key||':%'
+               WHERE (
+                 usage.organization_id,usage.workspace_id,
+                 usage.website_project_id
+               )=($1,$2,$3)
+                 AND usage.provider='dataforseo'
+                 AND usage.status IN ('reserved','settled')
+            )
+            OR EXISTS (
+              SELECT 1
+                FROM provider_batch_requests AS request
+                JOIN generation_refills AS refill
+                  ON request.request_id LIKE
+                     refill.refill_window_key||':%'
+               WHERE (
+                 request.organization_id,request.workspace_id,
+                 request.website_project_id
+               )=($1,$2,$3)
+                 AND (
+                   request.status<>'failed'
+                   OR request.actual_cost_micros IS NOT NULL
+                   OR request.provider_task_id IS NOT NULL
+                 )
+            )
+          ) value,
+          COALESCE((
+            SELECT sum(usage.actual_cost_micros)
+              FROM backlink_provider_usage_ledger AS usage
+              JOIN generation_refills AS refill
+                ON usage.reservation_key LIKE refill.refill_window_key||':%'
+             WHERE (
+               usage.organization_id,usage.workspace_id,
+               usage.website_project_id
+             )=($1,$2,$3)
+               AND usage.provider='dataforseo'
+               AND usage.status='settled'
+          ),0)::bigint actual_cost_micros,
+          COALESCE((
+            SELECT sum(usage.estimated_cost_micros)
+              FROM backlink_provider_usage_ledger AS usage
+              JOIN generation_refills AS refill
+                ON usage.reservation_key LIKE refill.refill_window_key||':%'
+             WHERE (
+               usage.organization_id,usage.workspace_id,
+               usage.website_project_id
+             )=($1,$2,$3)
+               AND usage.provider='dataforseo'
+               AND usage.status='reserved'
+          ),0)::bigint reserved_cost_micros,
+          (
+            SELECT count(DISTINCT usage.id)::integer
+              FROM backlink_provider_usage_ledger AS usage
+              JOIN generation_refills AS refill
+                ON usage.reservation_key LIKE refill.refill_window_key||':%'
+             WHERE (
+               usage.organization_id,usage.workspace_id,
+               usage.website_project_id
+             )=($1,$2,$3)
+               AND usage.provider='dataforseo'
+               AND usage.status='settled'
+          ) paid_call_count,
+          (
+            SELECT count(DISTINCT request.id)::integer
+              FROM provider_batch_requests AS request
+              JOIN generation_refills AS refill
+                ON request.request_id LIKE refill.refill_window_key||':%'
+             WHERE (
+               request.organization_id,request.workspace_id,
+               request.website_project_id
+             )=($1,$2,$3)
+               AND request.status='unknown_charge'
+          ) unknown_charge_count,
+          (
+            SELECT count(
+              DISTINCT request.normalized_request_hash
+            )::integer
+              FROM provider_batch_requests AS request
+              JOIN generation_refills AS refill
+                ON request.request_id LIKE refill.refill_window_key||':%'
+             WHERE (
+               request.organization_id,request.workspace_id,
+               request.website_project_id
+             )=($1,$2,$3)
+          ) request_fingerprint_count
+        ),
         contact_batch AS (
-          SELECT b.id,b.status,b.started_at,b.completed_at,
+          SELECT b.id,b.status,b.started_at,b.completed_at,b.updated_at,
+                 (
+                   SELECT min(job.retry_after)
+                     FROM backlink_contact_enrichment_jobs AS job
+                    WHERE (
+                      job.organization_id,job.workspace_id,
+                      job.website_project_id,job.batch_id
+                    )=(
+                      b.organization_id,b.workspace_id,
+                      b.website_project_id,b.id
+                    )
+                      AND job.status='retry_scheduled'
+                 ) next_retry_at,
                  (
                    SELECT count(*)::integer
                      FROM backlink_contact_enrichment_jobs AS job
@@ -660,6 +1458,14 @@ export function createRecommendationsQuery(
                       b.recommendation_context_version_id
                     )
                       AND inventory.publication_status='PUBLISHED'
+                      AND inventory.visible_pool_generation=(
+                        SELECT visible_pool_generation FROM pool_policy
+                      )
+                      AND inventory.fit_decision='eligible'
+                      AND inventory.fit_score_model_version=
+                        'recommendation-commercial-fit.v3'
+                      AND inventory.contact_decision='eligible'
+                      AND inventory.contact_reason_code='PUBLIC_EMAIL_FOUND'
                       AND inventory.verified_public_email_count>=1
                  ) published_count,
                  (
@@ -675,6 +1481,9 @@ export function createRecommendationsQuery(
                       b.recommendation_context_version_id
                     )
                       AND inventory.publication_status<>'PUBLISHED'
+                      AND inventory.visible_pool_generation=(
+                        SELECT visible_pool_generation FROM pool_policy
+                      )
                  ) unpublished_count,
                  (
                    SELECT count(*)::integer
@@ -698,6 +1507,9 @@ export function createRecommendationsQuery(
                       b.website_project_id,b.id
                     )
                       AND inventory.publication_status<>'PUBLISHED'
+                      AND inventory.visible_pool_generation=(
+                        SELECT visible_pool_generation FROM pool_policy
+                      )
                       AND job.status IN (
                         'completed','partially_completed',
                         'no_contact_found','retry_scheduled'
@@ -727,15 +1539,70 @@ export function createRecommendationsQuery(
             FROM backlink_contact_enrichment_batches AS b
            WHERE (b.organization_id,b.workspace_id,b.website_project_id)=
                  ($1,$2,$3)
-             AND b.recommendation_context_version_id=
-                 (SELECT id FROM current_context)
+              AND b.recommendation_context_version_id=
+                  (SELECT id FROM current_context)
+              AND EXISTS (
+                SELECT 1
+                  FROM backlink_contact_enrichment_jobs AS scoped_job
+                  JOIN backlink_recommendation_inventory AS scoped_inventory
+                    ON (
+                      scoped_inventory.organization_id,
+                      scoped_inventory.workspace_id,
+                      scoped_inventory.website_project_id,
+                      scoped_inventory.recommendation_id,
+                      scoped_inventory.recommendation_context_version_id
+                    )=(
+                      scoped_job.organization_id,
+                      scoped_job.workspace_id,
+                      scoped_job.website_project_id,
+                      scoped_job.recommendation_id,
+                      scoped_job.recommendation_context_version_id
+                    )
+                 WHERE (
+                   scoped_job.organization_id,scoped_job.workspace_id,
+                   scoped_job.website_project_id,scoped_job.batch_id
+                 )=(
+                   b.organization_id,b.workspace_id,
+                   b.website_project_id,b.id
+                 )
+                   AND scoped_inventory.visible_pool_generation=(
+                     SELECT visible_pool_generation FROM pool_policy
+                   )
+              )
+           ORDER BY b.started_at DESC,b.id DESC
            LIMIT 1
         )
         SELECT
+          (SELECT id FROM current_context)
+            "recommendationContextVersionId",
+          COALESCE(policy.visible_pool_generation,1)
+            "visiblePoolGeneration",
+          COALESCE(policy.visible_pool_state,'idle')
+            "visiblePoolState",
+          COALESCE(policy.visible_pool_target_count,10)
+            "visiblePoolTargetCount",
+          COALESCE(policy.archived_visible_pool_count,0)
+            "archivedVisiblePoolCount",
+          policy.visible_pool_archived_at "visiblePoolArchivedAt",
+          GREATEST(
+            (SELECT created_at FROM current_context),
+            candidate_counts.latest_updated_at,
+            policy.updated_at,
+            latest_refill_job.updated_at,
+            contact_batch.updated_at
+          ) "serverUpdatedAt",
           COALESCE(candidate_counts.candidate_ready_count,0)
             "candidateReadyCount",
+          COALESCE(candidate_counts.raw_candidate_count,0)
+            "rawCandidateCount",
+          COALESCE(candidate_counts.fit_count,0)
+            "fitCount",
+          COALESCE(publication_counts.contact_count,0)
+            "contactCount",
           COALESCE(publication_counts.published_count,0)
             "publishedContactReadyCount",
+          COALESCE(publication_counts.unpublished_count,0)
+            "unpublishedCount",
           CASE
             WHEN COALESCE(candidate_counts.historical_candidate_count,0)=0
               THEN 0.1
@@ -762,7 +1629,75 @@ export function createRecommendationsQuery(
             candidate_counts.provider_collected_at
           ) "providerCollectedAt",
           policy.pause_reason "pauseReason",
-          running_batch.value "refillInFlight",
+          (
+            running_batch.value
+            OR latest_refill_job.status IN (
+              'queued','running','waiting_provider'
+            )
+          ) "refillInFlight",
+          COALESCE(policy.refill_state,'idle') "refillState",
+          COALESCE(
+            policy.current_refill_tier,
+            'exact_product_target_market'
+          ) "currentRefillTier",
+          COALESCE(policy.current_refill_round,1) "currentRefillRound",
+          policy.paid_refill_tier "paidRefillTier",
+          policy.paid_refill_round "paidRefillRound",
+          policy.resource_refill_tier "resourceRefillTier",
+          policy.resource_refill_round "resourceRefillRound",
+          COALESCE(policy.attempted_refill_tiers,'[]'::jsonb)
+            "attemptedRefillTiers",
+          policy.termination_reason "terminationReason",
+          COALESCE(provider_call_state.value,false) "providerCallOccurred",
+          provider_call_state.actual_cost_micros "providerActualCostMicros",
+          provider_call_state.reserved_cost_micros "providerReservedCostMicros",
+          provider_call_state.paid_call_count "providerPaidCallCount",
+          provider_call_state.unknown_charge_count
+            "providerUnknownChargeCount",
+          provider_call_state.request_fingerprint_count
+            "providerUniqueCallCount",
+          COALESCE(policy.elimination_reason_counts,'{}'::jsonb)
+            "eliminationReasonCounts",
+          CASE WHEN latest_refill_job.id IS NULL THEN NULL
+            ELSE jsonb_build_object(
+              'id',latest_refill_job.id,
+              'operationId',latest_refill_job.refill_id,
+              'workflowId',latest_refill_job.workflow_id,
+              'status',latest_refill_job.status,
+              'step',latest_refill_job.step,
+              'progress',latest_refill_job.progress,
+              'errorCode',COALESCE(
+                latest_refill_job.error->>'code',
+                latest_refill_job.error->>'errorCode'
+              ),
+              'errorMessage',COALESCE(
+                latest_refill_job.error->>'message',
+                latest_refill_job.error->>'detail'
+              ),
+              'failure',CASE
+                WHEN latest_refill_job.error->>'rootCause' IS NULL THEN NULL
+                ELSE jsonb_build_object(
+                  'rootCause',latest_refill_job.error->>'rootCause',
+                  'recovery',latest_refill_job.error->>'recovery',
+                  'providerCallOccurred',COALESCE(
+                    (latest_refill_job.error->>'providerCallOccurred')::boolean,
+                    false
+                  ),
+                  'diagnosticId',latest_refill_job.error->>'diagnosticId',
+                  'message',latest_refill_job.error->>'message'
+                )
+              END,
+              'retryCount',latest_refill_job.retry_count,
+              'lowWatermark',latest_refill_job.low_watermark,
+              'highWatermark',latest_refill_job.high_watermark,
+              'refillWindowKey',latest_refill_job.refill_window_key,
+              'startedAt',latest_refill_job.started_at,
+              'finishedAt',latest_refill_job.finished_at,
+              'createdAt',latest_refill_job.created_at,
+              'updatedAt',latest_refill_job.updated_at,
+              'version',latest_refill_job.version
+            )
+          END "refillJob",
           CASE WHEN contact_batch.id IS NULL THEN NULL
             ELSE jsonb_build_object(
               'id',contact_batch.id,
@@ -771,8 +1706,9 @@ export function createRecommendationsQuery(
               'terminalJobCount',contact_batch.terminal_job_count,
               'publishedCount',contact_batch.published_count,
               'unpublishedCount',contact_batch.unpublished_count,
-              'retryableUnpublishedCount',
-                contact_batch.retryable_unpublished_count,
+               'retryableUnpublishedCount',
+                 contact_batch.retryable_unpublished_count,
+               'nextRetryAt',contact_batch.next_retry_at,
               'reasonCounts',contact_batch.reason_counts,
               'startedAt',contact_batch.started_at,
               'completedAt',contact_batch.completed_at
@@ -781,12 +1717,11 @@ export function createRecommendationsQuery(
         FROM candidate_counts
         CROSS JOIN publication_counts
         CROSS JOIN running_batch
+        CROSS JOIN provider_call_state
         LEFT JOIN latest_blueprint ON true
+        LEFT JOIN latest_refill_job ON true
         LEFT JOIN contact_batch ON true
-        LEFT JOIN backlink_commercial_inventory_policies AS policy
-          ON (policy.organization_id,policy.workspace_id,
-              policy.website_project_id,policy.project_context_version_id)=
-             ($1,$2,$3,(SELECT id FROM current_context))
+        LEFT JOIN pool_policy AS policy ON true
       `, [
         context.tenant.organizationId,
         context.tenant.workspaceId,
@@ -797,8 +1732,160 @@ export function createRecommendationsQuery(
         || row.contactBatch === undefined
         ? null
         : objectValue(row.contactBatch);
+      const persistedRefillJob = row.refillJob === null
+        || row.refillJob === undefined
+        ? null
+        : objectValue(row.refillJob);
+      const attemptedRefillTiers = arrayValue(row.attemptedRefillTiers).map(
+        (value) => {
+          const attempt = objectValue(value);
+          return Object.freeze({
+            tier: String(attempt.tier) as
+              RecommendationInventorySummary["currentRefillTier"],
+            round: Number(attempt.round),
+            window: Number(attempt.window ?? 1),
+          });
+        },
+      );
+      const currentRefillTier = String(
+        row.currentRefillTier ?? "exact_product_target_market",
+      ) as RecommendationInventorySummary["currentRefillTier"];
+      const currentRefillRound = Number(row.currentRefillRound ?? 1);
+      const publishedCount = Number(row.publishedContactReadyCount ?? 0);
+      const targetCount = Number(row.visiblePoolTargetCount ?? 10);
+      const terminationReason = nullableString(row.terminationReason) as
+        RecommendationInventorySummary["terminationReason"];
+      const terminalState = recommendationTerminalState(
+        terminationReason,
+        publishedCount,
+        targetCount,
+      );
+      const refillJob = terminalState === "TARGET_REACHED"
+        ? null
+        : persistedRefillJob;
+      const refillFailure = refillJob?.failure === null
+        || refillJob?.failure === undefined
+        ? null
+        : objectValue(refillJob.failure);
+      const blueprintVersion = row.blueprintVersion === null
+        || row.blueprintVersion === undefined
+        ? null : Number(row.blueprintVersion);
+      const persistedRefillState = String(row.refillState ?? "idle") as
+        RecommendationInventorySummary["refillState"];
+      const refillInFlight = row.refillInFlight === true;
+      const refillState = persistedRefillState === "running" && !refillInFlight
+        ? "idle"
+        : persistedRefillState;
+      const paidRefillTier = nullableString(row.paidRefillTier) as
+        NonNullable<RecommendationInventorySummary["paidCursor"]>["tier"] | null;
+      const paidRefillRound = nullableNumber(row.paidRefillRound);
+      const resourceRefillTier = nullableString(row.resourceRefillTier);
+      const resourceRefillRound = nullableNumber(row.resourceRefillRound);
+      const defaultRecovery = terminalState === "PAUSED_PROVIDER"
+        ? "WAIT_PROVIDER" as const
+        : terminalState === "PAUSED_BUDGET"
+          ? "RESUME_OPERATION" as const
+          : terminalState === "PROJECT_CONTEXT_REQUIRED"
+            ? "COMPLETE_PROJECT_CONTEXT" as const
+            : terminalState === "SUPPLY_FLOOR_REACHED"
+              ? "ACCEPT_SUPPLY_FLOOR" as const
+              : null;
       return Object.freeze({
+        contractVersion: "backlinks.recommendation-operation.v1" as const,
+        runningBuildId,
+        visiblePoolGeneration: Number(row.visiblePoolGeneration ?? 1),
+        visiblePoolState: String(
+          row.visiblePoolState ?? "idle",
+        ) as RecommendationInventorySummary["visiblePoolState"],
+        visiblePoolTargetCount: targetCount,
+        archivedVisiblePoolCount: Number(row.archivedVisiblePoolCount ?? 0),
+        visiblePoolArchivedAt: row.visiblePoolArchivedAt === null
+          || row.visiblePoolArchivedAt === undefined
+          ? null
+          : toIsoString(row.visiblePoolArchivedAt),
+        operationId: nullableString(refillJob?.operationId),
+        jobId: nullableString(refillJob?.id),
+        stage: recommendationStage({
+          terminalState,
+          refillState,
+          refillJob,
+          contactBatch,
+          blueprintVersion,
+        }),
+        terminal: terminalState === "TARGET_REACHED"
+          || terminalState === "PROJECT_CONTEXT_REQUIRED"
+          || terminalState === "SUPPLY_FLOOR_REACHED",
+        terminalState,
+        targetCount,
+        rawCount: Number(row.rawCandidateCount ?? 0),
+        fitCount: Number(row.fitCount ?? 0),
+        contactCount: Number(row.contactCount ?? 0),
+        publishedCount,
+        unpublishedCount: Number(row.unpublishedCount ?? 0),
+        tier: currentRefillTier,
+        round: currentRefillRound,
+        window: cursorWindow(
+          attemptedRefillTiers,
+          currentRefillTier,
+          currentRefillRound,
+        ),
+        paidCursor: paidRefillTier === null || paidRefillRound === null
+          ? null
+          : Object.freeze({
+            tier: paidRefillTier,
+            round: paidRefillRound,
+            window: cursorWindow(
+              attemptedRefillTiers,
+              paidRefillTier,
+              paidRefillRound,
+            ),
+          }),
+        resourceCursor:
+          resourceRefillTier !== "curated_resource_library"
+            || resourceRefillRound === null
+            ? null
+            : Object.freeze({
+              tier: "curated_resource_library" as const,
+              round: resourceRefillRound,
+              window: cursorWindow(
+                attemptedRefillTiers,
+                "curated_resource_library",
+                resourceRefillRound,
+              ),
+            }),
+        nextRetryAt: contactBatch?.nextRetryAt === null
+          || contactBatch?.nextRetryAt === undefined
+          ? row.nextRefillAt === null || row.nextRefillAt === undefined
+            ? null
+            : toIsoString(row.nextRefillAt)
+          : toIsoString(contactBatch.nextRetryAt),
+        errorCode: terminalState === "TARGET_REACHED"
+          ? null
+          : nullableString(refillJob?.errorCode)
+            ?? nullableString(refillFailure?.rootCause)
+            ?? nullableString(row.pauseReason),
+        recoveryAction: terminalState === "TARGET_REACHED"
+          ? null
+          : (
+            nullableString(refillFailure?.recovery) ?? defaultRecovery
+          ) as RecommendationInventorySummary["recoveryAction"],
+        providerCallOccurred: row.providerCallOccurred === true
+          || refillFailure?.providerCallOccurred === true,
+        providerActualCostMicros: Number(row.providerActualCostMicros ?? 0),
+        providerReservedCostMicros: Number(row.providerReservedCostMicros ?? 0),
+        providerPaidCallCount: Number(row.providerPaidCallCount ?? 0),
+        providerUnknownChargeCount:
+          Number(row.providerUnknownChargeCount ?? 0),
+        providerUniqueCallCount:
+          Number(row.providerUniqueCallCount ?? 0),
+        recommendationContextVersionId:
+          nullableString(row.recommendationContextVersionId),
+        serverUpdatedAt: row.serverUpdatedAt === null
+          || row.serverUpdatedAt === undefined
+          ? null
+          : toIsoString(row.serverUpdatedAt),
         candidateReadyCount: Number(row.candidateReadyCount ?? 0),
+        rawCandidateCount: Number(row.rawCandidateCount ?? 0),
         publishedContactReadyCount:
           Number(row.publishedContactReadyCount ?? 0),
         historicalEmailHitRate: Number(row.historicalEmailHitRate ?? 0.1),
@@ -806,9 +1893,7 @@ export function createRecommendationsQuery(
         candidateHighWatermark: Number(row.candidateHighWatermark ?? 40),
         publishedLowWatermark: Number(row.publishedLowWatermark ?? 5),
         publishedHighWatermark: Number(row.publishedHighWatermark ?? 10),
-        blueprintVersion: row.blueprintVersion === null
-          || row.blueprintVersion === undefined
-          ? null : Number(row.blueprintVersion),
+        blueprintVersion,
         blueprintGenerator: nullableString(row.blueprintGenerator) as
           RecommendationInventorySummary["blueprintGenerator"],
         latestRefillAt: row.latestRefillAt === null
@@ -821,7 +1906,56 @@ export function createRecommendationsQuery(
           || row.providerCollectedAt === undefined
           ? null : toIsoString(row.providerCollectedAt),
         pauseReason: nullableString(row.pauseReason),
-        refillInFlight: row.refillInFlight === true,
+        refillInFlight,
+        refillState,
+        currentRefillTier,
+        currentRefillRound,
+        attemptedRefillTiers,
+        terminationReason,
+        eliminationReasonCounts: Object.entries(
+          objectValue(row.eliminationReasonCounts),
+        ).map(([reasonCode, count]) => Object.freeze({
+          reasonCode,
+          count: Number(count),
+        })),
+        refillJob: refillJob === null ? null : Object.freeze({
+          operationId: String(refillJob.operationId),
+          id: String(refillJob.id),
+          workflowId: String(refillJob.workflowId),
+          status: String(refillJob.status) as
+            NonNullable<RecommendationInventorySummary["refillJob"]>["status"],
+          step: nullableString(refillJob.step),
+          progress: Number(refillJob.progress ?? 0),
+          errorCode: nullableString(refillJob.errorCode),
+          errorMessage: nullableString(refillJob.errorMessage),
+          failure: refillJob.failure === null
+            || refillJob.failure === undefined
+            ? null
+            : Object.freeze({
+              rootCause: String(objectValue(refillJob.failure).rootCause),
+              recovery: String(objectValue(refillJob.failure).recovery),
+              providerCallOccurred:
+                objectValue(refillJob.failure).providerCallOccurred === true,
+              diagnosticId:
+                String(objectValue(refillJob.failure).diagnosticId),
+              message: String(objectValue(refillJob.failure).message),
+            }) as RecommendationRefillFailure,
+          retryCount: Number(refillJob.retryCount ?? 0),
+          lowWatermark: Number(refillJob.lowWatermark),
+          highWatermark: Number(refillJob.highWatermark),
+          refillWindowKey: String(refillJob.refillWindowKey),
+          startedAt: refillJob.startedAt === null
+            || refillJob.startedAt === undefined
+            ? null
+            : toIsoString(refillJob.startedAt),
+          finishedAt: refillJob.finishedAt === null
+            || refillJob.finishedAt === undefined
+            ? null
+            : toIsoString(refillJob.finishedAt),
+          createdAt: toIsoString(refillJob.createdAt),
+          updatedAt: toIsoString(refillJob.updatedAt),
+          version: Number(refillJob.version),
+        }),
         contactBatch: contactBatch === null ? null : Object.freeze({
           id: String(contactBatch.id),
           status: contactBatch.status as
@@ -832,6 +1966,10 @@ export function createRecommendationsQuery(
           unpublishedCount: Number(contactBatch.unpublishedCount),
           retryableUnpublishedCount:
             Number(contactBatch.retryableUnpublishedCount),
+          nextRetryAt: contactBatch.nextRetryAt === null
+            || contactBatch.nextRetryAt === undefined
+            ? null
+            : toIsoString(contactBatch.nextRetryAt),
           reasonCounts: arrayValue(contactBatch.reasonCounts).map((value) => {
             const reason = objectValue(value);
             return Object.freeze({

@@ -34,6 +34,15 @@ export type CommercialDiscoveryRequestResult = Readonly<{
   artifact: CommercialDiscoveryArtifact;
 }>;
 
+class ReconciledProviderRequestWithoutResultError extends Error {
+  readonly providerRequestStatus = "failed" as const;
+
+  constructor() {
+    super("DATAFORSEO_RECONCILED_NO_RESULT");
+    this.name = "ReconciledProviderRequestWithoutResultError";
+  }
+}
+
 function hashPayload(value: unknown): string {
   return createHash("sha256")
     .update(JSON.stringify(value), "utf8")
@@ -84,6 +93,146 @@ export class CommercialDiscoveryRequestService {
     sleep?: (milliseconds: number) => Promise<void>;
   }>) {}
 
+  private async persistSuccessfulRequest(input: Readonly<{
+    request: Readonly<{
+      context: ProviderRequestContext;
+      projectContextVersionId: string;
+      call: CommercialDiscoveryCall;
+      actorId: string;
+    }>;
+    requestFingerprint: string;
+    batchRequestId: string;
+    leaseOwnerRequestId: string;
+    expectedStatus: "running" | "unknown_charge";
+    response: Record<string, unknown>;
+  }>): Promise<CommercialDiscoveryRequestResult> {
+    const completedAt = this.dependencies.now();
+    const artifact = normalizeCommercialDiscoveryResponse({
+      call: input.request.call,
+      response: input.response,
+      collectedAt: completedAt.toISOString(),
+    });
+    const freshUntil = new Date(completedAt.getTime() + 7 * 86_400_000);
+    const staleUntil = new Date(completedAt.getTime() + 30 * 86_400_000);
+    const payloadHash = hashPayload(artifact);
+    const budgets = createProviderBudgetRepository(
+      this.dependencies.client,
+      this.dependencies.now,
+    );
+
+    await this.dependencies.client.query("BEGIN");
+    try {
+      await this.dependencies.client.query(
+        `INSERT INTO backlink_commercial_discovery_artifacts (
+           id,organization_id,workspace_id,website_project_id,
+           project_context_version_id,provider,endpoint,request_intent,
+           request_fingerprint,source_type,response_schema_version,
+           normalized_payload,provider_task_ids,collected_at,fresh_until,
+           stale_until,cost_micros,created_by
+         ) VALUES (
+           $1,$2,$3,$4,$5,'dataforseo',$6,'DISCOVERY',$7,$8,$9,$10::jsonb,
+           $11::jsonb,$12,$13,$14,$15,$16
+         )
+         ON CONFLICT (
+           organization_id,workspace_id,website_project_id,
+           request_fingerprint,response_schema_version
+         ) DO UPDATE SET
+           project_context_version_id=EXCLUDED.project_context_version_id,
+           normalized_payload=EXCLUDED.normalized_payload,
+           provider_task_ids=EXCLUDED.provider_task_ids,
+           collected_at=EXCLUDED.collected_at,
+           fresh_until=EXCLUDED.fresh_until,
+           stale_until=EXCLUDED.stale_until,
+           cost_micros=EXCLUDED.cost_micros`,
+        [
+          randomUUID(),
+          input.request.context.organizationId,
+          input.request.context.workspaceId,
+          input.request.context.websiteProjectId,
+          input.request.projectContextVersionId,
+          input.request.call.endpoint,
+          input.requestFingerprint,
+          input.request.call.sourceType,
+          input.request.call.responseSchemaVersion,
+          JSON.stringify(artifact),
+          JSON.stringify(artifact.providerTaskIds),
+          completedAt,
+          freshUntil,
+          staleUntil,
+          artifact.costMicros,
+          input.request.actorId,
+        ],
+      );
+      const completedBatch = await this.dependencies.client.query(
+        `UPDATE provider_batch_requests
+            SET status='succeeded',
+                succeeded_count=CASE
+                  WHEN $2::integer > 0 THEN 1 ELSE 0
+                END,
+                negative_count=CASE
+                  WHEN $2::integer = 0 THEN 1 ELSE 0
+                END,
+                failed_count=0,
+                actual_cost_micros=$3,
+                raw_payload_hash=$4,
+                provider_task_id=$5,
+                result_summary=$6::jsonb,
+                failure_code=NULL,
+                finished_at=$7
+          WHERE id=$1 AND status=$8
+          RETURNING id`,
+        [
+          input.batchRequestId,
+          artifact.candidates.length,
+          artifact.costMicros,
+          payloadHash,
+          artifact.providerTaskIds[0] ?? null,
+          JSON.stringify([{
+            itemKey: input.requestFingerprint,
+            requestFingerprint: input.requestFingerprint,
+            status: artifact.candidates.length === 0 ? "empty" : "success",
+            allocatedCostMicros: artifact.costMicros,
+          }]),
+          completedAt,
+          input.expectedStatus,
+        ],
+      );
+      if (completedBatch.rows[0] === undefined) {
+        throw new Error("DATAFORSEO_PROVIDER_BATCH_STATE_CHANGED");
+      }
+      await budgets.settle({
+        batchRequestId: input.batchRequestId,
+        actualCostMicros: artifact.costMicros,
+        settledAt: completedAt,
+        expectedRequestStatus: input.expectedStatus,
+      });
+      const completedLease = await this.dependencies.client.query(
+        `UPDATE provider_fetch_leases
+            SET status='completed',heartbeat_at=$3,
+                lease_expires_at=$3,failure_code=NULL,updated_at=$3
+          WHERE artifact_fingerprint=$1 AND owner_request_id=$2
+            AND status=$4
+          RETURNING artifact_fingerprint`,
+        [
+          input.requestFingerprint,
+          input.leaseOwnerRequestId,
+          completedAt,
+          input.expectedStatus === "running"
+            ? "acquired"
+            : "unknown_charge",
+        ],
+      );
+      if (completedLease.rows[0] === undefined) {
+        throw new Error("DATAFORSEO_PROVIDER_LEASE_STATE_CHANGED");
+      }
+      await this.dependencies.client.query("COMMIT");
+    } catch (error) {
+      await this.dependencies.client.query("ROLLBACK");
+      throw error;
+    }
+    return Object.freeze({ source: "provider", artifact });
+  }
+
   async execute(input: Readonly<{
     context: ProviderRequestContext;
     projectContextVersionId: string;
@@ -124,6 +273,93 @@ export class CommercialDiscoveryRequestService {
           source: freshUntil > now ? "cache" : "stale-cache",
           artifact: artifactFromRow(cachedRow),
         });
+      }
+    }
+
+    const recoverable = await this.dependencies.client.query(
+      `SELECT id AS "batchRequestId",
+              provider_task_id AS "providerTaskId",
+              request_id AS "leaseOwnerRequestId"
+         FROM provider_batch_requests
+        WHERE organization_id=$1 AND workspace_id=$2
+          AND website_project_id=$3
+          AND normalized_request_hash=$4
+          AND endpoint=$5
+          AND response_schema_version=$6
+          AND status='unknown_charge'
+          AND provider_task_id IS NOT NULL
+        ORDER BY started_at DESC
+        LIMIT 1`,
+      [
+        input.context.organizationId,
+        input.context.workspaceId,
+        input.context.websiteProjectId,
+        requestFingerprint,
+        input.call.endpoint,
+        input.call.responseSchemaVersion,
+      ],
+    );
+    const recoverableRow = recoverable.rows[0];
+    if (recoverableRow !== undefined) {
+      const recoverAcceptedTask =
+        this.dependencies.provider.recoverAcceptedTask;
+      if (recoverAcceptedTask === undefined) {
+        throw new Error("BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED");
+      }
+      const response = await recoverAcceptedTask(
+        input.call,
+        String(recoverableRow.providerTaskId),
+      );
+      return this.persistSuccessfulRequest({
+        request: input,
+        requestFingerprint,
+        batchRequestId: String(recoverableRow.batchRequestId),
+        leaseOwnerRequestId: String(recoverableRow.leaseOwnerRequestId),
+        expectedStatus: "unknown_charge",
+        response,
+      });
+    }
+
+    if (input.refreshMode === "CACHE_PREFERRED") {
+      const reconciledWithoutResult = await this.dependencies.client.query(
+        `SELECT id
+           FROM provider_batch_requests
+          WHERE organization_id=$1 AND workspace_id=$2
+            AND website_project_id=$3
+            AND normalized_request_hash=$4
+            AND endpoint=$5
+            AND response_schema_version=$6
+            AND request_id LIKE $7
+            AND status='failed'
+            AND failure_code=
+              'DATAFORSEO_RECONCILED_ASSUMED_CHARGE_NO_RESULT'
+            AND NOT EXISTS (
+              SELECT 1
+                FROM provider_batch_requests AS unresolved
+               WHERE unresolved.organization_id=$1
+                 AND unresolved.workspace_id=$2
+                 AND unresolved.website_project_id=$3
+                 AND unresolved.normalized_request_hash=$4
+                 AND unresolved.endpoint=$5
+                 AND unresolved.response_schema_version=$6
+                 AND unresolved.request_id LIKE $7
+                 AND unresolved.status='unknown_charge'
+            )
+          ORDER BY started_at DESC
+          LIMIT 1`,
+        [
+          input.context.organizationId,
+          input.context.workspaceId,
+          input.context.websiteProjectId,
+          requestFingerprint,
+          input.call.endpoint,
+          input.call.responseSchemaVersion,
+          `commercial-refill:${input.context.websiteProjectId}:`
+            + `${input.projectContextVersionId}:%`,
+        ],
+      );
+      if (reconciledWithoutResult.rows[0] !== undefined) {
+        throw new ReconciledProviderRequestWithoutResultError();
       }
     }
 
@@ -184,6 +420,11 @@ export class CommercialDiscoveryRequestService {
     }
 
     const batchRequestId = randomUUID();
+    const providerRequestContext = Object.freeze({
+      ...input.context,
+      budgetReservationId:
+        `${input.context.budgetReservationId}:${batchRequestId}`,
+    });
     const budgets = createProviderBudgetRepository(
       this.dependencies.client,
       this.dependencies.now,
@@ -214,14 +455,14 @@ export class CommercialDiscoveryRequestService {
           requestFingerprint,
           input.call.estimatedCostMicros,
           now,
-          input.context.requestId,
-          input.context.budgetReservationId,
+          providerRequestContext.requestId,
+          providerRequestContext.budgetReservationId,
           input.actorId,
         ],
       );
       await budgets.recordRequest({
         batchRequestId,
-        context: input.context,
+        context: providerRequestContext,
         endpoint: input.call.endpoint,
         requestFingerprint,
         requestSchemaVersion: 1,
@@ -243,113 +484,32 @@ export class CommercialDiscoveryRequestService {
 
     try {
       await this.dependencies.gate.authorize({
-        context: input.context,
+        context: providerRequestContext,
         requestFingerprint,
         estimatedCostMicros: input.call.estimatedCostMicros,
       });
-      const response = await this.dependencies.provider.execute(input.call);
-      const completedAt = this.dependencies.now();
-      const artifact = normalizeCommercialDiscoveryResponse({
-        call: input.call,
-        response,
-        collectedAt: completedAt.toISOString(),
+      const response = await this.dependencies.provider.execute(input.call, {
+        onProviderTaskAccepted: async (providerTaskId) => {
+          const stored = await this.dependencies.client.query(
+            `UPDATE provider_batch_requests
+                SET provider_task_id=$2
+              WHERE id=$1 AND status='running'
+              RETURNING id`,
+            [batchRequestId, providerTaskId],
+          );
+          if (stored.rows[0] === undefined) {
+            throw new Error("DATAFORSEO_PROVIDER_TASK_PERSISTENCE_FAILED");
+          }
+        },
       });
-      const freshUntil = new Date(completedAt.getTime() + 7 * 86_400_000);
-      const staleUntil = new Date(completedAt.getTime() + 30 * 86_400_000);
-      const payloadHash = hashPayload(artifact);
-
-      await this.dependencies.client.query("BEGIN");
-      try {
-        await this.dependencies.client.query(
-          `INSERT INTO backlink_commercial_discovery_artifacts (
-             id,organization_id,workspace_id,website_project_id,
-             project_context_version_id,provider,endpoint,request_intent,
-             request_fingerprint,source_type,response_schema_version,
-             normalized_payload,provider_task_ids,collected_at,fresh_until,
-             stale_until,cost_micros,created_by
-           ) VALUES (
-             $1,$2,$3,$4,$5,'dataforseo',$6,'DISCOVERY',$7,$8,$9,$10::jsonb,
-             $11::jsonb,$12,$13,$14,$15,$16
-           )
-           ON CONFLICT (
-             organization_id,workspace_id,website_project_id,
-             request_fingerprint,response_schema_version
-           ) DO UPDATE SET
-             project_context_version_id=EXCLUDED.project_context_version_id,
-             normalized_payload=EXCLUDED.normalized_payload,
-             provider_task_ids=EXCLUDED.provider_task_ids,
-             collected_at=EXCLUDED.collected_at,
-             fresh_until=EXCLUDED.fresh_until,
-             stale_until=EXCLUDED.stale_until,
-             cost_micros=EXCLUDED.cost_micros`,
-          [
-            randomUUID(),
-            input.context.organizationId,
-            input.context.workspaceId,
-            input.context.websiteProjectId,
-            input.projectContextVersionId,
-            input.call.endpoint,
-            requestFingerprint,
-            input.call.sourceType,
-            input.call.responseSchemaVersion,
-            JSON.stringify(artifact),
-            JSON.stringify(artifact.providerTaskIds),
-            completedAt,
-            freshUntil,
-            staleUntil,
-            artifact.costMicros,
-            input.actorId,
-          ],
-        );
-        await this.dependencies.client.query(
-          `UPDATE provider_batch_requests
-              SET status='succeeded',
-                  succeeded_count=CASE
-                    WHEN $2::integer > 0 THEN 1 ELSE 0
-                  END,
-                  negative_count=CASE
-                    WHEN $2::integer = 0 THEN 1 ELSE 0
-                  END,
-                  actual_cost_micros=$3,
-                  raw_payload_hash=$4,
-                  provider_task_id=$5,
-                  result_summary=$6::jsonb,
-                  finished_at=$7
-            WHERE id=$1 AND status='running'`,
-          [
-            batchRequestId,
-            artifact.candidates.length,
-            artifact.costMicros,
-            payloadHash,
-            artifact.providerTaskIds[0] ?? null,
-            JSON.stringify([{
-              itemKey: requestFingerprint,
-              requestFingerprint,
-              status: artifact.candidates.length === 0 ? "empty" : "success",
-              allocatedCostMicros: artifact.costMicros,
-            }]),
-            completedAt,
-          ],
-        );
-        await budgets.settle({
-          batchRequestId,
-          actualCostMicros: artifact.costMicros,
-          settledAt: completedAt,
-        });
-        await this.dependencies.client.query(
-          `UPDATE provider_fetch_leases
-              SET status='completed',heartbeat_at=$3,
-                  lease_expires_at=$3,updated_at=$3
-            WHERE artifact_fingerprint=$1 AND owner_request_id=$2
-              AND status='acquired'`,
-          [requestFingerprint, input.context.requestId, completedAt],
-        );
-        await this.dependencies.client.query("COMMIT");
-      } catch (error) {
-        await this.dependencies.client.query("ROLLBACK");
-        throw error;
-      }
-      return Object.freeze({ source: "provider", artifact });
+      return this.persistSuccessfulRequest({
+        request: input,
+        requestFingerprint,
+        batchRequestId,
+        leaseOwnerRequestId: input.context.requestId,
+        expectedStatus: "running",
+        response,
+      });
     } catch (error) {
       const failedAt = this.dependencies.now();
       const failure = providerFailure(error);

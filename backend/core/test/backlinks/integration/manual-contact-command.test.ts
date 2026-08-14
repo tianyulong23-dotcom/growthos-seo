@@ -95,6 +95,24 @@ describe("LP-FINAL Opportunity manual Contact command", () => {
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
     await client.query(await readFile(roles, "utf8"));
+    await client.query(`
+      SET ROLE growthos_platform_owner;
+      SET search_path = platform, pg_catalog;
+      CREATE FUNCTION backlink_list_active_website_projects(text, text)
+      RETURNS TABLE (website_project_id text, context_version integer)
+      LANGUAGE sql STABLE SECURITY DEFINER
+      SET search_path = platform, pg_catalog
+      AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
+      REVOKE ALL
+        ON FUNCTION backlink_list_active_website_projects(text, text)
+        FROM PUBLIC;
+      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
+      GRANT EXECUTE
+        ON FUNCTION backlink_list_active_website_projects(text, text)
+        TO growthos_backlinks_owner;
+      RESET ROLE;
+      RESET search_path;
+    `);
 
     const manifest = JSON.parse(
       await readFile(manifestUrl, "utf8"),

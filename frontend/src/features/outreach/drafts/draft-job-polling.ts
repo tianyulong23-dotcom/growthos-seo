@@ -1,7 +1,13 @@
 export type DraftJobPollSnapshot = Readonly<{
   id: string
   draftId: string
-  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "REFUSED"
+  status:
+    | "QUEUED"
+    | "RUNNING"
+    | "RETRY_SCHEDULED"
+    | "SUCCEEDED"
+    | "FAILED"
+    | "REFUSED"
   deadlineAt: string
 }>
 

@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react"
 import {
   BrowserRouter,
   Navigate,
@@ -15,6 +16,41 @@ import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-s
 import { OverviewPage } from "@/pages/overview-page"
 import { PerformancePage } from "@/pages/performance-page"
 import { SettingsPage } from "@/pages/settings-page"
+import { getRuntimeStatus } from "@/runtime-status"
+
+function RuntimeAvailabilityBanner() {
+  const [available, setAvailable] = useState<boolean | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      const runtime = await getRuntimeStatus()
+      setAvailable(runtime.business_consumers_running)
+    } catch {
+      setAvailable(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const initialCheck = window.setTimeout(() => void refresh(), 0)
+    const poller = window.setInterval(() => void refresh(), 5_000)
+    return () => {
+      window.clearTimeout(initialCheck)
+      window.clearInterval(poller)
+    }
+  }, [refresh])
+
+  if (available !== false) return null
+  return (
+    <OutreachStandardStateView
+      state="offline"
+      compact
+      title="后台任务处理已暂停"
+      description="读取、草稿人工批准和发送前检查仍可用；新建项目、后台任务和实际发送暂不可用。"
+      retryLabel="重新检查"
+      onRetry={() => void refresh()}
+    />
+  )
+}
 
 function ProjectRedirect() {
   const { defaultProject, loading, error } = useCurrentProject()
@@ -96,6 +132,7 @@ function AppRoutes() {
 export function App() {
   return (
     <BrowserRouter>
+      <RuntimeAvailabilityBanner />
       <CurrentProjectProvider>
         <AppRoutes />
       </CurrentProjectProvider>

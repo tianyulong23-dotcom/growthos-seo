@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildLocalProductDataForSeoEnvironment,
+  localProductDataForSeoEndpoints,
   localProductDataForSeoBootstrapInputSchema,
   updateLocalProductDataForSeoManifest,
 } from "../../src/modules/backlinks/runtime/local-product-dataforseo-bootstrap.js";
@@ -12,10 +13,7 @@ const input = {
   websiteProjectKey: "elephtv",
   credentialSecretRef:
     "secret://growthos/local-product/dataforseo/provider-credential/v7",
-  endpointAllowlist: [
-    "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
-    "https://api.dataforseo.com/v3/backlinks/summary/live",
-  ],
+  endpointAllowlist: [...localProductDataForSeoEndpoints],
   timeoutMs: 60_000,
   estimatedCostMicros: 1_000,
   absoluteBudgetMicros: 5_000,
@@ -23,7 +21,6 @@ const input = {
   candidateLimit: 25,
   locationCode: "2840",
   languageCode: "en",
-  discoveryTargets: ["competitor.example", "publisher.example"],
   keywords: ["video streaming", "creator monetization"],
   products: ["streaming platform"],
   targetUrls: ["https://elephtv.com/"],
@@ -45,14 +42,12 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
       DATAFORSEO_CREDENTIAL_SECRET_REF:
         "secret://growthos/local-product/dataforseo/provider-credential/v7",
       DATAFORSEO_ENDPOINT_ALLOWLIST:
-        '["https://api.dataforseo.com/v3/backlinks/referring_domains/live","https://api.dataforseo.com/v3/backlinks/summary/live"]',
+        JSON.stringify(localProductDataForSeoEndpoints),
       DATAFORSEO_REQUEST_TIMEOUT_MS: "60000",
       DATAFORSEO_ESTIMATED_COST_MICROS: "1000",
       DATAFORSEO_ABSOLUTE_BUDGET_MICROS: "5000",
       DATAFORSEO_MAX_PAID_CALLS: "25",
       DATAFORSEO_CANDIDATE_LIMIT: "25",
-      DATAFORSEO_DISCOVERY_TARGETS_JSON:
-        '["competitor.example","publisher.example"]',
     });
     expect(JSON.stringify(environment)).not.toContain(input.login);
     expect(JSON.stringify(environment)).not.toContain(input.password);
@@ -68,10 +63,7 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
       runtime: { websiteProjectKey: "elephtv" },
       dataForSeo: {
         provider: "dataforseo",
-        endpointAllowlist: [
-          "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
-          "https://api.dataforseo.com/v3/backlinks/summary/live",
-        ],
+        endpointAllowlist: [...localProductDataForSeoEndpoints],
         credentialSecretRef:
           "secret://growthos/local-product/dataforseo/provider-credential/v7",
         maxCalls: 25,
@@ -85,6 +77,14 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
   });
 
   it("rejects cross-project, unsafe endpoint, excess calls, and fake inputs", () => {
+    expect(() => localProductDataForSeoBootstrapInputSchema.parse({
+      ...input,
+      timeoutMs: 300_000,
+    })).not.toThrow();
+    expect(() => localProductDataForSeoBootstrapInputSchema.parse({
+      ...input,
+      timeoutMs: 300_001,
+    })).toThrow();
     expect(() => localProductDataForSeoBootstrapInputSchema.parse({
       ...input,
       websiteProjectKey: "other-project",
@@ -108,10 +108,6 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
       ...input,
       credentialSecretRef:
         "secret://growthos/local-product/google/provider-credential/v1",
-    })).toThrow();
-    expect(() => localProductDataForSeoBootstrapInputSchema.parse({
-      ...input,
-      discoveryTargets: ["example.invalid"],
     })).toThrow();
     expect(() => localProductDataForSeoBootstrapInputSchema.parse({
       ...input,

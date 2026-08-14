@@ -26,6 +26,7 @@ export function decideCommercialInventoryRefill(input: Readonly<{
   publishedContactReadyCount: number;
   historicalVerifiedEmailCount: number;
   historicalCandidateCount: number;
+  refillCycleActive?: boolean | undefined;
   inflight: boolean;
   cooldownActive: boolean;
   budgetAvailable: boolean;
@@ -55,28 +56,26 @@ export function decideCommercialInventoryRefill(input: Readonly<{
     policy.maximumEmailHitRate,
     Math.max(policy.minimumEmailHitRate, observedRate),
   );
-  const candidateDeficit = Math.max(
-    0,
-    policy.candidateHighWatermark - input.candidateReadyCount,
-  );
   const publishedDeficit = Math.max(
     0,
     policy.publishedHighWatermark - input.publishedContactReadyCount,
   );
   const publishedOverfetch = Math.ceil(publishedDeficit / effectiveEmailHitRate);
   const inventoryLow =
-    input.candidateReadyCount < policy.candidateLowWatermark
-    || input.publishedContactReadyCount < policy.publishedLowWatermark;
+    input.publishedContactReadyCount < policy.publishedLowWatermark;
+  const refillCycleActive = input.refillCycleActive === true
+    && input.publishedContactReadyCount < policy.publishedHighWatermark;
+  const refillNeeded = inventoryLow || refillCycleActive;
   const pauseReason = input.inflight
     ? "inflight" as const
-    : input.cooldownActive
+    : input.cooldownActive && !refillCycleActive
       ? "cooldown" as const
       : !input.budgetAvailable ? "budget" as const : null;
 
   return Object.freeze({
-    shouldRefill: inventoryLow && pauseReason === null,
-    requestedCandidateCount: inventoryLow
-      ? Math.max(candidateDeficit, publishedOverfetch)
+    shouldRefill: refillNeeded && pauseReason === null,
+    requestedCandidateCount: refillNeeded
+      ? publishedOverfetch
       : 0,
     effectiveEmailHitRate,
     pauseReason,

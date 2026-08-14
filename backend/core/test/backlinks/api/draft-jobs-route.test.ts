@@ -21,11 +21,23 @@ import type {
 
 const opportunityId = "018f0000-0000-7000-8000-000000000095";
 const snapshotId = "018f0000-0000-7000-8000-000000000195";
+const requestSnapshotId = "018f0000-0000-7000-8000-000000000196";
 const runId = "018f0000-0000-7000-8000-000000000295";
 const draftId = "018f0000-0000-7000-8000-000000000395";
 const contactId = "018f0000-0000-7000-8000-000000000495";
 const contactVersion = 2;
 const queuedAt = new Date("2026-07-27T09:00:00.000Z");
+const generationRequest = {
+  cooperationType: "GENERAL_PARTNERSHIP",
+  linkAttributePreference: "NOT_SPECIFIED",
+  promotionTargetUrl: "https://example.com/product",
+  anchorTextSuggestion: null,
+  language: "en-US",
+  tone: "NEUTRAL_BUSINESS",
+  subjectStyle: "CLEAR_DIRECT",
+  additionalRequirements: "",
+  forbiddenPhrases: [],
+} as const;
 const member = createActorContext({
   userId: "user-95",
   sessionId: "session-95",
@@ -55,9 +67,12 @@ describe("BL-AI-095 Draft Job API", () => {
       job: DraftGenerationJob;
     }>();
     let budgetAvailable = true;
+    let modelProviderAvailable = true;
+    let preparedSnapshotCount = 0;
     const repository = {
       async prepareEvidenceSnapshot() {
-        return { snapshotId, replayed: false };
+        preparedSnapshotCount += 1;
+        return { snapshotId, requestSnapshotId, replayed: false };
       },
       async createJob(input: CreateDraftGenerationJobInput) {
         const prior = idempotency.get(input.idempotencyKey);
@@ -76,6 +91,9 @@ describe("BL-AI-095 Draft Job API", () => {
           contactId: input.contactId,
           contactVersion: input.contactVersion,
           evidenceSnapshotId: input.evidenceSnapshotId,
+          requestSnapshotId: input.requestSnapshotId,
+          request: generationRequest,
+          generator: null,
           promptVersion: input.promptVersion,
           outputSchemaVersion: input.outputSchemaVersion,
           baseDraftVersion: 1,
@@ -128,6 +146,9 @@ describe("BL-AI-095 Draft Job API", () => {
       async failJob() {
         throw new Error("not used");
       },
+      async scheduleRetry() {
+        throw new Error("not used");
+      },
     };
     const commands = createDraftCommands({
       repository,
@@ -139,13 +160,20 @@ describe("BL-AI-095 Draft Job API", () => {
         },
       },
       newId: (() => {
-        const values = [snapshotId, draftId, runId];
+        const values = [
+          snapshotId,
+          requestSnapshotId,
+          draftId,
+          runId,
+          "018f0000-0000-7000-8000-000000000595",
+        ];
         return () => values.shift() ?? "018f0000-0000-7000-8000-999999999999";
       })(),
       now: () => new Date("2026-07-27T09:00:00.000Z"),
       promptVersion: "draft-prompt.v1",
       outputSchemaVersion: "draft-output.v1",
       generationMode: "MODEL",
+      modelProviderAvailable: () => modelProviderAvailable,
       scheduler: {
         async start(input) {
           return { workflowId: `draft-generation:${input.runId}` };
@@ -194,6 +222,7 @@ describe("BL-AI-095 Draft Job API", () => {
           contactId,
           contactVersion,
           logicalDraftKey,
+          request: generationRequest,
         },
       });
     const created = await create("draft-request-95", "initial-outreach");
@@ -205,6 +234,7 @@ describe("BL-AI-095 Draft Job API", () => {
       contactId,
       contactVersion,
       evidenceSnapshotId: snapshotId,
+      requestSnapshotId,
       workflowId: `draft-generation:${runId}`,
       generationMode: "MODEL",
       replayed: false,
@@ -227,6 +257,23 @@ describe("BL-AI-095 Draft Job API", () => {
       "viewer",
     )).statusCode).toBe(403);
 
+    const preparedBeforeMisconfigured = preparedSnapshotCount;
+    modelProviderAvailable = false;
+    const misconfigured = await create(
+      "misconfigured-request-95",
+      "misconfigured-outreach",
+    );
+    expect(misconfigured.statusCode).toBe(400);
+    expect(misconfigured.json()).toMatchObject({
+      code: "BACKLINK_INVALID_REQUEST",
+      message: "MISCONFIGURED: AI Draft Provider is not configured.",
+      fieldErrors: [{
+        field: "AI_PROVIDER_ENABLED",
+      }],
+    });
+    expect(preparedSnapshotCount).toBe(preparedBeforeMisconfigured);
+    modelProviderAvailable = true;
+
     budgetAvailable = false;
     expect((await create(
       "budget-request-95",
@@ -246,11 +293,14 @@ describe("BL-AI-095 Draft Job API", () => {
         status: "QUEUED",
         contactId,
         contactVersion,
+        requestSnapshotId,
+        request: generationRequest,
+        generator: null,
         lastSuccessfulVersionId: null,
         queuedAt: "2026-07-27T09:00:00.000Z",
         startedAt: null,
         finishedAt: null,
-        deadlineAt: "2026-07-27T09:02:00.000Z",
+        deadlineAt: "2026-07-27T09:01:00.000Z",
         queueWaitMs: null,
         latencyMs: null,
         persistenceLatencyMs: null,

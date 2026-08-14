@@ -20,6 +20,7 @@ export const aiDraftEvidenceSchema = z.object({
     "OPPORTUNITY",
     "CONTACT",
     "ASSESSMENT",
+    "USER_INPUT",
   ]),
   value: nonBlank,
 }).strict();
@@ -40,11 +41,10 @@ export const aiDraftInputSchema = z.object({
 export const aiDraftOutputSchema = z.object({
   subject: nonBlank,
   bodyText: nonBlank,
-  personalizationClaims: z.array(z.object({
-    text: nonBlank,
+  factsUsed: z.array(z.object({
+    claim: nonBlank,
     evidenceIds: z.array(nonBlank).min(1).readonly(),
   }).strict()).readonly(),
-  missingInformation: z.array(nonBlank).readonly(),
   riskFlags: z.array(nonBlank).readonly(),
   requiresUserConfirmation: z.literal(true),
   canAutoSend: z.literal(false),

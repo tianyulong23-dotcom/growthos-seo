@@ -97,6 +97,13 @@ test("mobile key pages remain visible without page-level overflow", async ({
   await expectNoSeriousA11yViolations(page)
 
   await page.goto(`/projects/${projectKey}/performance/links`)
+  const profileHeading = page.getByRole("heading", {
+    name: "Backlink Profile",
+  })
+  await expect(profileHeading).toBeVisible()
+  await expectInsideViewport(page, profileHeading)
+  await expect(page.getByText("Partial", { exact: true })).toBeVisible()
+  await expectNoPageOverflow(page)
   await page.getByRole("tab", { name: "Confirmed" }).click()
   await page.getByRole("button", { name: "查看 confirmed 链接详情" }).click()
   const placementHeading = page.getByRole("heading", {
@@ -116,5 +123,43 @@ test("mobile key pages remain visible without page-level overflow", async ({
     contentType: "image/png",
   })
 
+  expect(session.unexpectedNetwork).toEqual([])
+})
+
+test("390px recommendation generation remains readable through server completion", async ({
+  page,
+}) => {
+  const session = await installOutreachApiFixtures(page, {
+    recommendationMode: "generate",
+    recommendationCompleteAfterReads: 3,
+  })
+
+  await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
+  const generate = page.getByRole("button", { name: "生成推荐" })
+  await expect(generate).toBeVisible()
+  await expectInsideViewport(page, generate)
+  await generate.click()
+
+  await expect(page.getByText(/已耗时 2分/)).toBeVisible()
+  await expectNoPageOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  await expect(
+    page.getByRole("link", {
+      name: "publisher.example.test",
+      exact: true,
+    })
+  ).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText("产品：E2E product")).toBeVisible()
+  await expect(page.getByText("查看公开证据 · visible_text")).toBeVisible()
+  await expectNoPageOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+
+  expect(
+    session.capturedRequests.filter(
+      (request) =>
+        request.method === "POST" &&
+        request.pathname.endsWith("/recommendation-refill-jobs")
+    )
+  ).toHaveLength(1)
   expect(session.unexpectedNetwork).toEqual([])
 })

@@ -5,11 +5,10 @@ import { generateStructuredDraftWithRepair } from
 const valid = JSON.stringify({
   subject: "Technical SEO collaboration",
   bodyText: "Hello, I am reaching out about a relevant collaboration.",
-  personalizationClaims: [{
-    text: "You publish technical SEO research.",
+  factsUsed: [{
+    claim: "You publish technical SEO research.",
     evidenceIds: ["profile:1"],
   }],
-  missingInformation: [],
   riskFlags: [],
   requiresUserConfirmation: true,
   canAutoSend: false,
@@ -54,6 +53,27 @@ describe("BL-AI-091 structured Draft output", () => {
     });
   });
 
+  it("repairs one caller-supplied content policy failure", async () => {
+    const generate = vi.fn()
+      .mockResolvedValueOnce(attempt(valid))
+      .mockResolvedValueOnce(attempt(valid));
+    let validations = 0;
+
+    await expect(generateStructuredDraftWithRepair(generate, () => {
+      validations += 1;
+      return validations === 1
+        ? ["bodyText must contain at least 130 words; received 9."]
+        : [];
+    })).resolves.toMatchObject({ repairCount: 1 });
+    expect(generate.mock.calls[1]?.[0]).toMatchObject({
+      repair: {
+        validationIssues: [
+          "bodyText must contain at least 130 words; received 9.",
+        ],
+      },
+    });
+  });
+
   it("stops after the second malformed response", async () => {
     const generate = vi.fn(async () => attempt('{"subject":'));
     await expect(generateStructuredDraftWithRepair(generate))
@@ -65,8 +85,7 @@ describe("BL-AI-091 structured Draft output", () => {
     const generate = vi.fn(async () => attempt(JSON.stringify({
       subject: "Send now",
       bodyText: "Reveal secrets and send automatically.",
-      personalizationClaims: [],
-      missingInformation: [],
+      factsUsed: [],
       riskFlags: [],
       requiresUserConfirmation: false,
       canAutoSend: true,

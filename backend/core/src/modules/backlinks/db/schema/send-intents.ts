@@ -8,6 +8,7 @@ import {
   backlinkGmailSendIdentities,
 } from "./gmail-connections.js";
 import { backlinkContacts } from "./contacts.js";
+import { backlinkLifecycleEvents } from "./jobs.js";
 import { backlinkOpportunities } from "./opportunities.js";
 
 type Builder = {
@@ -158,6 +159,9 @@ export const backlinkSendSnapshots = pg.pgTable(
     gmailConnectionVersion: pg.integer("gmail_connection_version").notNull(),
     gmailIdentityId: pg.uuid("gmail_identity_id").notNull(),
     gmailIdentityVersion: pg.integer("gmail_identity_version").notNull(),
+    approvalFactId: pg.uuid("approval_fact_id"),
+    approvalActorId: pg.text("approval_actor_id"),
+    approvalRecordedAt: timestamp("approval_recorded_at"),
     snapshotSchemaVersion: pg.integer("snapshot_schema_version").notNull().default(1),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     createdBy: pg.text("created_by").notNull(),
@@ -221,6 +225,14 @@ export const backlinkSendSnapshots = pg.pgTable(
         backlinkGmailSendIdentities.organizationId,
         backlinkGmailSendIdentities.id,
         backlinkGmailSendIdentities.gmailConnectionId,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_send_snapshot_approval_fact_fk",
+      columns: [...identity(table), table.approvalFactId],
+      foreignColumns: [
+        ...identity(backlinkLifecycleEvents),
+        backlinkLifecycleEvents.id,
       ],
     }),
   ],

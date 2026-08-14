@@ -13,21 +13,15 @@ export const localProductDataForSeoEndpoints = Object.freeze([
   "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
   "https://api.dataforseo.com/v3/backlinks/competitors/live",
   "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
+  "https://api.dataforseo.com/v3/backlinks/summary/live",
+  "https://api.dataforseo.com/v3/backlinks/backlinks/live",
 ] as const);
 export const localProductDataForSeoEndpoint =
-  localProductDataForSeoEndpoints.at(-1) as string;
+  "https://api.dataforseo.com/v3/backlinks/referring_domains/live";
+export const localProductDataForSeoMaximumTimeoutMs = 300_000;
 const maximumBudgetMicros = 100_000_000;
 const projectKeySchema = z.string().trim().min(1).max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
-const domainSchema = z.string().trim().toLowerCase()
-  .regex(
-    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u,
-  )
-  .refine(
-    (value) =>
-      value !== "example.invalid" && !value.endsWith(".example.invalid"),
-    "Demo domains are forbidden.",
-  );
 const nonBlankList = z.array(z.string().trim().min(1).max(512))
   .min(1)
   .max(100);
@@ -101,7 +95,8 @@ export const localProductDataForSeoBootstrapInputSchema = z.object({
   credentialSecretRef: localProductDataForSeoCredentialReferenceSchema
     .default(localProductDataForSeoCredentialReference),
   endpointAllowlist: localProductDataForSeoEndpointAllowlistSchema,
-  timeoutMs: z.coerce.number().int().positive().max(120_000),
+  timeoutMs: z.coerce.number().int().positive()
+    .max(localProductDataForSeoMaximumTimeoutMs),
   estimatedCostMicros: z.coerce.number().int().positive()
     .max(maximumBudgetMicros),
   absoluteBudgetMicros: z.coerce.number().int().positive()
@@ -110,7 +105,6 @@ export const localProductDataForSeoBootstrapInputSchema = z.object({
   candidateLimit: z.coerce.number().int().min(10).max(100),
   locationCode: z.string().trim().min(1).max(64),
   languageCode: z.string().trim().min(1).max(32),
-  discoveryTargets: z.array(domainSchema).min(1).max(100),
   keywords: nonBlankList,
   products: nonBlankList,
   targetUrls: z.array(targetUrlSchema).min(1).max(100),
@@ -146,7 +140,6 @@ export const localProductDataForSeoEnvironmentNames = Object.freeze([
   "DATAFORSEO_CANDIDATE_LIMIT",
   "DATAFORSEO_LOCATION_CODE",
   "DATAFORSEO_LANGUAGE_CODE",
-  "DATAFORSEO_DISCOVERY_TARGETS_JSON",
   "DATAFORSEO_PROJECT_KEYWORDS_JSON",
   "DATAFORSEO_PROJECT_PRODUCTS_JSON",
   "DATAFORSEO_TARGET_URLS_JSON",
@@ -169,8 +162,6 @@ export function buildLocalProductDataForSeoEnvironment(
     DATAFORSEO_CANDIDATE_LIMIT: String(input.candidateLimit),
     DATAFORSEO_LOCATION_CODE: input.locationCode,
     DATAFORSEO_LANGUAGE_CODE: input.languageCode,
-    DATAFORSEO_DISCOVERY_TARGETS_JSON:
-      JSON.stringify(input.discoveryTargets),
     DATAFORSEO_PROJECT_KEYWORDS_JSON: JSON.stringify(input.keywords),
     DATAFORSEO_PROJECT_PRODUCTS_JSON: JSON.stringify(input.products),
     DATAFORSEO_TARGET_URLS_JSON: JSON.stringify(input.targetUrls),

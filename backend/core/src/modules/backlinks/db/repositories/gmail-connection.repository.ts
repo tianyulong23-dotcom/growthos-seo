@@ -75,6 +75,7 @@ const viewFromRow = (row: Record<string, unknown>): GmailConnectionView => {
   const sendAvailability = row.sendAvailability;
   const mailSyncCapability = row.mailSyncCapability;
   const recentErrorCategory = row.recentErrorCategory;
+  const affectedProjectCount = row.affectedProjectCount ?? 0;
   if (
     typeof connectionId !== "string" ||
     typeof version !== "number" ||
@@ -90,6 +91,9 @@ const viewFromRow = (row: Record<string, unknown>): GmailConnectionView => {
     ].includes(String(connectionStatus)) ||
     !["AVAILABLE", "PAUSED"].includes(String(sendAvailability)) ||
     typeof mailSyncCapability !== "boolean" ||
+    typeof affectedProjectCount !== "number" ||
+    !Number.isInteger(affectedProjectCount) ||
+    affectedProjectCount < 0 ||
     (recentErrorCategory !== null && typeof recentErrorCategory !== "string")
   ) {
     throw new TypeError("Gmail persistence returned an invalid connection.");
@@ -108,6 +112,7 @@ const viewFromRow = (row: Record<string, unknown>): GmailConnectionView => {
     mailSyncCapability,
     tokenExpiresAt: asIso(row.tokenExpiresAt),
     connectedAt: asIso(row.connectedAt),
+    affectedProjectCount,
     recentErrorCategory,
   };
 };
@@ -454,6 +459,10 @@ export class PostgresqlGmailConnectionRepository
       async (transaction) => {
         const result = await transaction.query(
           `SELECT ${selectView},
+                  backlinks.backlink_count_selected_gmail_projects(
+                    connection.organization_id,
+                    connection.id
+                  ) AS "affectedProjectCount",
                   COALESCE(project_binding.is_selected, false) AS "isSelected"
              FROM backlinks.backlink_gmail_connections AS connection
              JOIN backlinks.backlink_gmail_workspace_bindings AS binding

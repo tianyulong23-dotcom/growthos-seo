@@ -8,7 +8,7 @@
     "node": "24.14.1"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsx scripts/local-product-build-identity.ts write",
     "start:api": "node dist/index.js api",
     "start:worker": "node dist/index.js worker",
     "typecheck": "tsc --noEmit",
@@ -19,10 +19,14 @@
     "sbom:backlinks": "tsx scripts/build-backlinks-sbom.ts",
     "openapi:backlinks:check": "tsx scripts/check-backlinks-openapi.ts",
     "migration:backlinks:check": "tsx scripts/check-backlinks-migrations.ts",
+    "local-product:build-identity:check": "tsx scripts/local-product-build-identity.ts check",
     "live:google-oauth:import": "tsx scripts/import-local-product-google-oauth-credentials.ts",
     "local-product:ai:import": "tsx scripts/import-local-product-ai-credential.ts",
     "local-product:dataforseo:import": "tsx scripts/import-local-product-dataforseo-credential.ts",
+    "local-product:resource-library:import": "tsx scripts/import-resource-library.ts",
     "local-product:commercial-gold-set": "tsx scripts/run-commercial-gold-set.ts",
+    "local-product:recommendation-refill:reconcile": "tsx scripts/reconcile-recommendation-refill-orphans.ts",
+    "local-product:recommendation:v3-reassess": "tsx scripts/reassess-historical-commercial-candidates.ts",
     "test:backlinks:unit": "vitest run test/unit",
     "test:backlinks:api": "vitest run test/backlinks/api",
     "test:backlinks:contract": "vitest run test/contract",

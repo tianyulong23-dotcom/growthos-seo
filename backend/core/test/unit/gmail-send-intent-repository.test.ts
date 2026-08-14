@@ -44,9 +44,29 @@ const persistedIntent = {
   version: 1,
   requestedSendAt: input.requestedSendAt,
 };
+const defaultDraft = {
+  opportunityId: "018f0000-0000-7000-8000-000000000614",
+  opportunityVersion: 2,
+  prospectId: "018f0000-0000-7000-8000-000000000615",
+  recommendationContextVersionId:
+    "018f0000-0000-7000-8000-000000000616",
+  status: "approved",
+  currentVersionId: input.approvedDraftVersionId,
+  approvedVersionId: input.approvedDraftVersionId,
+  draftContactId: input.contactId,
+  draftContactVersion: input.contactVersion,
+  versionContactId: input.contactId,
+  versionContactVersion: input.contactVersion,
+  draftVersionNo: 1,
+  draftSource: "MODEL",
+  subjectText: "A relevant collaboration idea",
+  bodyText: "Hello, this is an approved draft.",
+  bodyDocument: null,
+};
 
 type FakePoolOptions = Readonly<{
   draft?: Record<string, unknown>;
+  approvalFact?: Record<string, unknown>;
   bindingAvailable?: boolean;
   failOutbox?: boolean;
   failReservation?: boolean;
@@ -91,27 +111,17 @@ const createFakePool = (options: FakePoolOptions = {}) => {
           }
           if (sql.includes("FROM backlinks.backlink_email_drafts")) {
             return result(options.draft === undefined
-              ? [{
-                  opportunityId:
-                    "018f0000-0000-7000-8000-000000000614",
-                  opportunityVersion: 2,
-                  prospectId:
-                    "018f0000-0000-7000-8000-000000000615",
-                  recommendationContextVersionId:
-                    "018f0000-0000-7000-8000-000000000616",
-                  status: "approved",
-                  currentVersionId: input.approvedDraftVersionId,
-                  approvedVersionId: input.approvedDraftVersionId,
-                  draftContactId: input.contactId,
-                  draftContactVersion: input.contactVersion,
-                  versionContactId: input.contactId,
-                  versionContactVersion: input.contactVersion,
-                  draftVersionNo: 1,
-                  subjectText: "A relevant collaboration idea",
-                  bodyText: "Hello, this is an approved draft.",
-                  bodyDocument: null,
-                }]
+              ? [defaultDraft]
               : [options.draft]);
+          }
+          if (sql.includes("FROM backlinks.backlink_lifecycle_events")) {
+            return result([options.approvalFact ?? {
+              approvalFactId:
+                "018f0000-0000-7000-8000-000000000417",
+              approvalActorId: input.actorId,
+              approvalRecordedAt:
+                new Date("2026-07-27T10:13:00.000Z"),
+            }]);
           }
           if (sql.includes("FROM backlinks.backlink_contacts AS contact")) {
             return result([{
@@ -133,6 +143,19 @@ const createFakePool = (options: FakePoolOptions = {}) => {
                     "018f0000-0000-7000-8000-000000000515",
                   gmailIdentityVersion: 4,
                 }]);
+          }
+          if (
+            sql.includes(
+              "FROM backlinks.backlink_suppression_entries AS entry",
+            )
+            && !sql.includes(
+              "FROM backlinks.backlink_rate_limit_reservations AS reservation",
+            )
+          ) {
+            return result([{
+              suppressed: false,
+              sendBlocked: false,
+            }]);
           }
           if (
             sql.includes(
@@ -214,6 +237,12 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     expect(fake.queries.some((sql) =>
       sql.includes("FROM backlinks.backlink_email_drafts")
       && sql.endsWith("FOR UPDATE OF draft, opportunity"))).toBe(true);
+    expect(fake.queries.some((sql) =>
+      sql.includes("JOIN backlinks.backlink_secret_references AS secret")
+      && sql.includes("secret.status = 'ACTIVE'"))).toBe(true);
+    expect(fake.queries.some((sql) =>
+      sql.includes("FROM backlinks.backlink_lifecycle_events")
+      && sql.includes("draft.approval.recorded"))).toBe(true);
     const intentInsert = fake.queries.findIndex((sql) =>
       sql.startsWith("INSERT INTO backlinks.backlink_send_intents"));
     const snapshotInsert = fake.queries.findIndex((sql) =>
@@ -226,6 +255,9 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
       sql.startsWith("INSERT INTO backlinks.backlink_outbox_events"));
     expect(intentInsert).toBeGreaterThan(0);
     expect(snapshotInsert).toBeGreaterThan(intentInsert);
+    expect(fake.queries[snapshotInsert]).toContain("approval_fact_id");
+    expect(fake.queries[snapshotInsert]).toContain("approval_actor_id");
+    expect(fake.queries[snapshotInsert]).toContain("approval_recorded_at");
     expect(reservationInsert).toBeGreaterThan(snapshotInsert);
     expect(outboxInsert).toBeGreaterThan(reservationInsert);
     expect(fake.queries.at(-1)).toBe("COMMIT");
@@ -243,6 +275,26 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
         draftContactVersion: input.contactVersion,
         versionContactId: input.contactId,
         versionContactVersion: input.contactVersion,
+      },
+    });
+    const repository = new PostgresqlSendIntentRepository({
+      pool: fake.pool,
+    });
+
+    await expect(repository.create(input)).resolves.toEqual({
+      state: "draft_not_approved",
+    });
+    expect(fake.queries.some((sql) => sql.startsWith("INSERT INTO"))).toBe(
+      false,
+    );
+    expect(fake.queries.at(-1)).toBe("COMMIT");
+  });
+
+  it("does not create an Intent for a diagnostic template fallback", async () => {
+    const fake = createFakePool({
+      draft: {
+        ...defaultDraft,
+        draftSource: "TEMPLATE_FALLBACK",
       },
     });
     const repository = new PostgresqlSendIntentRepository({

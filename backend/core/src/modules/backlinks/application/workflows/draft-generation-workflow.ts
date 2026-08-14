@@ -3,10 +3,11 @@ import { validateDraftOutputPolicy } from
 import type { AiDraftPort, AiDraftResult } from
   "../../ports/ai-draft.port.js";
 import { AiDraftError } from "../../ports/ai-draft.port.js";
+import { createDraftTemplateFallback } from
+  "../services/draft-template-fallback.js";
 import type {
   DraftGenerationMode,
   DraftGenerationRepository,
-  DraftPromptContext,
 } from "../repositories/draft-generation.repository.js";
 
 export type DraftGenerationWorkflowInput = Readonly<{
@@ -20,44 +21,6 @@ export type DraftGenerationWorkflowInput = Readonly<{
   generationMode: DraftGenerationMode;
 }>;
 
-const manualDraft = (context: DraftPromptContext): AiDraftResult => {
-  const opportunity = context.prompt.userContext.opportunity as
-    | Readonly<{ targetHost?: unknown }>
-    | undefined;
-  const targetHost = typeof opportunity?.targetHost === "string"
-    ? opportunity.targetHost
-    : "your website";
-  return {
-    output: {
-      subject: `Collaboration opportunity for ${targetHost}`,
-      bodyText: [
-        "Hello,",
-        "",
-        "I would like to discuss a potential collaboration that may be relevant to your audience.",
-        "Please let me know if you are open to reviewing the details.",
-        "",
-        "Best regards,",
-      ].join("\n"),
-      personalizationClaims: [],
-      missingInformation: [
-        "This template was created while the AI provider was disabled.",
-      ],
-      riskFlags: [],
-      requiresUserConfirmation: true,
-      canAutoSend: false,
-    },
-    usage: { inputTokens: 0, outputTokens: 0 },
-    estimatedCostUsd: 0,
-    model: {
-      providerRef: "manual-template",
-      modelId: "manual-template",
-      modelVersion: "manual-template.v1",
-    },
-    latencyMs: 0,
-    repairCount: 0,
-  };
-};
-
 export async function runDraftGenerationWorkflow(
   input: DraftGenerationWorkflowInput,
   repository: DraftGenerationRepository,
@@ -69,7 +32,7 @@ export async function runDraftGenerationWorkflow(
     throw new Error("Draft generation recordedAt is invalid.");
   }
   const mutation = { ...input, recordedAt };
-  const job = await repository.claimJob(mutation);
+  let job = await repository.claimJob(mutation);
   if (job.status === "SUCCEEDED") {
     return {
       outcome: "already_completed" as const,
@@ -103,29 +66,73 @@ export async function runDraftGenerationWorkflow(
       });
     }
     let result: AiDraftResult;
-    if (input.generationMode === "MODEL") {
+    let source: "MODEL" | "TEMPLATE_FALLBACK";
+    if (input.generationMode !== "MODEL") {
+      result = createDraftTemplateFallback(
+        context.prompt,
+        ai === null ? "PROVIDER_UNAVAILABLE" : "MODEL_DISABLED",
+      );
+      source = "TEMPLATE_FALLBACK";
+    } else {
       if (ai === null) {
         throw new AiDraftError({
           code: "MISCONFIGURED",
-          message: "AI Draft provider is unavailable.",
+          message: "AI Draft Provider is not configured.",
           retryable: false,
         });
       }
-      result = await ai.generate(context.prompt);
-    } else {
-      result = manualDraft(context);
+      source = "MODEL";
+      try {
+        result = await ai.generate(context.prompt);
+      } catch (error) {
+        if (
+          error instanceof AiDraftError
+          && error.retryable
+          && job.attemptCount < 2
+        ) {
+          await repository.scheduleRetry({
+            ...mutation,
+            errorClass: error.name,
+            errorCode: error.code,
+          });
+          job = await repository.claimJob({
+            ...mutation,
+            recordedAt: (dependencies.now ?? (() => new Date()))(),
+          });
+          if (!job.started || job.status !== "RUNNING") {
+            throw new AiDraftError({
+              code: "UNAVAILABLE",
+              message: "Draft generation retry could not reclaim the Job.",
+              retryable: false,
+            });
+          }
+          result = await ai.generate(context.prompt);
+        } else {
+          throw error;
+        }
+      }
     }
-    validateDraftOutputPolicy({
-      output: result.output,
-      approvedEvidence: context.approvedEvidence,
-      forbiddenValues: context.forbiddenValues,
-    });
+    try {
+      validateDraftOutputPolicy({
+        output: result.output,
+        approvedEvidence: context.approvedEvidence,
+        forbiddenValues: context.forbiddenValues,
+      });
+    } catch (error) {
+      throw new AiDraftError({
+        code: "POLICY_VIOLATION",
+        message: error instanceof Error
+          ? error.message
+          : "Draft output violated policy.",
+        retryable: false,
+      });
+    }
     const persistenceStartedAt = (dependencies.now ?? (() => new Date()))();
     const completed = await repository.completeJob({
       ...mutation,
       recordedAt: persistenceStartedAt,
       result,
-      source: input.generationMode,
+      source,
     });
     return {
       outcome: "completed" as const,

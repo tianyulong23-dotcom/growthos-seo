@@ -14,13 +14,18 @@ const baseContext = {
 };
 const recommendationId = "018f0000-0000-7000-8000-000000000001";
 const contextId = "018f0000-0000-7000-8000-000000000002";
+const operationId = "018f0000-0000-7000-8000-000000000003";
 describe("BL-AI-063 recommendation command APIs", () => {
   it("enforces idempotency, expected versions, permissions, and audit responses", async () => {
     let rejectCalls = 0;
+    let refillCreates = 0;
     const calls: { text: string; values?: readonly unknown[] }[] = [];
     const commands = createRecommendationCommands({ query: async (text, values) => {
       calls.push({ text, values });
       const requestHash = values?.[7];
+      if (text.includes("INSERT INTO backlink_commercial_inventory_policies")) {
+        return { rows: [] };
+      }
       if (text.includes("recommendation.rejected")) {
         if (values?.[5] === 7) {
           return { rows: [{ state: "version_conflict", requestHash }] };
@@ -30,8 +35,11 @@ describe("BL-AI-063 recommendation command APIs", () => {
           responseBody: { recommendationId, status: "rejected",
             version: 3, lifecycleEventId: "life-reject", auditEventId: "audit-reject" } }] };
       }
-      return { rows: [{ state: "completed", requestHash, responseBody: {
-        jobId: "job-1", workflowId: "refill:job-1", status: "queued", version: 1,
+      const state = refillCreates === 0 ? "completed" : "replay";
+      refillCreates += state === "completed" ? 1 : 0;
+      return { rows: [{ state, requestHash, responseBody: {
+        operationId, jobId: "job-1", workflowId: "refill:job-1",
+        status: "queued", version: 1, visiblePoolGeneration: 1,
         lifecycleEventId: "life-refill", auditEventId: "audit-refill" } }] };
     } });
     const app = Fastify({ logger: false, genReqId: () => "request-63" });
@@ -70,13 +78,35 @@ describe("BL-AI-063 recommendation command APIs", () => {
     expect(stale.statusCode).toBe(409);
     const denied = await post(rejectPath, "reject-denied", rejectPayload, "viewer");
     expect(denied.statusCode).toBe(403);
-    const refill = await post("/api/v1/projects/project-key/backlinks/recommendation-refill-jobs",
-      "refill-63", { expectedVersion: 0, recommendationContextVersionId: contextId,
-        lowWatermark: 5, highWatermark: 20, refillWindowKey: "manual-2026-07-23" });
-    expect(refill.statusCode).toBe(202);
-    expect(refill.json()).toMatchObject({ jobId: "job-1", workflowId: "refill:job-1", status: "queued",
-      version: 1, replayed: false, lifecycleEventId: "life-refill",
-      auditEventId: "audit-refill" });
+    const refillPath =
+      "/api/v1/projects/project-key/backlinks/recommendation-refill-jobs";
+    const refillPayload = { expectedVersion: 0,
+      recommendationContextVersionId: contextId,
+      visiblePoolGeneration: 1,
+      lowWatermark: 9, highWatermark: 10 };
+    const refillResponses = await Promise.all(Array.from(
+      { length: 5 },
+      () => app.inject({ method: "POST", url: refillPath, payload: refillPayload }),
+    ));
+    expect(refillResponses.map(({ statusCode }) => statusCode)).toEqual(
+      [202, 202, 202, 202, 202],
+    );
+    for (const refill of refillResponses) {
+      expect(refill.json()).toMatchObject({
+        operationId,
+        jobId: "job-1",
+        workflowId: "refill:job-1",
+        status: "queued",
+        version: 1,
+        visiblePoolGeneration: 1,
+        lifecycleEventId: "life-refill",
+        auditEventId: "audit-refill",
+      });
+    }
+    expect(refillCreates).toBe(1);
+    expect(refillResponses.filter(
+      (response) => response.json().replayed === false,
+    )).toHaveLength(1);
     expect(calls.at(-1)?.text).toContain("backlink_recommendation_refills");
     expect(calls.at(-1)?.text).toContain("backlink_outbox_events");
     expect(calls.at(-1)?.text).toContain(
@@ -85,5 +115,108 @@ describe("BL-AI-063 recommendation command APIs", () => {
     expect(calls.at(-1)?.text).toContain(
       "'contractVersion','backlinks.recommendation-refill.requested.v1'",
     );
+    expect(calls.at(-1)?.text).toContain(
+      "active_job.status IN ('queued','running','waiting_provider')",
+    );
+    expect(calls.at(-1)?.text).toContain(
+      "backlink_commercial_discovery_batches active_discovery",
+    );
+    expect(calls.at(-1)?.text).toContain(
+      "backlink_contact_enrichment_batches active_contact",
+    );
+    expect(calls.at(-1)?.values?.[6]).toBe(
+      `recommendation-refill:manual:${contextId}:g1:blueprint-v3`,
+    );
+    expect(calls.at(-1)?.values?.[17]).toBe(
+      `manual:${contextId}:g1:blueprint-v3`,
+    );
+    expect(calls.at(-1)?.values?.[20]).toBeNull();
+    expect(calls.at(-1)?.values?.[21]).toBe(1);
+    expect(calls.at(-1)?.text).toContain(
+      `(prior."responseBody"->>'operationId')::uuid=$21::uuid`,
+    );
+    expect(calls.at(-1)?.text).toContain(
+      "policy.termination_reason='TIERS_EXHAUSTED'",
+    );
+    expect(calls.at(-1)?.text).toContain(
+      "attempted_refill_tiers=CASE",
+    );
+
+    const invalidTarget = await app.inject({
+      method: "POST",
+      url: refillPath,
+      payload: {
+        ...refillPayload,
+        lowWatermark: 10,
+        highWatermark: 20,
+      },
+    });
+    expect(invalidTarget.statusCode).toBe(400);
+  }, 15_000);
+
+  it("archives a complete pool without starting the next generation", async () => {
+    const calls: { text: string; values?: readonly unknown[] }[] = [];
+    const commands = createRecommendationCommands({
+      query: async (text, values) => {
+        calls.push({ text, values });
+        return {
+          rows: [{
+            state: "completed",
+            requestHash: values?.[7],
+            responseBody: {
+              archivedGeneration: 1,
+              nextGeneration: 2,
+              archivedCount: 20,
+              state: "awaiting_refresh",
+              version: 2,
+              lifecycleEventId: "life-archive",
+              auditEventId: "audit-archive",
+            },
+          }],
+        };
+      },
+    });
+    const app = Fastify({ logger: false, genReqId: () => "request-archive" });
+    await registerBacklinksOpenApi(app);
+    app.decorateRequest("actor");
+    app.addHook("preHandler", async (request) => {
+      request.actor = member;
+    });
+    registerBacklinksRecommendationCommandsRoutes(app, {
+      module: createBacklinksModule({
+        projectContext: {
+          resolve: async () => baseContext,
+        },
+        queries: {},
+      }),
+      commands,
+    });
+    await app.ready();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project-key/backlinks/recommendation-pools/1/archive",
+      headers: { "idempotency-key": "archive-pool-1" },
+      payload: { recommendationContextVersionId: contextId },
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      archivedGeneration: 1,
+      nextGeneration: 2,
+      archivedCount: 20,
+      state: "awaiting_refresh",
+      replayed: false,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.values?.slice(4, 8)).toEqual([
+      contextId,
+      1,
+      "archive-pool-1",
+      expect.any(String),
+    ]);
+    expect(calls[0]?.text).toContain("visible_pool_state='awaiting_refresh'");
+    expect(calls[0]?.text).not.toContain("recommendation-refill.requested");
   });
 });

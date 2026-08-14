@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { basename } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createOpportunityCommands } from "../../../src/modules/backlinks/application/commands/opportunities.command.js";
 import { createOpportunityRepository } from "../../../src/modules/backlinks/db/repositories/opportunity.repository.js";
@@ -33,6 +34,16 @@ const roles = new URL(
   "../../../../database/roles/0001_growthos_schema_roles.sql",
   import.meta.url,
 );
+const manifestUrl = new URL(
+  "../../../../database/deployment-manifest.v1.json",
+  import.meta.url,
+);
+type DeploymentManifest = Readonly<{
+  steps: readonly Readonly<{
+    migrationId: string;
+    path: string;
+  }>[];
+}>;
 const id = (value: number) =>
   `018f0000-0000-7000-8000-${String(value).padStart(12, "0")}`;
 const organizationId = id(1),
@@ -52,24 +63,37 @@ describe("BL-AI-076 create Opportunity command", () => {
     await harness.migrate();
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
-    for (const name of [
-      "0002_backlink_provider_seo.sql",
-      "0003_backlink_recommendations.sql",
-      "0004_backlink_contacts_opportunities.sql",
-    ])
-      await client.query(await readFile(migration(name), "utf8"));
     await client.query(await readFile(roles, "utf8"));
-    for (const name of [
-      "0005_backlink_schema_role_ownership.sql",
-      "0006_backlink_opportunities.sql",
-      "0007_backlink_opportunity_counter.sql",
-    ])
-      await client.query(await readFile(migration(name), "utf8"));
-    for (const name of [
-      "0011_backlink_contact_purpose_correction.sql",
-      "0039_backlink_opportunity_contact_gate.sql",
-    ])
-      await client.query(await readFile(migration(name), "utf8"));
+    await client.query(`
+      SET ROLE growthos_platform_owner;
+      SET search_path = platform, pg_catalog;
+      CREATE FUNCTION backlink_list_active_website_projects(text, text)
+      RETURNS TABLE (website_project_id text, context_version integer)
+      LANGUAGE sql STABLE SECURITY DEFINER
+      SET search_path = platform, pg_catalog
+      AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
+      REVOKE ALL
+        ON FUNCTION backlink_list_active_website_projects(text, text)
+        FROM PUBLIC;
+      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
+      GRANT EXECUTE
+        ON FUNCTION backlink_list_active_website_projects(text, text)
+        TO growthos_backlinks_owner;
+      RESET ROLE;
+      RESET search_path;
+    `);
+    const manifest = JSON.parse(
+      await readFile(manifestUrl, "utf8"),
+    ) as DeploymentManifest;
+    for (const step of manifest.steps.filter(
+      ({ migrationId }) =>
+        migrationId.startsWith("backlinks-")
+        && migrationId !== "backlinks-0001",
+    )) {
+      await client.query(
+        await readFile(migration(basename(step.path)), "utf8"),
+      );
+    }
     await client.query("SET search_path = backlinks, pg_catalog");
     await client.query(
       `INSERT INTO backlink_prospects (
@@ -147,6 +171,7 @@ describe("BL-AI-076 create Opportunity command", () => {
         inventoryId: string;
         contactCandidateId: string;
         contactEvidenceId: string;
+        contactSnapshotId: string;
         recommendationContextVersionId: string;
         hostname: string;
         registrableDomain: string;
@@ -242,6 +267,57 @@ describe("BL-AI-076 create Opportunity command", () => {
           seed.confidence,
         ],
       );
+      await client.query(
+        `INSERT INTO backlink_contact_evidence_snapshots (
+        id,organization_id,workspace_id,website_project_id,recommendation_id,
+        prospect_id,recommendation_context_version_id,contact_candidate_id,
+        contact_evidence_id,source_url,email_sha256,email_reference,
+        inferred_purpose,contact_confidence,purpose_confidence,
+        evidence_confidence,collected_at,rules_version,created_by
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,repeat('c',64),$11,
+        $12,$13,$14,$13,now(),'contact-publication.v1','seed')`,
+        [
+          seed.contactSnapshotId,
+          organizationId,
+          workspaceId,
+          websiteProjectId,
+          seed.recommendationId,
+          seed.prospectId,
+          seed.recommendationContextVersionId,
+          seed.contactCandidateId,
+          seed.contactEvidenceId,
+          `https://${seed.hostname}/contact`,
+          `contact-evidence:${seed.contactEvidenceId}`,
+          seed.purpose,
+          seed.confidence,
+          seed.purposeConfidence,
+        ],
+      );
+      await client.query(
+        `UPDATE backlink_recommendation_inventory
+            SET publication_status='PUBLISHED',
+                fit_decision='eligible',
+                fit_score_model_version='recommendation-commercial-fit.v3',
+                contact_decision='eligible',
+                contact_reason_code='PUBLIC_EMAIL_FOUND',
+                verified_public_email_count=1,
+                contact_evidence_snapshot_id=$2,
+                default_contact_candidate_id=$3,
+                default_contact_source_url=$4,
+                default_contact_email_sha256=repeat('c',64),
+                default_contact_email_reference=$5,
+                contact_collected_at=now(),
+                contact_rules_version='contact-publication.v1',
+                updated_at=now()
+          WHERE id=$1`,
+        [
+          seed.inventoryId,
+          seed.contactSnapshotId,
+          seed.contactCandidateId,
+          `https://${seed.hostname}/contact`,
+          `contact-evidence:${seed.contactEvidenceId}`,
+        ],
+      );
     };
     const missingContactInput = {
       context,
@@ -288,6 +364,53 @@ describe("BL-AI-076 create Opportunity command", () => {
         contactCandidateId,
       ],
     );
+    await client.query(
+      `INSERT INTO backlink_contact_evidence_snapshots (
+      id,organization_id,workspace_id,website_project_id,recommendation_id,
+      prospect_id,recommendation_context_version_id,contact_candidate_id,
+      contact_evidence_id,source_url,email_sha256,email_reference,
+      inferred_purpose,contact_confidence,purpose_confidence,
+      evidence_confidence,collected_at,rules_version,created_by
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+      'https://www.publisher.test/contact',repeat('a',64),$10,
+      'editorial',95,95,95,now(),'contact-publication.v1','seed')`,
+      [
+        id(22),
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        recommendationId,
+        prospectId,
+        recommendationContextVersionId,
+        contactCandidateId,
+        contactEvidenceId,
+        `contact-evidence:${contactEvidenceId}`,
+      ],
+    );
+    await client.query(
+      `UPDATE backlink_recommendation_inventory
+          SET publication_status='PUBLISHED',
+              fit_decision='eligible',
+              fit_score_model_version='recommendation-commercial-fit.v3',
+              contact_decision='eligible',
+              contact_reason_code='PUBLIC_EMAIL_FOUND',
+              verified_public_email_count=1,
+              contact_evidence_snapshot_id=$2,
+              default_contact_candidate_id=$3,
+              default_contact_source_url='https://www.publisher.test/contact',
+              default_contact_email_sha256=repeat('a',64),
+              default_contact_email_reference=$4,
+              contact_collected_at=now(),
+              contact_rules_version='contact-publication.v1',
+              updated_at=now()
+        WHERE id=$1`,
+      [
+        inventoryId,
+        id(22),
+        contactCandidateId,
+        `contact-evidence:${contactEvidenceId}`,
+      ],
+    );
     const input = {
       context,
       recommendationId,
@@ -320,16 +443,17 @@ describe("BL-AI-076 create Opportunity command", () => {
       inventoryId: id(18),
       contactCandidateId: id(19),
       contactEvidenceId: id(20),
+      contactSnapshotId: id(23),
       recommendationContextVersionId: id(21),
       hostname: "review.test",
       registrableDomain: "review.test",
       email: "press@agency.test",
       domainRelation: "external_domain",
-      confidence: 60,
-      purpose: "unknown",
-      purposeConfidence: 20,
+      confidence: 90,
+      purpose: "partnerships",
+      purposeConfidence: 90,
     });
-    const review = await commands.createFromRecommendation({
+    const second = await commands.createFromRecommendation({
       context,
       recommendationId: id(17),
       contactCandidateId: id(19),
@@ -337,10 +461,10 @@ describe("BL-AI-076 create Opportunity command", () => {
       idempotencyKey: "accept-rec-review",
       requestId: "request-review",
     });
-    expect(review).toMatchObject({
+    expect(second).toMatchObject({
       recommendationId: id(17),
       contactCandidateId: id(19),
-      contactReviewRequired: true,
+      contactReviewRequired: false,
       joinSequence: 2,
       replayed: false,
     });
@@ -351,6 +475,7 @@ describe("BL-AI-076 create Opportunity command", () => {
       inventoryId: id(12),
       contactCandidateId: id(13),
       contactEvidenceId: id(14),
+      contactSnapshotId: id(24),
       recommendationContextVersionId: id(15),
       hostname: "news.publisher.test",
       registrableDomain: "publisher.test",
@@ -384,11 +509,11 @@ describe("BL-AI-076 create Opportunity command", () => {
       (SELECT status FROM backlink_contact_candidates WHERE id=$4)
         initial_contact_status,
       (SELECT status FROM backlink_contact_candidates WHERE id=$5)
-        review_contact_status,
+        second_contact_status,
       (SELECT status FROM backlink_recommendation_inventory WHERE id=$1)
         initial_status,
       (SELECT status FROM backlink_recommendation_inventory WHERE id=$2)
-        review_status,
+        second_status,
       (SELECT status FROM backlink_recommendation_inventory WHERE id=$3)
         duplicate_status`,
           [inventoryId, id(18), id(12), contactCandidateId, id(19)],
@@ -397,14 +522,14 @@ describe("BL-AI-076 create Opportunity command", () => {
     ).toEqual({
       opportunities: 2,
       cycles: 2,
-      contacts: 1,
+      contacts: 2,
       lifecycle: 2,
       audit: 2,
       idempotency: 2,
       initial_contact_status: "promoted",
-      review_contact_status: "candidate",
+      second_contact_status: "promoted",
       initial_status: "accepted",
-      review_status: "accepted",
+      second_status: "accepted",
       duplicate_status: "shown",
     });
   });

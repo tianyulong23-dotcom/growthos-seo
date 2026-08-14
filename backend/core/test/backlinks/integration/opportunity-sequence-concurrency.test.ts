@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { basename } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -36,6 +37,16 @@ const roles = new URL(
   "../../../../database/roles/0001_growthos_schema_roles.sql",
   import.meta.url,
 );
+const manifestUrl = new URL(
+  "../../../../database/deployment-manifest.v1.json",
+  import.meta.url,
+);
+type DeploymentManifest = Readonly<{
+  steps: readonly Readonly<{
+    migrationId: string;
+    path: string;
+  }>[];
+}>;
 const repositorySource = new URL(
   "../../../src/modules/backlinks/db/repositories/opportunity.repository.ts",
   import.meta.url,
@@ -75,22 +86,36 @@ describe("BL-AI-077 project Opportunity counter", () => {
     const client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
     try {
-      for (const name of [
-        "0002_backlink_provider_seo.sql",
-        "0003_backlink_recommendations.sql",
-        "0004_backlink_contacts_opportunities.sql",
-      ]) {
-        await client.query(await readFile(migration(name), "utf8"));
-      }
       await client.query(await readFile(roles, "utf8"));
-      for (const name of [
-        "0005_backlink_schema_role_ownership.sql",
-        "0006_backlink_opportunities.sql",
-        "0007_backlink_opportunity_counter.sql",
-        "0011_backlink_contact_purpose_correction.sql",
-        "0039_backlink_opportunity_contact_gate.sql",
-      ]) {
-        await client.query(await readFile(migration(name), "utf8"));
+      await client.query(`
+        SET ROLE growthos_platform_owner;
+        SET search_path = platform, pg_catalog;
+        CREATE FUNCTION backlink_list_active_website_projects(text, text)
+        RETURNS TABLE (website_project_id text, context_version integer)
+        LANGUAGE sql STABLE SECURITY DEFINER
+        SET search_path = platform, pg_catalog
+        AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
+        REVOKE ALL
+          ON FUNCTION backlink_list_active_website_projects(text, text)
+          FROM PUBLIC;
+        GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
+        GRANT EXECUTE
+          ON FUNCTION backlink_list_active_website_projects(text, text)
+          TO growthos_backlinks_owner;
+        RESET ROLE;
+        RESET search_path;
+      `);
+      const manifest = JSON.parse(
+        await readFile(manifestUrl, "utf8"),
+      ) as DeploymentManifest;
+      for (const step of manifest.steps.filter(
+        ({ migrationId }) =>
+          migrationId.startsWith("backlinks-")
+          && migrationId !== "backlinks-0001",
+      )) {
+        await client.query(
+          await readFile(migration(basename(step.path)), "utf8"),
+        );
       }
       await client.query("SET search_path = backlinks, pg_catalog");
       const prospectIds = Array.from(
@@ -112,6 +137,10 @@ describe("BL-AI-077 project Opportunity counter", () => {
       const contactEvidenceIds = Array.from(
         { length: concurrency },
         (_, index) => id(5_000 + index),
+      );
+      const contactSnapshotIds = Array.from(
+        { length: concurrency },
+        (_, index) => id(6_000 + index),
       );
       const domains = Array.from(
         { length: concurrency },
@@ -169,6 +198,55 @@ describe("BL-AI-077 project Opportunity counter", () => {
         contactEvidenceIds, contactCandidateIds, domains, organizationId,
         workspaceId, websiteProjectId,
       ]);
+      await client.query(`INSERT INTO backlink_contact_evidence_snapshots (
+        id,organization_id,workspace_id,website_project_id,recommendation_id,
+        prospect_id,recommendation_context_version_id,contact_candidate_id,
+        contact_evidence_id,source_url,email_sha256,email_reference,
+        inferred_purpose,contact_confidence,purpose_confidence,
+        evidence_confidence,collected_at,rules_version,created_by
+      ) SELECT s.id,$7,$8,$9,s.recommendation_id,s.prospect_id,$10,
+          s.contact_candidate_id,s.contact_evidence_id,
+          'https://' || s.domain || '/contact',repeat('a',64),
+          'contact-evidence:' || s.contact_evidence_id::text,
+          'editorial',95,95,95,now(),'contact-publication.v1','seed'
+        FROM unnest(
+          $1::uuid[],$2::uuid[],$3::uuid[],$4::uuid[],$5::uuid[],$6::text[]
+        ) s(
+          id,recommendation_id,prospect_id,contact_candidate_id,
+          contact_evidence_id,domain
+        )`, [
+        contactSnapshotIds, recommendationIds, prospectIds,
+        contactCandidateIds, contactEvidenceIds, domains,
+        organizationId, workspaceId, websiteProjectId,
+        recommendationContextVersionId,
+      ]);
+      await client.query(`UPDATE backlink_recommendation_inventory inventory
+          SET publication_status='PUBLISHED',
+              fit_decision='eligible',
+              fit_score_model_version='recommendation-commercial-fit.v3',
+              contact_decision='eligible',
+              contact_reason_code='PUBLIC_EMAIL_FOUND',
+              verified_public_email_count=1,
+              contact_evidence_snapshot_id=published.snapshot_id,
+              default_contact_candidate_id=published.contact_candidate_id,
+              default_contact_source_url=
+                'https://' || published.domain || '/contact',
+              default_contact_email_sha256=repeat('a',64),
+              default_contact_email_reference=
+                'contact-evidence:' || published.contact_evidence_id::text,
+              contact_collected_at=now(),
+              contact_rules_version='contact-publication.v1',
+              updated_at=now()
+         FROM unnest(
+           $1::uuid[],$2::uuid[],$3::uuid[],$4::uuid[],$5::text[]
+         ) published(
+           inventory_id,snapshot_id,contact_candidate_id,
+           contact_evidence_id,domain
+         )
+        WHERE inventory.id=published.inventory_id`, [
+        inventoryIds, contactSnapshotIds, contactCandidateIds,
+        contactEvidenceIds, domains,
+      ]);
     } finally {
       await client.end();
     }
@@ -203,6 +281,10 @@ describe("BL-AI-077 project Opportunity counter", () => {
         await client.connect();
         await client.query("SET ROLE growthos_backlinks_writer");
         await client.query("SET search_path = backlinks, pg_catalog");
+        await client.query(
+          "SELECT set_config('app.current_organization_id',$1,false)",
+          [organizationId],
+        );
         await client.query(
           "SELECT set_config('app.current_workspace_id',$1,false)",
           [workspaceId],

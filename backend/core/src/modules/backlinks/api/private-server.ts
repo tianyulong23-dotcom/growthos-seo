@@ -20,6 +20,9 @@ import type {
 } from "../application/commands/project-context-projection.command.js";
 import type { createReplyMatchCommands } from "../application/commands/reply-match.command.js";
 import type { createSendIntentCommands } from "../application/commands/send-intent.command.js";
+import type {
+  createBacklinkProfileService,
+} from "../application/services/backlink-profile.service.js";
 import type { AssessmentQuery } from "../application/queries/assessment.query.js";
 import type { DraftQuery } from "../application/queries/draft.query.js";
 import type { createGmailConnectionQuery } from "../application/queries/gmail-connection.query.js";
@@ -27,6 +30,7 @@ import type { OpportunitiesQuery } from "../application/queries/opportunities.qu
 import type { MetricDashboardQuery } from "../application/queries/metric-dashboard.query.js";
 import type { PlacementLinksQuery } from "../application/queries/placement-links.query.js";
 import type { RecommendationsQuery } from "../application/queries/recommendations.query.js";
+import type { ResourceLibraryQuery } from "../application/queries/resource-library.query.js";
 import type { ReportOverviewQuery } from "../application/queries/report-overview.query.js";
 import type { ReplyMailQuery } from "../application/queries/reply-mail.query.js";
 import type { SendIntentQuery } from "../application/queries/send-intent.query.js";
@@ -41,6 +45,7 @@ import {
 } from "../application/workflows/mail-push-webhook.js";
 import type { BacklinksConfig } from "../config/index.js";
 import { registerBacklinksAssessmentRoute } from "./assessment.route.js";
+import { registerBacklinkProfileRoutes } from "./backlink-profile.route.js";
 import { registerBacklinksContactsRoutes } from "./contacts.route.js";
 import {
   registerBacklinksContactEnrichmentRoutes,
@@ -67,6 +72,7 @@ import {
 import { registerBacklinksPlatformContextConsumer } from "./platform-request-context.js";
 import { registerBacklinksRecommendationCommandsRoutes } from "./recommendation-commands.route.js";
 import { registerBacklinksRecommendationsRoute } from "./recommendations.route.js";
+import { registerBacklinksResourceLibraryRoute } from "./resource-library.route.js";
 import { registerBacklinksReplyMailRoutes } from "./reply-mail.route.js";
 import { registerBacklinksReplyMatchRoutes } from "./reply-match.route.js";
 import { registerBacklinksReportExportRoutes } from "./reports/report-export.route.js";
@@ -84,6 +90,7 @@ type BacklinksApiQueries =
   & OpportunitiesQuery
   & PlacementLinksQuery
   & RecommendationsQuery
+  & ResourceLibraryQuery
   & ReplyMailQuery
   & SendIntentQuery
   & SummaryQuery;
@@ -101,6 +108,7 @@ type PlacementReviewCommand = ReturnType<typeof createPlacementReviewCommand>;
 type RecommendationCommands = ReturnType<typeof createRecommendationCommands>;
 type ReplyMatchCommands = ReturnType<typeof createReplyMatchCommands>;
 type SendIntentCommands = ReturnType<typeof createSendIntentCommands>;
+type BacklinkProfileService = ReturnType<typeof createBacklinkProfileService>;
 
 export type BacklinksPrivateApiDependencies = Readonly<{
   module: BacklinksModule<BacklinksApiQueries>;
@@ -122,6 +130,7 @@ export type BacklinksPrivateApiDependencies = Readonly<{
   replyMatchCommands: ReplyMatchCommands;
   sendIntentCommands: SendIntentCommands;
   settingsGovernanceService: BacklinksSettingsGovernanceService;
+  backlinkProfileService: BacklinkProfileService;
   projectContextProjectionCommand?: ProjectContextProjectionCommand;
   gmailPushWebhook?: GmailPushWebhookHandler;
 }>;
@@ -131,6 +140,11 @@ export type CreateBacklinksPrivateApiOptions = Readonly<{
   platformContextSigningKey: string | Buffer;
   dependencies: BacklinksPrivateApiDependencies;
   readiness?: () => Promise<void>;
+  buildIdentity?: Readonly<{
+    buildId: string;
+    sourceFingerprint: string;
+    artifactFingerprint: string;
+  }>;
   logger?: boolean;
 }>;
 
@@ -187,7 +201,12 @@ export async function createBacklinksPrivateApi(
     async (_request, reply) => {
       try {
         await options.readiness?.();
-        return { status: "ok" as const };
+        return {
+          status: "ok" as const,
+          ...(options.buildIdentity === undefined
+            ? {}
+            : { build: options.buildIdentity }),
+        };
       } catch {
         return reply.code(503).send({ status: "unavailable" as const });
       }
@@ -212,6 +231,10 @@ export async function createBacklinksPrivateApi(
   });
   registerBacklinksRecommendationsRoute(app, {
     module: options.dependencies.module,
+    runningBuildId: options.buildIdentity?.buildId ?? "unknown",
+  });
+  registerBacklinksResourceLibraryRoute(app, {
+    module: options.dependencies.module,
   });
   registerBacklinksOpportunitiesRoutes(app, {
     module: options.dependencies.module,
@@ -231,6 +254,10 @@ export async function createBacklinksPrivateApi(
   registerBacklinksLinksRoutes(app, {
     module: options.dependencies.module,
     reverifyCommand: options.dependencies.placementReverifyCommand,
+  });
+  registerBacklinkProfileRoutes(app, {
+    module: options.dependencies.module,
+    service: options.dependencies.backlinkProfileService,
   });
   registerBacklinksMetricDashboardRoute(app, {
     projectContext: options.dependencies.module.projectContext,

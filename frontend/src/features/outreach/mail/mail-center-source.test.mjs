@@ -73,6 +73,21 @@ test("BL-AI-140 exposes resilient list, thread, pagination, and manual match sta
   assert.match(center, /Opportunity：/)
   assert.match(center, /游标/)
   assert.match(center, /pollingIntervalSeconds/)
+  assert.match(center, /lastSuccessfulSyncAt/)
+  assert.match(center, /lastError/)
+  assert.match(center, /nextRetryAt/)
+  assert.match(center, /data-testid="mail-sync-diagnostics"/)
+  assert.doesNotMatch(
+    center,
+    /data-testid="mail-sync-diagnostics"[\s\S]*?hidden[\s\S]*?aria-hidden="true"/
+  )
+  assert.match(center, /最近成功/)
+  assert.match(center, /最近错误/)
+  assert.match(center, /下次重试/)
+  assert.match(center, /维护模式：后台 Worker 未运行/)
+  assert.match(center, /已保存邮件仍可读取；立即同步暂不可用/)
+  assert.match(center, /businessConsumersRunning !== true/)
+  assert.match(center, /getRuntimeStatus/)
   assert.match(center, /立即同步并刷新邮件/)
   assert.match(center, /解除错误关联/)
   assert.match(center, /isMailApiStatus\(error, 403\)/)
@@ -89,6 +104,11 @@ test("BL-AI-140 exposes resilient list, thread, pagination, and manual match sta
   assert.doesNotMatch(center, /setTimeout\(resolve,\s*5_000\)/)
   assert.match(panel, /MailCenter/)
   assert.match(panel, /重新授权/)
+  assert.match(panel, /连接：/)
+  assert.match(panel, /Send Ready：/)
+  assert.match(panel, /Sync Ready：/)
+  assert.match(panel, /缺少门槛：/)
+  assert.match(panel, /已保存邮件仍可读取/)
   assert.doesNotMatch(`${center}\n${panel}`, /mock|fallback|demo/i)
   assert.doesNotMatch(
     `${panel}\n${center}`,

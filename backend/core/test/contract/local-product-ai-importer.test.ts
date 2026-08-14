@@ -120,7 +120,7 @@ describe("LOCAL_PRODUCT AI credential importer", () => {
       modelId: "gpt-5.6-sol",
       modelVersion: "2026-08-03",
       maxCalls: 25,
-      timeoutMs: 60_000,
+      timeoutMs: 45_000,
       maxInputTokens: 8_000,
       maxOutputTokens: 1_200,
       absoluteBudgetUsd: 0.1,
@@ -151,6 +151,9 @@ describe("LOCAL_PRODUCT AI credential importer", () => {
     expect(
       await readFile(join(runtimeRoot, "backlinks-api.env"), "utf8"),
     ).toContain("AI_PROVIDER_ENABLED=false");
+    expect(
+      await readFile(join(runtimeRoot, "backlinks-api.env"), "utf8"),
+    ).toContain("AI_PROVIDER_TIMEOUT_MS=45000");
     expect(await readTree(root)).not.toContain(apiKey);
   });
 });

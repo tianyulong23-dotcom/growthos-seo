@@ -1,29 +1,31 @@
 import * as React from "react"
 import {
+  Archive,
   CirclePlus,
   Clock3,
   ExternalLink,
   LoaderCircle,
   Mail,
   RefreshCw,
+  RotateCw,
   Search,
 } from "lucide-react"
 import { useNavigate } from "react-router"
 
-import {
-  type Project,
-  useCurrentProject,
-} from "@/app/project-context"
+import { type Project, useCurrentProject } from "@/app/project-context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { ApiError } from "@/api/client"
 import { backlinksProjectQueries } from "@/features/outreach/api/project-query"
 import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
 
 import {
+  archiveRecommendationPool,
   createOpportunity,
   getRecommendationInventory,
+  requestRecommendationRefill,
   retryUnpublishedContacts,
   type RecommendationInventoryStatus,
   type RecommendationItem,
@@ -32,6 +34,11 @@ import {
   type RecommendationRefillState,
   useRecommendationRefill,
 } from "./use-recommendation-refill"
+import {
+  releaseRecommendationStartLease,
+  subscribeRecommendationOperation,
+  tryAcquireRecommendationStartLease,
+} from "./recommendation-operation-session"
 import { useRecommendations } from "./use-recommendations"
 
 const reasonLabels: Record<string, string> = {
@@ -59,14 +66,35 @@ function formatDate(value: string) {
 }
 
 function metric(value: number | null) {
-  return value === null ? "待补" : value.toFixed(1)
+  return value === null ? "数据源未提供" : value.toLocaleString("zh-CN")
 }
 
-function formatElapsed(value: number) {
-  const seconds = Math.max(0, Math.floor(value / 1_000))
-  const minutes = Math.floor(seconds / 60)
-  const remainder = seconds % 60
-  return minutes > 0 ? `${minutes}分 ${remainder}秒` : `${remainder}秒`
+function fitTierLabel(value: RecommendationItem["fitDecision"]["matchTier"]) {
+  return value === "high_fit" ? "高适合度" : "合格适合度"
+}
+
+function marketTierLabel(
+  value: RecommendationItem["fitDecision"]["market"]["tier"]
+) {
+  return value === "target_market" ? "目标市场匹配" : "同语种扩展市场"
+}
+
+function candidateSourceLabel(value: RecommendationItem["candidateSource"]) {
+  return {
+    paid_discovery: "DataForSEO 发现",
+    resource_library: "资源库补充",
+    mixed: "统一供给",
+    existing_history: "历史候选",
+  }[value]
+}
+
+function metricsSourceLabel(value: RecommendationItem["metricsSource"]) {
+  return {
+    dataforseo: "DataForSEO 指标",
+    resource_library_snapshot: "资源库快照指标",
+    mixed_snapshot: "混合来源快照",
+    historical_snapshot: "历史快照指标",
+  }[value]
 }
 
 function formatQueryTime(value: number | null) {
@@ -79,12 +107,54 @@ function formatQueryTime(value: number | null) {
   }).format(new Date(value))
 }
 
+function formatServerTime(value: string | null) {
+  return value === null ? "服务端未提供" : formatDate(value)
+}
+
+function formatProviderCost(value: number) {
+  return `$${(value / 1_000_000).toFixed(4)}`
+}
+
+const refillTierLabels: Record<
+  RecommendationInventoryStatus["currentRefillTier"],
+  string
+> = {
+  exact_product_target_market: "精确产品与目标市场",
+  same_topic_target_market: "同主题与目标市场",
+  adjacent_industry_same_audience: "邻近行业与相同受众",
+  resource_media_review_partner_ecosystem: "资源、媒体、评测与伙伴生态",
+  same_language_expansion: "同语种扩展",
+  curated_resource_library: "高权重资源库补充",
+}
+
+function refillTerminationMessage(
+  inventory: RecommendationInventoryStatus | null
+) {
+  if (inventory === null) return null
+  const count = inventory.publishedContactReadyCount
+  switch (inventory.terminationReason) {
+    case "BUDGET":
+      return `本轮因 DataForSEO 预算不足停止。当前真实可发布网站为 ${count} 个。`
+    case "PROVIDER_UNAVAILABLE":
+      return `本轮因 DataForSEO 当前不可用停止。当前真实可发布网站为 ${count} 个。`
+    case "TIERS_EXHAUSTED":
+      return `五层付费发现与资源库补充均已完成，仍只有 ${count} 个真实可发布网站。系统不会伪造补足。`
+    case "PROJECT_CONTEXT":
+      return `当前项目资料不足，无法继续发现。当前真实可发布网站为 ${count} 个。`
+    default:
+      return null
+  }
+}
+
 function ContactBatchWaitView({
   project,
   wait,
   batch,
+  inventory,
   error,
   retrying,
+  requesting,
+  actionLabel,
   onStart,
   onRetry,
   onRefresh,
@@ -92,17 +162,46 @@ function ContactBatchWaitView({
   project: Project
   wait: RecommendationRefillState
   batch: RecommendationInventoryStatus["contactBatch"]
+  inventory: RecommendationInventoryStatus | null
   error: string | null
   retrying: boolean
-  onStart: () => void
+  requesting: boolean
+  actionLabel: string
+  onStart: () => void | Promise<void>
   onRetry: () => void
   onRefresh: () => void
 }) {
-  const running = wait.status === "running"
+  const running = wait.status === "running" && inventory?.stage !== "pause"
+  const terminationMessage = refillTerminationMessage(inventory)
+  const poolMessage =
+    inventory?.visiblePoolState === "awaiting_refresh"
+      ? `第 ${inventory.visiblePoolGeneration - 1} 轮已归档。生成下一轮后，系统会重新寻找 10 个未在历史轮次出现的可联系网站。`
+      : null
+  const progressMetrics: ReadonlyArray<readonly [string, string | number]> = [
+    ["阶段", wait.phase],
+    [
+      "当前层级",
+      inventory === null
+        ? "等待服务端"
+        : refillTierLabels[inventory.currentRefillTier],
+    ],
+    ["原始候选", inventory?.rawCandidateCount ?? 0],
+    ["联系人终态", batch?.terminalJobCount ?? 0],
+    [
+      "Provider 成本",
+      formatProviderCost(inventory?.providerActualCostMicros ?? 0),
+    ],
+    ["付费调用", inventory?.providerPaidCallCount ?? 0],
+    ["服务端更新", formatServerTime(wait.lastServerUpdateAt)],
+  ]
   return (
     <div
       className="flex min-h-64 flex-col items-center justify-center border-y bg-muted/20 px-4 py-8 text-center"
-      role={wait.status === "failed" ? "alert" : "status"}
+      role={
+        wait.status === "failed" || wait.status === "partial"
+          ? "alert"
+          : "status"
+      }
       aria-busy={running || undefined}
     >
       {running ? (
@@ -110,24 +209,44 @@ function ContactBatchWaitView({
       ) : (
         <Clock3 className="mb-3 size-5 text-muted-foreground" />
       )}
-      <h2 className="text-sm font-medium">当前没有已发布的可联系推荐</h2>
+      <h2 className="text-sm font-medium">
+        {inventory?.visiblePoolState === "awaiting_refresh"
+          ? "当前推荐轮次已归档"
+          : "当前没有已发布的可联系推荐"}
+      </h2>
       <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">
-        {project.name} 的候选网站会自动进入联系人发现批次。这里只显示具备公开证据、
-        已冻结默认联系人并通过发布门禁的网站。
+        {poolMessage ??
+          terminationMessage ??
+          `${project.name} 的候选网站会自动进入联系人发现批次。这里只显示具备公开证据、已冻结默认联系人并通过发布门禁的网站。`}
       </p>
-      {wait.status !== "idle" && (
+      {inventory !== null && (
         <div className="mt-5 grid w-full max-w-2xl grid-cols-2 gap-3 text-left sm:grid-cols-4">
           {[
-            ["阶段", wait.phase],
-            ["已耗时", formatElapsed(wait.elapsedMs)],
-            ["轮询次数", String(wait.pollCount)],
-            ["最后查询", formatQueryTime(wait.lastQueryAt)],
+            ["原始候选", inventory.rawCandidateCount],
+            ["真实可发布", inventory.publishedContactReadyCount],
+            ["推荐轮次", `第 ${inventory.visiblePoolGeneration} 轮`],
+            ["本轮目标", inventory.visiblePoolTargetCount],
           ].map(([label, value]) => (
+            <div key={label} className="min-w-0 border-l-2 pl-3">
+              <div className="text-xs text-muted-foreground">{label}</div>
+              <div className="mt-1 text-sm font-medium">{value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {wait.status !== "idle" && (
+        <div className="mt-5 grid w-full max-w-4xl grid-cols-2 gap-3 text-left sm:grid-cols-4">
+          {progressMetrics.map(([label, value]) => (
             <div key={label} className="min-w-0 border-l-2 pl-3">
               <div className="text-xs text-muted-foreground">{label}</div>
               <div className="mt-1 truncate text-sm font-medium">{value}</div>
             </div>
           ))}
+        </div>
+      )}
+      {(inventory?.providerUnknownChargeCount ?? 0) > 0 && (
+        <div className="mt-4 text-sm text-destructive">
+          检测到 {inventory?.providerUnknownChargeCount} 个未知扣费请求，当前轮次已按治理规则暂停。
         </div>
       )}
       {batch !== null && (
@@ -157,15 +276,42 @@ function ContactBatchWaitView({
           )}
         </>
       )}
+      {inventory !== null && inventory.attemptedRefillTiers.length > 0 && (
+        <div className="mt-4 flex max-w-2xl flex-wrap justify-center gap-2">
+          {inventory.attemptedRefillTiers.map((attempt, attemptIndex) => (
+            <Badge
+              key={`${attempt.round}:${attempt.tier}:${attemptIndex}`}
+              variant="outline"
+            >
+              第 {attempt.round} 轮 · {refillTierLabels[attempt.tier]}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {inventory !== null && inventory.eliminationReasonCounts.length > 0 && (
+        <div className="mt-3 flex max-w-2xl flex-wrap justify-center gap-2">
+          {inventory.eliminationReasonCounts.map((reason) => (
+            <Badge key={reason.reasonCode} variant="secondary">
+              {reasonLabels[reason.reasonCode] ?? reason.reasonCode}{" "}
+              {reason.count}
+            </Badge>
+          ))}
+        </div>
+      )}
       {(wait.error || error) && (
-        <p className="mt-4 text-sm text-destructive">
-          {wait.error ?? error}
-        </p>
+        <p className="mt-4 text-sm text-destructive">{wait.error ?? error}</p>
       )}
       <div className="mt-5 flex flex-wrap justify-center gap-2">
-        <Button onClick={onStart} disabled={running}>
-          {running ? <LoaderCircle className="animate-spin" /> : <Clock3 />}
-          等待本批可联系推荐
+        <Button
+          onClick={() => void onStart()}
+          disabled={requesting || inventory === null}
+        >
+          {running || requesting ? (
+            <LoaderCircle className="animate-spin" />
+          ) : (
+            <Search />
+          )}
+          {inventory === null ? "读取服务端状态" : actionLabel}
         </Button>
         <Button variant="outline" onClick={onRefresh}>
           <RefreshCw />
@@ -187,14 +333,6 @@ function WebsiteIdentity({ item }: { item: RecommendationItem }) {
     <div className="flex min-w-0 items-start gap-3">
       <span className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-md border bg-muted text-xs font-semibold">
         {item.hostname.slice(0, 1).toUpperCase()}
-        <img
-          src={item.faviconUrl}
-          alt=""
-          className="absolute inset-0 size-full bg-background object-contain p-1.5"
-          onError={(event) => {
-            event.currentTarget.hidden = true
-          }}
-        />
       </span>
       <div className="min-w-0">
         <a
@@ -214,55 +352,276 @@ function WebsiteIdentity({ item }: { item: RecommendationItem }) {
   )
 }
 
-function ProjectRecommendationsWorkspace({
-  project,
-}: {
-  project: Project
-}) {
+function ProjectRecommendationsWorkspace({ project }: { project: Project }) {
   const websiteProjectKey = project.id
   const navigate = useNavigate()
   const query = useRecommendations(websiteProjectKey, true)
   const refreshRecommendations = query.refresh
-  const pollInventory = React.useCallback(async () => {
-    try {
-      return await getRecommendationInventory(
-        websiteProjectKey,
-        AbortSignal.timeout(10_000)
-      )
-    } catch {
-      return null
+  const readInventory = React.useCallback(
+    (signal: AbortSignal) =>
+      getRecommendationInventory(websiteProjectKey, signal),
+    [websiteProjectKey]
+  )
+  const refreshRecommendationsFromInventory = React.useCallback(async () => {
+    await refreshRecommendations()
+  }, [refreshRecommendations])
+  const wait = useRecommendationRefill(
+    project,
+    readInventory,
+    refreshRecommendationsFromInventory
+  )
+  const inventory = wait.inventory
+  const [requestingRefill, setRequestingRefill] = React.useState(false)
+  const [poolAction, setPoolAction] = React.useState<
+    "archive" | "archive-and-refresh" | null
+  >(null)
+  const [error, setError] = React.useState<string | null>(null)
+  const refillRequestInFlight = React.useRef(false)
+  const automaticFirstPoolKey = React.useRef<string | null>(null)
+  const [startLeaseOwnerId] = React.useState(() => crypto.randomUUID())
+  const refreshWait = wait.refresh
+  const recommendationContextVersionId =
+    inventory?.recommendationContextVersionId ?? null
+  const visiblePoolGeneration = inventory?.visiblePoolGeneration ?? null
+  React.useEffect(() => {
+    if (
+      recommendationContextVersionId === null ||
+      visiblePoolGeneration === null
+    ) {
+      return
     }
-  }, [websiteProjectKey])
-  const wait = useRecommendationRefill(project, pollInventory)
-  const [inventory, setInventory] =
-    React.useState<Awaited<ReturnType<typeof pollInventory>>>(null)
+    return subscribeRecommendationOperation(
+      {
+        websiteProjectKey,
+        recommendationContextVersionId,
+        visiblePoolGeneration,
+      },
+      () => refreshWait()
+    )
+  }, [
+    recommendationContextVersionId,
+    refreshWait,
+    visiblePoolGeneration,
+    websiteProjectKey,
+  ])
+  const hasEverDiscovered =
+    inventory !== null &&
+    (inventory.refillJob !== null ||
+      inventory.latestRefillAt !== null ||
+      inventory.rawCandidateCount > 0 ||
+      inventory.contactBatch !== null)
+  const refillPaused =
+    inventory?.terminalState === "PAUSED_BUDGET" ||
+    inventory?.terminalState === "PAUSED_PROVIDER"
+  const contactRecoveryRequired =
+    wait.contactBatchActivity === "recovery_required"
+  const refillActionLabel = contactRecoveryRequired
+    ? "重新检查状态"
+    : refillPaused
+      ? "继续原任务"
+      : wait.active
+        ? "连接当前批次"
+        : inventory?.visiblePoolState === "awaiting_refresh"
+          ? "生成下一轮"
+          : hasEverDiscovered
+            ? "继续生成本轮"
+            : "生成推荐"
+  const refreshAll = React.useCallback(async () => {
+    setError(null)
+    refreshWait()
+    await refreshRecommendations()
+  }, [refreshRecommendations, refreshWait])
+
+  const startOrReconnectRefill = React.useCallback(async () => {
+    if (contactRecoveryRequired) {
+      wait.refresh()
+      return
+    }
+    if (wait.active && !refillPaused) {
+      wait.refresh()
+      return
+    }
+    if (
+      refillRequestInFlight.current ||
+      inventory === null ||
+      inventory.recommendationContextVersionId === null
+    ) {
+      if (inventory !== null) {
+        setError("当前项目缺少可用的推荐 Context，请重新读取项目资料。")
+      }
+      return
+    }
+
+    const operationScope = {
+      websiteProjectKey,
+      recommendationContextVersionId: inventory.recommendationContextVersionId,
+      visiblePoolGeneration: inventory.visiblePoolGeneration,
+    }
+    if (
+      !tryAcquireRecommendationStartLease(
+        window.localStorage,
+        operationScope,
+        startLeaseOwnerId
+      )
+    ) {
+      setError("另一个标签页正在连接当前任务，正在读取同一 operation。")
+      wait.refresh()
+      return
+    }
+
+    refillRequestInFlight.current = true
+    setRequestingRefill(true)
+    setError(null)
+    try {
+      const result = await requestRecommendationRefill(
+        websiteProjectKey,
+        inventory.recommendationContextVersionId,
+        inventory.visiblePoolGeneration,
+        9,
+        10
+      )
+      wait.connectJob(result)
+    } catch (requestError) {
+      if (requestError instanceof ApiError && requestError.status === 409) {
+        setError("服务端已有当前项目批次，正在重新连接该批次。")
+        wait.refresh()
+      } else {
+        setError("未能创建推荐批次，请重新读取服务端状态后再试。")
+      }
+    } finally {
+      releaseRecommendationStartLease(
+        window.localStorage,
+        operationScope,
+        startLeaseOwnerId
+      )
+      refillRequestInFlight.current = false
+      setRequestingRefill(false)
+    }
+  }, [
+    contactRecoveryRequired,
+    inventory,
+    refillPaused,
+    startLeaseOwnerId,
+    wait,
+    websiteProjectKey,
+  ])
+
+  React.useEffect(() => {
+    if (
+      inventory === null ||
+      inventory.recommendationContextVersionId === null ||
+      inventory.visiblePoolGeneration !== 1 ||
+      inventory.visiblePoolState !== "idle" ||
+      hasEverDiscovered ||
+      project.inputRequired.length > 0 ||
+      wait.active
+    ) {
+      return
+    }
+    const key = `${websiteProjectKey}:${inventory.recommendationContextVersionId}:g1`
+    if (automaticFirstPoolKey.current === key) return
+    automaticFirstPoolKey.current = key
+    void startOrReconnectRefill()
+  }, [
+    hasEverDiscovered,
+    inventory,
+    project.inputRequired.length,
+    startOrReconnectRefill,
+    wait.active,
+    websiteProjectKey,
+  ])
+
+  async function archiveCurrentPool(generateNext: boolean) {
+    if (
+      poolAction !== null ||
+      inventory === null ||
+      inventory.recommendationContextVersionId === null ||
+      inventory.visiblePoolState !== "active"
+    ) {
+      return
+    }
+    setPoolAction(generateNext ? "archive-and-refresh" : "archive")
+    setError(null)
+    try {
+      const archived = await archiveRecommendationPool(
+        websiteProjectKey,
+        inventory.recommendationContextVersionId,
+        inventory.visiblePoolGeneration
+      )
+      backlinksProjectQueries.invalidate([
+        "backlinks",
+        websiteProjectKey,
+        "recommendations",
+      ])
+      await refreshRecommendations()
+      refreshWait()
+      if (!generateNext) {
+        setOpportunityAnnouncement(
+          `第 ${archived.archivedGeneration} 轮推荐已归档。`
+        )
+        return
+      }
+
+      const nextScope = {
+        websiteProjectKey,
+        recommendationContextVersionId:
+          inventory.recommendationContextVersionId,
+        visiblePoolGeneration: archived.nextGeneration,
+      }
+      if (
+        !tryAcquireRecommendationStartLease(
+          window.localStorage,
+          nextScope,
+          startLeaseOwnerId
+        )
+      ) {
+        setError("本轮已归档，另一个标签页正在生成下一轮。")
+        refreshWait()
+        return
+      }
+      try {
+        const refill = await requestRecommendationRefill(
+          websiteProjectKey,
+          inventory.recommendationContextVersionId,
+          archived.nextGeneration,
+          9,
+          10
+        )
+        wait.connectJob(refill)
+        setOpportunityAnnouncement(
+          `第 ${archived.archivedGeneration} 轮已归档，第 ${archived.nextGeneration} 轮已开始生成。`
+        )
+      } finally {
+        releaseRecommendationStartLease(
+          window.localStorage,
+          nextScope,
+          startLeaseOwnerId
+        )
+      }
+    } catch (poolError) {
+      setError(
+        poolError instanceof ApiError && poolError.status === 409
+          ? "推荐池状态已变化，请重新读取后再操作。"
+          : "推荐池操作失败，请重新读取服务端状态后再试。"
+      )
+      refreshWait()
+    } finally {
+      setPoolAction(null)
+    }
+  }
   const [search, setSearch] = React.useState("")
   const [busyId, setBusyId] = React.useState<string | null>(null)
+  const addRequestInFlight = React.useRef(false)
+  const [joinedOpportunityIds, setJoinedOpportunityIds] = React.useState<
+    Readonly<Record<string, string>>
+  >({})
+  const [opportunityError, setOpportunityError] = React.useState<{
+    recommendationId: string
+    message: string
+  } | null>(null)
+  const [opportunityAnnouncement, setOpportunityAnnouncement] =
+    React.useState("")
   const [retrying, setRetrying] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-
-  const refreshAll = React.useCallback(async () => {
-    const [, nextInventory] = await Promise.all([
-      refreshRecommendations(),
-      pollInventory(),
-    ])
-    setInventory(nextInventory)
-  }, [pollInventory, refreshRecommendations])
-
-  React.useEffect(() => {
-    void pollInventory().then(setInventory)
-  }, [pollInventory])
-
-  React.useEffect(() => {
-    if (wait.status !== "succeeded") return
-    let active = true
-    queueMicrotask(() => {
-      if (active) void refreshAll()
-    })
-    return () => {
-      active = false
-    }
-  }, [refreshAll, wait.status])
 
   async function retryUnpublished() {
     if (retrying) return
@@ -270,7 +629,12 @@ function ProjectRecommendationsWorkspace({
     setError(null)
     try {
       const result = await retryUnpublishedContacts(websiteProjectKey)
-      wait.start(result.batchId)
+      const batchId = result.batchId
+      if (batchId === null) {
+        wait.refresh()
+      } else {
+        wait.connectBatch(batchId)
+      }
     } catch {
       setError("未能重试本批未发布网站，请重新读取批次状态。")
     } finally {
@@ -284,9 +648,17 @@ function ProjectRecommendationsWorkspace({
         candidate.id === item.recommendedContactCandidateId &&
         candidate.eligible
     )
-    if (!contact || busyId) return
+    if (
+      !contact ||
+      busyId ||
+      addRequestInFlight.current ||
+      joinedOpportunityIds[item.id]
+    ) {
+      return
+    }
+    addRequestInFlight.current = true
     setBusyId(item.id)
-    setError(null)
+    setOpportunityError(null)
     try {
       const result = await createOpportunity(
         websiteProjectKey,
@@ -307,12 +679,21 @@ function ProjectRecommendationsWorkspace({
         websiteProjectKey,
         "opportunities",
       ])
-      navigate(
-        `/projects/${websiteProjectKey}/backlinks/opportunities?opportunityId=${result.opportunityId}`
+      setJoinedOpportunityIds((current) => ({
+        ...current,
+        [item.id]: result.opportunityId,
+      }))
+      setOpportunityAnnouncement(
+        `${item.hostname} 已加入 Opportunity。你仍在推荐池中。`
       )
     } catch {
-      setError("创建 Opportunity 失败。请刷新推荐，确认冻结联系人证据仍有效。")
+      setOpportunityError({
+        recommendationId: item.id,
+        message:
+          "创建 Opportunity 失败。请刷新推荐，确认冻结联系人证据仍有效。",
+      })
     } finally {
+      addRequestInFlight.current = false
       setBusyId(null)
     }
   }
@@ -339,9 +720,12 @@ function ProjectRecommendationsWorkspace({
         project={project}
         wait={wait}
         batch={wait.batch ?? inventory?.contactBatch ?? null}
+        inventory={inventory}
         error={error}
         retrying={retrying}
-        onStart={() => wait.start()}
+        requesting={requestingRefill}
+        actionLabel={refillActionLabel}
+        onStart={startOrReconnectRefill}
         onRetry={() => void retryUnpublished()}
         onRefresh={() => void refreshAll()}
       />
@@ -372,15 +756,25 @@ function ProjectRecommendationsWorkspace({
 
   return (
     <div>
+      <div className="sr-only" role="status" aria-live="polite">
+        {opportunityAnnouncement}
+      </div>
       {wait.status !== "idle" && (
         <div
           className="mb-4 border-l-2 border-primary bg-muted/30 px-4 py-3 text-sm"
-          role="status"
-          aria-busy={wait.status === "running" || undefined}
+          role={
+            wait.status === "failed" || wait.status === "partial"
+              ? "alert"
+              : "status"
+          }
+          aria-busy={
+            (wait.status === "running" && inventory?.stage !== "pause") ||
+            undefined
+          }
         >
           <div className="min-w-0">
             <div className="flex items-center gap-2 font-medium">
-              {wait.status === "running" ? (
+              {wait.status === "running" && inventory?.stage !== "pause" ? (
                 <LoaderCircle className="size-4 animate-spin" />
               ) : (
                 <Clock3 className="size-4" />
@@ -388,8 +782,18 @@ function ProjectRecommendationsWorkspace({
               {wait.phase}
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
-              已耗时 {formatElapsed(wait.elapsedMs)} · 轮询 {wait.pollCount} 次 ·
-              最后查询 {formatQueryTime(wait.lastQueryAt)}
+              原始候选 {inventory?.rawCandidateCount ?? 0} · 联系人终态{" "}
+              {batch?.terminalJobCount ?? 0} · 当前层级{" "}
+              {inventory
+                ? refillTierLabels[inventory.currentRefillTier]
+                : "等待服务端"}{" "}
+              · Provider 成本{" "}
+              {formatProviderCost(inventory?.providerActualCostMicros ?? 0)}
+              {" "}· 付费调用 {inventory?.providerPaidCallCount ?? 0}
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              已读取 {wait.pollCount} 次 · 最后读取{" "}
+              {formatQueryTime(wait.lastQueryAt)}
             </div>
             {wait.error && (
               <div className="mt-1 text-xs text-destructive">{wait.error}</div>
@@ -400,15 +804,17 @@ function ProjectRecommendationsWorkspace({
 
       <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          ["可联系推荐", query.items.length],
-          ["本批已发布", batch?.publishedCount ?? query.items.length],
-          ["本批未发布", batch?.unpublishedCount ?? 0],
+          ["本轮推荐", query.items.length],
+          ["本轮目标", inventory?.visiblePoolTargetCount ?? 10],
           [
-            "本批终态",
-            batch === null
-              ? "待读取"
-              : `${batch.terminalJobCount}/${batch.totalJobCount}`,
+            "已加入机会",
+            query.items.filter(
+              (item) =>
+                item.existingOpportunityId !== null ||
+                joinedOpportunityIds[item.id] !== undefined
+            ).length,
           ],
+          ["历史已归档", inventory?.archivedVisiblePoolCount ?? 0],
         ].map(([label, value]) => (
           <Card key={label} size="sm">
             <CardContent>
@@ -432,24 +838,33 @@ function ProjectRecommendationsWorkspace({
                 className="pl-9 sm:max-w-sm"
               />
             </div>
-            <Button onClick={() => wait.start()} disabled={wait.status === "running"}>
-              {wait.status === "running" ? (
+            <Button
+              variant="outline"
+              onClick={() => void archiveCurrentPool(false)}
+              disabled={
+                poolAction !== null || inventory?.visiblePoolState !== "active"
+              }
+            >
+              {poolAction === "archive" ? (
                 <LoaderCircle className="animate-spin" />
               ) : (
-                <Clock3 />
+                <Archive />
               )}
-              等待本批可联系推荐
+              归档本轮
             </Button>
-            {batch !== null && batch.retryableUnpublishedCount > 0 && (
-              <Button
-                variant="outline"
-                onClick={() => void retryUnpublished()}
-                disabled={retrying}
-              >
-                <RefreshCw className={retrying ? "animate-spin" : undefined} />
-                仅重试未发布
-              </Button>
-            )}
+            <Button
+              onClick={() => void archiveCurrentPool(true)}
+              disabled={
+                poolAction !== null || inventory?.visiblePoolState !== "active"
+              }
+            >
+              {poolAction === "archive-and-refresh" ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <RotateCw />
+              )}
+              归档并生成下一轮
+            </Button>
             <Button
               variant="outline"
               size="icon"
@@ -479,6 +894,7 @@ function ProjectRecommendationsWorkspace({
 
         <div className="divide-y">
           {rows.map((item) => {
+            const fit = item.fitDecision
             const contact = item.contacts.find(
               (candidate) =>
                 candidate.id === item.recommendedContactCandidateId &&
@@ -486,6 +902,7 @@ function ProjectRecommendationsWorkspace({
             )
             const evidence = contact?.evidence[0]
             const isBusy = busyId === item.id
+            const joinedOpportunityId = joinedOpportunityIds[item.id]
             return (
               <article
                 key={item.id}
@@ -494,42 +911,106 @@ function ProjectRecommendationsWorkspace({
                 <section className="min-w-0 space-y-3">
                   <WebsiteIdentity item={item} />
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="secondary">评分 {item.score}</Badge>
+                    <Badge variant="secondary">
+                      {fitTierLabel(fit.matchTier)} · 综合适合度{" "}
+                      {fit.overallFit.toFixed(1)}
+                    </Badge>
+                    <Badge variant="outline">
+                      {marketTierLabel(fit.market.tier)}
+                    </Badge>
+                    <Badge variant="outline">
+                      {candidateSourceLabel(item.candidateSource)}
+                    </Badge>
+                    {item.resourceType !== null && (
+                      <Badge variant="outline">
+                        资源库 {item.resourceType === "free" ? "免费" : "付费"}
+                      </Badge>
+                    )}
+                    <Badge variant="outline">
+                      {item.priority === "high" ? "高优先级" : "标准优先级"}
+                    </Badge>
+                    <Badge variant="outline">风险 {item.risk.level}</Badge>
                     <Badge>公开邮箱已验证</Badge>
                     <span className="text-xs text-muted-foreground">
                       获取于 {formatDate(item.acquiredAt)}
                     </span>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
-                    {item.matchReasons.map((reason) => (
+                    {[
+                      ...fit.matchedProducts.map((value) => `产品：${value}`),
+                      ...fit.matchedTopics.map((value) => `主题：${value}`),
+                      ...fit.matchedKeywords.map((value) => `关键词：${value}`),
+                    ].map((reason) => (
                       <Badge key={reason} variant="outline">
                         {reason}
                       </Badge>
                     ))}
                   </div>
-                  <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div className="space-y-1 text-xs text-muted-foreground">
                     <div>
-                      <span className="text-muted-foreground">权威</span>
+                      市场：目标 {fit.market.targetCountry} /{" "}
+                      {fit.market.targetLanguage}；候选{" "}
+                      {fit.market.candidateCountry ?? "国家未提供"} /{" "}
+                      {fit.market.candidateLanguage ?? "语言未识别"}
+                    </div>
+                    <div>
+                      合作角度：
+                      {fit.cooperationAngles.join("、") || "编辑合作评估合格"}
+                    </div>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    指标来源：{metricsSourceLabel(item.metricsSource)}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
+                    <div>
+                      <span className="text-muted-foreground">Rank</span>
                       <div className="mt-1 font-medium">
-                        {metric(item.seoMetrics.authority)}
+                        {metric(fit.dataForSeo.rank)}
                       </div>
                     </div>
                     <div>
-                      <span className="text-muted-foreground">编辑质量</span>
+                      <span className="text-muted-foreground">流量</span>
                       <div className="mt-1 font-medium">
-                        {metric(item.seoMetrics.editorialQuality)}
+                        {metric(fit.dataForSeo.traffic)}
                       </div>
                     </div>
                     <div>
-                      <span className="text-muted-foreground">技术健康</span>
+                      <span className="text-muted-foreground">Backlinks</span>
                       <div className="mt-1 font-medium">
-                        {metric(item.seoMetrics.technicalHealth)}
+                        {metric(fit.dataForSeo.backlinks)}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">
+                        Ref. Domains
+                      </span>
+                      <div className="mt-1 font-medium">
+                        {metric(fit.dataForSeo.referringDomains)}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">垃圾风险</span>
+                      <div className="mt-1 font-medium">
+                        {metric(fit.dataForSeo.spamScore)}
                       </div>
                     </div>
                   </div>
-                  <div className="truncate text-xs text-muted-foreground">
-                    来源：{item.dataSources.join("、") || "待补"}
-                  </div>
+                  {item.relevantPages.length > 0 && (
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                      {item.relevantPages.map((url) => (
+                        <a
+                          key={url}
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
+                        >
+                          <span className="truncate">相关内容页</span>
+                          <ExternalLink className="size-3 shrink-0" />
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </section>
 
                 <section className="min-w-0 space-y-3">
@@ -548,7 +1029,7 @@ function ProjectRecommendationsWorkspace({
                         <span>用途置信度 {contact.purposeConfidence}</span>
                       </div>
                       <a
-                        href={evidence.sourceUrl}
+                        href={item.contactDecision.sourceUrl}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
@@ -558,6 +1039,10 @@ function ProjectRecommendationsWorkspace({
                         </span>
                         <ExternalLink className="size-3 shrink-0" />
                       </a>
+                      <div className="text-muted-foreground">
+                        邮箱来源：{item.emailSource.extractionMethod} ·{" "}
+                        {formatDate(item.emailSource.observedAt)}
+                      </div>
                     </div>
                   ) : (
                     <p className="text-sm text-destructive">
@@ -580,7 +1065,16 @@ function ProjectRecommendationsWorkspace({
                       <div>该域名已在当前项目的 Opportunity 中。</div>
                     )}
                   </div>
-                  {item.existingOpportunityId ? (
+                  {joinedOpportunityId ? (
+                    <div className="space-y-2">
+                      <Button disabled className="w-full">
+                        已加入
+                      </Button>
+                      <p className="text-xs text-muted-foreground">
+                        已加入机会池，可稍后在机会页面查看。
+                      </p>
+                    </div>
+                  ) : item.existingOpportunityId ? (
                     <Button
                       onClick={() =>
                         navigate(
@@ -606,6 +1100,11 @@ function ProjectRecommendationsWorkspace({
                       )}
                       加入 Opportunity
                     </Button>
+                  )}
+                  {opportunityError?.recommendationId === item.id && (
+                    <p role="alert" className="text-xs text-destructive">
+                      {opportunityError.message}
+                    </p>
                   )}
                 </section>
               </article>

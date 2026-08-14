@@ -2,6 +2,9 @@ from dataclasses import dataclass
 
 from httpx import AsyncClient
 from sqlalchemy import text
+from temporalio.api.enums.v1 import TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 from temporalio.client import Client
 
 from app.core.config import Settings
@@ -23,7 +26,10 @@ class RuntimeDependencies:
                 timeout=self.settings.runtime_dependency_timeout_seconds,
             )
             await self._check_database()
-            self.temporal = await Client.connect(self.settings.temporal_address)
+            self.temporal = await Client.connect(
+                self.settings.temporal_address,
+                namespace=self.settings.temporal_namespace,
+            )
             await self._check_temporal()
             await self._check_core()
         except Exception:
@@ -41,6 +47,27 @@ class RuntimeDependencies:
         if self.core_client is not None:
             await self.core_client.aclose()
         await engine.dispose()
+
+    async def business_consumers_running(self) -> bool:
+        if self.settings.backlinks_runtime_mode == "DISABLED":
+            return True
+        if (
+            not self.settings.backlinks_business_consumers_expected
+            or self.temporal is None
+        ):
+            return False
+        try:
+            response = await self.temporal.workflow_service.describe_task_queue(
+                DescribeTaskQueueRequest(
+                    namespace=self.settings.temporal_namespace,
+                    task_queue=TaskQueue(name=self.settings.backlinks_task_queue),
+                    task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+                    report_pollers=True,
+                )
+            )
+        except Exception:
+            return False
+        return bool(response.pollers)
 
     async def _check_database(self) -> None:
         async with engine.connect() as connection:

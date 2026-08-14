@@ -108,6 +108,7 @@ const serializeConnection = (
   connection: GmailConnectionView,
 ) => ({
   ...connection,
+  affectedProjectCount: connection.affectedProjectCount ?? 0,
   grantedScopes: [...connection.grantedScopes],
   recentErrorCategory: connection.recentErrorCategory ?? null,
 });
@@ -307,11 +308,14 @@ export function registerBacklinksGmailConnectionRoutes(
       actor: request.actor,
       websiteProjectKey: request.params.websiteProjectKey,
     });
+    const status = await options.syncCommands.status({
+      context,
+      connectionId: request.params.connectionId,
+    });
     return {
-      ...await options.syncCommands.status({
-        context,
-        connectionId: request.params.connectionId,
-      }),
+      ...status,
+      lastErrorCategory: status.lastErrorCategory ?? null,
+      consecutiveFailures: status.consecutiveFailures ?? 0,
       meta: meta(request, projectScope(context)),
     };
   });

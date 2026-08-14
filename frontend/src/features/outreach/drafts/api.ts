@@ -13,6 +13,7 @@ export type DraftJobStatus =
   BacklinksResponse<"backlinksGetDraftJobV1">["job"]["status"]
 export type DraftJob =
   BacklinksResponse<"backlinksGetDraftJobV1">["job"]
+export type DraftRequest = NonNullable<DraftJob["request"]>
 
 export type ManualContactRole =
   BacklinksRequest<"backlinksCreateManualContactCandidateV1">["body"]["contactRole"]
@@ -23,11 +24,7 @@ export type ManualContactCandidate =
 export function createDraftJob(
   websiteProjectKey: string,
   opportunityId: string,
-  input: Readonly<{
-    contactId: string
-    contactVersion: number
-    logicalDraftKey: string
-  }>,
+  input: BacklinksRequest<"backlinksCreateDraftJobV1">["body"],
   idempotencyKey: string,
   signal: AbortSignal
 ) {
@@ -186,6 +183,29 @@ export function createSendIntent(
     headers: { "idempotency-key": idempotencyKey },
     body: input,
   })
+}
+
+export function preflightSendIntent(
+  websiteProjectKey: string,
+  draftId: string,
+  input: Readonly<{
+    approvedDraftVersionId: string
+    contactId: string
+    contactVersion: number
+    gmailConnectionId: string
+    messagePurpose: SendIntentMessagePurpose
+    followUpIndex: number
+  }>,
+  signal?: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksPreflightSendIntentV1",
+    {
+      path: { websiteProjectKey, draftId },
+      body: input,
+    },
+    signal ? { signal } : undefined
+  )
 }
 
 export function getSendIntent(

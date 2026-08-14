@@ -133,7 +133,7 @@ function Invoke-IntegratedParallelBlockMigrations {
     Invoke-PsqlFile -Database $Database -Path (
         Join-Path $BacklinksMigrationPath "0027_backlink_negotiation_facts.sql"
     )
-    Invoke-BacklinksMigrations -Database $Database -First 28 -Last 45
+    Invoke-BacklinksMigrations -Database $Database -First 28 -Last 60
 }
 
 function Invoke-DatabaseContract {
@@ -260,7 +260,8 @@ try {
 
     $Ready = $false
     for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
-        & docker exec $ContainerName pg_isready -U postgres -d postgres 2>$null | Out-Null
+        & docker exec $ContainerName pg_isready -h 127.0.0.1 `
+            -U postgres -d postgres 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) {
             $Ready = $true
             break

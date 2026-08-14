@@ -151,6 +151,9 @@ export function useGmailConnection(
         window.location.pathname
       )
       window.location.assign(response.authorizationUrl)
+      window.setTimeout(() => {
+        setBusyAction((current) => (current === "connect" ? null : current))
+      }, 15_000)
     } catch {
       setErrorMessage(
         "未能启动 Gmail 授权。真实 Provider 默认关闭时会安全失败。"

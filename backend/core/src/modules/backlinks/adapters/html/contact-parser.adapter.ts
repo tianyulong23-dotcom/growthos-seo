@@ -37,13 +37,30 @@ const emailOptions: EmailOptions = Object.freeze({
 });
 const htmlTypes = new Set(["text/html", "application/xhtml+xml"]);
 const emailPattern =
-  /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,63}/gu;
+  /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]{1,64}@(?:[\p{L}\p{N}-]{1,63}\.){1,10}[\p{L}]{2,63}/gu;
 const bracketedObfuscatedEmailPattern =
-  /([\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+)\s*(?:\[at\]|\(at\))\s*((?:[\p{L}\p{N}-]+\s*(?:\.|\[dot\]|\(dot\)|\sdot\s)\s*)+[\p{L}]{2,63})/giu;
+  /([\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]{1,64})\s*(?:\[at\]|\(at\))\s*((?:[\p{L}\p{N}-]{1,63}\s*(?:\.|\[dot\]|\(dot\)|\sdot\s)\s*){1,10}[\p{L}]{2,63})/giu;
 const wordObfuscatedEmailPattern =
-  /([\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+)\s+at\s+((?:[\p{L}\p{N}-]+\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*)+[\p{L}]{2,63})/giu;
+  /([\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]{1,64})\s+at\s+((?:[\p{L}\p{N}-]{1,63}\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*){1,10}[\p{L}]{2,63})/giu;
+const emailMarkerPattern = /@/gu;
+const obfuscatedEmailMarkerPattern = /(?:\[at\]|\(at\)|\sat\s)/giu;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const maxNodes = 20_000;
+const markerWindowRadius = 320;
+const maxMarkerWindows = 256;
+
+function markerWindows(value: string, marker: RegExp): readonly string[] {
+  const windows: string[] = [];
+  for (const match of value.matchAll(marker)) {
+    if (match.index === undefined) continue;
+    windows.push(value.slice(
+      Math.max(0, match.index - markerWindowRadius),
+      Math.min(value.length, match.index + markerWindowRadius),
+    ));
+    if (windows.length >= maxMarkerWindows) break;
+  }
+  return windows;
+}
 
 export type ContactCandidate = Readonly<{
   email: string;
@@ -136,6 +153,7 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
         ? {}
         : { nearbyText }),
       ...(title === "" ? {} : { pageTitle: title }),
+      pageUrl: page.finalUrl,
     });
     candidates.set(email, Object.freeze({
       email,
@@ -151,7 +169,17 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
     }));
   };
   visible.find("a[href]").each((_, element) => {
-    const href = $(element).attr("href") ?? "";
+    const href = ($(element).attr("href") ?? "").trim();
+    if (isCandidateEmail(href)) {
+      add(
+        href,
+        "mailto",
+        $(element).text(),
+        `${$(element).text()} ${href}`,
+        $(element).parent().text().slice(0, 1_000),
+      );
+      return;
+    }
     if (!href.toLowerCase().startsWith("mailto:")) return;
     try {
       add(
@@ -159,7 +187,7 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
         "mailto",
         $(element).text(),
         `${$(element).text()} ${href}`,
-        $(element).parent().text(),
+        $(element).parent().text().slice(0, 1_000),
       );
     } catch {
       // Invalid percent encoding cannot provide trustworthy evidence.
@@ -172,33 +200,36 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
   for (const node of textNodes) {
     if (node.type !== "text") continue;
     const visibleText = $(node).text();
-    for (const match of visibleText.matchAll(emailPattern)) {
-      add(
-        match[0],
-        "visible_text",
-        undefined,
-        match[0],
-        $(node).parent().text(),
-      );
+    for (const window of markerWindows(visibleText, emailMarkerPattern)) {
+      for (const match of window.matchAll(emailPattern)) {
+        add(match[0], "visible_text", undefined, match[0], window);
+      }
     }
-    for (const pattern of [
-      bracketedObfuscatedEmailPattern,
-      wordObfuscatedEmailPattern,
-    ]) {
-      for (const match of visibleText.matchAll(pattern)) {
-        const local = match[1];
-        const rawDomain = match[2];
-        if (local === undefined || rawDomain === undefined) continue;
-        const domain = rawDomain
-          .replace(/\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*/giu, ".")
-          .replace(/\s+/gu, "");
-        add(
-          `${local}@${domain}`,
-          "obfuscated_text",
-          undefined,
-          match[0],
-          $(node).parent().text(),
-        );
+    for (
+      const window of markerWindows(
+        visibleText,
+        obfuscatedEmailMarkerPattern,
+      )
+    ) {
+      for (const pattern of [
+        bracketedObfuscatedEmailPattern,
+        wordObfuscatedEmailPattern,
+      ]) {
+        for (const match of window.matchAll(pattern)) {
+          const local = match[1];
+          const rawDomain = match[2];
+          if (local === undefined || rawDomain === undefined) continue;
+          const domain = rawDomain
+            .replace(/\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*/giu, ".")
+            .replace(/\s+/gu, "");
+          add(
+            `${local}@${domain}`,
+            "obfuscated_text",
+            undefined,
+            match[0],
+            window,
+          );
+        }
       }
     }
   }
@@ -207,8 +238,10 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
     try {
       const walk = (value: unknown): void => {
         if (typeof value === "string") {
-          for (const match of value.matchAll(emailPattern)) {
-            add(match[0], "json_ld", undefined, value);
+          for (const window of markerWindows(value, emailMarkerPattern)) {
+            for (const match of window.matchAll(emailPattern)) {
+              add(match[0], "json_ld", undefined, window);
+            }
           }
           return;
         }

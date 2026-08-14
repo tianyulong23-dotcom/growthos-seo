@@ -8,6 +8,7 @@ import {
   Send,
   ShieldCheck,
   TriangleAlert,
+  WandSparkles,
 } from "lucide-react"
 import { Link, useParams } from "react-router"
 
@@ -27,6 +28,7 @@ import {
   getDraft,
   getSendIntent,
   listOpportunityContacts,
+  preflightSendIntent,
   saveDraftVersion,
 } from "@/features/outreach/drafts/api"
 import {
@@ -40,6 +42,7 @@ import type {
   DraftSnapshot,
   DraftStatus,
   OpportunityContact,
+  SendIntentPreflight,
   SendIntentResult,
   SendIntentView,
 } from "@/features/outreach/drafts/types"
@@ -54,10 +57,10 @@ const statusLabels: Record<DraftStatus, string> = {
 }
 
 const sendIntentStatusLabels: Record<SendIntentView["status"], string> = {
-  READY: "已排队",
+  READY: "QUEUED · 已排队",
   DISPATCHING: "正在发送",
-  PROVIDER_ACCEPTED: "Gmail Provider 已接受",
-  DELIVERY_UNKNOWN: "发送结果未知",
+  PROVIDER_ACCEPTED: "SUBMITTED/SENT · Gmail Provider 已接受",
+  DELIVERY_UNKNOWN: "UNKNOWN · 发送结果未知",
   FAILED_RETRYABLE: "发送失败，等待受控恢复",
   FAILED_FINAL: "发送失败",
   CANCELLED: "已取消",
@@ -87,27 +90,102 @@ function formatTimestamp(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN")
 }
 
+type SendPreflightFailure = {
+  code: string
+  message: string
+  repair: string
+}
+
+const sendPreflightFailures: Record<string, Omit<SendPreflightFailure, "code">> =
+  {
+    GMAIL_CONNECTION_NOT_SELECTED: {
+      message: "当前项目尚未选择 Gmail 发件账号。",
+      repair: "前往邮件中心选择组织已有账号。",
+    },
+    GMAIL_REAUTH_REQUIRED: {
+      message: "Gmail 授权已失效或需要重新确认。",
+      repair: "重新完成 Gmail 授权后再检查。",
+    },
+    GMAIL_SEND_DISABLED: {
+      message: "本地 Gmail Send 运行能力当前关闭。",
+      repair: "恢复运行配置并正常重启本地产品后再检查。",
+    },
+    GMAIL_SCOPE_INSUFFICIENT: {
+      message: "当前 Gmail 授权缺少发送所需权限。",
+      repair: "重新授权 Gmail 并授予 Send 权限。",
+    },
+    GMAIL_WORKER_UNAVAILABLE: {
+      message: "Temporal Gmail Worker 当前不可用。",
+      repair: "启动或修复 Worker 后重新检查。",
+    },
+    CONTACT_VERSION_STALE: {
+      message: "已确认联系人或联系人版本已经变化。",
+      repair: "刷新机会联系人并重新生成、批准草稿。",
+    },
+    DRAFT_VERSION_STALE: {
+      message: "当前草稿不再是服务端已批准版本。",
+      repair: "刷新草稿并重新人工批准正确版本。",
+    },
+    SEND_POLICY_REJECTED: {
+      message: "抑制、退订、频率、配额或 Kill Switch 门禁拒绝发送。",
+      repair: "核对具体治理状态，处理后重新检查。",
+    },
+  }
+
+function problemCode(error: unknown): string | null {
+  if (!(error instanceof ApiError) || typeof error.detail !== "object") {
+    return null
+  }
+  if (
+    error.detail !== null &&
+    "code" in error.detail &&
+    typeof error.detail.code === "string"
+  ) {
+    return error.detail.code
+  }
+  return null
+}
+
+function sendPreflightError(error: unknown): SendPreflightFailure {
+  const code = problemCode(error) ?? "PREFLIGHT_UNAVAILABLE"
+  const known = sendPreflightFailures[code]
+  if (known) return { code, ...known }
+  return {
+    code,
+    message: "发送预检未完成，发送按钮保持关闭。",
+    repair: "检查本地服务状态后重新检查；本次预检不会创建 Send Intent。",
+  }
+}
+
 function sendIntentErrorMessage(error: unknown): {
   message: string
   unknown: boolean
 } {
   if (error instanceof ApiError) {
+    const code = problemCode(error)
+    const known = code ? sendPreflightFailures[code] : undefined
+    if (known) {
+      return {
+        message: `确定未发送：${known.message} ${known.repair}`,
+        unknown: false,
+      }
+    }
     if (error.status === 409) {
       return {
-        message: "草稿、身份或服务端门禁已变化；请刷新后重新核对。",
+        message: "确定未发送：草稿、身份或服务端门禁已变化；请刷新后重新核对。",
         unknown: false,
       }
     }
     if (error.status === 429) {
       return {
-        message: "服务端配额或频率门禁已拒绝此请求，未创建 Send Intent。",
+        message: "确定未发送：服务端配额或频率门禁已拒绝，未创建 Send Intent。",
         unknown: false,
       }
     }
     if (error.status >= 400 && error.status < 500) {
       return {
         message:
-          "服务端拒绝创建 Send Intent；请刷新并核对批准版本和 Gmail 身份。",
+          "确定未发送：服务端拒绝创建 Send Intent；请刷新并核对批准版本和 Gmail 身份。",
         unknown: false,
       }
     }
@@ -160,6 +238,14 @@ function DraftEditorPage({
     null
   )
   const [sendIntentUnknown, setSendIntentUnknown] = React.useState(false)
+  const [sendPreflight, setSendPreflight] =
+    React.useState<SendIntentPreflight | null>(null)
+  const [sendPreflightStatus, setSendPreflightStatus] = React.useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle")
+  const [sendPreflightFailure, setSendPreflightFailure] =
+    React.useState<SendPreflightFailure | null>(null)
+  const [sendPreflightRefresh, setSendPreflightRefresh] = React.useState(0)
   const gmailConnection = useGmailConnection(projectId, Boolean(draftId))
 
   const loadRecipient = React.useCallback(
@@ -244,7 +330,14 @@ function DraftEditorPage({
   }
 
   const approve = async () => {
-    if (!draftId || !snapshot?.currentVersion || dirty) return
+    if (
+      !draftId ||
+      !snapshot?.currentVersion ||
+      snapshot.currentVersion.source === "TEMPLATE_FALLBACK" ||
+      dirty
+    ) {
+      return
+    }
     setApproving(true)
     setError(null)
     setNotice(null)
@@ -257,6 +350,9 @@ function DraftEditorPage({
       setSendIntentView(null)
       setSendStatusError(null)
       setSendIntentUnknown(false)
+      setSendPreflight(null)
+      setSendPreflightStatus("idle")
+      setSendPreflightFailure(null)
       setNotice("当前草稿版本已人工批准。")
     } catch (approveError) {
       setError(errorMessage(approveError))
@@ -266,6 +362,8 @@ function DraftEditorPage({
   }
 
   const currentVersion = snapshot?.currentVersion ?? null
+  const fallbackDiagnostic =
+    currentVersion?.source === "TEMPLATE_FALLBACK"
   const readOnly =
     snapshot?.status === "approved" || snapshot?.status === "sent"
   const busy = loading || saving || approving || creatingSendIntent
@@ -284,17 +382,99 @@ function DraftEditorPage({
     gmailConnection.status === "ready" &&
     gmailConnection.connection?.connectionStatus === "CONNECTED" &&
     gmailConnection.connection.sendAvailability === "AVAILABLE"
+  const sendPreflightReady =
+    sendPreflightStatus === "ready" &&
+    sendPreflight?.allowed === true &&
+    sendPreflight.deliveryState === "NOT_SENT"
   const sendPreconditionsReady =
     snapshot?.status === "approved" &&
     approvedVersionMatchesCurrent &&
+    !fallbackDiagnostic &&
     gmailReady &&
-    recipient !== null
+    recipient !== null &&
+    sendPreflightReady
   const canCreateSendIntent =
     sendPreconditionsReady &&
     sendConfirmed &&
     !busy &&
     sendIntent === null &&
     !sendIntentUnknown
+
+  React.useEffect(() => {
+    const controller = new AbortController()
+    const startTimer = window.setTimeout(() => {
+      if (
+        snapshot?.status !== "approved" ||
+        !snapshot.approvedVersionId ||
+        !approvedVersionMatchesCurrent ||
+        fallbackDiagnostic ||
+        !recipient
+      ) {
+        setSendPreflight(null)
+        setSendPreflightStatus("idle")
+        setSendPreflightFailure(null)
+        setSendConfirmed(false)
+        return
+      }
+
+      if (!gmailConnection.connection) {
+        setSendPreflight(null)
+        setSendPreflightStatus("error")
+        setSendPreflightFailure({
+          code: "GMAIL_CONNECTION_NOT_SELECTED",
+          ...sendPreflightFailures.GMAIL_CONNECTION_NOT_SELECTED,
+        })
+        setSendConfirmed(false)
+        return
+      }
+
+      setSendPreflight(null)
+      setSendPreflightStatus("loading")
+      setSendPreflightFailure(null)
+      setSendConfirmed(false)
+
+      void preflightSendIntent(
+        projectId,
+        draftId,
+        {
+          approvedDraftVersionId: snapshot.approvedVersionId,
+          contactId: recipient.id,
+          contactVersion: recipient.version,
+          gmailConnectionId: gmailConnection.connection.connectionId,
+          messagePurpose: "INITIAL_OUTREACH",
+          followUpIndex: 0,
+        },
+        controller.signal
+      ).then(
+        (response) => {
+          if (controller.signal.aborted) return
+          setSendPreflight(response)
+          setSendPreflightStatus("ready")
+        },
+        (preflightError) => {
+          if (controller.signal.aborted) return
+          setSendPreflight(null)
+          setSendPreflightStatus("error")
+          setSendPreflightFailure(sendPreflightError(preflightError))
+        }
+      )
+    }, 0)
+
+    return () => {
+      window.clearTimeout(startTimer)
+      controller.abort()
+    }
+  }, [
+    approvedVersionMatchesCurrent,
+    draftId,
+    fallbackDiagnostic,
+    gmailConnection.connection,
+    projectId,
+    recipient,
+    sendPreflightRefresh,
+    snapshot?.approvedVersionId,
+    snapshot?.status,
+  ])
 
   const createApprovedSendIntent = async () => {
     if (
@@ -328,10 +508,18 @@ function DraftEditorPage({
         idempotencyKey
       )
       setSendIntent(response)
-      setNotice("发送任务已提交，正在读取服务端发送状态。")
+      setNotice(
+        "已创建 Send Intent，当前为 QUEUED；正在读取服务端状态，尚未确认 Gmail 接受。"
+      )
     } catch (sendError) {
       const result = sendIntentErrorMessage(sendError)
       setSendIntentUnknown(result.unknown)
+      if (!result.unknown) {
+        setSendPreflight(null)
+        setSendPreflightStatus("error")
+        setSendPreflightFailure(sendPreflightError(sendError))
+        setSendConfirmed(false)
+      }
       setError(result.message)
     } finally {
       setCreatingSendIntent(false)
@@ -399,6 +587,22 @@ function DraftEditorPage({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {snapshot?.status === "draft" && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                nativeButton={false}
+                render={
+                  <Link
+                    to={`/projects/${projectId}/backlinks/drafts/new?opportunityId=${snapshot.opportunityId}&regenerate=1`}
+                  />
+                }
+              >
+                <WandSparkles />
+                重新生成
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -425,7 +629,12 @@ function DraftEditorPage({
                 </Button>
                 <Button
                   size="sm"
-                  disabled={dirty || busy || snapshot?.status !== "draft"}
+                  disabled={
+                    dirty ||
+                    busy ||
+                    fallbackDiagnostic ||
+                    snapshot?.status !== "draft"
+                  }
                   onClick={() => void approve()}
                 >
                   {approving ? (
@@ -489,6 +698,18 @@ function DraftEditorPage({
               </div>
             </section>
 
+            {fallbackDiagnostic && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+              >
+                <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+                <span>
+                  模板诊断稿不计为 AI 生成成功，不能批准或解锁发送。请重新生成真实 AI 草稿。
+                </span>
+              </div>
+            )}
+
             {snapshot.status === "approved" && (
               <section
                 aria-labelledby="send-confirmation-title"
@@ -509,15 +730,47 @@ function DraftEditorPage({
                   <Badge variant="outline">人工最终确认</Badge>
                 </div>
 
-                <dl className="grid gap-3 text-sm sm:grid-cols-3">
+                <dl className="grid gap-3 border-y py-3 text-sm sm:grid-cols-4">
                   <div>
-                    <dt className="text-xs text-muted-foreground">发送身份</dt>
+                    <dt className="text-xs text-muted-foreground">Gmail</dt>
                     <dd className="mt-1 font-medium break-all">
-                      {gmailReady
-                        ? gmailConnection.connection?.primaryEmail
-                        : "Gmail 身份未就绪"}
+                      {sendPreflight?.gmail.primaryEmail ??
+                        gmailConnection.connection?.primaryEmail ??
+                        "未选择账号"}
                     </dd>
                   </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">连接</dt>
+                    <dd className="mt-1 font-medium">
+                      {sendPreflight?.gmail.connectionStatus ??
+                        gmailConnection.connection?.connectionStatus ??
+                        "NOT_SELECTED"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">发送</dt>
+                    <dd className="mt-1 font-medium">
+                      {sendPreflightStatus === "ready"
+                        ? "可提交 · NOT_SENT"
+                        : sendPreflightStatus === "loading"
+                          ? "预检中 · NOT_SENT"
+                          : sendPreflightStatus === "error"
+                            ? "确定未发送 · NOT_SENT"
+                            : "等待前置条件 · NOT_SENT"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">同步</dt>
+                    <dd className="mt-1 font-medium">
+                      {(sendPreflight?.gmail.mailSyncCapability ??
+                      gmailConnection.connection?.mailSyncCapability)
+                        ? "可用"
+                        : "暂停"}
+                    </dd>
+                  </div>
+                </dl>
+
+                <dl className="grid gap-3 text-sm sm:grid-cols-2">
                   <div>
                     <dt className="text-xs text-muted-foreground">收件人</dt>
                     <dd className="mt-1 font-medium break-all">
@@ -563,6 +816,70 @@ function DraftEditorPage({
                   <p className="text-xs text-destructive">
                     Gmail 连接未处于可发送状态，不能发送。
                   </p>
+                )}
+                {sendPreflightFailure && (
+                  <div
+                    className="flex flex-col gap-3 border border-destructive/30 bg-destructive/5 px-3 py-3 text-xs sm:flex-row sm:items-center sm:justify-between"
+                    role="alert"
+                  >
+                    <div>
+                      <div className="font-medium text-destructive">
+                        确定未发送 · {sendPreflightFailure.code}
+                      </div>
+                      <p className="mt-1 text-muted-foreground">
+                        {sendPreflightFailure.message}{" "}
+                        {sendPreflightFailure.repair}
+                      </p>
+                    </div>
+                    {sendPreflightFailure.code ===
+                    "GMAIL_CONNECTION_NOT_SELECTED" ? (
+                      <Button
+                        nativeButton={false}
+                        render={
+                          <Link
+                            to={`/projects/${projectId}/backlinks/email`}
+                          />
+                        }
+                        size="sm"
+                        variant="outline"
+                      >
+                        选择 Gmail
+                      </Button>
+                    ) : sendPreflightFailure.code ===
+                        "GMAIL_REAUTH_REQUIRED" ||
+                      sendPreflightFailure.code ===
+                        "GMAIL_SCOPE_INSUFFICIENT" ? (
+                      <Button
+                        disabled={gmailConnection.busyAction === "connect"}
+                        onClick={() => void gmailConnection.connect()}
+                        size="sm"
+                        variant="outline"
+                      >
+                        重新授权 Gmail
+                      </Button>
+                    ) : sendPreflightFailure.code ===
+                        "CONTACT_VERSION_STALE" ||
+                      sendPreflightFailure.code === "DRAFT_VERSION_STALE" ? (
+                      <Button
+                        disabled={busy}
+                        onClick={() => void load()}
+                        size="sm"
+                        variant="outline"
+                      >
+                        刷新草稿
+                      </Button>
+                    ) : (
+                      <Button
+                        onClick={() =>
+                          setSendPreflightRefresh((value) => value + 1)
+                        }
+                        size="sm"
+                        variant="outline"
+                      >
+                        重新检查
+                      </Button>
+                    )}
+                  </div>
                 )}
 
                 <label className="flex items-start gap-2 text-sm">
@@ -720,7 +1037,7 @@ export function DraftPage() {
     return <div className="p-6 text-sm text-destructive">草稿 ID 缺失。</div>
   }
   if (draftId === "new") {
-    return <DraftGeneration websiteProjectKey={projectId} />
+    return <DraftGeneration project={currentProject} />
   }
   return <DraftEditorPage projectId={projectId} draftId={draftId} />
 }

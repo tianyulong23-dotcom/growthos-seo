@@ -24,18 +24,291 @@ param(
     [int]$GmailMinimumIntervalSeconds = 120,
     [ValidateRange(15, 3600)]
     [int]$GmailPollingIntervalSeconds = 60,
+    [ValidateSet("normal", "quiesced")]
+    [string]$WorkerExecutionMode = "normal",
+    [switch]$PreflightOnly,
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
+$scriptBoundParameters = $PSBoundParameters
 
 if ($env:OS -ne "Windows_NT") {
     throw "Start-GrowthOS-LocalProduct.ps1 requires Windows"
 }
 
-if ($EnableGmail) {
-    $EnableGmailSend = $true
-    $EnableGmailSync = $true
+function Read-EnvironmentSetting(
+    [string]$Path,
+    [string]$Name
+) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    foreach ($rawLine in Get-Content -LiteralPath $Path -Encoding UTF8) {
+        $line = $rawLine.Trim()
+        if ($line.Length -eq 0 -or $line.StartsWith("#")) {
+            continue
+        }
+        $parts = $line.Split("=", 2)
+        if ($parts.Length -ne 2 -or $parts[0].Trim().Length -eq 0) {
+            throw "Invalid environment line in $Path"
+        }
+        if ($parts[0].Trim() -eq $Name) {
+            return $parts[1].Trim()
+        }
+    }
+    return $null
+}
+
+function Test-DataForSeoSecretReferenceAvailable(
+    [string]$Reference
+) {
+    if (
+        [string]::IsNullOrWhiteSpace($Reference) -or
+        $Reference -notmatch (
+            "^secret://growthos/local-product/" +
+            "(dataforseo/.+)/(v[1-9][0-9]*)$"
+        )
+    ) {
+        return $false
+    }
+    $externalSecretId = $Matches[1]
+    $externalSecretVersion = $Matches[2]
+    $secretRoot = Join-Path $RuntimeRoot "secrets"
+    if (-not (Test-Path -LiteralPath (
+        Join-Path $secretRoot "master-key.bin"
+    ))) {
+        return $false
+    }
+    $valuesRoot = Join-Path $secretRoot "values"
+    if (-not (Test-Path -LiteralPath $valuesRoot)) {
+        return $false
+    }
+    foreach (
+        $path in Get-ChildItem -LiteralPath $valuesRoot -Recurse `
+            -Filter "$externalSecretVersion.json" -File
+    ) {
+        try {
+            $envelope = Get-Content -LiteralPath $path.FullName `
+                -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (
+                $envelope.secretKind -eq "DATAFORSEO_CREDENTIAL" -and
+                $envelope.externalSecretId -eq $externalSecretId -and
+                $envelope.externalSecretVersion -eq $externalSecretVersion
+            ) {
+                return $true
+            }
+        }
+        catch {
+        }
+    }
+    return $false
+}
+
+function Test-GoogleOauthSecretReferenceAvailable(
+    [string]$Reference
+) {
+    if (
+        [string]::IsNullOrWhiteSpace($Reference) -or
+        $Reference -notmatch (
+            "^secret://growthos/local-product/" +
+            "(google/.+)/(v[1-9][0-9]*)$"
+        )
+    ) {
+        return $false
+    }
+    $externalSecretId = $Matches[1]
+    $externalSecretVersion = $Matches[2]
+    $secretRoot = Join-Path $RuntimeRoot "secrets"
+    if (-not (Test-Path -LiteralPath (
+        Join-Path $secretRoot "master-key.bin"
+    ))) {
+        return $false
+    }
+    $valuesRoot = Join-Path $secretRoot "values"
+    if (-not (Test-Path -LiteralPath $valuesRoot)) {
+        return $false
+    }
+    foreach (
+        $path in Get-ChildItem -LiteralPath $valuesRoot -Recurse `
+            -Filter "$externalSecretVersion.json" -File
+    ) {
+        try {
+            $envelope = Get-Content -LiteralPath $path.FullName `
+                -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (
+                $envelope.secretKind -eq "GOOGLE_OAUTH_CLIENT_SECRET" -and
+                $envelope.externalSecretId -eq $externalSecretId -and
+                $envelope.externalSecretVersion -eq $externalSecretVersion
+            ) {
+                return $true
+            }
+        }
+        catch {
+        }
+    }
+    return $false
+}
+
+function Get-GoogleOauthClientSecretReference {
+    $workerEnvironment = Join-Path $RuntimeRoot "backlinks-worker.env"
+    $configured = Read-EnvironmentSetting `
+        $workerEnvironment "GOOGLE_OAUTH_CLIENT_SECRET_REF"
+    if (-not [string]::IsNullOrWhiteSpace($configured)) {
+        return $configured
+    }
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        return $null
+    }
+    try {
+        $manifest = Get-Content -LiteralPath $ManifestPath `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        return [string]$manifest.google.oauthClientSecretRef
+    }
+    catch {
+        return $null
+    }
+}
+
+function Resolve-DataForSeoRequested {
+    if ($scriptBoundParameters.ContainsKey("EnableDataForSeo")) {
+        return [bool]$scriptBoundParameters["EnableDataForSeo"]
+    }
+    return (
+        Read-EnvironmentSetting `
+            (Join-Path $RuntimeRoot "backlinks-worker.env") `
+            "DATAFORSEO_ENABLED"
+    ) -eq "true"
+}
+
+function Resolve-DataForSeoEnabled {
+    if (
+        $env:CI -eq "true" -or
+        $env:NODE_ENV -eq "test"
+    ) {
+        return $false
+    }
+    if (-not (Resolve-DataForSeoRequested)) {
+        return $false
+    }
+    $secretReference = Read-EnvironmentSetting `
+        (Join-Path $RuntimeRoot "backlinks-worker.env") `
+        "DATAFORSEO_CREDENTIAL_SECRET_REF"
+    if (-not (Test-DataForSeoSecretReferenceAvailable $secretReference)) {
+        throw (
+            "LOCAL_PRODUCT_DATAFORSEO_CONFIG_REQUIRED:" +
+            "credential Secret Reference is unavailable"
+        )
+    }
+    return $true
+}
+
+function Resolve-DataForSeoMaxPaidCalls {
+    if ($scriptBoundParameters.ContainsKey("DataForSeoMaxPaidCalls")) {
+        return [int]$scriptBoundParameters["DataForSeoMaxPaidCalls"]
+    }
+    if (-not $EnableDataForSeo) {
+        return $DataForSeoMaxPaidCalls
+    }
+    $configured = Read-EnvironmentSetting `
+        (Join-Path $RuntimeRoot "backlinks-worker.env") `
+        "DATAFORSEO_MAX_PAID_CALLS"
+    $parsed = 0
+    if (
+        [int]::TryParse([string]$configured, [ref]$parsed) -and
+        $parsed -ge 1 -and
+        $parsed -le 1000
+    ) {
+        return $parsed
+    }
+    return $DataForSeoMaxPaidCalls
+}
+
+function Resolve-GmailCapabilityEnabled(
+    [string]$ParameterName,
+    [string]$EnvironmentName
+) {
+    if (
+        $env:CI -eq "true" -or
+        $env:NODE_ENV -eq "test"
+    ) {
+        return $false
+    }
+    $requested = if ($scriptBoundParameters.ContainsKey("EnableGmail")) {
+        [bool]$scriptBoundParameters["EnableGmail"]
+    }
+    elseif ($scriptBoundParameters.ContainsKey($ParameterName)) {
+        [bool]$scriptBoundParameters[$ParameterName]
+    }
+    else {
+        (
+            Read-EnvironmentSetting `
+                (Join-Path $RuntimeRoot "backlinks-worker.env") `
+                $EnvironmentName
+        ) -eq "true"
+    }
+    if (-not $requested) {
+        return $false
+    }
+    if (
+        -not (
+            Test-GoogleOauthSecretReferenceAvailable `
+                (Get-GoogleOauthClientSecretReference)
+        )
+    ) {
+        throw (
+            "LOCAL_PRODUCT_GMAIL_CONFIG_REQUIRED:" +
+            "Google OAuth client Secret Reference is unavailable"
+        )
+    }
+    return $true
+}
+
+$EnableDataForSeo = Resolve-DataForSeoEnabled
+$DataForSeoMaxPaidCalls = Resolve-DataForSeoMaxPaidCalls
+$EnableGmailSend = Resolve-GmailCapabilityEnabled `
+    "EnableGmailSend" "GMAIL_SEND_ENABLED"
+$EnableGmailSync = Resolve-GmailCapabilityEnabled `
+    "EnableGmailSync" "GMAIL_SYNC_ENABLED"
+
+function Invoke-ResolvedLocalProductConfiguration(
+    [string]$BuildId,
+    [switch]$ValidateOnly
+) {
+    & (Join-Path $PSScriptRoot "Set-LocalProductConfiguration.ps1") `
+        -RuntimeRoot $RuntimeRoot `
+        -ManifestPath $ManifestPath `
+        -RepositoryRoot $RepositoryRoot `
+        -EnableAi:$EnableAi `
+        -EnableGmailSend:$EnableGmailSend `
+        -EnableGmailSync:$EnableGmailSync `
+        -EnableDataForSeo:$EnableDataForSeo `
+        -EnableBrowser:$EnableBrowser `
+        -AiMaxCalls $AiMaxCalls `
+        -DataForSeoMaxPaidCalls $DataForSeoMaxPaidCalls `
+        -GmailRolling24HourSendLimit $GmailRolling24HourSendLimit `
+        -GmailMinimumIntervalSeconds $GmailMinimumIntervalSeconds `
+        -GmailPollingIntervalSeconds $GmailPollingIntervalSeconds `
+        -WorkerExecutionMode $WorkerExecutionMode `
+        -BuildId $BuildId `
+        -ValidateOnly:$ValidateOnly
+}
+
+if ($PreflightOnly) {
+    $configuration = Invoke-ResolvedLocalProductConfiguration `
+        -ValidateOnly
+    [pscustomobject]@{
+        status = "ok"
+        preflightOnly = $true
+        runtimeMode = "LOCAL_PRODUCT"
+        projectKey = $configuration.projectKey
+        dataForSeoEnabled = [bool]$EnableDataForSeo
+        dataForSeoMaxPaidCalls = $DataForSeoMaxPaidCalls
+        gmailSendEnabled = [bool]$EnableGmailSend
+        gmailSyncEnabled = [bool]$EnableGmailSync
+        workerExecutionMode = $WorkerExecutionMode
+    }
+    return
 }
 
 Add-Type -TypeDefinition @"
@@ -278,7 +551,11 @@ function Invoke-LocalProductAlembicUpgrade {
     }
 }
 
-function Wait-HttpReady([string]$Uri, [uint32]$GroupPid) {
+function Wait-HttpReady(
+    [string]$Uri,
+    [uint32]$GroupPid,
+    [string]$ExpectedBuildId
+) {
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
         Start-Sleep -Seconds 1
         if (-not (Get-Process -Id $GroupPid -ErrorAction SilentlyContinue)) {
@@ -286,7 +563,13 @@ function Wait-HttpReady([string]$Uri, [uint32]$GroupPid) {
         }
         try {
             $response = Invoke-RestMethod -Uri $Uri -TimeoutSec 5
-            if ($response.status -eq "ok") {
+            if (
+                $response.status -eq "ok" `
+                -and (
+                    [string]::IsNullOrWhiteSpace($ExpectedBuildId) `
+                    -or [string]$response.build.buildId -eq $ExpectedBuildId
+                )
+            ) {
                 return
             }
         }
@@ -302,14 +585,21 @@ function Wait-HttpAvailable([string]$Uri, [uint32]$GroupPid) {
         if (-not (Get-Process -Id $GroupPid -ErrorAction SilentlyContinue)) {
             throw "Process group $GroupPid exited before $Uri became available"
         }
-        $statusCode = & curl.exe `
-            --silent `
-            --show-error `
-            --output NUL `
-            --write-out "%{http_code}" `
-            --max-time 5 `
-            --noproxy "*" `
-            $Uri 2>$null
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $statusCode = & curl.exe `
+                --silent `
+                --show-error `
+                --output NUL `
+                --write-out "%{http_code}" `
+                --max-time 5 `
+                --noproxy "*" `
+                $Uri 2>$null
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if ($LASTEXITCODE -eq 0 -and $statusCode -eq "200") {
             return
         }
@@ -317,18 +607,48 @@ function Wait-HttpAvailable([string]$Uri, [uint32]$GroupPid) {
     throw "$Uri did not become available"
 }
 
-function Wait-WorkerReady([string]$LogPath, [uint32]$GroupPid) {
+function Wait-WorkerReady(
+    [string]$LogPath,
+    [uint32]$GroupPid,
+    [string]$ExpectedBuildId,
+    [string]$ExpectedExecutionMode = "normal"
+) {
     for ($attempt = 0; $attempt -lt 150; $attempt++) {
         Start-Sleep -Seconds 1
         if (-not (Get-Process -Id $GroupPid -ErrorAction SilentlyContinue)) {
             throw "Worker process group $GroupPid exited before readiness"
         }
-        if (
-            (Test-Path -LiteralPath $LogPath) -and
-            (Select-String -LiteralPath $LogPath -SimpleMatch `
-                '"event":"backlinks.worker.ready"' -Quiet)
-        ) {
-            return
+        if (Test-Path -LiteralPath $LogPath) {
+            foreach ($line in @(
+                Get-Content -LiteralPath $LogPath -Tail 200 -Encoding UTF8
+            )) {
+                if ($line -notmatch '"event":"backlinks.worker.ready"') {
+                    continue
+                }
+                try {
+                    $ready = $line | ConvertFrom-Json
+                }
+                catch {
+                    continue
+                }
+                if (
+                    -not [string]::IsNullOrWhiteSpace($ExpectedBuildId) -and
+                    [string]$ready.buildId -ne $ExpectedBuildId
+                ) {
+                    continue
+                }
+                if (
+                    $ExpectedExecutionMode -eq "quiesced" -and (
+                        [string]$ready.workerExecutionMode -ne "quiesced" -or
+                        $ready.businessConsumersRunning -ne $false -or
+                        $ready.postgresReady -ne $true -or
+                        $ready.temporalReady -ne $true
+                    )
+                ) {
+                    continue
+                }
+                return
+            }
         }
     }
     throw "Backlinks Worker did not become ready"
@@ -364,6 +684,50 @@ function Start-Component(
     )
 }
 
+function Get-LocalProductBuildIdentity {
+    $coreRoot = Join-Path $RepositoryRoot "backend\core"
+    $tsx = Join-Path $coreRoot "node_modules\.bin\tsx.cmd"
+    if (-not (Test-Path -LiteralPath $tsx)) {
+        throw "LOCAL_PRODUCT_STALE_BUILD:TSX_RUNTIME_MISSING"
+    }
+    Push-Location $coreRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(
+            & $tsx "scripts\local-product-build-identity.ts" "check" 2>&1
+        )
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($exitCode -ne 0) {
+        throw (
+            "LOCAL_PRODUCT_STALE_BUILD:" +
+            (($output | ForEach-Object { [string]$_ }) -join " ")
+        )
+    }
+    try {
+        $result = (($output | Select-Object -Last 1) | ConvertFrom-Json)
+    }
+    catch {
+        throw "LOCAL_PRODUCT_STALE_BUILD:BUILD_IDENTITY_INVALID"
+    }
+    if ($result.ok -ne $true -or $null -eq $result.identity) {
+        throw "LOCAL_PRODUCT_STALE_BUILD"
+    }
+    return $result.identity
+}
+
+$buildIdentity = if ($SkipBuild) {
+    Get-LocalProductBuildIdentity
+}
+else {
+    $null
+}
+
 $newStatePath = Join-Path $RuntimeRoot "local-product-processes.json"
 $legacyStatePath = Join-Path $RuntimeRoot "live001-processes.json"
 if (Test-Path -LiteralPath $newStatePath) {
@@ -391,21 +755,6 @@ foreach ($port in $applicationPorts) {
         throw "LOCAL_PRODUCT_PORT_CONFLICT:$port"
     }
 }
-
-& (Join-Path $PSScriptRoot "Set-LocalProductConfiguration.ps1") `
-    -RuntimeRoot $RuntimeRoot `
-    -ManifestPath $ManifestPath `
-    -RepositoryRoot $RepositoryRoot `
-    -EnableAi:$EnableAi `
-    -EnableGmailSend:$EnableGmailSend `
-    -EnableGmailSync:$EnableGmailSync `
-    -EnableDataForSeo:$EnableDataForSeo `
-    -EnableBrowser:$EnableBrowser `
-    -AiMaxCalls $AiMaxCalls `
-    -DataForSeoMaxPaidCalls $DataForSeoMaxPaidCalls `
-    -GmailRolling24HourSendLimit $GmailRolling24HourSendLimit `
-    -GmailMinimumIntervalSeconds $GmailMinimumIntervalSeconds `
-    -GmailPollingIntervalSeconds $GmailPollingIntervalSeconds | Out-Null
 
 if (-not $SkipBuild) {
     Invoke-Checked `
@@ -437,7 +786,10 @@ if (-not $SkipBuild) {
         (Get-Command npm.cmd).Source `
         @("run", "build") `
         (Join-Path $RepositoryRoot "frontend")
+    $buildIdentity = Get-LocalProductBuildIdentity
 }
+Invoke-ResolvedLocalProductConfiguration `
+    -BuildId ([string]$buildIdentity.buildId) | Out-Null
 
 $env:GROWTHOS_LIVE001_SECRET_DIR = Join-Path $RuntimeRoot "secrets"
 $composeFile = Join-Path $RepositoryRoot `
@@ -448,6 +800,7 @@ Invoke-Checked `
     $RepositoryRoot
 Wait-ContainerHealthy "growthos-live001-postgres"
 Wait-ContainerHealthy "growthos-live001-temporal"
+
 Invoke-LocalProductAlembicUpgrade
 
 $contactMigrationPath = Join-Path $RepositoryRoot `
@@ -615,7 +968,6 @@ SELECT (NOT EXISTS (
    WHERE table_schema='backlinks'
      AND table_name='backlink_gmail_workspace_bindings'
      AND column_name='website_project_id'
-     AND is_nullable='NO'
 ))::text;
 "@
     ) `
@@ -924,6 +1276,754 @@ if ($gmailOrganizationReuseMigrationRequired.Trim() -eq "true") {
     }
 }
 
+$draftRequestSnapshotMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0048_backlink_draft_request_snapshots.sql"
+$draftRequestSnapshotMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regclass('backlinks.backlink_draft_request_snapshots') IS NULL
+  OR NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_evidence_snapshots'
+       AND column_name='context_data'
+  )
+  OR NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_model_runs'
+       AND column_name='request_snapshot_id'
+  )
+  OR NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_draft_versions'
+       AND column_name='request_snapshot_id'
+  )
+  OR NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class r ON r.oid=c.conrelid
+      JOIN pg_namespace n ON n.oid=r.relnamespace
+     WHERE n.nspname='backlinks'
+       AND r.relname='backlink_model_runs'
+       AND c.conname='backlink_model_run_status_check'
+       AND position('RETRY_SCHEDULED' IN pg_get_constraintdef(c.oid)) > 0
+  )
+  OR NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class r ON r.oid=c.conrelid
+      JOIN pg_namespace n ON n.oid=r.relnamespace
+     WHERE n.nspname='backlinks'
+       AND r.relname='backlink_draft_versions'
+       AND c.conname='backlink_draft_version_source_check'
+       AND position('TEMPLATE_FALLBACK' IN pg_get_constraintdef(c.oid)) > 0
+  )
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($draftRequestSnapshotMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $draftRequestSnapshotMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $draftRequestSnapshotMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($draftRequestSnapshotMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_DRAFT_REQUEST_SNAPSHOT_MIGRATION_FAILED:$draftRequestSnapshotMigrationExitCode"
+    }
+}
+
+$gmailSendReplyLoopMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0049_backlink_gmail_send_reply_loop.sql"
+$gmailSendReplyLoopMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regclass(
+    'backlinks.backlink_gmail_connection_sync_cursors'
+  ) IS NULL
+  OR NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_send_snapshots'
+       AND column_name='approval_fact_id'
+  )
+  OR NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid='backlinks.backlink_send_snapshots'::regclass
+       AND conname='backlink_send_snapshot_approval_fact_fk'
+  )
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($gmailSendReplyLoopMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $gmailSendReplyLoopMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $gmailSendReplyLoopMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($gmailSendReplyLoopMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_GMAIL_SEND_REPLY_LOOP_MIGRATION_FAILED:$gmailSendReplyLoopMigrationExitCode"
+    }
+}
+
+$backlinkProfileInventoryMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0050_backlink_profile_inventory.sql"
+$backlinkProfileInventoryMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regclass('backlinks.backlink_profile_sync_jobs') IS NULL
+  OR to_regclass('backlinks.backlink_profile_snapshots') IS NULL
+  OR to_regclass('backlinks.backlink_inventory_items') IS NULL
+  OR to_regclass('backlinks.backlink_profile_health_snapshots') IS NULL
+  OR to_regclass('backlinks.backlink_profile_sync_cursors') IS NULL
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkProfileInventoryMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $backlinkProfileInventoryMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkProfileInventoryMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkProfileInventoryMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_BACKLINK_PROFILE_INVENTORY_MIGRATION_FAILED:$backlinkProfileInventoryMigrationExitCode"
+    }
+}
+
+$backlinkInventoryMonitoringMigrationPath = Join-Path $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0051_backlink_inventory_monitoring.sql"
+$backlinkInventoryMonitoringMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regclass('backlinks.backlink_inventory_monitor_policies') IS NULL
+  OR to_regclass('backlinks.backlink_inventory_monitor_runs') IS NULL
+  OR to_regclass('backlinks.backlink_inventory_monitor_observations') IS NULL
+  OR to_regclass('backlinks.backlink_inventory_monitor_requests') IS NULL
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkInventoryMonitoringMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content -LiteralPath $backlinkInventoryMonitoringMigrationPath `
+            -Raw -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkInventoryMonitoringMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkInventoryMonitoringMigrationExitCode -ne 0) {
+        throw "LOCAL_PRODUCT_BACKLINK_INVENTORY_MONITORING_MIGRATION_FAILED:$backlinkInventoryMonitoringMigrationExitCode"
+    }
+}
+
+$backlinkRecommendationPublicationDefaultMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0052_backlink_recommendation_publication_default.sql"
+$backlinkRecommendationPublicationDefaultMigrationRequired = `
+    Invoke-CheckedCapture `
+        (Get-Command docker.exe).Source `
+        @(
+            "exec",
+            "growthos-live001-postgres",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "growthos_live001",
+            "-Atqc",
+            @"
+SELECT (
+  SELECT column_default <> '''CONTACT_PENDING''::text'
+    FROM information_schema.columns
+   WHERE table_schema='backlinks'
+     AND table_name='backlink_recommendation_inventory'
+     AND column_name='publication_status'
+)::text;
+"@
+        ) `
+        $RepositoryRoot
+if (
+    $backlinkRecommendationPublicationDefaultMigrationRequired.Trim() `
+        -eq "true"
+) {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath `
+                $backlinkRecommendationPublicationDefaultMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkRecommendationPublicationDefaultMigrationExitCode = `
+            $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if (
+        $backlinkRecommendationPublicationDefaultMigrationExitCode -ne 0
+    ) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_RECOMMENDATION_PUBLICATION_DEFAULT_MIGRATION_FAILED:$backlinkRecommendationPublicationDefaultMigrationExitCode"
+    }
+}
+
+$backlinkMonitoringContinuityMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0053_backlink_monitoring_continuity.sql"
+$backlinkMonitoringContinuityMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  position(
+    'provider_inventory_requires_pin_or_management' IN pg_get_functiondef(
+      'backlinks.backlink_apply_inventory_monitor_policy()'::regprocedure
+    )
+  ) = 0
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkMonitoringContinuityMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath $backlinkMonitoringContinuityMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkMonitoringContinuityMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkMonitoringContinuityMigrationExitCode -ne 0) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_MONITORING_CONTINUITY_MIGRATION_FAILED:$backlinkMonitoringContinuityMigrationExitCode"
+    }
+}
+
+$backlinkRecommendationFitContactMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0054_backlink_recommendation_fit_contact_contract.sql"
+$backlinkRecommendationFitContactMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_recommendation_inventory'
+       AND column_name='fit_decision'
+  )
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkRecommendationFitContactMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath $backlinkRecommendationFitContactMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkRecommendationFitContactMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkRecommendationFitContactMigrationExitCode -ne 0) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_RECOMMENDATION_FIT_CONTACT_MIGRATION_FAILED:$backlinkRecommendationFitContactMigrationExitCode"
+    }
+}
+
+$backlinkPublishableRefillCycleMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0055_backlink_publishable_refill_cycle.sql"
+$backlinkPublishableRefillCycleMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_commercial_inventory_policies'
+       AND column_name='refill_state'
+  )
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkPublishableRefillCycleMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath $backlinkPublishableRefillCycleMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkPublishableRefillCycleMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkPublishableRefillCycleMigrationExitCode -ne 0) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_PUBLISHABLE_REFILL_CYCLE_MIGRATION_FAILED:$backlinkPublishableRefillCycleMigrationExitCode"
+    }
+}
+
+$backlinkGmailAffectedProjectCountMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0056_backlink_gmail_affected_project_count.sql"
+$backlinkGmailAffectedProjectCountMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regprocedure(
+    'backlinks.backlink_count_selected_gmail_projects(uuid,uuid)'
+  ) IS NULL
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkGmailAffectedProjectCountMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath $backlinkGmailAffectedProjectCountMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkGmailAffectedProjectCountMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkGmailAffectedProjectCountMigrationExitCode -ne 0) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_GMAIL_AFFECTED_PROJECT_COUNT_MIGRATION_FAILED:$backlinkGmailAffectedProjectCountMigrationExitCode"
+    }
+}
+
+$backlinkResourceLibraryMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0057_backlink_resource_library.sql"
+$backlinkResourceLibraryMigrationRequired = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  to_regclass('backlinks.backlink_resource_library_items') IS NULL
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkResourceLibraryMigrationRequired.Trim() -eq "true") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath $backlinkResourceLibraryMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkResourceLibraryMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkResourceLibraryMigrationExitCode -ne 0) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_RESOURCE_LIBRARY_MIGRATION_FAILED:$backlinkResourceLibraryMigrationExitCode"
+    }
+}
+
+$backlinkReassessmentCursorMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0058_backlink_refill_reassessment_cursors.sql"
+$backlinkReassessmentCursorMigrationState = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  SELECT count(*)
+    FROM information_schema.columns
+   WHERE table_schema='backlinks'
+     AND table_name='backlink_commercial_inventory_policies'
+     AND column_name IN (
+       'paid_refill_tier','paid_refill_round',
+       'resource_refill_tier','resource_refill_round'
+     )
+)::text || ':' || (
+  SELECT count(*)
+    FROM pg_constraint
+   WHERE conrelid=
+     'backlinks.backlink_commercial_inventory_policies'::regclass
+     AND conname IN (
+       'backlink_commercial_paid_refill_cursor_check',
+       'backlink_commercial_resource_refill_cursor_check'
+     )
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkReassessmentCursorMigrationState.Trim() -eq "0:0") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath $backlinkReassessmentCursorMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkReassessmentCursorMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkReassessmentCursorMigrationExitCode -ne 0) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_REASSESSMENT_CURSOR_MIGRATION_FAILED:$backlinkReassessmentCursorMigrationExitCode"
+    }
+}
+elseif ($backlinkReassessmentCursorMigrationState.Trim() -ne "4:2") {
+    throw "LOCAL_PRODUCT_BACKLINK_REASSESSMENT_CURSOR_MIGRATION_PARTIAL"
+}
+
+$backlinkVisiblePoolMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0059_backlink_recommendation_pool_generations.sql"
+$backlinkVisiblePoolMigrationState = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  SELECT count(*)
+    FROM information_schema.columns
+   WHERE table_schema='backlinks'
+     AND (
+       (
+         table_name='backlink_commercial_inventory_policies'
+         AND column_name IN (
+           'visible_pool_generation','visible_pool_state',
+           'visible_pool_target_count','archived_visible_pool_count',
+           'visible_pool_archived_at','visible_pool_archived_by'
+         )
+       )
+       OR (
+         table_name IN (
+           'backlink_recommendation_inventory',
+           'backlink_recommendation_refills',
+           'backlink_commercial_discovery_batches',
+           'backlink_commercial_candidates'
+         )
+         AND column_name='visible_pool_generation'
+       )
+     )
+)::text || ':' || (
+  SELECT count(*)
+    FROM pg_constraint
+   WHERE conname IN (
+     'backlink_commercial_visible_pool_generation_check',
+     'backlink_commercial_visible_pool_state_check',
+     'backlink_commercial_visible_pool_target_check',
+     'backlink_rec_inventory_pool_generation_check',
+     'backlink_rec_refill_pool_generation_check',
+     'backlink_commercial_batch_pool_generation_check',
+     'backlink_commercial_candidate_pool_generation_check'
+   )
+)::text;
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkVisiblePoolMigrationState.Trim() -eq "0:0") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath $backlinkVisiblePoolMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkVisiblePoolMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkVisiblePoolMigrationExitCode -ne 0) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_VISIBLE_POOL_MIGRATION_FAILED:$backlinkVisiblePoolMigrationExitCode"
+    }
+}
+elseif ($backlinkVisiblePoolMigrationState.Trim() -ne "10:7") {
+    throw "LOCAL_PRODUCT_BACKLINK_VISIBLE_POOL_MIGRATION_PARTIAL"
+}
+
+$backlinkExactTenMigrationPath = Join-Path `
+    $RepositoryRoot `
+    "backend\core\src\modules\backlinks\db\migrations\0060_backlink_v3_exact_ten_project_context.sql"
+$backlinkExactTenMigrationState = Invoke-CheckedCapture `
+    (Get-Command docker.exe).Source `
+    @(
+        "exec",
+        "growthos-live001-postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "growthos_live001",
+        "-Atqc",
+        @"
+SELECT (
+  SELECT count(*)
+    FROM information_schema.columns
+   WHERE table_schema='backlinks'
+     AND table_name='backlink_project_context_snapshots'
+     AND column_name IN (
+       'target_market','target_audiences','partnership_goals'
+     )
+)::text || ':' || (
+  SELECT (
+    position('10' IN pg_get_constraintdef(oid)) > 0
+    AND position('20' IN pg_get_constraintdef(oid)) = 0
+  )::text
+    FROM pg_constraint
+   WHERE conrelid=
+     'backlinks.backlink_commercial_inventory_policies'::regclass
+     AND conname='backlink_commercial_visible_pool_target_check'
+);
+"@
+    ) `
+    $RepositoryRoot
+if ($backlinkExactTenMigrationState.Trim() -eq "0:false") {
+    Push-Location $RepositoryRoot
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        Get-Content `
+            -LiteralPath $backlinkExactTenMigrationPath `
+            -Raw `
+            -Encoding UTF8 |
+            & (Get-Command docker.exe).Source exec -i `
+                growthos-live001-postgres psql -X -v ON_ERROR_STOP=1 `
+                -U postgres -d growthos_live001 2>&1 |
+            ForEach-Object { Write-Host ([string]$_) }
+        $backlinkExactTenMigrationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+    if ($backlinkExactTenMigrationExitCode -ne 0) {
+        throw `
+            "LOCAL_PRODUCT_BACKLINK_EXACT_TEN_MIGRATION_FAILED:$backlinkExactTenMigrationExitCode"
+    }
+}
+elseif ($backlinkExactTenMigrationState.Trim() -ne "3:true") {
+    throw "LOCAL_PRODUCT_BACKLINK_EXACT_TEN_MIGRATION_PARTIAL"
+}
+
 $migrationManifest = Get-Content `
     -LiteralPath (Join-Path $RepositoryRoot `
         "backend\database\deployment-manifest.v1.json") `
@@ -932,7 +2032,7 @@ $migrationManifest = Get-Content `
     ConvertFrom-Json
 $expectedAlembic = [string]$migrationManifest.heads.alembic
 $expectedBacklinks = [string]$migrationManifest.heads.backlinks
-if ($expectedBacklinks -ne "0047") {
+if ($expectedBacklinks -ne "0060") {
     throw "LOCAL_PRODUCT_BACKLINKS_MIGRATION_HEAD_UNSUPPORTED"
 }
 $databaseSql = @"
@@ -940,6 +2040,123 @@ SELECT (
   current_setting('server_version_num')::integer >= 180000
   AND (SELECT version_num='$expectedAlembic' FROM alembic_version LIMIT 1)
   AND to_regclass('backlinks.backlink_send_snapshots') IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_commercial_inventory_policies'
+       AND column_name='refill_state'
+  )
+  AND to_regprocedure(
+    'backlinks.backlink_count_selected_gmail_projects(uuid,uuid)'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_resource_library_items'
+  ) IS NOT NULL
+  AND (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_commercial_inventory_policies'
+       AND column_name IN (
+         'paid_refill_tier','paid_refill_round',
+         'resource_refill_tier','resource_refill_round'
+       )
+  ) = 4
+  AND (
+    SELECT count(*)
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_commercial_inventory_policies'::regclass
+       AND conname IN (
+         'backlink_commercial_paid_refill_cursor_check',
+         'backlink_commercial_resource_refill_cursor_check'
+       )
+  ) = 2
+  AND (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND (
+         (
+           table_name='backlink_commercial_inventory_policies'
+           AND column_name IN (
+             'visible_pool_generation','visible_pool_state',
+             'visible_pool_target_count','archived_visible_pool_count',
+             'visible_pool_archived_at','visible_pool_archived_by'
+           )
+         )
+         OR (
+           table_name IN (
+             'backlink_recommendation_inventory',
+             'backlink_recommendation_refills',
+             'backlink_commercial_discovery_batches',
+             'backlink_commercial_candidates'
+           )
+           AND column_name='visible_pool_generation'
+         )
+       )
+  ) = 10
+  AND (
+    SELECT count(*)
+      FROM pg_constraint
+     WHERE conname IN (
+       'backlink_commercial_visible_pool_generation_check',
+       'backlink_commercial_visible_pool_state_check',
+       'backlink_commercial_visible_pool_target_check',
+       'backlink_rec_inventory_pool_generation_check',
+       'backlink_rec_refill_pool_generation_check',
+       'backlink_commercial_batch_pool_generation_check',
+       'backlink_commercial_candidate_pool_generation_check'
+     )
+  ) = 7
+  AND (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_project_context_snapshots'
+       AND column_name IN (
+         'target_market','target_audiences','partnership_goals'
+       )
+  ) = 3
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_commercial_inventory_policies'::regclass
+       AND conname='backlink_commercial_visible_pool_target_check'
+       AND position('10' IN pg_get_constraintdef(oid)) > 0
+       AND position('20' IN pg_get_constraintdef(oid)) = 0
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid='backlinks.backlink_resource_library_items'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_policies
+     WHERE schemaname='backlinks'
+       AND tablename='backlink_resource_library_items'
+       AND policyname='backlink_resource_library_tenant_policy'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_commercial_inventory_policies'::regclass
+       AND conname='backlink_commercial_refill_tier_check'
+       AND position(
+         'curated_resource_library' IN pg_get_constraintdef(oid)
+       ) > 0
+  )
+  AND position(
+    'provider_inventory_requires_pin_or_management' IN pg_get_functiondef(
+      'backlinks.backlink_apply_inventory_monitor_policy()'::regprocedure
+    )
+  ) > 0
   AND position(
     'GREATEST(' IN pg_get_functiondef(
       'backlinks.backlink_allocate_opportunity_join_sequence(uuid,uuid,uuid,text)'::regprocedure
@@ -1120,6 +2337,32 @@ SELECT (
      WHERE conrelid=
        'backlinks.backlink_recommendation_inventory'::regclass
        AND conname='backlink_rec_inventory_publication_gate_check'
+       AND position(
+         'fit_decision = ''eligible''::text' IN pg_get_constraintdef(oid)
+       ) > 0
+       AND position(
+         'contact_decision = ''eligible''::text' IN pg_get_constraintdef(oid)
+       ) > 0
+  )
+  AND (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_recommendation_inventory'
+       AND column_name IN (
+         'fit_decision',
+         'contact_decision',
+         'contact_reason_code',
+         'fit_score_model_version'
+       )
+  ) = 4
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid=
+       'backlinks.backlink_commercial_candidates'::regclass
+       AND conname=
+         'backlink_commercial_candidate_context_domain_model_uq'
   )
   AND EXISTS (
     SELECT 1
@@ -1128,6 +2371,124 @@ SELECT (
        'backlinks.backlink_contact_evidence_snapshots'::regclass
        AND relrowsecurity
        AND relforcerowsecurity
+  )
+  AND to_regclass(
+    'backlinks.backlink_draft_request_snapshots'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_trigger t
+      JOIN pg_class r ON r.oid=t.tgrelid
+      JOIN pg_namespace n ON n.oid=r.relnamespace
+     WHERE n.nspname='backlinks'
+       AND r.relname='backlink_draft_request_snapshots'
+       AND t.tgname='backlink_draft_request_snapshot_immutable'
+       AND NOT t.tgisinternal
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid='backlinks.backlink_draft_request_snapshots'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_evidence_snapshots'
+       AND column_name='context_data'
+       AND data_type='jsonb'
+       AND is_nullable='NO'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_model_runs'
+       AND column_name='request_snapshot_id'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_draft_versions'
+       AND column_name='request_snapshot_id'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid='backlinks.backlink_model_runs'::regclass
+       AND conname='backlink_model_run_status_check'
+       AND position('RETRY_SCHEDULED' IN pg_get_constraintdef(oid)) > 0
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid='backlinks.backlink_draft_versions'::regclass
+       AND conname='backlink_draft_version_source_check'
+       AND position('TEMPLATE_FALLBACK' IN pg_get_constraintdef(oid)) > 0
+  )
+  AND to_regclass(
+    'backlinks.backlink_gmail_connection_sync_cursors'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid=
+       'backlinks.backlink_gmail_connection_sync_cursors'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND (
+    SELECT count(*)
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_send_snapshots'
+       AND column_name IN (
+         'approval_fact_id',
+         'approval_actor_id',
+         'approval_recorded_at'
+       )
+  ) = 3
+  AND EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conrelid='backlinks.backlink_send_snapshots'::regclass
+       AND conname='backlink_send_snapshot_approval_fact_fk'
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid='backlinks.backlink_inventory_items'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND to_regclass(
+    'backlinks.backlink_inventory_monitor_policies'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_inventory_monitor_runs'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_inventory_monitor_observations'
+  ) IS NOT NULL
+  AND to_regclass(
+    'backlinks.backlink_inventory_monitor_requests'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+      FROM pg_class
+     WHERE oid='backlinks.backlink_inventory_monitor_policies'::regclass
+       AND relrowsecurity
+       AND relforcerowsecurity
+  )
+  AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema='backlinks'
+       AND table_name='backlink_profile_snapshots'
+       AND column_name='inventory_coverage'
   )
 )::text;
 "@
@@ -1317,138 +2678,6 @@ Invoke-CheckedCapture `
     ) `
     $RepositoryRoot | Out-Null
 
-if ($EnableGmailSend -or $EnableGmailSync) {
-    $requireGmailSend = $(if ($EnableGmailSend) { "true" } else { "false" })
-    $requireGmailSync = $(if ($EnableGmailSync) { "true" } else { "false" })
-    $gmailBindingSql = @"
-WITH usable AS (
-  SELECT c.id
-    FROM backlinks.backlink_gmail_connections c
-    JOIN backlinks.backlink_secret_references r ON
-      (r.organization_id,r.id,r.secret_kind)=
-      (c.organization_id,c.token_secret_reference_id,'GMAIL_TOKEN_SET')
-   WHERE c.organization_id='$organizationId'::uuid
-     AND c.connection_status='CONNECTED'
-     AND c.send_availability='AVAILABLE'
-     AND c.disconnected_at IS NULL
-     AND r.status='ACTIVE'
-     AND (NOT $requireGmailSend OR c.granted_scopes @>
-       jsonb_build_array('https://www.googleapis.com/auth/gmail.send'))
-     AND (NOT $requireGmailSync OR c.granted_scopes @>
-       jsonb_build_array('https://www.googleapis.com/auth/gmail.readonly'))
-   ORDER BY c.updated_at DESC,c.id
-   LIMIT 1
-),
-current_usable AS (
-  SELECT b.id
-    FROM backlinks.backlink_gmail_workspace_bindings b
-    JOIN usable u ON u.id=b.gmail_connection_id
-   WHERE b.organization_id='$organizationId'::uuid
-     AND b.workspace_id='$workspaceId'::uuid
-     AND b.binding_status='ACTIVE'
-     AND b.is_primary=true
-)
-UPDATE backlinks.backlink_gmail_workspace_bindings b
-   SET binding_status='INACTIVE',is_primary=false,version=b.version+1,
-       updated_at=now(),updated_by='$actorId'
- WHERE b.organization_id='$organizationId'::uuid
-   AND b.workspace_id='$workspaceId'::uuid
-   AND b.binding_status='ACTIVE'
-   AND b.is_primary=true
-   AND EXISTS (SELECT 1 FROM usable)
-   AND NOT EXISTS (SELECT 1 FROM current_usable);
-
-WITH usable AS (
-  SELECT c.id
-    FROM backlinks.backlink_gmail_connections c
-    JOIN backlinks.backlink_secret_references r ON
-      (r.organization_id,r.id,r.secret_kind)=
-      (c.organization_id,c.token_secret_reference_id,'GMAIL_TOKEN_SET')
-   WHERE c.organization_id='$organizationId'::uuid
-     AND c.connection_status='CONNECTED'
-     AND c.send_availability='AVAILABLE'
-     AND c.disconnected_at IS NULL
-     AND r.status='ACTIVE'
-     AND (NOT $requireGmailSend OR c.granted_scopes @>
-       jsonb_build_array('https://www.googleapis.com/auth/gmail.send'))
-     AND (NOT $requireGmailSync OR c.granted_scopes @>
-       jsonb_build_array('https://www.googleapis.com/auth/gmail.readonly'))
-   ORDER BY c.updated_at DESC,c.id
-   LIMIT 1
-)
-UPDATE backlinks.backlink_gmail_workspace_bindings b
-   SET binding_status='ACTIVE',is_primary=true,version=b.version+1,
-       updated_at=now(),updated_by='$actorId'
-  FROM usable u
- WHERE (b.organization_id,b.workspace_id,b.gmail_connection_id)=
-       ('$organizationId'::uuid,'$workspaceId'::uuid,u.id)
-   AND (b.binding_status<>'ACTIVE' OR b.is_primary=false)
-   AND NOT EXISTS (
-     SELECT 1
-       FROM backlinks.backlink_gmail_workspace_bindings active
-      WHERE active.organization_id='$organizationId'::uuid
-        AND active.workspace_id='$workspaceId'::uuid
-        AND active.binding_status='ACTIVE'
-        AND active.is_primary=true
-   );
-
-WITH usable AS (
-  SELECT c.id
-    FROM backlinks.backlink_gmail_connections c
-    JOIN backlinks.backlink_secret_references r ON
-      (r.organization_id,r.id,r.secret_kind)=
-      (c.organization_id,c.token_secret_reference_id,'GMAIL_TOKEN_SET')
-   WHERE c.organization_id='$organizationId'::uuid
-     AND c.connection_status='CONNECTED'
-     AND c.send_availability='AVAILABLE'
-     AND c.disconnected_at IS NULL
-     AND r.status='ACTIVE'
-     AND (NOT $requireGmailSend OR c.granted_scopes @>
-       jsonb_build_array('https://www.googleapis.com/auth/gmail.send'))
-     AND (NOT $requireGmailSync OR c.granted_scopes @>
-       jsonb_build_array('https://www.googleapis.com/auth/gmail.readonly'))
-   ORDER BY c.updated_at DESC,c.id
-   LIMIT 1
-)
-INSERT INTO backlinks.backlink_gmail_workspace_bindings (
-  id,organization_id,workspace_id,gmail_connection_id,binding_status,
-  is_primary,version,created_by,updated_by
-)
-SELECT gen_random_uuid(),'$organizationId'::uuid,'$workspaceId'::uuid,u.id,
-       'ACTIVE',true,1,'$actorId','$actorId'
-  FROM usable u
- WHERE NOT EXISTS (
-   SELECT 1
-     FROM backlinks.backlink_gmail_workspace_bindings active
-    WHERE active.organization_id='$organizationId'::uuid
-      AND active.workspace_id='$workspaceId'::uuid
-      AND active.binding_status='ACTIVE'
-      AND active.is_primary=true
- )
-ON CONFLICT (organization_id,workspace_id,gmail_connection_id)
-DO UPDATE SET binding_status='ACTIVE',is_primary=true,
-  version=backlink_gmail_workspace_bindings.version+1,
-  updated_at=now(),updated_by=EXCLUDED.updated_by;
-"@
-    Invoke-CheckedCapture `
-        (Get-Command docker.exe).Source `
-        @(
-            "exec",
-            "growthos-live001-postgres",
-            "psql",
-            "-X",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-U",
-            "postgres",
-            "-d",
-            "growthos_live001",
-            "-Atqc",
-            $gmailBindingSql
-        ) `
-        $RepositoryRoot | Out-Null
-}
-
 $enabledKillSwitches = @()
 if ($EnableAi) {
     $enabledKillSwitches += [pscustomobject]@{
@@ -1528,10 +2757,11 @@ WITH latest_project AS (
      AND workspace_id='$workspaceId'::uuid
    ORDER BY website_project_id,snapshot_version DESC
 ),
-active_projects AS (
+active_project AS (
   SELECT website_project_id
     FROM latest_project
-   WHERE project_status='ACTIVE'
+   WHERE website_project_id='$websiteProjectId'::uuid
+     AND project_status='ACTIVE'
 ),
 current AS (
   SELECT DISTINCT ON (website_project_id)
@@ -1552,7 +2782,7 @@ SELECT gen_random_uuid(),'$organizationId'::uuid,'$workspaceId'::uuid,
        active.website_project_id,'$layer','$capability',$providerSql,
        COALESCE(current.version,0)+1,false,
        '$reason','$actorId'
-  FROM active_projects active
+  FROM active_project active
   LEFT JOIN current
     ON current.website_project_id=active.website_project_id
  WHERE COALESCE(current.blocked,true) IS DISTINCT FROM false;
@@ -1607,6 +2837,8 @@ $state = @{
     repositoryRoot = $RepositoryRoot
     runtimeRoot = $RuntimeRoot
     runtimeMode = "LOCAL_PRODUCT"
+    workerExecutionMode = $WorkerExecutionMode
+    businessConsumersRunning = $WorkerExecutionMode -eq "normal"
     projectKey = (
         Get-Content (Join-Path $RuntimeRoot "identity.json") `
             -Raw `
@@ -1623,6 +2855,9 @@ $state = @{
     browserEnabled = [bool]$EnableBrowser
     dataForSeoEnabled = [bool]$EnableDataForSeo
     dataForSeoMaxPaidCalls = $DataForSeoMaxPaidCalls
+    buildId = [string]$buildIdentity.buildId
+    sourceFingerprint = [string]$buildIdentity.sourceFingerprint
+    artifactFingerprint = [string]$buildIdentity.artifactFingerprint
     browserGroupPid = 0
     coreApiGroupPid = 0
     workerGroupPid = 0
@@ -1636,59 +2871,134 @@ try {
             "browser-worker" $runId $powerShell $wrapper
         Write-State $state $newStatePath
         Wait-HttpReady "http://127.0.0.1:7401/health" `
-            $state.browserGroupPid
+            $state.browserGroupPid $null
     }
 
     $state.coreApiGroupPid = Start-Component `
         "core-api" $runId $powerShell $wrapper
     Write-State $state $newStatePath
     Wait-HttpReady "http://127.0.0.1:7301/ready" `
-        $state.coreApiGroupPid
+        $state.coreApiGroupPid $state.buildId
 
     $state.workerGroupPid = Start-Component `
         "worker" $runId $powerShell $wrapper
     Write-State $state $newStatePath
     Wait-WorkerReady `
         (Join-Path $logs "$runId-worker.stdout.log") `
-        $state.workerGroupPid
+        $state.workerGroupPid `
+        $state.buildId `
+        $WorkerExecutionMode
 
     $state.fastApiGroupPid = Start-Component `
         "fastapi" $runId $powerShell $wrapper
     Write-State $state $newStatePath
     Wait-HttpReady "http://127.0.0.1:7200/ready" `
-        $state.fastApiGroupPid
+        $state.fastApiGroupPid $null
 
-    if ($EnableGmailSync) {
-        $connectionStatus = Invoke-RestMethod `
-            -Uri (
-                "http://127.0.0.1:7200/api/v1/projects/" +
-                $state.projectKey +
-                "/backlinks/gmail-connections/status"
+    if ($EnableGmailSync -and $WorkerExecutionMode -eq "normal") {
+        $gmailSyncTargetsSql = @"
+SELECT project.project_key || '|' || connection.id::text
+  FROM platform.projects project
+  JOIN backlinks.backlink_website_project_mailbox_bindings project_binding
+    ON project_binding.organization_id=
+       NULLIF(project.organization_id,'')::uuid
+   AND project_binding.workspace_id=NULLIF(project.workspace_id,'')::uuid
+   AND project_binding.website_project_id=project.id::uuid
+   AND project_binding.binding_status='ACTIVE'
+   AND project_binding.is_selected=true
+  JOIN backlinks.backlink_gmail_workspace_bindings workspace_binding
+    ON workspace_binding.organization_id=project_binding.organization_id
+   AND workspace_binding.workspace_id=project_binding.workspace_id
+   AND workspace_binding.id=project_binding.gmail_workspace_binding_id
+   AND workspace_binding.binding_status='ACTIVE'
+  JOIN backlinks.backlink_gmail_connections connection
+    ON connection.organization_id=workspace_binding.organization_id
+   AND connection.id=workspace_binding.gmail_connection_id
+ WHERE project.status='ACTIVE'
+   AND project.organization_id='$organizationId'
+   AND project.workspace_id='$workspaceId'
+   AND connection.disconnected_at IS NULL
+ ORDER BY project.project_key,connection.id;
+"@
+        $gmailSyncTargetOutput = Invoke-CheckedCapture `
+            (Get-Command docker.exe).Source `
+            @(
+                "exec",
+                "growthos-live001-postgres",
+                "psql",
+                "-X",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-U",
+                "postgres",
+                "-d",
+                "growthos_live001",
+                "-Atqc",
+                $gmailSyncTargetsSql
             ) `
-            -Method Get `
-            -Headers @{
-                "x-request-id" = "local-product-$runId-gmail-status"
-            } `
-            -TimeoutSec 30
-        if ($null -eq $connectionStatus.connection) {
-            throw "LOCAL_PRODUCT_GMAIL_SYNC_CONNECTION_MISSING"
+            $RepositoryRoot
+        $gmailSyncWorkflows = @()
+        $gmailSyncFailures = @()
+        foreach (
+            $targetLine in $gmailSyncTargetOutput -split (
+                [Environment]::NewLine
+            )
+        ) {
+            if ([string]::IsNullOrWhiteSpace($targetLine)) {
+                continue
+            }
+            $target = $targetLine.Split("|", 2)
+            if ($target.Length -ne 2) {
+                throw "LOCAL_PRODUCT_GMAIL_SYNC_TARGET_INVALID"
+            }
+            $projectKey = $target[0]
+            $connectionId = $target[1]
+            try {
+                $syncResult = Invoke-RestMethod `
+                    -Uri (
+                        "http://127.0.0.1:7200/api/v1/projects/" +
+                        $projectKey +
+                        "/backlinks/gmail-connections/" +
+                        $connectionId +
+                        "/sync"
+                    ) `
+                    -Method Post `
+                    -Headers @{
+                        "x-request-id" = (
+                            "local-product-$runId-gmail-sync-" +
+                            $projectKey
+                        )
+                    } `
+                    -ContentType "application/json" `
+                    -Body "{}" `
+                    -TimeoutSec 30
+                $gmailSyncWorkflows += [pscustomobject]@{
+                    projectKey = $projectKey
+                    connectionId = $connectionId
+                    workflowId = $syncResult.workflowId
+                }
+            }
+            catch {
+                $gmailSyncFailures += [pscustomobject]@{
+                    projectKey = $projectKey
+                    connectionId = $connectionId
+                    category = "PROJECT_GMAIL_SYNC_START_FAILED"
+                }
+                Write-Warning (
+                    "Gmail Sync remains paused for project " +
+                    "$projectKey; other project bindings will continue."
+                )
+            }
         }
-        $syncResult = Invoke-RestMethod `
-            -Uri (
-                "http://127.0.0.1:7200/api/v1/projects/" +
-                $state.projectKey +
-                "/backlinks/gmail-connections/" +
-                $connectionStatus.connection.connectionId +
-                "/sync"
-            ) `
-            -Method Post `
-            -Headers @{
-                "x-request-id" = "local-product-$runId-gmail-sync"
-            } `
-            -ContentType "application/json" `
-            -Body "{}" `
-            -TimeoutSec 30
-        $state.gmailSyncWorkflowId = $syncResult.workflowId
+        $state.gmailSyncWorkflows = @($gmailSyncWorkflows)
+        $state.gmailSyncWorkflowIds = @(
+            $gmailSyncWorkflows |
+                Select-Object -ExpandProperty workflowId -Unique
+        )
+        $state.gmailSyncStartFailures = @($gmailSyncFailures)
+        if ($state.gmailSyncWorkflowIds.Count -gt 0) {
+            $state.gmailSyncWorkflowId = $state.gmailSyncWorkflowIds[0]
+        }
         Write-State $state $newStatePath
     }
 
@@ -1712,6 +3022,12 @@ catch {
 }
 
 $finalStatus = $null
+$expectedStatus = if ($WorkerExecutionMode -eq "quiesced") {
+    "maintenance_ready"
+}
+else {
+    "ok"
+}
 $readinessDeadline = (Get-Date).AddSeconds(120)
 while ((Get-Date) -lt $readinessDeadline) {
     $finalStatus = & (
@@ -1720,11 +3036,14 @@ while ((Get-Date) -lt $readinessDeadline) {
         -RuntimeRoot $RuntimeRoot `
         -RepositoryRoot $RepositoryRoot `
         -NoFail
-    if ($finalStatus.status -eq "ok") {
+    if ($finalStatus.status -eq $expectedStatus) {
         $finalStatus
         return
     }
     Start-Sleep -Seconds 1
 }
 
+if ($WorkerExecutionMode -eq "quiesced") {
+    throw "LOCAL_PRODUCT_MAINTENANCE_READINESS_TIMEOUT"
+}
 throw "LOCAL_PRODUCT_STACK_READINESS_TIMEOUT"

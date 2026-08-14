@@ -44,13 +44,43 @@ import {
   createTemporalGmailSendConsumer,
 } from "../workflows/outbox-relay.js";
 import type { BacklinksLiveCapabilities } from "./live-capabilities.js";
+import {
+  ensureLocalProductGmailPollingSyncWorkflow,
+} from "./local-product-gmail-sync-runtime.js";
 
 export function createLocalProductSendIntentCommands(
   pool: BacklinkTenantPool,
   capabilities: BacklinksLiveCapabilities,
+  workerAvailable: () => Promise<boolean>,
 ) {
+  const secretStore = capabilities.secretStoreRoot === null
+    ? null
+    : new SecretStoreClientAdapter({
+      config: { enabled: true, provider: "platform-secret-store" },
+      client: new LocalProductSecretStoreClient({
+        rootDirectory: capabilities.secretStoreRoot,
+      }),
+    });
   return createSendIntentCommands({
     repository: new PostgresqlSendIntentRepository({ pool }),
+    sendRuntimeEnabled: capabilities.gmailSendEnabled,
+    workerAvailable,
+    async gmailCredentialAvailable(input) {
+      if (secretStore === null) return false;
+      try {
+        const plaintext = await secretStore.resolve({
+          reference: input.tokenSecretReference,
+          context: {
+            organizationId: input.organizationId,
+            subjectProvider: "google",
+            connectionId: input.gmailConnectionId,
+          },
+        });
+        return plaintext.trim().length > 0;
+      } catch {
+        return false;
+      }
+    },
     newId: randomUUID,
     now: () => new Date(),
     quotaProfile: {
@@ -126,7 +156,10 @@ export async function createLocalProductGmailSendRuntime(
     persistence: connectionPersistence,
     refreshLock: new PostgresqlGmailConnectionRefreshLock(pool),
   });
-  const contexts = new Map<string, ResolvedProjectContext>();
+  const contexts = new Map<string, Readonly<{
+    context: ResolvedProjectContext;
+    gmailConnectionVersion: number;
+  }>>();
 
   const commandLoader = {
     async load(
@@ -172,6 +205,7 @@ export async function createLocalProductGmailSendRuntime(
                identity.source AS "identitySource",
                identity.observed_at AS "identityObservedAt",
                identity.version AS "identityVersion",
+               connection.version AS "gmailConnectionVersion",
                connection.connection_status AS "connectionStatus",
                connection.send_availability AS "sendAvailability",
                context.canonical_domain AS "canonicalDomain",
@@ -289,7 +323,16 @@ export async function createLocalProductGmailSendRuntime(
         subject: String(row.subjectText),
         bodyText: String(row.bodyText),
       });
-      contexts.set(input.attempt.attemptId, context);
+      const gmailConnectionVersion = Number(row.gmailConnectionVersion);
+      if (!Number.isSafeInteger(gmailConnectionVersion)) {
+        throw new Error(
+          "BACKLINK_LOCAL_PRODUCT_GMAIL_CONNECTION_VERSION_INVALID",
+        );
+      }
+      contexts.set(input.attempt.attemptId, {
+        context,
+        gmailConnectionVersion,
+      });
       return {
         gmailConnectionId: input.context.gmailConnectionId,
         rawBase64Url: mime.rawBase64Url,
@@ -301,8 +344,8 @@ export async function createLocalProductGmailSendRuntime(
 
   const gmail: GmailSendPort = {
     async send(command) {
-      const context = contexts.get(command.requestId);
-      if (context === undefined) {
+      const entry = contexts.get(command.requestId);
+      if (entry === undefined) {
         throw new Error("BACKLINK_LOCAL_PRODUCT_GMAIL_SEND_CONTEXT_MISSING");
       }
       try {
@@ -311,13 +354,46 @@ export async function createLocalProductGmailSendRuntime(
           client: new GoogleGmailProviderClient({
             resolveAccessToken: async (connectionId) =>
               tokenRepository.resolveAccessToken({
-                context,
+                context: entry.context,
                 connectionId,
               }),
           }),
         }).send(command);
       } finally {
         contexts.delete(command.requestId);
+      }
+    },
+  };
+
+  const connectionHealthCheck = {
+    async run(input: Readonly<{
+      context: {
+        gmailConnectionId: string;
+      };
+      attempt: {
+        attemptId: string;
+      };
+    }>) {
+      const entry = contexts.get(input.attempt.attemptId);
+      if (entry === undefined) {
+        throw new Error(
+          "BACKLINK_LOCAL_PRODUCT_GMAIL_SEND_CONTEXT_MISSING",
+        );
+      }
+      const refreshed = await tokenRepository.refresh({
+        context: entry.context,
+        connectionId: input.context.gmailConnectionId,
+        expectedVersion: entry.gmailConnectionVersion,
+      });
+      if (
+        refreshed.outcome === "REAUTH_REQUIRED"
+        || refreshed.connection.connectionStatus !== "CONNECTED"
+        || refreshed.connection.sendAvailability !== "AVAILABLE"
+      ) {
+        contexts.delete(input.attempt.attemptId);
+        throw new Error(
+          "BACKLINK_LOCAL_PRODUCT_GMAIL_CONNECTION_HEALTH_FAILED",
+        );
       }
     },
   };
@@ -471,8 +547,24 @@ export async function createLocalProductGmailSendRuntime(
   const activity = new GmailSendActivity({
     repository: new PostgresqlSendAttemptRepository({ pool }),
     commandLoader,
+    connectionHealthCheck,
     policyInputLoader,
     gmail,
+    ...(capabilities.gmailSyncEnabled
+      ? {
+          acceptedSendHandler: {
+            async run(input) {
+              await ensureLocalProductGmailPollingSyncWorkflow({
+                workflowClient: options.workflowClient,
+                taskQueue: options.taskQueue,
+                context: input.context,
+                pollingIntervalSeconds:
+                  capabilities.gmailPollingIntervalSeconds,
+              });
+            },
+          },
+        }
+      : {}),
   });
   const relay = createGmailSendOutboxRelay({
     repository: createOutboxRelayRepository(options.outboxClient),

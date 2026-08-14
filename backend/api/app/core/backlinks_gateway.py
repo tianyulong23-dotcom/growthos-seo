@@ -375,7 +375,7 @@ class BacklinksGateway:
         return (
             request.url.path.endswith("/reject")
             or request.url.path.endswith("/placement-candidates")
-            or request.url.path.endswith("/recommendation-refill-jobs")
+            or request.url.path.endswith("/archive")
             or request.url.path.endswith("/reverify")
             or request.url.path.endswith("/send-intents")
             or request.url.path.endswith("/transition")

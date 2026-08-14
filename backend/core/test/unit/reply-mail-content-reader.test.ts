@@ -84,6 +84,37 @@ describe("BL-AI-139 sanitized reply mail content reader", () => {
       });
   });
 
+  it("reads connection-scoped Gmail objects within the resolved workspace", async () => {
+    const connectionScopedKey = [
+      "backlinks",
+      "mail",
+      "raw",
+      scope.organizationId,
+      scope.workspaceId,
+      "gmail-connection",
+      "connection-139",
+      "message-139.eml",
+    ].join("/");
+    const reader = createSanitizedReplyMailContentReader({
+      rawObjectReader: {
+        async get(input) {
+          expect(input.rawObjectKey).toBe(connectionScopedKey);
+          return Buffer.from([
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            "Shared connection reply",
+          ].join("\r\n"));
+        },
+      },
+    });
+
+    await expect(reader.read({ ...scope, rawObjectKey: connectionScopedKey }))
+      .resolves.toEqual({
+        plainText: "Shared connection reply\n",
+        sanitizedHtml: null,
+      });
+  });
+
   it("rejects an object key outside the resolved project before reading", async () => {
     let reads = 0;
     const reader = createSanitizedReplyMailContentReader({

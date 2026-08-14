@@ -139,6 +139,8 @@ export class GmailConnectionSecretRepositoryError extends Error {
   }
 }
 
+export const gmailAccessTokenRefreshLeadTimeMs = 5 * 60_000;
+
 const tokenContext = (
   organizationId: string,
   connectionId: string,
@@ -286,7 +288,7 @@ implements GmailConnectionCompletionGateway {
       throw new GmailConnectionSecretRepositoryError();
     }
 
-    const refreshBefore = Date.now() + 60_000;
+    const refreshBefore = Date.now() + gmailAccessTokenRefreshLeadTimeMs;
     if (Date.parse(current.view.tokenExpiresAt) <= refreshBefore) {
       const refreshed = await this.refresh({
         ...input,
@@ -343,7 +345,7 @@ implements GmailConnectionCompletionGateway {
       context,
     }));
     if (currentTokens.refreshToken === undefined) {
-      return this.markReauthRequired(input, current);
+      throw new GmailConnectionSecretRepositoryError();
     }
 
     let refreshed: GoogleAuthTokenSet;
@@ -358,10 +360,7 @@ implements GmailConnectionCompletionGateway {
     } catch (error) {
       if (
         error instanceof GoogleAuthError
-        && (
-          error.code === googleAuthFailureCodes.authExpired
-          || error.code === googleAuthFailureCodes.authorizationDenied
-        )
+        && error.code === googleAuthFailureCodes.authExpired
       ) {
         return this.markReauthRequired(input, current);
       }

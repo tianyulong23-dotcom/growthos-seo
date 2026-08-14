@@ -146,6 +146,12 @@ describe("BL-AI-128 PostgreSQL Initial Mail Sync Repository", () => {
         'test', 'test'
       );
     `);
+    await admin.query(
+      await readFile(
+        migration("0047_backlink_gmail_organization_reuse.sql"),
+        "utf8",
+      ),
+    );
     const tenantUrl = new URL(harness.connectionString);
     tenantUrl.username = loginRole;
     tenantUrl.password = password;

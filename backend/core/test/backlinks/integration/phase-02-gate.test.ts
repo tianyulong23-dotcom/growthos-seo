@@ -73,9 +73,12 @@ describe("BL-AI-041 Phase 02 gate", () => {
     await database.connect();
     await database.query(`
       ALTER TABLE backlink_project_context_snapshots
+        ADD COLUMN target_market text NOT NULL DEFAULT '',
         ADD COLUMN products jsonb NOT NULL DEFAULT '[]'::jsonb,
         ADD COLUMN keywords jsonb NOT NULL DEFAULT '[]'::jsonb,
-        ADD COLUMN target_urls jsonb NOT NULL DEFAULT '[]'::jsonb
+        ADD COLUMN target_urls jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN target_audiences jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN partnership_goals jsonb NOT NULL DEFAULT '[]'::jsonb
     `);
   }, 120_000);
   afterAll(async () => {
@@ -94,11 +97,14 @@ describe("BL-AI-041 Phase 02 gate", () => {
       canonicalDomain: "example.com",
       locale: "en-US",
       countryCode: "US",
+      targetMarket: "United States",
       profileVersionId: "profile-v1",
       promotionTargetVersionId: "promotion-v1",
       products: ["Example product"],
       keywords: ["example keyword"],
       targetUrls: ["https://example.com/"],
+      targetAudiences: ["site owners"],
+      partnershipGoals: ["editorial review"],
       actorId: "gate-test",
     });
     await createJobRepository(database).create({

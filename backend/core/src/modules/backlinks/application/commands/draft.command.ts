@@ -16,6 +16,7 @@ import { draftDocumentSchema } from "../schemas/draft-document.schema.js";
 import {
   draftDocumentToPlainText,
 } from "../../domain/drafts/draft-document.js";
+import type { DraftRequest } from "../schemas/draft-request.schema.js";
 
 export type DraftBudgetGate = Readonly<{
   assertAvailable(input: Readonly<{
@@ -39,6 +40,7 @@ type CreateDraftCommand = Readonly<{
   contactVersion: number;
   logicalDraftKey: string;
   idempotencyKey: string;
+  request: DraftRequest;
 }>;
 
 const digest = (value: unknown) =>
@@ -85,12 +87,23 @@ export function createDraftCommands(dependencies: Readonly<{
   promptVersion: string;
   outputSchemaVersion: string;
   generationMode: DraftGenerationMode;
+  modelProviderAvailable(): boolean;
   scheduler: DraftGenerationScheduler;
 }>) {
   return Object.freeze({
     async create(input: CreateDraftCommand) {
       authorize(input.context);
       if (dependencies.generationMode === "MODEL") {
+        if (!dependencies.modelProviderAvailable()) {
+          throw new BacklinkError({
+            code: backlinkErrorCodes.invalidRequest,
+            message: "MISCONFIGURED: AI Draft Provider is not configured.",
+            fieldErrors: [{
+              field: "AI_PROVIDER_ENABLED",
+              message: "Enable and configure the AI Draft Provider.",
+            }],
+          });
+        }
         try {
           await dependencies.budget.assertAvailable({
             organizationId: input.context.tenant.organizationId,
@@ -118,6 +131,8 @@ export function createDraftCommands(dependencies: Readonly<{
             contactId: input.contactId,
             contactVersion: input.contactVersion,
             snapshotId: dependencies.newId(),
+            requestSnapshotId: dependencies.newId(),
+            request: input.request,
             actorId: input.context.actor.userId,
             recordedAt,
           });
@@ -126,6 +141,8 @@ export function createDraftCommands(dependencies: Readonly<{
           contactId: input.contactId,
           contactVersion: input.contactVersion,
           evidenceSnapshotId: evidenceSnapshot.snapshotId,
+          requestSnapshotId: evidenceSnapshot.requestSnapshotId,
+          request: input.request,
           logicalDraftKey: input.logicalDraftKey,
           promptVersion: dependencies.promptVersion,
           outputSchemaVersion: dependencies.outputSchemaVersion,
@@ -142,6 +159,7 @@ export function createDraftCommands(dependencies: Readonly<{
           contactId: input.contactId,
           contactVersion: input.contactVersion,
           evidenceSnapshotId: evidenceSnapshot.snapshotId,
+          requestSnapshotId: evidenceSnapshot.requestSnapshotId,
           draftId,
           runId,
           logicalDraftKey: input.logicalDraftKey,
@@ -170,6 +188,7 @@ export function createDraftCommands(dependencies: Readonly<{
           contactId: input.contactId,
           contactVersion: input.contactVersion,
           evidenceSnapshotId: evidenceSnapshot.snapshotId,
+          requestSnapshotId: evidenceSnapshot.requestSnapshotId,
           workflowId: scheduled.workflowId,
           generationMode: dependencies.generationMode,
           replayed: job.runId !== runId,

@@ -26,6 +26,10 @@ import {
   startBacklinksWorker,
   type BacklinksWorkerRegistrations,
 } from "./modules/backlinks/workflows/worker.js";
+import {
+  assertLocalProductRuntimeBuildIdentity,
+  type LocalProductRuntimeBuildIdentity,
+} from "./runtime-build-identity.js";
 
 export * from "./modules/backlinks/api/index.js";
 
@@ -358,6 +362,7 @@ async function createRuntimeResources(
 
 async function startApiProcess(
   environment: z.output<typeof runtimeEnvironmentSchema>,
+  buildIdentity: LocalProductRuntimeBuildIdentity,
 ): Promise<void> {
   const resources = await createRuntimeResources("api", environment);
   let runtime: BacklinksProductionRuntimeModule | undefined;
@@ -389,6 +394,7 @@ async function startApiProcess(
         await assertPostgreSqlReady(resources.pool);
         await assertTemporalReady(resources.temporal);
       },
+      buildIdentity,
     });
     const server = await startBacklinksPrivateApi(app, {
       host: environment.BACKLINKS_HOST,
@@ -409,6 +415,7 @@ async function startApiProcess(
       event: "backlinks.api.ready",
       address: server.address,
       taskQueue: environment.TEMPORAL_BACKLINKS_TASK_QUEUE,
+      buildId: buildIdentity.buildId,
     }));
   } catch (error) {
     await closeResources([
@@ -424,6 +431,7 @@ async function startApiProcess(
 
 async function startWorkerProcess(
   environment: z.output<typeof runtimeEnvironmentSchema>,
+  buildIdentity: LocalProductRuntimeBuildIdentity,
 ): Promise<void> {
   const resources = await createRuntimeResources("worker", environment);
   let runtime: BacklinksProductionRuntimeModule | undefined;
@@ -455,7 +463,7 @@ async function startWorkerProcess(
     console.log(JSON.stringify({
       event: "backlinks.worker.ready",
       taskQueue: environment.TEMPORAL_BACKLINKS_TASK_QUEUE,
-      buildId: environment.TEMPORAL_BUILD_ID,
+      buildId: buildIdentity.buildId,
     }));
     await worker.completion;
   } catch (error) {
@@ -475,11 +483,14 @@ export async function runBacklinksProcess(
 ): Promise<void> {
   const environment = readRuntimeEnvironment();
   assertProcessConfiguration(runtimeProcess, environment);
+  const buildIdentity = assertLocalProductRuntimeBuildIdentity(
+    environment.TEMPORAL_BUILD_ID,
+  );
   if (runtimeProcess === "api") {
-    await startApiProcess(environment);
+    await startApiProcess(environment, buildIdentity);
     return;
   }
-  await startWorkerProcess(environment);
+  await startWorkerProcess(environment, buildIdentity);
 }
 
 const entrypoint = process.argv[1];
