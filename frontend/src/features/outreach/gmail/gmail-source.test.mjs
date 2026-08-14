@@ -38,6 +38,7 @@ test("BL-AI-121 Gmail connection UI distinguishes reauthorization and restricted
   assert.match(hook, /window\.location\.assign\(response\.authorizationUrl\)/)
   assert.match(hook, /gmailOAuth/)
   assert.match(hook, /invalid_or_expired/)
+  assert.match(hook, /access_denied/)
   assert.match(hook, /10 分钟/)
   assert.match(hook, /window\.history\.replaceState/)
   assert.match(hook, /界面不会推断为已连接/)

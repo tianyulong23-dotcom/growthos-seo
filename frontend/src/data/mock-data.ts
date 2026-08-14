@@ -2,13 +2,13 @@ import {
   BarChart3,
   FileText,
   KeyRound,
-  Link2,
   SearchCheck,
   Settings2,
   SlidersHorizontal,
   type LucideIcon,
 } from "lucide-react"
 
+import { backlinksNavigation } from "@/features/outreach/manifest"
 import type { Project } from "@/features/projects/types"
 
 export type ModuleTab = {
@@ -21,7 +21,7 @@ export type ModuleConfig = {
   label: string
   description: string
   icon: LucideIcon
-  tabs: ModuleTab[]
+  tabs: readonly ModuleTab[]
   action: string
 }
 
@@ -136,20 +136,7 @@ export const modules: ModuleConfig[] = [
     ],
     action: "创建内容",
   },
-  {
-    id: "backlinks",
-    label: "外链",
-    description: "发现高价值站点，推进外联并监控链接变化",
-    icon: Link2,
-    tabs: [
-      { id: "projects", label: "项目" },
-      { id: "recommendations", label: "推荐" },
-      { id: "opportunities", label: "机会" },
-      { id: "links", label: "链接" },
-      { id: "email", label: "邮件" },
-    ],
-    action: "添加机会",
-  },
+  backlinksNavigation,
   {
     id: "performance",
     label: "效果",
@@ -221,36 +208,5 @@ export const auditRows = [
     count: 63,
     change: "+5",
     owner: "未分配",
-  },
-]
-
-export const backlinkRows = [
-  {
-    domain: "cleanenergynews.com",
-    authority: 72,
-    relevance: "高",
-    status: "待联系",
-    contact: "editor@cleanenergynews.com",
-  },
-  {
-    domain: "greenbuildingadvisor.com",
-    authority: 68,
-    relevance: "高",
-    status: "跟进中",
-    contact: "内容编辑",
-  },
-  {
-    domain: "ecowatch.com",
-    authority: 81,
-    relevance: "中",
-    status: "已回复",
-    contact: "合作团队",
-  },
-  {
-    domain: "renewableenergyworld.com",
-    authority: 76,
-    relevance: "高",
-    status: "已获得",
-    contact: "专栏编辑",
   },
 ]

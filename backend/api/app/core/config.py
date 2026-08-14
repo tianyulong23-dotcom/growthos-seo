@@ -176,6 +176,8 @@ class Settings(BaseSettings):
     google_ads_api_version: str = "v23"
     backlinks_private_base_url: str = "http://127.0.0.1:7301"
     backlinks_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    backlinks_task_queue: str = "growthos.backlinks.v1"
+    backlinks_runtime_status_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
     platform_auth_issuer: str = "growthos-platform-auth"
     platform_auth_signing_key: SecretStr | None = None
     platform_auth_max_token_ttl_seconds: int = Field(default=900, ge=1, le=3600)

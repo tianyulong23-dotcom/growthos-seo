@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel
 
 from app.modules.keywords.schemas import KeywordOperationalHealthResponse
@@ -13,6 +13,11 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
 
 
+class RuntimeStatusResponse(BaseModel):
+    status: Literal["ok", "maintenance"]
+    business_consumers_running: bool
+
+
 @router.get(
     "/health",
     response_model=HealthResponse,
@@ -20,6 +25,21 @@ class HealthResponse(BaseModel):
 )
 async def health() -> HealthResponse:
     return HealthResponse(status="ok")
+
+
+@router.get(
+    "/api/v1/runtime-status",
+    response_model=RuntimeStatusResponse,
+    include_in_schema=False,
+)
+async def runtime_status(request: Request) -> RuntimeStatusResponse:
+    consumers_running = (
+        await request.app.state.backlinks_runtime_status.business_consumers_running()
+    )
+    return RuntimeStatusResponse(
+        status="ok" if consumers_running else "maintenance",
+        business_consumers_running=consumers_running,
+    )
 
 
 def get_keyword_health_service() -> KeywordService:

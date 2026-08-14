@@ -15,6 +15,7 @@ from app.core.backlinks_gateway import (
     PlatformContextResolver,
     RejectingPlatformContextResolver,
 )
+from app.core.backlinks_runtime_status import BacklinksRuntimeStatus
 from app.core.config import Settings, get_settings
 from app.core.platform_auth import HmacPlatformAuthenticationAuthority
 from app.core.secure_logging import configure_sensitive_logging
@@ -389,12 +390,19 @@ def create_app(
         timeout_seconds=settings.backlinks_request_timeout_seconds,
     )
     application.state.backlinks_gateway = gateway
+    application.state.backlinks_runtime_status = BacklinksRuntimeStatus(
+        address=settings.temporal_address,
+        namespace=settings.temporal_namespace,
+        task_queue=settings.backlinks_task_queue,
+        timeout_seconds=settings.backlinks_runtime_status_timeout_seconds,
+    )
     application.state.platform_context_resolver = (
         platform_context_resolver or create_platform_context_resolver(settings)
     )
     application.state.oauth_callback_frontend_origin = (
         settings.backlinks_oauth_frontend_origin
     )
+    application.state.oauth_callback_cookie_secure = settings.app_env == "production"
     application.state.owned_backlinks_gateway = gateway if owns_gateway else None
     application.add_middleware(
         CORSMiddleware,

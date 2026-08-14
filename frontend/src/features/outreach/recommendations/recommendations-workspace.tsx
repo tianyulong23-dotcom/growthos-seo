@@ -159,7 +159,7 @@ function ContactBatchWaitView({
   onRetry,
   onRefresh,
 }: {
-  project: Project
+  project: OutreachProject
   wait: RecommendationRefillState
   batch: RecommendationInventoryStatus["contactBatch"]
   inventory: RecommendationInventoryStatus | null

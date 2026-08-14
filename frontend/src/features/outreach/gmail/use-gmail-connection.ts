@@ -22,13 +22,16 @@ const oauthCallbackErrorParam = "gmailOAuth"
 const invalidOAuthAttempt = "invalid_or_expired"
 const invalidOAuthAttemptMessage =
   "Gmail 授权已过期或失效，请重新连接并在 10 分钟内完成 Google 同意。"
+const deniedOAuthAttempt = "access_denied"
+const deniedOAuthAttemptMessage = "已取消 Gmail 授权，未保存任何连接。"
 
 function readOAuthCallbackError(): string | null {
   if (typeof window === "undefined") return null
   const url = new URL(window.location.href)
-  return url.searchParams.get(oauthCallbackErrorParam) === invalidOAuthAttempt
-    ? invalidOAuthAttemptMessage
-    : null
+  const callbackError = url.searchParams.get(oauthCallbackErrorParam)
+  if (callbackError === invalidOAuthAttempt) return invalidOAuthAttemptMessage
+  if (callbackError === deniedOAuthAttempt) return deniedOAuthAttemptMessage
+  return null
 }
 
 function clearOAuthCallbackError(): void {

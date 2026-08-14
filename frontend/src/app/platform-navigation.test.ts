@@ -5,6 +5,7 @@ import {
   settingsNavigation,
 } from "@/app/platform-navigation"
 import { modules } from "@/data/mock-data"
+import { backlinksNavigation } from "@/features/outreach/manifest"
 
 const expectedProjectTabs = [
   ["business", "业务资料"],
@@ -35,5 +36,22 @@ describe("settings navigation", () => {
         .find((module) => module.id === "platform-settings")
         ?.tabs.map(({ id, label }) => [id, label])
     ).toEqual(expectedPlatformTabs)
+  })
+})
+
+describe("backlinks navigation", () => {
+  it("uses the outreach module navigation without project creation", () => {
+    const configuredBacklinks = modules.find(
+      (module) => module.id === "backlinks"
+    )
+
+    expect(configuredBacklinks).toBe(backlinksNavigation)
+    expect(
+      configuredBacklinks?.tabs.map(({ id, label }) => [id, label])
+    ).toEqual([
+      ["recommendations", "推荐池"],
+      ["opportunities", "外链机会"],
+      ["email", "邮件中心"],
+    ])
   })
 })

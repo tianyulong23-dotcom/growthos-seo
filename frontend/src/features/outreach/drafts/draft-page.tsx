@@ -37,6 +37,7 @@ import {
 import { DraftEditor } from "@/features/outreach/drafts/draft-editor"
 import { DraftGeneration } from "@/features/outreach/drafts/draft-generation"
 import { toOutreachProject } from "@/features/outreach/project"
+import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
 import { useProjects } from "@/features/projects/project-context"
 import type {
   DraftDocument,
@@ -134,17 +135,7 @@ const sendPreflightFailures: Record<string, Omit<SendPreflightFailure, "code">> 
   }
 
 function problemCode(error: unknown): string | null {
-  if (!(error instanceof ApiError) || typeof error.detail !== "object") {
-    return null
-  }
-  if (
-    error.detail !== null &&
-    "code" in error.detail &&
-    typeof error.detail.code === "string"
-  ) {
-    return error.detail.code
-  }
-  return null
+  return error instanceof ApiError ? error.code : null
 }
 
 function sendPreflightError(error: unknown): SendPreflightFailure {

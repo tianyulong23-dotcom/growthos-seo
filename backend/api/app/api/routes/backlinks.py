@@ -1,5 +1,7 @@
+import hashlib
 import json
 from collections.abc import Sequence
+from urllib.parse import parse_qs, quote, urlparse
 
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse, Response
@@ -10,13 +12,27 @@ from app.core.backlinks_gateway import (
     PlatformContextResolver,
     problem_response,
 )
+from app.core.platform_request_context import ResolvedPlatformRequestContext
 
 router = APIRouter(tags=["backlinks"])
 
 _GOOGLE_OAUTH_CALLBACK_QUERY_KEYS = frozenset(
-    {"code", "state", "iss", "scope", "authuser", "prompt"}
+    {
+        "authuser",
+        "code",
+        "error",
+        "error_description",
+        "error_uri",
+        "iss",
+        "prompt",
+        "scope",
+        "state",
+    }
 )
 _GOOGLE_OAUTH_ISSUER = "https://accounts.google.com"
+_GMAIL_OAUTH_COOKIE_PREFIX = "backlinks_gmail_oauth_"
+_GMAIL_OAUTH_COOKIE_PATH = "/api/v1"
+_GMAIL_OAUTH_COOKIE_MAX_AGE = 10 * 60
 
 
 async def _forward(
@@ -46,32 +62,6 @@ async def _forward(
         request,
         resolved=resolved,
         website_project_key=website_project_key,
-        query_params=query_params,
-    )
-
-
-async def _forward_collection(
-    request: Request,
-    *,
-    query_params: Sequence[tuple[str, str]] | None = None,
-) -> Response:
-    resolver: PlatformContextResolver = request.app.state.platform_context_resolver
-    gateway: BacklinksGateway = request.app.state.backlinks_gateway
-    try:
-        resolved = await resolver.resolve_collection(request=request)
-    except PlatformContextResolutionError as error:
-        return problem_response(
-            status=error.status,
-            problem_type=f"urn:growthos:problem:platform:{error.code.lower().replace('_', '-')}",
-            title=error.title,
-            detail=error.detail,
-            code=error.code,
-            request_id=request.headers.get("x-request-id", "unresolved"),
-            retryable=False,
-        )
-    return await gateway.forward_collection(
-        request,
-        resolved=resolved,
         query_params=query_params,
     )
 
@@ -753,7 +743,49 @@ async def connect_backlinks_gmail(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:
-    return await _forward(request, websiteProjectKey)
+    resolver: PlatformContextResolver = request.app.state.platform_context_resolver
+    gateway: BacklinksGateway = request.app.state.backlinks_gateway
+    try:
+        resolved = await resolver.resolve(
+            request=request,
+            website_project_key=websiteProjectKey,
+            required_permission="backlinks:write",
+        )
+    except PlatformContextResolutionError as error:
+        return _platform_context_problem(request, error)
+
+    response = await gateway.forward(
+        request,
+        resolved=resolved,
+        website_project_key=websiteProjectKey,
+    )
+    if not 200 <= response.status_code < 300:
+        return response
+    state = _authorization_url_state(request, response)
+    if isinstance(state, Response):
+        return state
+    try:
+        ticket = gateway.issue_gmail_oauth_callback_ticket(resolved, state=state)
+    except ValueError:
+        return problem_response(
+            status=503,
+            problem_type="urn:growthos:problem:platform:backlinks-gateway-misconfigured",
+            title="Backlinks gateway unavailable",
+            detail="The Backlinks gateway signing configuration is unavailable.",
+            code="BACKLINKS_GATEWAY_MISCONFIGURED",
+            request_id=request.headers.get("x-request-id", "unresolved"),
+            retryable=False,
+        )
+    response.set_cookie(
+        key=_gmail_oauth_cookie_name(state),
+        value=ticket,
+        max_age=_GMAIL_OAUTH_COOKIE_MAX_AGE,
+        path=_GMAIL_OAUTH_COOKIE_PATH,
+        secure=request.app.state.oauth_callback_cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
 
 
 @router.get(
@@ -766,10 +798,34 @@ async def complete_backlinks_gmail_connection_stable(
     callback_query = _google_oauth_callback_query(request)
     if isinstance(callback_query, Response):
         return callback_query
-    return _gmail_oauth_callback_response(
+    resolved = _gmail_oauth_callback_context(
         request,
-        await _forward_collection(request, query_params=callback_query),
+        state=callback_query["state"],
     )
+    if isinstance(resolved, Response):
+        return resolved
+    if callback_query.get("error") == "access_denied":
+        response = _gmail_oauth_denied_response(request, resolved)
+        delete_ticket = True
+    else:
+        gateway: BacklinksGateway = request.app.state.backlinks_gateway
+        upstream = await gateway.forward(
+            request,
+            resolved=resolved,
+            website_project_key=resolved.project.website_project_key,
+            query_params=[
+                ("code", callback_query["code"]),
+                ("state", callback_query["state"]),
+            ],
+        )
+        response = _gmail_oauth_callback_response(
+            request,
+            upstream,
+        )
+        delete_ticket = 200 <= upstream.status_code < 300
+    if delete_ticket:
+        _delete_gmail_oauth_callback_ticket(response, callback_query["state"])
+    return response
 
 
 @router.get(
@@ -783,14 +839,140 @@ async def complete_backlinks_gmail_connection_legacy(
     callback_query = _google_oauth_callback_query(request)
     if isinstance(callback_query, Response):
         return callback_query
-    return _gmail_oauth_callback_response(
+    resolved = _gmail_oauth_callback_context(
         request,
-        await _forward(
-            request,
-            websiteProjectKey,
-            query_params=callback_query,
-        ),
+        state=callback_query["state"],
     )
+    if isinstance(resolved, Response):
+        return resolved
+    if resolved.project.website_project_key != websiteProjectKey:
+        response = problem_response(
+            status=403,
+            problem_type="urn:growthos:problem:platform:project-binding-failed",
+            title="Platform project binding failed",
+            detail="The OAuth callback ticket does not match the requested project.",
+            code="PLATFORM_PROJECT_BINDING_FAILED",
+            request_id=resolved.correlation_id,
+            retryable=False,
+        )
+        delete_ticket = True
+    elif callback_query.get("error") == "access_denied":
+        response = _gmail_oauth_denied_response(request, resolved)
+        delete_ticket = True
+    else:
+        gateway: BacklinksGateway = request.app.state.backlinks_gateway
+        upstream = await gateway.forward(
+            request,
+            resolved=resolved,
+            website_project_key=websiteProjectKey,
+            query_params=[
+                ("code", callback_query["code"]),
+                ("state", callback_query["state"]),
+            ],
+        )
+        response = _gmail_oauth_callback_response(
+            request,
+            upstream,
+        )
+        delete_ticket = 200 <= upstream.status_code < 300
+    if delete_ticket:
+        _delete_gmail_oauth_callback_ticket(response, callback_query["state"])
+    return response
+
+
+def _authorization_url_state(request: Request, response: Response) -> str | Response:
+    parsed = urlparse("")
+    try:
+        payload = json.loads(response.body)
+        authorization_url = payload["authorizationUrl"]
+        parsed = urlparse(authorization_url)
+        states = parse_qs(parsed.query, keep_blank_values=True).get("state", [])
+    except (KeyError, TypeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        states = []
+    if (
+        len(states) != 1
+        or not _valid_oauth_state(states[0])
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+    ):
+        return problem_response(
+            status=502,
+            problem_type="urn:growthos:problem:platform:oauth-authorization-url-invalid",
+            title="OAuth authorization URL invalid",
+            detail="The Gmail authorization response did not contain a valid OAuth state.",
+            code="OAUTH_AUTHORIZATION_URL_INVALID",
+            request_id=request.headers.get("x-request-id", "unresolved"),
+            retryable=False,
+        )
+    return states[0]
+
+
+def _gmail_oauth_callback_context(
+    request: Request,
+    *,
+    state: str,
+) -> ResolvedPlatformRequestContext | Response:
+    cookie_name = _gmail_oauth_cookie_name(state)
+    ticket = request.cookies.get(cookie_name)
+    if ticket is None:
+        return _oauth_callback_problem(
+            request,
+            detail="The OAuth callback ticket is missing or expired.",
+        )
+    gateway: BacklinksGateway = request.app.state.backlinks_gateway
+    try:
+        resolved = gateway.resolve_gmail_oauth_callback_ticket(
+            ticket,
+            state=state,
+            correlation_id=request.headers.get("x-request-id", "oauth-callback"),
+        )
+    except ValueError:
+        response = _oauth_callback_problem(
+            request,
+            detail="The OAuth callback ticket is invalid or expired.",
+        )
+        _delete_gmail_oauth_callback_ticket(response, state)
+        return response
+    if "backlinks:write" not in resolved.permissions:
+        response = problem_response(
+            status=403,
+            problem_type="urn:growthos:problem:platform:permission-denied",
+            title="Platform permission denied",
+            detail="The OAuth callback ticket does not grant backlinks:write.",
+            code="PLATFORM_PERMISSION_DENIED",
+            request_id=resolved.correlation_id,
+            retryable=False,
+        )
+        _delete_gmail_oauth_callback_ticket(response, state)
+        return response
+    return resolved
+
+
+def _gmail_oauth_cookie_name(state: str) -> str:
+    state_hash = hashlib.sha256(state.encode("ascii")).hexdigest()
+    return f"{_GMAIL_OAUTH_COOKIE_PREFIX}{state_hash}"
+
+
+def _delete_gmail_oauth_callback_ticket(response: Response, state: str) -> None:
+    response.delete_cookie(
+        key=_gmail_oauth_cookie_name(state),
+        path=_GMAIL_OAUTH_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _gmail_oauth_denied_response(
+    request: Request,
+    resolved: ResolvedPlatformRequestContext,
+) -> Response:
+    return_path = (
+        f"/projects/{quote(resolved.project.website_project_key, safe='')}"
+        "/backlinks/email?gmailOAuth=access_denied"
+    )
+    frontend_origin = request.app.state.oauth_callback_frontend_origin
+    url = return_path if frontend_origin is None else f"{frontend_origin.rstrip('/')}{return_path}"
+    return RedirectResponse(url=url, status_code=303)
 
 
 def _gmail_oauth_callback_response(
@@ -834,62 +1016,97 @@ def _gmail_oauth_callback_response(
 
 def _google_oauth_callback_query(
     request: Request,
-) -> list[tuple[str, str]] | Response:
+) -> dict[str, str] | Response:
     query_items = list(request.query_params.multi_items())
-    request_id = request.headers.get("x-request-id", "oauth-callback")
     unsupported = sorted({name for name, _ in query_items} - _GOOGLE_OAUTH_CALLBACK_QUERY_KEYS)
     if unsupported:
-        return problem_response(
-            status=400,
-            problem_type="urn:growthos:problem:platform:oauth-callback-invalid",
-            title="OAuth callback invalid",
+        return _oauth_callback_problem(
+            request,
             detail="The OAuth callback contains unsupported parameters.",
-            code="OAUTH_CALLBACK_INVALID",
-            request_id=request_id,
-            retryable=False,
         )
 
     values: dict[str, list[str]] = {}
     for name, value in query_items:
         values.setdefault(name, []).append(value)
     if any(len(items) != 1 for items in values.values()):
-        return problem_response(
-            status=400,
-            problem_type="urn:growthos:problem:platform:oauth-callback-invalid",
-            title="OAuth callback invalid",
+        return _oauth_callback_problem(
+            request,
             detail="The OAuth callback contains repeated parameters.",
-            code="OAUTH_CALLBACK_INVALID",
-            request_id=request_id,
-            retryable=False,
         )
 
     issuer = values.get("iss")
     if issuer is not None and issuer[0] != _GOOGLE_OAUTH_ISSUER:
-        return problem_response(
-            status=400,
-            problem_type="urn:growthos:problem:platform:oauth-callback-invalid",
-            title="OAuth callback invalid",
+        return _oauth_callback_problem(
+            request,
             detail="The OAuth callback issuer is not allowed.",
-            code="OAUTH_CALLBACK_INVALID",
-            request_id=request_id,
-            retryable=False,
         )
 
-    bounded_fields = {"scope": 8_192, "authuser": 32, "prompt": 128}
+    bounded_fields = {
+        "authuser": 32,
+        "code": 8_192,
+        "error": 128,
+        "error_description": 2_048,
+        "error_uri": 2_048,
+        "prompt": 128,
+        "scope": 8_192,
+        "state": 128,
+    }
     if any(
         len(values[name][0]) > maximum for name, maximum in bounded_fields.items() if name in values
     ):
-        return problem_response(
-            status=400,
-            problem_type="urn:growthos:problem:platform:oauth-callback-invalid",
-            title="OAuth callback invalid",
+        return _oauth_callback_problem(
+            request,
             detail="The OAuth callback contains an oversized parameter.",
-            code="OAUTH_CALLBACK_INVALID",
-            request_id=request_id,
-            retryable=False,
         )
 
-    return [(name, values[name][0]) for name in ("code", "state") if name in values]
+    callback = {name: items[0] for name, items in values.items()}
+    has_code = bool(callback.get("code"))
+    has_error = bool(callback.get("error"))
+    if (
+        not _valid_oauth_state(callback.get("state", ""))
+        or has_code == has_error
+        or (has_error and callback["error"] != "access_denied")
+    ):
+        return _oauth_callback_problem(
+            request,
+            detail="The OAuth callback did not contain a supported result.",
+        )
+    return callback
+
+
+def _valid_oauth_state(value: str) -> bool:
+    return (
+        32 <= len(value) <= 128
+        and value.isascii()
+        and all(character.isalnum() or character in "-_" for character in value)
+    )
+
+
+def _oauth_callback_problem(request: Request, *, detail: str) -> Response:
+    return problem_response(
+        status=400,
+        problem_type="urn:growthos:problem:platform:oauth-callback-invalid",
+        title="OAuth callback invalid",
+        detail=detail,
+        code="OAUTH_CALLBACK_INVALID",
+        request_id=request.headers.get("x-request-id", "oauth-callback"),
+        retryable=False,
+    )
+
+
+def _platform_context_problem(
+    request: Request,
+    error: PlatformContextResolutionError,
+) -> Response:
+    return problem_response(
+        status=error.status,
+        problem_type=f"urn:growthos:problem:platform:{error.code.lower().replace('_', '-')}",
+        title=error.title,
+        detail=error.detail,
+        code=error.code,
+        request_id=request.headers.get("x-request-id", "unresolved"),
+        retryable=False,
+    )
 
 
 @router.get(
