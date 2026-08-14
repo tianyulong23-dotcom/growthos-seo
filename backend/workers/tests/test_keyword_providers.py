@@ -34,11 +34,19 @@ from seo_workers.keywords.providers import (
     build_topic_active_selection_prompt,
     compact_seed_profile,
     completion_token_parameter,
+    country_display_name,
+    country_location_code,
     host_matches_domain,
     initial_library_filter_schema,
     is_same_domain,
     sort_serp_competitors,
 )
+
+
+@pytest.mark.parametrize("country", ["UNITED STATES", "United States", "united states"])
+def test_country_helpers_accept_persisted_country_names(country: str) -> None:
+    assert country_display_name(country) == "United States"
+    assert country_location_code(country) == 2840
 
 
 def dataforseo_response(result: list[dict], *, cost: float = 0.01) -> dict:
@@ -614,7 +622,8 @@ async def test_dataforseo_charged_task_failure_preserves_cost_and_path() -> None
 
 
 @pytest.mark.anyio
-async def test_google_ads_site_fallback_parses_the_dataforseo_result() -> None:
+@pytest.mark.parametrize("language", ["en", "English"])
+async def test_google_ads_site_fallback_parses_the_dataforseo_result(language: str) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -641,7 +650,7 @@ async def test_google_ads_site_fallback_parses_the_dataforseo_result() -> None:
         rows, billing = await client.google_ads_keywords_for_site(
             domain="bikicarcare.com",
             country="US",
-            language="en",
+            language=language,
         )
     finally:
         await http.close()
@@ -652,7 +661,7 @@ async def test_google_ads_site_fallback_parses_the_dataforseo_result() -> None:
         "target": "bikicarcare.com",
         "target_type": "site",
         "location_name": "United States",
-        "language_code": "en",
+        "language_name": "English",
         "search_partners": False,
         "include_adult_keywords": False,
         "sort_by": "relevance",
@@ -1143,52 +1152,44 @@ def test_provider_config_does_not_expose_the_password() -> None:
 def test_initial_library_filter_uses_only_general_usability_rules() -> None:
     candidates = [
         SeedCandidate(
-            keyword=keyword,
-            normalized_keyword=keyword,
-            rank=index,
+            keyword="candidate phrase",
+            normalized_keyword="candidate phrase",
+            rank=1,
             selection_details={},
-            raw=RawKeyword(keyword=keyword, source="labs_site", search_volume=100 - index),
-        )
-        for index, keyword in enumerate(
-            ["accounting software", "example login", "broken fragment"],
-            start=1,
+            raw=RawKeyword(keyword="candidate phrase", source="labs_site", search_volume=100),
         )
     ]
 
     prompt = build_initial_library_filter_prompt(
         candidates=candidates,
         profile={
-            "business_name": "Example Company",
-            "business_summary": "Cloud accounting software for small businesses.",
-            "products_services": ["Cloud accounting software"],
+            "business_name": "Profile Must Not Affect This Gate",
+            "business_summary": "Profile content must not be included in the prompt.",
         },
         country="US",
         language="en",
     )
     schema = initial_library_filter_schema(candidates)
 
-    assert "general SEO keyword usability filter" in prompt
-    assert "Judge the complete search need" in prompt
-    assert "business profile is evidence" in prompt
-    assert "keep: the query has a clear connection" in prompt
-    assert "remove_irrelevant" in prompt
-    assert "remove_entity" in prompt
-    assert "remove_navigation" in prompt
-    assert "remove_unusable" in prompt
-    assert "affirmative support in the business profile" in prompt
-    assert "industry proximity or a shared general word is not affirmative support" in prompt
-    assert "do not invent domain-specific rules" in prompt
+    assert "strict query-integrity gate" in prompt
+    assert "malformed, truncated, or semantically underdetermined" in prompt
+    assert "Do not judge website relevance, industry fit, brand ownership" in prompt
+    assert "keep: the ordered phrase itself forms a complete" in prompt
+    assert "remove_incomplete" in prompt
+    assert "Prefer rejecting a questionable string" in prompt
+    assert "If any core relationship is uncertain, return remove_incomplete" in prompt
+    assert "Profile Must Not Affect This Gate" not in prompt
+    assert "remove_irrelevant" not in prompt
+    assert "remove_entity" not in prompt
+    assert "remove_navigation" not in prompt
     assert "search_volume" not in prompt
     assert "decisions item 1 classifies k001" in prompt
     assert schema["required"] == ["decisions"]
-    assert schema["properties"]["decisions"]["minItems"] == 3
-    assert schema["properties"]["decisions"]["maxItems"] == 3
+    assert schema["properties"]["decisions"]["minItems"] == 1
+    assert schema["properties"]["decisions"]["maxItems"] == 1
     assert schema["properties"]["decisions"]["items"]["enum"] == [
         "keep",
-        "remove_irrelevant",
-        "remove_entity",
-        "remove_navigation",
-        "remove_unusable",
+        "remove_incomplete",
     ]
 
 
@@ -1822,7 +1823,7 @@ async def test_initial_library_filter_uses_configured_luna_model() -> None:
             model="gpt-5.4-mini",
             timeout_seconds=10,
             max_retries=0,
-            initial_filter_model="gpt-5.6-luna",
+            keyword_model="gpt-5.6-luna",
         ),
     )
     try:
@@ -1837,11 +1838,76 @@ async def test_initial_library_filter_uses_configured_luna_model() -> None:
 
     body = json.loads(requests[0].content)
     assert body["model"] == "gpt-5.6-luna"
-    assert "reasoning_effort" not in body
+    assert body["reasoning_effort"] == "medium"
 
 
 @pytest.mark.anyio
-async def test_topic_dedup_request_uses_low_reasoning_and_larger_output_budget() -> None:
+async def test_keyword_completion_supports_responses_protocol() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "id": "response-1",
+                "model": "gpt-5.6-luna",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": '{"decisions":["keep"]}',
+                    }],
+                }],
+                "usage": {"input_tokens": 10, "output_tokens": 20},
+            },
+        )
+
+    candidate = SeedCandidate(
+        keyword="movie streaming app",
+        normalized_keyword="movie streaming app",
+        rank=1,
+        selection_details={"rule_version": "test"},
+        raw=RawKeyword(
+            keyword="movie streaming app",
+            source="google_ads_site",
+            search_volume=1_000,
+        ),
+    )
+    http = JsonHttpClient(timeout_seconds=10, max_retries=0)
+    await http.client.aclose()
+    http.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleClient(
+        http,
+        AIProviderConfig(
+            base_url="https://api.openai.test/v1",
+            api_key="test-key",
+            model="gpt-5.6-luna",
+            api_protocol="responses",
+            timeout_seconds=10,
+            max_retries=0,
+        ),
+    )
+    try:
+        await client.filter_initial_library_candidates(
+            candidates=[candidate],
+            profile={"business_type": "Streaming application"},
+            country="US",
+            language="en",
+        )
+    finally:
+        await http.close()
+
+    body = json.loads(requests[0].content)
+    assert requests[0].url.path == "/v1/responses"
+    assert "messages" not in body
+    assert body["reasoning"] == {"effort": "medium"}
+    assert body["text"]["format"]["type"] == "json_schema"
+
+
+@pytest.mark.anyio
+async def test_topic_dedup_request_uses_configured_reasoning_and_larger_output_budget() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1873,7 +1939,8 @@ async def test_topic_dedup_request_uses_low_reasoning_and_larger_output_budget()
             model="gpt-5.4-mini",
             timeout_seconds=10,
             max_retries=0,
-            topic_dedup_model="gpt-5.6-terra",
+            keyword_model="gpt-5.6-terra",
+            keyword_reasoning_effort="high",
         ),
     )
     try:
@@ -1899,7 +1966,7 @@ async def test_topic_dedup_request_uses_low_reasoning_and_larger_output_budget()
     assert len(requests) == 1
     body = json.loads(requests[0].content)
     assert body["model"] == "gpt-5.6-terra"
-    assert body["reasoning_effort"] == "low"
+    assert body["reasoning_effort"] == "high"
     assert body["max_completion_tokens"] == 5_000
     assert body["response_format"]["type"] == "json_schema"
     assert body["response_format"]["json_schema"]["strict"] is True

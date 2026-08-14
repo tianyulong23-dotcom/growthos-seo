@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class KeywordWorkerSettings(BaseSettings):
+    app_env: str = "development"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/seo"
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
@@ -14,12 +15,14 @@ class KeywordWorkerSettings(BaseSettings):
 
     business_profile_ai_base_url: str = ""
     business_profile_ai_api_key: str = ""
+    business_profile_ai_api_protocol: str = "chat_completions"
     business_profile_ai_model: str = "gpt-5.4-mini"
     business_profile_ai_timeout: str = "90s"
     business_profile_ai_max_retries: int = 1
     keyword_initial_filter_ai_model: str = "gpt-5.6-luna"
     keyword_topic_dedup_ai_model: str = "gpt-5.6-terra"
     ai_settings_encryption_key: str = ""
+    ai_settings_allow_plaintext: bool = False
     google_gsc_client_id: str = ""
     google_gsc_client_secret: str = ""
 
@@ -50,3 +53,7 @@ class KeywordWorkerSettings(BaseSettings):
     @property
     def dataforseo_configured(self) -> bool:
         return bool(self.dataforseo_login and self.dataforseo_password)
+
+    @property
+    def allow_plaintext_settings(self) -> bool:
+        return self.ai_settings_allow_plaintext or self.app_env != "production"

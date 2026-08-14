@@ -14,6 +14,7 @@ const expectedProjectTabs = [
 const expectedPlatformTabs = [
   ["ai", "AI 模型"],
   ["dataforseo", "DataForSEO"],
+  ["google-oauth", "Google OAuth"],
 ]
 
 describe("settings navigation", () => {

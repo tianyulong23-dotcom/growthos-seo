@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { markBusinessProfileOnboarding } from "@/features/projects/business-profile-onboarding-storage"
 import {
   projectCountryOptions,
@@ -140,7 +141,7 @@ export function CreateProjectDialog({
           </DialogHeader>
 
           <div className="space-y-5">
-            <label className="block space-y-2 text-sm">
+            <Label className="block space-y-2 text-sm">
               <span className="flex items-center gap-2 font-medium">
                 <Globe2 className="size-4 text-muted-foreground" />
                 主域名
@@ -158,10 +159,10 @@ export function CreateProjectDialog({
               {error && (
                 <span className="block text-xs text-destructive">{error}</span>
               )}
-            </label>
+            </Label>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <label className="space-y-2 text-sm">
+              <Label className="block min-w-0 space-y-2 text-sm">
                 <span className="flex items-center gap-2 font-medium">
                   <MapPin className="size-4 text-muted-foreground" />
                   国家
@@ -175,9 +176,9 @@ export function CreateProjectDialog({
                   emptyText="未找到国家"
                   ariaLabel="选择国家"
                 />
-              </label>
+              </Label>
 
-              <label className="space-y-2 text-sm">
+              <Label className="block min-w-0 space-y-2 text-sm">
                 <span className="flex items-center gap-2 font-medium">
                   <Languages className="size-4 text-muted-foreground" />
                   语言
@@ -191,10 +192,10 @@ export function CreateProjectDialog({
                   emptyText="未找到语言"
                   ariaLabel="选择语言"
                 />
-              </label>
+              </Label>
             </div>
 
-            <label className="block space-y-2 text-sm">
+            <Label className="block space-y-2 text-sm">
               <span className="flex items-center gap-2 font-medium">
                 <Swords className="size-4 text-muted-foreground" />
                 竞争对手
@@ -209,7 +210,7 @@ export function CreateProjectDialog({
                 placeholder="competitor.com"
                 disabled={submitting}
               />
-            </label>
+            </Label>
           </div>
 
           <DialogFooter>

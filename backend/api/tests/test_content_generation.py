@@ -1,6 +1,7 @@
 import asyncio
 import json
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,17 +23,20 @@ from app.modules.content.quality import (
     ContentScorer,
     deterministic_quality_check,
     markdown_to_html,
+    sanitize_markdown_links,
     sanitize_sections,
 )
 from app.modules.content.writing_gateway import (
     ArticlePlan,
+    CriticalResearchGap,
     EvidenceClaim,
-    LockedRequirementCheck,
     OutlineSection,
     SectionDraft,
     SectionIssue,
-    SemanticQualityResult,
     UnifiedArticle,
+    VisualPlanItem,
+    WritingOutputError,
+    WritingRequestError,
 )
 
 
@@ -316,79 +320,270 @@ def test_planning_saves_complete_pack_and_binds_normalized_claims(
         "solar battery savings",
     ]
     assert pack["search_intent"] == "Compare cost and savings"
-    assert pack["article_type"] == "How-To Guide"
+    assert pack["article_type"] == "guide"
     assert pack["authority_sources"][0]["url"] == authority_url
     assert pack["authority_sources"][0]["excerpt"] == "Verified fact"
     assert pack["authority_sources"][0] == {
         "url": authority_url,
-            "title": "Source",
-            "excerpt": "Verified fact",
-            "research_answer": "",
-            "citation_excerpt": "",
-            "research_claim": "The model proposed this fact.",
-        "verification_status": "verified",
-        "verification_method": "page_text_match_v1",
-        "source_tier": "tier_1_official_public_or_standards",
+        "title": "Source",
+        "excerpt": "Verified fact",
+        "research_answer": "",
+        "citation_excerpt": "",
+        "research_claim": "The model proposed this fact.",
         "provider": "responses",
         "model": "research-model",
         "queries": ["official facts"],
         "failed_queries": ["current prices"],
         "cached": True,
-        "verified_url": authority_url,
-        "echo_cluster_id": "source-1",
-        "independent_source": True,
-            "verification_claims": [
+        "verification_claims": [
             {
                 "claim": "The model proposed this fact.",
                 "status": "verified",
                 "evidence": "Verified fact",
-                }
-            ],
-            "crawler": {},
-        }
+            }
+        ],
+    }
     assert pack["internal_sources"][0]["url"] == internal_url
     assert repo.bound_plan is not None
     assert repo.bound_plan["claims"][0]["claim_id"] == "claim-1"
     assert repo.bound_plan["claims"][0]["section_id"] == "section-1"
-    assert repo.bound_plan["sections"][0]["claim_ids"] == ["claim-1"]
-    assert repo.bound_plan["sections"][0]["internal_urls"] == [internal_url]
+    assert repo.bound_plan["sections"][0]["claim_ids"] == [
+        "claim-1",
+        "claim-2",
+        "claim-3",
+    ]
+    assert repo.bound_plan["sections"][0]["internal_urls"] == [
+        internal_url,
+        "https://other.example/page",
+    ]
 
 
-def test_supplemental_research_only_queries_unsupported_load_bearing_requirements() -> None:
+def unified_for_plan(
+    plan: ArticlePlan, marker: str = "Complete article prose"
+) -> UnifiedArticle:
+    return UnifiedArticle(
+        title=plan.title,
+        meta_title=plan.meta_title,
+        meta_description=plan.meta_description,
+        slug=plan.slug,
+        sections=[
+            SectionDraft(
+                section_id=section.section_id,
+                markdown=f"## {section.heading}\n\n{marker} for {section.section_id}.",
+                summary=f"{marker} summary for {section.section_id}",
+            )
+            for section in plan.sections
+        ],
+    )
+
+
+def test_critical_research_tasks_use_only_explicit_plan_gaps_and_cap_batch() -> None:
     plan = plan_with_sections(1).model_copy(
         update={
-            "sections": [
-                plan_with_sections(1).sections[0].model_copy(
-                    update={
-                        "data_requirements": [
-                            "Explain the installation steps clearly",
-                            "current federal tax credit rules",
-                            "2026 average installation cost",
-                            "current product availability by region",
-                            "comparison ranking methodology",
-                            "latest warranty statistics",
-                        ]
-                    }
+            "critical_research_gaps": [
+                CriticalResearchGap(
+                    missing_information=f"Missing information {index}",
+                    why_it_blocks_core_answer="The core answer depends on it.",
+                    research_query=f"Research complete topic {index}",
                 )
+                for index in range(1, 6)
             ]
         }
     )
+
+    assert generation._critical_research_tasks(plan) == [
+        "Research complete topic 1",
+        "Research complete topic 2",
+        "Research complete topic 3",
+        "Research complete topic 4",
+    ]
+
+
+def test_full_article_payload_excludes_internal_research_gap_decision() -> None:
+    plan = plan_with_sections(1).model_copy(
+        update={
+            "critical_research_gaps": [
+                CriticalResearchGap(
+                    missing_information="Missing core fact",
+                    why_it_blocks_core_answer="The answer depends on it.",
+                    research_query="Research the missing core fact",
+                )
+            ],
+            "visuals": [
+                VisualPlanItem(
+                    visual_id="visual-original",
+                    section_id="section-1",
+                    reader_job="explain",
+                    source_strategy="project_asset",
+                    title="Payback inputs",
+                    alt_instruction="Explain the inputs shown in the image.",
+                )
+            ],
+        }
+    )
     pack = {
-        "keyword": "solar battery",
+        "keyword": "solar battery payback",
+        "language": "en",
         "country": "US",
-        "questions": ["How long is solar battery payback?"],
-        "required_questions": ["Are solar batteries worth it?"],
+        "project": {},
         "authority_sources": [],
-        "content_brief": {},
+        "competitors": [],
+        "internal_sources": [],
     }
 
-    queries = generation._supplemental_research_queries(plan, pack)
+    payload = generation._full_article_writing_payload(plan, pack)
 
-    assert len(queries) == 4
-    assert all("installation steps clearly" not in query for query in queries)
-    assert "How long is solar battery payback?" not in queries
-    assert "Are solar batteries worth it?" not in queries
-    assert any("current federal tax credit rules" in query for query in queries)
+    assert "critical_research_gaps" not in payload["article_plan"]
+    assert "visuals" not in payload["article_plan"]
+
+
+def test_normalize_plan_keeps_only_safe_section_bound_visuals() -> None:
+    sections = [
+        OutlineSection(
+            section_id=f"original-{index}",
+            heading=f"Section {index}",
+            objective=f"Explain topic {index}",
+            word_target=100,
+        )
+        for index in range(1, 5)
+    ]
+    claim = EvidenceClaim(
+        claim_id="original-claim",
+        claim="The measured result is 42 units.",
+        source_url="https://source.example/result",
+        quote="The measured result is 42 units.",
+    )
+    plan = plan_with_sections(1).model_copy(
+        update={
+            "sections": sections,
+            "claims": [claim],
+            "visuals": [
+                VisualPlanItem(
+                    visual_id="project-image",
+                    section_id="original-1",
+                    reader_job="demonstrate",
+                    source_strategy="project_asset",
+                    required=True,
+                    title="Project example",
+                    alt_instruction="Show the project example.",
+                ),
+                VisualPlanItem(
+                    visual_id="same-section-image",
+                    section_id="original-1",
+                    reader_job="orient",
+                    source_strategy="stock",
+                    title="Duplicate section image",
+                    alt_instruction="Show another image in the same section.",
+                ),
+                VisualPlanItem(
+                    visual_id="ai-proof",
+                    section_id="original-2",
+                    reader_job="prove",
+                    source_strategy="ai",
+                    title="Generated proof",
+                    alt_instruction="Prove the factual claim.",
+                ),
+                VisualPlanItem(
+                    visual_id="chart-without-data",
+                    section_id="original-3",
+                    reader_job="compare",
+                    source_strategy="chart",
+                    title="Unsupported chart",
+                    alt_instruction="Compare the unsupported values.",
+                ),
+                VisualPlanItem(
+                    visual_id="chart-with-data",
+                    section_id="original-4",
+                    reader_job="compare",
+                    source_strategy="chart",
+                        title="Supported chart",
+                        alt_instruction="Compare the measured result.",
+                        data_claim_ids=["original-claim"],
+                        chart_data=[
+                            {
+                                "label": "Measured result",
+                                "value": 42,
+                                "unit": " units",
+                                "claim_id": "original-claim",
+                            }
+                        ],
+                    ),
+            ],
+        }
+    )
+    pack = {
+        "keyword": "solar battery payback",
+        "language": "en",
+        "project": {},
+        "authority_sources": [
+            {
+                "url": "https://source.example/result",
+                "title": "Measurement report",
+            }
+        ],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    normalized = generation.normalize_plan(plan, pack)
+
+    assert [item.visual_id for item in normalized.visuals] == [
+        "visual-1",
+        "visual-2",
+    ]
+    assert [item.section_id for item in normalized.visuals] == [
+        "section-1",
+        "section-4",
+    ]
+    assert all(item.required is False for item in normalized.visuals)
+    assert normalized.visuals[1].data_claim_ids == ["claim-1"]
+    assert normalized.visuals[1].chart_data[0].claim_id == "claim-1"
+
+
+def test_article_quality_guidance_prioritizes_scope_example_and_substantive_editing() -> None:
+    plan = plan_with_sections(1)
+    pack = {
+        "keyword": "solar battery payback",
+        "language": "en",
+        "country": "US",
+        "project": {},
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    brief = generation._article_writing_brief(pack)
+    writing = generation._full_article_writing_payload(plan, pack)
+    editing = generation._full_article_editing_payload(
+        plan,
+        [
+            SectionDraft(
+                section_id="section-1",
+                markdown="## Section 1\n\nComplete draft prose.",
+            )
+        ],
+        pack,
+    )
+
+    assert "one primary reader question" in brief["scope_control"]
+    assert "distinct job" in brief["scope_control"]
+    assert "end-to-end worked example" in brief["worked_example"]
+    assert "complete the task or make the decision" in writing["quality_target"][
+        "reader_outcome"
+    ]
+    assert any("caveat once" in item for item in writing["instructions"])
+    assert any(
+        "strongest occurrence of a repeated point" in item
+        for item in editing["editorial_priorities"]
+    )
+    assert any(
+        "shorter article with distinct reader value" in item
+        for item in editing["editorial_priorities"]
+    )
+    assert any(
+        "do not limit the pass to copyediting" in item
+        for item in editing["editing_rules"]
+    )
 
 
 def test_planning_receives_complete_plan_input_and_preserves_locked_title(
@@ -463,56 +658,13 @@ def test_planning_receives_complete_plan_input_and_preserves_locked_title(
         {"keyword": "editorial calendar", "type": "supporting"},
         {"keyword": "content workflow", "type": "supporting"},
     ]
-    assert pack["content_brief"]["secondary_keywords"] == [
-        "editorial calendar",
-        "content workflow",
-    ]
+    assert "content_brief" not in pack
+    assert "dominant_content_type" not in json.dumps(pack)
     assert artifact["plan"]["title"] == "Locked Content Plan Title"
     assert generation.fallback_plan(pack).title == "Locked Content Plan Title"
 
 
-def test_existing_section_evidence_suppresses_supplemental_research() -> None:
-    authority_url = "https://irs.gov/solar-credit"
-    section = plan_with_sections(1).sections[0].model_copy(
-        update={
-            "heading": "Federal solar battery tax credit requirements",
-            "objective": "Explain current federal solar battery tax credit eligibility",
-            "data_requirements": ["current federal tax credit rules"],
-            "claim_ids": ["claim-existing"],
-        }
-    )
-    plan = plan_with_sections(1).model_copy(
-        update={
-            "sections": [section],
-            "claims": [
-                EvidenceClaim(
-                    claim_id="claim-existing",
-                    claim="Federal eligibility rules apply.",
-                    source_url=authority_url,
-                    quote="Federal eligibility rules apply.",
-                    section_id=section.section_id,
-                )
-            ],
-        }
-    )
-    pack = {
-        "keyword": "solar battery tax credit",
-        "country": "US",
-        "project": {},
-        "content_brief": {},
-        "authority_sources": [
-            {
-                "url": authority_url,
-                "title": "Federal solar battery tax credit eligibility requirements",
-                "excerpt": "Federal eligibility rules apply.",
-            }
-        ],
-    }
-
-    assert generation._supplemental_research_queries(plan, pack) == []
-
-
-def test_successful_supplemental_research_rebuilds_pack_before_normalization(
+def test_critical_research_rebuilds_pack_after_one_planning_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -557,11 +709,23 @@ def test_successful_supplemental_research_rebuilds_pack_before_normalization(
                     quote="Eligible battery storage technology qualifies under current rules.",
                 )
             ],
+            "critical_research_gaps": [
+                CriticalResearchGap(
+                    missing_information="Current federal tax credit eligibility",
+                    why_it_blocks_core_answer="The reader cannot determine eligibility without it.",
+                    research_query=(
+                        "Research current US federal solar battery tax credit "
+                        "eligibility as one complete task"
+                    ),
+                )
+            ],
         }
     )
     packs = iter([initial_pack, supplemented_pack])
     pack_calls = 0
     research_queries: list[str] = []
+    events: list[str] = []
+    planning_payload: dict[str, Any] = {}
 
     async def build_pack(*_: Any, **__: Any) -> dict[str, Any]:
         nonlocal pack_calls
@@ -575,11 +739,23 @@ def test_successful_supplemental_research_rebuilds_pack_before_normalization(
         _keyword: str,
         _snapshot: dict[str, Any],
         exact_questions: list[str],
+        model_snapshot: dict[str, Any],
     ) -> tuple[None, int]:
+        events.append("research")
         research_queries.extend(exact_questions)
+        assert model_snapshot == {"model": "test-model"}
         return None, 1
 
-    async def generate(*_: Any, **__: Any) -> Any:
+    async def generate(
+        _gateway: Any,
+        _settings: Settings,
+        _context: dict[str, Any],
+        _call: str,
+        payload: dict[str, Any],
+        _output: Any,
+    ) -> Any:
+        events.append("plan")
+        planning_payload.update(deepcopy(payload))
         return SimpleNamespace(value=planned, usage={"input_tokens": 10})
 
     repo = FakeRepository()
@@ -593,9 +769,16 @@ def test_successful_supplemental_research_rebuilds_pack_before_normalization(
     artifact = store.objects[result["output_ref"]]
 
     assert pack_calls == 2
-    assert len(research_queries) == 1
-    assert "current federal tax credit rules" in research_queries[0]
+    assert research_queries == [
+        "Research current US federal solar battery tax credit eligibility as one complete task"
+    ]
     assert "What is a solar battery?" not in research_queries
+    assert events == ["plan", "research"]
+    assert planning_payload["research_pack"]["research_sources"] == []
+    assert planning_payload["writing_brief"]["reader_task"] == (
+        "Help a reader in US resolve the practical question behind "
+        "'solar battery tax credit'."
+    )
     assert artifact["plan"]["claims"][0]["source_url"] == authority_url
     assert result["warnings"] == []
 
@@ -623,7 +806,14 @@ def test_supplemental_research_failure_keeps_planning_successful(
                 plan_with_sections(1).sections[0].model_copy(
                     update={"data_requirements": ["current federal tax credit rules"]}
                 )
-            ]
+            ],
+            "critical_research_gaps": [
+                CriticalResearchGap(
+                    missing_information="Current federal tax credit eligibility",
+                    why_it_blocks_core_answer="The reader cannot determine eligibility without it.",
+                    research_query="Research current US federal solar battery tax credit eligibility",
+                )
+            ],
         }
     )
     pack_calls = 0
@@ -655,7 +845,7 @@ def test_supplemental_research_failure_keeps_planning_successful(
     ]
 
 
-def test_planning_rejects_quote_taken_from_another_source() -> None:
+def test_planning_preserves_model_claims_without_source_quote_filtering() -> None:
     first_url = "https://authority.example/first"
     second_url = "https://authority.example/second"
     pack = {
@@ -694,11 +884,14 @@ def test_planning_rejects_quote_taken_from_another_source() -> None:
 
     normalized = generation.normalize_plan(plan, pack)
 
-    assert [claim.claim for claim in normalized.claims] == ["Cycle limits vary"]
-    assert normalized.sections[0].claim_ids == ["claim-2"]
+    assert [claim.claim for claim in normalized.claims] == [
+        "Warranty is ten years",
+        "Cycle limits vary",
+    ]
+    assert normalized.sections[0].claim_ids == ["claim-1", "claim-2"]
 
 
-def test_planning_rejects_claim_that_contradicts_its_quote() -> None:
+def test_planning_preserves_model_claim_without_contradiction_filtering() -> None:
     authority_url = "https://authority.example/warranty"
     quote = "The warranty covers installation labor."
     pack = {
@@ -730,11 +923,13 @@ def test_planning_rejects_claim_that_contradicts_its_quote() -> None:
 
     normalized = generation.normalize_plan(plan, pack)
 
-    assert normalized.claims == []
-    assert normalized.sections[0].claim_ids == []
+    assert [claim.claim for claim in normalized.claims] == [
+        "The warranty does not cover installation labor."
+    ]
+    assert normalized.sections[0].claim_ids == ["claim-1"]
 
 
-def test_planning_drops_claim_not_assigned_to_any_section() -> None:
+def test_planning_preserves_claim_not_assigned_to_any_section() -> None:
     authority_url = "https://authority.example/fact"
     pack = {
         "keyword": "solar battery",
@@ -764,10 +959,13 @@ def test_planning_drops_claim_not_assigned_to_any_section() -> None:
 
     normalized = generation.normalize_plan(plan, pack)
 
-    assert normalized.claims == []
+    assert [claim.claim for claim in normalized.claims] == [
+        "Battery warranties commonly cover ten years."
+    ]
+    assert normalized.claims[0].section_id is None
 
 
-def test_explicit_non_independent_source_never_enters_research_pack(
+def test_explicit_non_independent_source_remains_available_to_writing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_url = "https://news.example/repeated-report"
@@ -795,10 +993,10 @@ def test_explicit_non_independent_source_never_enters_research_pack(
         build_research_pack(repo, Settings(app_env="test"), base_context())
     )
 
-    assert pack["authority_sources"] == []
+    assert [item["url"] for item in pack["authority_sources"]] == [source_url]
 
 
-def test_legacy_authority_and_research_sources_never_enter_research_pack(
+def test_legacy_authority_source_remains_available_to_writing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = FakeRepository(
@@ -831,10 +1029,12 @@ def test_legacy_authority_and_research_sources_never_enter_research_pack(
         build_research_pack(repo, Settings(app_env="test"), base_context())
     )
 
-    assert pack["authority_sources"] == []
+    assert [item["url"] for item in pack["authority_sources"]] == [
+        "https://legacy.example/unverified"
+    ]
 
 
-def test_unreachable_research_source_never_enters_research_pack(
+def test_unreachable_research_source_remains_available_as_citation_research(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = FakeRepository(
@@ -842,7 +1042,7 @@ def test_unreachable_research_source_never_enters_research_pack(
             "authority": [
                 source(
                     "https://authority.example/unreachable",
-                    status="failed",
+                    status="available",
                     summary={
                         "citation_excerpt": "A model-returned exact quote.",
                         "research_claim": "A model-returned claim.",
@@ -850,6 +1050,7 @@ def test_unreachable_research_source_never_enters_research_pack(
                     metadata={
                         "source": "web_research",
                         "verification_status": "unreachable",
+                        "verification_method": "crawler_page_unavailable_v1",
                         "independent_source": False,
                     },
                 )
@@ -865,10 +1066,160 @@ def test_unreachable_research_source_never_enters_research_pack(
         build_research_pack(repo, Settings(app_env="test"), base_context())
     )
 
-    assert pack["authority_sources"] == []
+    assert "verification_status" not in pack["authority_sources"][0]
+    assert pack["authority_sources"][0]["excerpt"] == "A model-returned exact quote."
+    assert pack["authority_sources"][0]["research_claim"] == "A model-returned claim."
 
 
-def test_research_pack_exposes_only_verified_claims_and_page_evidence(
+def test_supplemental_research_does_not_retry_as_separate_problem_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_store(monkeypatch)
+    initial_pack = {
+        "keyword": "ExampleTV download",
+        "country": "US",
+        "language": "en",
+        "project": {
+            "profile": {
+                "business_name": "ExampleTV",
+                "products_services": ["Streaming application"],
+                "conversion_actions": ["Download ExampleTV"],
+                "key_pages": [
+                    {
+                        "url": "https://example.com/download",
+                        "title": "Download ExampleTV",
+                        "description": "Official download page",
+                    }
+                ],
+            }
+        },
+        "questions": [],
+        "required_questions": [],
+        "competitors": [],
+        "authority_sources": [],
+        "internal_sources": [],
+        "serp_analysis": {"dominant_content_type": "How-To Guide"},
+        "content_brief": {},
+    }
+    planned = plan_with_sections(1).model_copy(
+        update={
+            "sections": [
+                plan_with_sections(1).sections[0].model_copy(
+                    update={"data_requirements": ["current official download instructions"]}
+                )
+            ],
+            "critical_research_gaps": [
+                CriticalResearchGap(
+                    missing_information="Current official download instructions",
+                    why_it_blocks_core_answer="The reader cannot complete the requested download without them.",
+                    research_query=(
+                        "Research the current official ExampleTV download instructions "
+                        "as one complete task"
+                    ),
+                )
+            ],
+        }
+    )
+    query_rounds: list[list[str]] = []
+
+    async def build_pack(*_: Any, **__: Any) -> dict[str, Any]:
+        return deepcopy(initial_pack)
+
+    async def collect_research(
+        _repo: Any,
+        _settings: Settings,
+        _run_id: str,
+        _keyword: str,
+        _snapshot: dict[str, Any],
+        exact_questions: list[str],
+        model_snapshot: dict[str, Any],
+    ) -> tuple[str | None, int]:
+        del model_snapshot
+        query_rounds.append(exact_questions)
+        return "research_unavailable", 0
+
+    async def generate(*_: Any, **__: Any) -> Any:
+        return SimpleNamespace(value=planned, usage={})
+
+    monkeypatch.setattr(generation, "build_research_pack", build_pack)
+    monkeypatch.setattr(generation, "_collect_research", collect_research)
+    monkeypatch.setattr(generation, "cached_generate", generate)
+
+    result = asyncio.run(
+        plan_article(FakeRepository(), Settings(app_env="test"), base_context(), POLICY)
+    )
+
+    assert len(query_rounds) == 1
+    assert query_rounds[0] == [
+        "Research the current official ExampleTV download instructions as one complete task"
+    ]
+    assert [item["code"] for item in result["warnings"]] == [
+        "supplemental_research_degraded"
+    ]
+
+
+def test_plan_without_critical_gaps_does_not_trigger_research(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_store(monkeypatch)
+    initial_pack = {
+        "keyword": "streaming application",
+        "country": "US",
+        "language": "en",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "products_services": ["Streaming application"],
+            },
+        },
+        "questions": [],
+        "required_questions": [],
+        "competitors": [],
+        "authority_sources": [],
+        "internal_sources": [],
+        "serp_analysis": {"dominant_content_type": "How-To Guide"},
+        "content_brief": {},
+    }
+    planned = plan_with_sections(1)
+    query_rounds: list[list[str]] = []
+    pack_calls = 0
+
+    async def build_pack(*_: Any, **__: Any) -> dict[str, Any]:
+        nonlocal pack_calls
+        pack_calls += 1
+        return deepcopy(initial_pack)
+
+    async def collect_research(
+        _repo: Any,
+        _settings: Settings,
+        _run_id: str,
+        _keyword: str,
+        _snapshot: dict[str, Any],
+        exact_questions: list[str],
+        model_snapshot: dict[str, Any],
+    ) -> tuple[str | None, int]:
+        del model_snapshot
+        query_rounds.append(exact_questions)
+        return None, 1
+
+    async def generate(*_: Any, **__: Any) -> Any:
+        return SimpleNamespace(value=planned, usage={})
+
+    monkeypatch.setattr(generation, "build_research_pack", build_pack)
+    monkeypatch.setattr(generation, "_collect_research", collect_research)
+    monkeypatch.setattr(generation, "cached_generate", generate)
+
+    result = asyncio.run(
+        plan_article(FakeRepository(), Settings(app_env="test"), base_context(), POLICY)
+    )
+
+    assert pack_calls == 1
+    assert query_rounds == []
+    assert result["warnings"] == []
+
+
+def test_research_pack_preserves_all_research_content_and_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_url = "https://agency.gov/report"
@@ -918,20 +1269,25 @@ def test_research_pack_exposes_only_verified_claims_and_page_evidence(
     authority = pack["authority_sources"][0]
 
     assert authority["excerpt"] == page_evidence
-    assert authority["research_claim"] == verified_claim
-    assert authority["research_answer"] == ""
-    assert authority["citation_excerpt"] == ""
+    assert authority["research_claim"] == f"{verified_claim}\n{rejected_claim}"
+    assert authority["research_answer"] == f"{verified_claim} {rejected_claim}"
+    assert authority["citation_excerpt"] == "A model-returned candidate passage."
     assert authority["verification_claims"] == [
         {
             "claim": verified_claim,
             "status": "verified",
             "evidence": page_evidence,
-        }
+        },
+        {
+            "claim": rejected_claim,
+            "status": "not_found",
+            "evidence": "",
+        },
     ]
-    assert rejected_claim not in json.dumps(authority)
+    assert rejected_claim in json.dumps(authority)
 
 
-def test_echo_duplicate_never_enters_research_pack_or_plan_claims(
+def test_echo_duplicate_remains_available_and_model_claims_are_preserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     verified_url = "https://agency.gov/original-report"
@@ -993,12 +1349,15 @@ def test_echo_duplicate_never_enters_research_pack_or_plan_claims(
 
     normalized = generation.normalize_plan(plan, pack)
 
-    assert [item["url"] for item in pack["authority_sources"]] == [verified_url]
-    assert [claim.source_url for claim in normalized.claims] == [verified_url]
-    assert normalized.sections[0].claim_ids == ["claim-1"]
+    assert [item["url"] for item in pack["authority_sources"]] == [
+        verified_url,
+        echo_url,
+    ]
+    assert [claim.source_url for claim in normalized.claims] == [verified_url, echo_url]
+    assert normalized.sections[0].claim_ids == ["claim-1", "claim-2"]
 
 
-def test_section_failure_retries_once_then_uses_complete_short_section(
+def test_full_article_missing_a_planned_section_fails_instead_of_using_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -1020,76 +1379,36 @@ def test_section_failure_retries_once_then_uses_complete_short_section(
     )
     context = base_context()
     context["completed_steps"] = {"planning": {"output_ref": plan_ref}}
-    attempts: dict[str, int] = {}
-    payloads: dict[str, list[dict[str, Any]]] = {}
+    calls: list[tuple[str, dict[str, Any]]] = []
 
     class Gateway:
         async def generate(self, call: str, payload: dict[str, Any], _output: Any) -> Any:
-            section_id = str(payload["section"]["section_id"])
-            if call == "edit_section":
-                return SimpleNamespace(
-                    value=SectionDraft.model_validate(payload["draft"]),
-                    usage={"input_tokens": 5, "output_tokens": 10},
-                )
-            attempts[section_id] = attempts.get(section_id, 0) + 1
-            payloads.setdefault(section_id, []).append(deepcopy(payload))
-            if section_id == "section-1" and attempts[section_id] == 1:
-                raise RuntimeError("first attempt failed")
-            if section_id == "section-2":
-                raise RuntimeError("both attempts failed")
+            calls.append((call, deepcopy(payload)))
             return SimpleNamespace(
-                value=SectionDraft(
-                    section_id=section_id,
-                    markdown="Useful answer after retry.",
-                    summary="Useful answer",
+                value=UnifiedArticle(
+                    title=plan.title,
+                    meta_title=plan.meta_title,
+                    meta_description=plan.meta_description,
+                    slug=plan.slug,
+                    sections=[unified_for_plan(plan).sections[0]],
                 ),
                 usage={"input_tokens": 5, "output_tokens": 10},
             )
 
     monkeypatch.setattr(generation, "writing_gateway", lambda _context: Gateway())
-    result = asyncio.run(
-        write_article_sections(
-            FakeRepository(), Settings(app_env="test"), context, POLICY
+    with pytest.raises(WritingOutputError, match="complete_article_missing_sections"):
+        asyncio.run(
+            write_article_sections(
+                FakeRepository(), Settings(app_env="test"), context, POLICY
+            )
         )
-    )
-    artifact = store.objects[result["output_ref"]]
 
-    assert attempts == {"section-1": 2, "section-2": 2}
-    assert result["summary"]["section_count"] == 2
-    assert result["summary"]["complete"] is True
-    assert result["summary"]["model_failures"] == [
-        {
-            "section_id": "section-1",
-            "mode": "full",
-            "code": "writing_unexpected_error",
-            "attempts": 0,
-            "format_attempts": 0,
-        },
-        {
-            "section_id": "section-2",
-            "mode": "full",
-            "code": "writing_unexpected_error",
-            "attempts": 0,
-            "format_attempts": 0,
-        },
-        {
-            "section_id": "section-2",
-            "mode": "compact",
-            "code": "writing_unexpected_error",
-            "attempts": 0,
-            "format_attempts": 0,
-        },
-    ]
-    assert [item["section_id"] for item in artifact["sections"]] == [
+    assert len(calls) == 1
+    assert calls[0][0] == "unify_article"
+    assert [item["section_id"] for item in calls[0][1]["article_plan"]["sections"]] == [
         "section-1",
         "section-2",
     ]
-    assert artifact["sections"][0]["markdown"].startswith("## Section 1")
-    assert "Explain topic 2" in artifact["sections"][1]["markdown"]
-    assert payloads["section-2"][0]["previous_section_summaries"] == [
-        "Useful answer"
-    ]
-    assert [item["code"] for item in result["warnings"]] == ["writing_degraded"]
 
 
 def test_edit_check_and_revision_failures_keep_complete_article(
@@ -1145,26 +1464,12 @@ def test_edit_check_and_revision_failures_keep_complete_article(
     checked = asyncio.run(
         check_article(FakeRepository(), Settings(app_env="test"), context, POLICY)
     )
-    assert [item["code"] for item in checked["warnings"]] == ["checking_degraded"]
+    assert checked["warnings"] == []
     assert "A complete useful answer." in store.objects[checked["output_ref"]]["markdown"]
-    assert checked["summary"] == {
-        "issue_count": 0,
-        "passed": False,
-        "check_status": "unavailable",
-        "repairable": False,
-        "repair_scope": [],
-        "issue_fingerprint": [],
-        "repairable_issue_fingerprint": [],
-        "repairable_issue_count": 0,
-        "evidence_issue_count": 0,
-        "content_score": 77.5,
-        "content_score_passed": True,
-        "model_failure": {
-            "code": "writing_unexpected_error",
-            "attempts": 0,
-            "format_attempts": 0,
-        },
-    }
+    assert checked["summary"]["passed"] is True
+    assert checked["summary"]["check_status"] == "completed"
+    assert checked["summary"]["repairable"] is False
+    assert checked["summary"]["model_failure"] is None
     assert store.objects[checked["output_ref"]]["quality"]["issues"] == []
 
     checked_artifact = store.objects[checked["output_ref"]]
@@ -1183,6 +1488,56 @@ def test_edit_check_and_revision_failures_keep_complete_article(
     )
     assert [item["code"] for item in revised["warnings"]] == ["revising_degraded"]
     assert "A complete useful answer." in store.objects[revised["output_ref"]]["markdown"]
+
+
+def test_check_marks_fallback_sections_as_repairable_and_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = patch_store(monkeypatch)
+    plan = plan_with_sections(1)
+    pack = {
+        "keyword": "solar battery payback",
+        "language": "en",
+        "questions": [],
+        "required_questions": [],
+        "project": {"domain": "project.example"},
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+    section = generation.fallback_section(plan.sections[0], "en", pack, plan)
+    pack_ref = asyncio.run(store.write_json("fallback-pack.json.gz", pack))
+    planning_ref = asyncio.run(
+        store.write_json(
+            "fallback-plan.json.gz",
+            {"research_pack_ref": pack_ref, "plan": plan.model_dump(mode="json")},
+        )
+    )
+    editing_ref = asyncio.run(
+        store.write_json(
+            "fallback-article.json.gz",
+            generation.article_artifact(
+                plan,
+                [section],
+                pack,
+                degraded_section_ids=["section-1"],
+            ),
+        )
+    )
+    context = base_context()
+    context["completed_steps"] = {
+        "planning": {"output_ref": planning_ref},
+        "editing": {"output_ref": editing_ref},
+    }
+
+    checked = asyncio.run(
+        check_article(FakeRepository(), Settings(app_env="test"), context, POLICY)
+    )
+
+    assert checked["summary"]["passed"] is False
+    assert checked["summary"]["repairable"] is True
+    assert checked["summary"]["repair_scope"] == ["section-1"]
+    assert checked["summary"]["blocking_issue_codes"] == ["fallback_section"]
 
 
 def test_empty_revision_result_keeps_issue_and_reports_no_revised_section(
@@ -1256,7 +1611,7 @@ def test_empty_revision_result_keeps_issue_and_reports_no_revised_section(
     assert "A complete useful answer." in artifact["markdown"]
 
 
-def test_semantic_check_receives_only_required_questions(
+def test_check_does_not_send_required_questions_to_the_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -1288,17 +1643,9 @@ def test_semantic_check_receives_only_required_questions(
             generation.article_artifact(plan, [section], pack),
         )
     )
-    received_questions: list[str] = []
-
     class Gateway:
-        async def generate(
-            self, _call: str, payload: dict[str, Any], _output: Any
-        ) -> Any:
-            received_questions.extend(payload["required_questions"])
-            return SimpleNamespace(
-                value=SemanticQualityResult(passed=True),
-                usage={"input_tokens": 5, "output_tokens": 1},
-            )
+        async def generate(self, *_: Any, **__: Any) -> Any:
+            raise AssertionError("checking must not call the writing model")
 
     monkeypatch.setattr(generation, "writing_gateway", lambda _context: Gateway())
     context = base_context()
@@ -1311,11 +1658,11 @@ def test_semantic_check_receives_only_required_questions(
         check_article(FakeRepository(), Settings(app_env="test"), context, POLICY)
     )
 
-    assert received_questions == ["Required question"]
     assert result["summary"]["passed"] is True
+    assert result["usage"] is None
 
 
-def test_semantic_check_records_failed_locked_writing_direction(
+def test_check_does_not_send_locked_writing_direction_to_the_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -1349,27 +1696,9 @@ def test_semantic_check_records_failed_locked_writing_direction(
             generation.article_artifact(plan, [section], pack),
         )
     )
-    received_requirements: list[dict[str, str]] = []
-
     class Gateway:
-        async def generate(
-            self, _call: str, payload: dict[str, Any], _output: Any
-        ) -> Any:
-            received_requirements.extend(payload["locked_requirements"])
-            return SimpleNamespace(
-                value=SemanticQualityResult(
-                    passed=True,
-                    locked_requirement_checks=[
-                        LockedRequirementCheck(
-                            field="writing_direction",
-                            requirement=requirement,
-                            passed=False,
-                            evidence="The article has no worked example.",
-                        )
-                    ],
-                ),
-                usage={"input_tokens": 5, "output_tokens": 1},
-            )
+        async def generate(self, *_: Any, **__: Any) -> Any:
+            raise AssertionError("checking must not call the writing model")
 
     monkeypatch.setattr(generation, "writing_gateway", lambda _context: Gateway())
     context = base_context()
@@ -1383,24 +1712,12 @@ def test_semantic_check_records_failed_locked_writing_direction(
     )
     artifact = store.objects[result["output_ref"]]
 
-    assert received_requirements == [
-        {"field": "writing_direction", "requirement": requirement}
-    ]
-    assert artifact["quality"]["locked_requirement_checks"] == [
-        {
-            "field": "writing_direction",
-            "requirement": requirement,
-            "passed": False,
-            "evidence": "The article has no worked example.",
-        }
-    ]
-    assert "locked_requirement_failed" in {
-        issue["code"] for issue in artifact["quality"]["issues"]
-    }
-    assert result["summary"]["passed"] is False
+    assert artifact["quality"]["locked_requirement_checks"] == []
+    assert result["summary"]["passed"] is True
+    assert result["usage"] is None
 
 
-def test_check_and_revision_receive_matching_section_requirements(
+def test_check_and_revision_do_not_receive_explicit_section_checklists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -1478,21 +1795,8 @@ def test_check_and_revision_receive_matching_section_requirements(
         async def generate(
             self, call: str, payload: dict[str, Any], _output: Any
         ) -> Any:
+            assert call == "revise_sections"
             payloads[call] = payload
-            if call == "check_article":
-                return SimpleNamespace(
-                    value=SemanticQualityResult(
-                        passed=False,
-                        issues=[
-                            SectionIssue(
-                                section_id="section-1",
-                                code="comparison_criteria_missing",
-                                message="Add decision criteria",
-                            )
-                        ],
-                    ),
-                    usage={"input_tokens": 5, "output_tokens": 1},
-                )
             return SimpleNamespace(
                 value=generation.RevisedSections(sections=[sections[0]]),
                 usage={"input_tokens": 5, "output_tokens": 1},
@@ -1508,40 +1812,52 @@ def test_check_and_revision_receive_matching_section_requirements(
     checked = asyncio.run(
         check_article(FakeRepository(), Settings(app_env="test"), context, POLICY)
     )
-    context["completed_steps"]["checking"] = {"output_ref": checked["output_ref"]}
+    checked_artifact = store.objects[checked["output_ref"]]
+    checked_artifact["quality"].update(
+        {
+            "passed": False,
+            "repairable": True,
+            "repair_scope": ["section-1"],
+            "issues": [
+                {
+                    "section_id": "section-1",
+                    "code": "comparison_criteria_missing",
+                    "message": "Add decision criteria",
+                    "category": "prose",
+                    "repairable": True,
+                }
+            ],
+        }
+    )
+    checked_ref = asyncio.run(store.write_json("checked.json.gz", checked_artifact))
+    context["completed_steps"]["checking"] = {"output_ref": checked_ref}
     asyncio.run(
         revise_article_sections(
             FakeRepository(), Settings(app_env="test"), context, POLICY
         )
     )
 
-    comparison_rule = "State the decision criteria before comparing options"
-    assert comparison_rule in payloads["check_article"]["section_requirements"][
+    assert [item["section_id"] for item in payloads["revise_sections"]["section_goals"]] == [
         "section-1"
-    ]["must"]
-    assert payloads["check_article"]["conversion_actions"] == [
-        "Start a free assessment"
-    ]
-    assert set(payloads["check_article"]["section_requirements"]) == {
-        "section-1",
-        "section-2",
-    }
-    assert [item["section_id"] for item in payloads["revise_sections"]["section_plans"]] == [
-        "section-1"
-    ]
-    assert comparison_rule in payloads["revise_sections"]["section_requirements"][
-        "section-1"
-    ]["must"]
-    assert payloads["revise_sections"]["conversion_actions"] == [
-        "Start a free assessment"
     ]
     assert [item["claim_id"] for item in payloads["revise_sections"]["claims"]] == [
         "claim-1"
     ]
-    assert "section-2" not in payloads["revise_sections"]["section_requirements"]
+    assert "official_product" not in payloads["revise_sections"]
+    assert payloads["revise_sections"]["section_goals"][0]["official_product"] == {
+        "conversion_actions": [],
+        "cta_targets": [],
+    }
+    assert not {
+        "issues",
+        "section_requirements",
+        "article_contract",
+        "section_contracts",
+        "locked_requirements",
+    }.intersection(payloads["revise_sections"])
 
 
-def test_semantic_check_preserves_unanswered_required_question_issue(
+def test_check_does_not_infer_semantic_question_issues_with_a_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -1577,19 +1893,7 @@ def test_semantic_check_preserves_unanswered_required_question_issue(
 
     class Gateway:
         async def generate(self, *_: Any, **__: Any) -> Any:
-            return SimpleNamespace(
-                value=SemanticQualityResult(
-                    passed=False,
-                    issues=[
-                        SectionIssue(
-                            section_id="section-1",
-                            code="required_question_unanswered",
-                            message="Required question is not answered",
-                        )
-                    ],
-                ),
-                usage={"input_tokens": 5, "output_tokens": 1},
-            )
+            raise AssertionError("checking must not call the writing model")
 
     monkeypatch.setattr(generation, "writing_gateway", lambda _context: Gateway())
     context = base_context()
@@ -1603,27 +1907,15 @@ def test_semantic_check_preserves_unanswered_required_question_issue(
     )
     artifact = store.objects[result["output_ref"]]
 
-    assert result["summary"] == {
-        "issue_count": 1,
-        "passed": False,
-        "check_status": "completed",
-        "repairable": True,
-        "repair_scope": ["section-1"],
-        "issue_fingerprint": ["prose:section-1:required_question_unanswered"],
-        "repairable_issue_fingerprint": [
-            "prose:section-1:required_question_unanswered"
-        ],
-        "repairable_issue_count": 1,
-        "evidence_issue_count": 0,
-        "model_failure": None,
-    }
-    assert artifact["quality"]["issues"][0]["code"] == (
-        "required_question_unanswered"
-    )
-    assert artifact["quality"]["required_questions"] == {"total": 1, "covered": []}
+    assert result["summary"]["issue_count"] == 0
+    assert result["summary"]["passed"] is True
+    assert result["summary"]["repairable"] is False
+    assert result["summary"]["model_failure"] is None
+    assert artifact["quality"]["issues"] == []
+    assert artifact["quality"]["locked_requirement_checks"] == []
 
 
-def test_sanitizer_removes_unverified_claims_and_unknown_links() -> None:
+def test_sanitizer_preserves_generated_claims_and_unknown_links() -> None:
     authority_url = "https://authority.example/fact"
     internal_url = "https://project.example/guide"
     plan = plan_with_sections(1).model_copy(
@@ -1673,12 +1965,15 @@ def test_sanitizer_removes_unverified_claims_and_unknown_links() -> None:
     )
 
     assert "10 years" in sanitized.markdown
-    assert "999" not in sanitized.markdown
-    assert "always guarantees" not in sanitized.markdown
-    assert "https://unknown.example" not in sanitized.markdown
+    assert "999" in sanitized.markdown
+    assert "always guarantees" in sanitized.markdown
+    assert "https://unknown.example" in sanitized.markdown
     assert f"]({internal_url})" in sanitized.markdown
-    assert sanitized.used_claim_ids == ["claim-1"]
-    assert sanitized.used_source_urls == [authority_url]
+    assert sanitized.used_claim_ids == ["claim-1", "invented"]
+    assert sanitized.used_source_urls == [
+        authority_url,
+        "https://unknown.example/page",
+    ]
     assert sanitized.used_internal_urls == [internal_url]
     assert report.passed is True
 
@@ -1823,7 +2118,7 @@ def test_internal_link_assignment_ignores_template_heading_noise() -> None:
     assert assigned[0].internal_urls == []
 
 
-def test_finalizer_removes_cross_section_duplicate_and_sixth_internal_links() -> None:
+def test_finalizer_preserves_generated_internal_links() -> None:
     urls = [f"https://project.example/blog/topic-{index}" for index in range(1, 7)]
     plan = plan_with_sections(6).model_copy(
         update={
@@ -1862,19 +2157,482 @@ def test_finalizer_removes_cross_section_duplicate_and_sixth_internal_links() ->
 
     finalized, warnings = finalize_article_artifact(artifact)
 
-    assert finalized["markdown"].count("](") == 5
-    assert finalized["markdown"].count(urls[0]) == 1
-    assert urls[5] not in finalized["markdown"]
-    assert finalized["sections"][5]["used_internal_urls"] == []
-    assert warnings == [
-        {
-            "code": "invalid_internal_links_removed",
-            "message": "未按章节分配、重复或超量的内链已移除，并保留了锚文本",
+    assert finalized["markdown"].count("](") == 7
+    assert finalized["markdown"].count(urls[0]) == 2
+    assert urls[5] in finalized["markdown"]
+    assert finalized["sections"][5]["used_internal_urls"] == [urls[5]]
+    assert warnings == []
+
+
+def test_article_artifact_does_not_add_a_project_cta_the_model_did_not_write() -> None:
+    cta_url = "https://example.com/download"
+    section_plan = OutlineSection(
+        section_id="download",
+        heading="Download the application",
+        objective="Show the reader how to get started",
+        section_type="conclusion",
+        cta_type="strong",
+    )
+    plan = plan_with_sections(1).model_copy(update={"sections": [section_plan]})
+    section = SectionDraft(
+        section_id="download",
+        markdown=f"## Download the application\n\n{QUALITY_PROSE}",
+    )
+    pack = {
+        "keyword": "ExampleTV streaming application download",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "conversion_actions": ["Download for Free"],
+                "key_pages": [
+                    {
+                        "url": cta_url,
+                        "title": "Download ExampleTV",
+                        "description": "Official application download",
+                    }
+                ],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    artifact = article_artifact(plan, [section], pack)
+    finalized, warnings = finalize_article_artifact(artifact)
+
+    assert artifact["plan"]["sections"][0]["internal_urls"] == []
+    assert cta_url not in finalized["markdown"]
+    assert finalized["sections"][0]["used_internal_urls"] == []
+    assert warnings == []
+
+
+def test_finalize_section_plans_treats_choice_process_as_body_not_conclusion() -> None:
+    section = OutlineSection(
+        section_id="decision",
+        heading="Choose by the required outcome, then compare the total cost",
+        objective="Give the reader a practical sequence for choosing an option.",
+        coverage_points=[
+            "List the required outcome.",
+            "Compare the complete cost and compatibility.",
+            "Finish with the next action.",
+        ],
+        section_type="conclusion",
+        cta_type="medium",
+    )
+
+    finalized = generation._finalize_section_plans([section], {})
+
+    assert finalized[0].section_type == "body_how_to"
+    assert finalized[0].cta_type == "medium"
+
+
+def test_finalize_section_plans_preserves_a_real_conclusion() -> None:
+    section = OutlineSection(
+        section_id="conclusion",
+        heading="Conclusion: choose the option that fits your situation",
+        objective="Summarize the answer and the most important condition.",
+        section_type="conclusion",
+    )
+
+    finalized = generation._finalize_section_plans([section], {})
+
+    assert finalized[0].section_type == "conclusion"
+
+
+def test_normalize_unified_preserves_the_model_section_heading() -> None:
+    section_plan = OutlineSection(
+        section_id="watch",
+        heading="How to Watch Live Sports on ExampleTV",
+        objective="Give the complete playback path",
+    )
+    plan = plan_with_sections(1).model_copy(
+        update={
+            "title": "ExampleTV: Stream Live Sports",
+            "sections": [section_plan],
         }
+    )
+    unified = UnifiedArticle(
+        title=plan.title,
+        meta_title=plan.meta_title,
+        meta_description=plan.meta_description,
+        slug=plan.slug,
+        sections=[
+            SectionDraft(
+                section_id="watch",
+                markdown=(
+                    "## ExampleTV: Stream Live Sports\n\n"
+                    "Open Live TV, choose Sports, select a match, and press Play."
+                ),
+            )
+        ],
+    )
+
+    normalized = generation.normalize_unified(unified, plan, [])
+
+    assert normalized.sections[0].markdown.startswith(
+        "## ExampleTV: Stream Live Sports\n\n"
+    )
+    assert normalized.sections[0].markdown.count(plan.title) == 1
+
+
+def test_article_artifact_deduplicates_project_facts_without_adding_a_cta() -> None:
+    cta_url = "https://example.com/download"
+    section_plan = OutlineSection(
+        section_id="download",
+        heading="Download and Install ExampleTV",
+        objective="Explain installation on supported devices",
+        internal_urls=[cta_url],
+        cta_type="strong",
+    )
+    plan = plan_with_sections(1).model_copy(update={"sections": [section_plan]})
+    repeated = "ExampleTV works on Android phones, smart TVs, TV boxes and TV sticks."
+    narrated_repeat = (
+        "The ExampleTV download guide says the service works on Android phones, "
+        "smart TVs, TV boxes and TV sticks."
+    )
+    section = SectionDraft(
+        section_id="download",
+        markdown=(
+            "## Download and Install ExampleTV\n\n"
+            "The official application supports Android phones, smart TVs, TV boxes "
+            "and TV sticks, with device-specific installation steps below.\n\n"
+            f"{repeated}\n\n{narrated_repeat}"
+        ),
+    )
+    pack = {
+        "keyword": "ExampleTV live sports streaming",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "business_summary": "ExampleTV streams live sports.",
+                "value_propositions": [repeated],
+                "conversion_actions": ["Download for Free"],
+                "key_pages": [{"url": cta_url, "title": "Download ExampleTV"}],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    artifact = article_artifact(plan, [section], pack)
+
+    assert artifact["markdown"].count(repeated) == 1
+    assert narrated_repeat in artifact["markdown"]
+    assert "device-specific installation steps" in artifact["markdown"]
+    assert cta_url not in artifact["markdown"]
+
+
+def test_article_artifact_preserves_model_generated_project_ctas() -> None:
+    cta_url = "https://example.com/download"
+    plan = plan_with_sections(3).model_copy(
+        update={
+            "sections": [
+                OutlineSection(
+                    section_id="intro",
+                    heading="Streaming choices",
+                    objective="Introduce the choices",
+                ),
+                OutlineSection(
+                    section_id="product",
+                    heading="ExampleTV download",
+                    objective="Explain the product and how to download it",
+                    internal_urls=[cta_url],
+                    cta_type="soft",
+                ),
+                OutlineSection(
+                    section_id="conclusion",
+                    heading="Choose a service",
+                    objective="Summarize the decision",
+                    cta_type="strong",
+                ),
+            ]
+        }
+    )
+    sections = [
+        SectionDraft(
+            section_id="intro",
+            markdown=f"## Streaming choices\n\n{QUALITY_PROSE}\n\nDownload for Free",
+        ),
+        SectionDraft(
+            section_id="product",
+            markdown=(
+                f"## ExampleTV download\n\n{QUALITY_PROSE}\n\n"
+                f"[Download for Free]({cta_url})\n\nDownload for Free"
+            ),
+        ),
+        SectionDraft(
+            section_id="conclusion",
+            markdown=(
+                f"## Choose a service\n\n{QUALITY_PROSE}\n\n"
+                f"[Download for Free]({cta_url})"
+            ),
+        ),
     ]
+    pack = {
+        "keyword": "ExampleTV streaming application download",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "conversion_actions": ["Download for Free"],
+                "key_pages": [
+                    {
+                        "url": cta_url,
+                        "title": "Download ExampleTV",
+                        "description": "Official application download",
+                    }
+                ],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    artifact = article_artifact(plan, sections, pack)
+    finalized, warnings = finalize_article_artifact(artifact)
+
+    by_id = {item["section_id"]: item for item in finalized["sections"]}
+    assert artifact["plan"]["sections"][0]["internal_urls"] == []
+    assert artifact["plan"]["sections"][1]["internal_urls"] == [cta_url]
+    assert artifact["plan"]["sections"][2]["internal_urls"] == []
+    assert cta_url not in by_id["intro"]["markdown"]
+    assert f"[Download for Free]({cta_url})" in by_id["product"]["markdown"]
+    assert cta_url in by_id["conclusion"]["markdown"]
+    assert finalized["markdown"].count(cta_url) == 2
+    assert finalized["markdown"].count("Download for Free") >= 4
+    assert warnings == []
 
 
-def test_quality_rejects_wrong_number_even_with_an_allowed_source_link() -> None:
+def test_article_artifact_preserves_secondary_cta_and_generated_sources_appendix() -> None:
+    cta_url = "https://example.com/download"
+    homepage_url = "https://example.com/"
+    plan = plan_with_sections(2).model_copy(
+        update={
+            "sections": [
+                OutlineSection(
+                    section_id="download",
+                    heading="Official download",
+                    objective="Show the official download route",
+                    internal_urls=[cta_url],
+                    cta_type="strong",
+                ),
+                OutlineSection(
+                    section_id="watch",
+                    heading="Start watching",
+                    objective="Explain how to start playback",
+                    internal_urls=[homepage_url],
+                ),
+            ]
+        }
+    )
+    sections = [
+        SectionDraft(
+            section_id="download",
+            markdown=(
+                f"## Official download\n\n{QUALITY_PROSE}\n\n"
+                f"[Download for Free]({cta_url})"
+            ),
+        ),
+        SectionDraft(
+            section_id="watch",
+            markdown=(
+                f"## Start watching\n\n{QUALITY_PROSE}\n\n"
+                f"Need the app first? [Open ExampleTV]({homepage_url}) and follow "
+                "its download route.\n\n"
+                f"*Sources: *[*ExampleTV guide*]({homepage_url})*."
+            ),
+        ),
+    ]
+    pack = {
+        "keyword": "live streaming",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "conversion_actions": ["Download for Free"],
+                "key_pages": [
+                    {
+                        "url": cta_url,
+                        "title": "Download ExampleTV",
+                        "description": "Official application download",
+                    },
+                    {
+                        "url": homepage_url,
+                        "title": "ExampleTV",
+                        "description": "ExampleTV homepage",
+                    },
+                ],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [{"url": homepage_url}],
+    }
+
+    artifact = article_artifact(plan, sections, pack)
+    finalized, warnings = finalize_article_artifact(artifact)
+
+    assert finalized["markdown"].count(cta_url) == 1
+    assert finalized["markdown"].count(f"]({homepage_url})") == 2
+    assert "Need the app first?" in finalized["markdown"]
+    assert "Sources:" in finalized["markdown"]
+    assert warnings == []
+
+
+def test_article_artifact_keeps_plain_text_ctas_as_plain_text() -> None:
+    cta_url = "https://example.com/download"
+    plan = plan_with_sections(2).model_copy(
+        update={
+            "sections": [
+                OutlineSection(
+                    section_id="devices",
+                    heading="Supported devices and download",
+                    objective="Explain supported devices and the official download path",
+                    internal_urls=[cta_url],
+                    cta_type="strong",
+                ),
+                OutlineSection(
+                    section_id="watch",
+                    heading="Start watching",
+                    objective="Explain how to start watching",
+                ),
+            ]
+        }
+    )
+    sections = [
+        SectionDraft(
+            section_id="devices",
+            markdown=(
+                f"## Supported devices and download\n\n{QUALITY_PROSE}\n\n"
+                "Works on Android phones and smart TVs. (Download for Free)."
+            ),
+        ),
+        SectionDraft(
+            section_id="watch",
+            markdown=(
+                f"## Start watching\n\n{QUALITY_PROSE}\n\n"
+                "Ready to use ExampleTV? Download for Free and install the app."
+            ),
+        ),
+    ]
+    pack = {
+        "keyword": "ExampleTV streaming application download",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "conversion_actions": ["Download for Free"],
+                "key_pages": [{"url": cta_url, "title": "Download ExampleTV"}],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    artifact = article_artifact(plan, sections, pack)
+    artifact = article_artifact(
+        ArticlePlan.model_validate(artifact["plan"]),
+        [SectionDraft.model_validate(item) for item in artifact["sections"]],
+        pack,
+    )
+
+    assert cta_url not in artifact["markdown"]
+    assert artifact["markdown"].count("Download for Free") == 2
+
+
+def test_generated_markdown_repairs_spacing_around_strong_text() -> None:
+    markdown = (
+        "A**free tier** is different. "
+        "Open the service's**Live TV**area before kickoff."
+    )
+
+    repaired, repair_count, fragments_removed = generation._repair_generated_markdown(
+        markdown
+    )
+
+    assert repaired == (
+        "A **free tier** is different. "
+        "Open the service's **Live TV** area before kickoff."
+    )
+    assert repair_count == 3
+    assert fragments_removed == 0
+
+
+def test_generated_markdown_preserves_a_valid_unicode_arrow() -> None:
+    markdown = "Open **Profile → Register** to create an account."
+
+    repaired, repair_count, fragments_removed = generation._repair_generated_markdown(
+        markdown
+    )
+
+    assert repaired == markdown
+    assert repair_count == 0
+    assert fragments_removed == 0
+
+
+def test_article_artifact_preserves_only_the_model_generated_trailing_cta() -> None:
+    cta_url = "https://example.com/download"
+    plan = plan_with_sections(2).model_copy(
+        update={
+            "sections": [
+                OutlineSection(
+                    section_id="product",
+                    heading="ExampleTV download",
+                    objective="Explain how to download the product",
+                    internal_urls=[cta_url],
+                    cta_type="soft",
+                ),
+                OutlineSection(
+                    section_id="conclusion",
+                    heading="Choose a service",
+                    objective="Summarize the decision",
+                    cta_type="strong",
+                ),
+            ]
+        }
+    )
+    sections = [
+        SectionDraft(
+            section_id="product",
+            markdown=f"## ExampleTV download\n\n{QUALITY_PROSE}",
+        ),
+        SectionDraft(
+            section_id="conclusion",
+            markdown=(
+                f"## Choose a service\n\n{QUALITY_PROSE}\n\n"
+                "If the product fits your setup, follow its official installation path:\n"
+                f"[Download for Free]({cta_url})"
+            ),
+        ),
+    ]
+    pack = {
+        "keyword": "ExampleTV streaming application download",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "conversion_actions": ["Download for Free"],
+                "key_pages": [{"url": cta_url, "title": "Download ExampleTV"}],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    artifact = article_artifact(plan, sections, pack)
+
+    assert artifact["markdown"].count(cta_url) == 1
+    assert "follow its official installation path:" in artifact["markdown"]
+
+
+def test_quality_does_not_reject_model_numbers() -> None:
     authority_url = "https://authority.example/fact"
     plan = plan_with_sections(1).model_copy(
         update={
@@ -1906,11 +2664,11 @@ def test_quality_rejects_wrong_number_even_with_an_allowed_source_link() -> None
         allowed_internal_urls=set(),
     )
 
-    assert report.passed is False
-    assert any(issue.code == "unsupported_number" for issue in report.issues)
+    assert report.passed is True
+    assert report.issues == []
 
 
-def test_quality_and_sanitizer_reject_source_assigned_to_another_section() -> None:
+def test_quality_and_sanitizer_preserve_source_used_in_another_section() -> None:
     authority_url = "https://authority.example/fact"
     plan = plan_with_sections(2).model_copy(
         update={
@@ -1960,13 +2718,11 @@ def test_quality_and_sanitizer_reject_source_assigned_to_another_section() -> No
         allowed_internal_urls=set(),
     )[0]
 
-    assert any(
-        issue.code == "source_not_assigned_to_section" for issue in report.issues
-    )
-    assert authority_url not in sanitized.markdown
-    assert "10 years" not in sanitized.markdown
-    assert sanitized.used_claim_ids == []
-    assert sanitized.used_source_urls == []
+    assert report.passed is True
+    assert authority_url in sanitized.markdown
+    assert "10 years" in sanitized.markdown
+    assert sanitized.used_claim_ids == ["claim-1"]
+    assert sanitized.used_source_urls == [authority_url]
 
 
 def test_quality_does_not_treat_numbers_inside_a_link_url_as_article_claims() -> None:
@@ -1987,7 +2743,7 @@ def test_quality_does_not_treat_numbers_inside_a_link_url_as_article_claims() ->
         allowed_internal_urls=set(),
     )
 
-    assert report.checks["unsupported_numbers"] == 0
+    assert report.passed is True
 
 
 def test_quality_detects_and_sanitizes_a_malformed_source_link() -> None:
@@ -2099,6 +2855,19 @@ def test_quality_recovers_a_verified_url_split_by_multiple_spaces() -> None:
     )
 
 
+def test_link_sanitizer_does_not_remove_normal_sentence_endings() -> None:
+    markdown = (
+        "Confirm coverage. Compare current services. "
+        "Consider the subscription. Complete the setup. "
+        "Free service access does not make data free."
+    )
+
+    sanitized, removed = sanitize_markdown_links(markdown, set())
+
+    assert sanitized == markdown
+    assert removed == 0
+
+
 def test_finalize_article_artifact_removes_unrecoverable_malformed_links() -> None:
     plan = plan_with_sections(1)
     artifact = article_artifact(
@@ -2160,7 +2929,98 @@ def test_finalize_article_artifact_removes_orphaned_url_fragments() -> None:
     ]
 
 
-def test_finalize_article_artifact_restores_a_verified_link_only_claim() -> None:
+def test_finalize_article_artifact_removes_unmatched_strong_marker() -> None:
+    plan = plan_with_sections(1)
+    artifact = article_artifact(
+        plan,
+        [
+            SectionDraft(
+                section_id="section-1",
+                markdown=(
+                    "## Section 1\n\n"
+                    "**No single platform carries every sport.\n\n"
+                    f"A valid **service comparison** remains formatted. {QUALITY_PROSE}"
+                ),
+            )
+        ],
+        {"authority_sources": [], "competitors": [], "internal_sources": []},
+    )
+
+    finalized, warnings = finalize_article_artifact(artifact)
+
+    assert "**No single platform carries every sport." not in finalized["markdown"]
+    assert "No single platform carries every sport." in finalized["markdown"]
+    assert "**service comparison**" in finalized["markdown"]
+    assert finalized["sections"][0]["markdown"] in finalized["markdown"]
+    assert warnings == [
+        {
+            "code": "unmatched_markdown_markers_removed",
+            "message": "最终正文中未配对的 Markdown 粗体标记已移除",
+        }
+    ]
+
+
+def test_finalize_article_artifact_keeps_title_out_of_editor_body() -> None:
+    plan = plan_with_sections(1).model_copy(update={"title": "ExampleTV Live Sports"})
+    artifact = article_artifact(
+        plan,
+        [
+            SectionDraft(
+                section_id="section-1",
+                markdown=f"## Section 1\n\n{QUALITY_PROSE}",
+            )
+        ],
+        {"authority_sources": [], "competitors": [], "internal_sources": []},
+    )
+
+    finalized, warnings = finalize_article_artifact(artifact)
+
+    assert finalized["title"] == "ExampleTV Live Sports"
+    assert finalized["markdown"].startswith("## Section 1\n\n")
+    assert "ExampleTV Live Sports" not in finalized["markdown"]
+    assert warnings == []
+
+
+def test_finalize_article_artifact_repairs_common_generated_markdown_damage() -> None:
+    plan = plan_with_sections(1)
+    artifact = article_artifact(
+        plan,
+        [
+            SectionDraft(
+                section_id="section-1",
+                markdown=(
+                    "## Section 1\n\n"
+                    "**Yes, this is the direct answer. **\n\n"
+                    "ElephTV\u00e2\u0080\u0099s path is App \u00e2\u0086\u0092 Profile.\n\n"
+                    "| Device | Setup |\n"
+                    "|---|---|\n"
+                    "| Android | Install the app | Extra cell |\n\n"
+                    "For example, e. See the e. tv announcement.\n\n"
+                    f"{QUALITY_PROSE}"
+                ),
+            )
+        ],
+        {"authority_sources": [], "competitors": [], "internal_sources": []},
+    )
+
+    finalized, warnings = finalize_article_artifact(artifact)
+
+    assert "**Yes, this is the direct answer.**" in finalized["markdown"]
+    assert "ElephTV's path is App -> Profile." in finalized["markdown"]
+    assert "\u00e2\u0080\u0099" not in finalized["markdown"]
+    assert "\u00e2\u0086\u0092" not in finalized["markdown"]
+    assert "| Android | Install the app |" in finalized["markdown"]
+    assert "Extra cell" not in finalized["markdown"]
+    assert "For example, e." not in finalized["markdown"]
+    assert "See the e. tv announcement." in finalized["markdown"]
+    assert finalized["sections"][0]["markdown"] in finalized["markdown"]
+    assert {item["code"] for item in warnings} >= {
+        "generated_markdown_repaired",
+        "broken_sentence_fragments_removed",
+    }
+
+
+def test_finalize_article_artifact_preserves_a_link_only_claim() -> None:
     authority_url = (
         "https://www.irs.gov/credits-deductions/"
         "residential-clean-energy-credit"
@@ -2212,15 +3072,12 @@ def test_finalize_article_artifact_restores_a_verified_link_only_claim() -> None
 
     finalized, warnings = finalize_article_artifact(artifact)
 
-    assert (
-        "The residential clean energy credit is not available for property placed "
-        "in service after December 31, 2025. ([IRS guidance]"
-        f"({authority_url}))."
-    ) in finalized["markdown"]
+    assert f"([IRS guidance]({authority_url}))" in finalized["markdown"]
+    assert "The residential clean energy credit is not available" not in finalized["markdown"]
     assert warnings == []
 
 
-def test_quality_reports_heading_hierarchy_and_markdown_html_is_deterministic() -> None:
+def test_quality_ignores_heading_style_and_markdown_html_is_deterministic() -> None:
     plan = plan_with_sections(1)
     section = SectionDraft(
         section_id="section-1",
@@ -2238,11 +3095,22 @@ def test_quality_reports_heading_hierarchy_and_markdown_html_is_deterministic() 
     )
     html = markdown_to_html("# Title\n\n## Section\n\nUseful **answer**.\n")
 
-    assert [item.code for item in report.issues] == ["invalid_heading_hierarchy"]
+    assert report.issues == []
     assert html == "<h1>Title</h1>\n<h2>Section</h2>\n<p>Useful <strong>answer</strong>.</p>"
 
 
-def test_quality_reports_competitor_copy_and_missing_required_section() -> None:
+def test_markdown_html_renders_tables_as_tables() -> None:
+    html = markdown_to_html(
+        "| Option | Price |\n|:--|--:|\n| **A** | [10](https://example.com) |\n"
+    )
+
+    assert "<table>" in html
+    assert '<th style="text-align:left">Option</th>' in html
+    assert '<td style="text-align:right"><a href="https://example.com">10</a></td>' in html
+    assert "<p>| Option | Price |" not in html
+
+
+def test_quality_only_reports_missing_required_section() -> None:
     plan = plan_with_sections(2)
     copied = (
         "A solar battery payback estimate depends on electricity prices system cost "
@@ -2264,11 +3132,7 @@ def test_quality_reports_competitor_copy_and_missing_required_section() -> None:
         competitor_passages=[copied],
     )
 
-    assert {item.code for item in report.issues} == {
-        "competitor_copy",
-        "section_missing",
-    }
-    assert report.checks["copied_competitor_sections"] == 1
+    assert {item.code for item in report.issues} == {"section_missing"}
 
 
 def test_competitor_summary_is_structured_and_bounded() -> None:
@@ -2405,7 +3269,7 @@ def test_competitor_summary_uses_stored_main_html_for_section_depth(
     ]
 
 
-def test_competitor_blueprint_is_applied_to_model_and_fallback_plans() -> None:
+def test_competitor_blueprint_does_not_override_model_plan() -> None:
     pack = {
         "keyword": "solar battery",
         "required_questions": [],
@@ -2438,21 +3302,13 @@ def test_competitor_blueprint_is_applied_to_model_and_fallback_plans() -> None:
     normalized = generation.normalize_plan(plan_with_sections(1), pack)
     fallback = generation.fallback_plan(pack)
 
-    assert any(item.heading == "Pricing" for item in normalized.sections)
-    assert any(item.heading == "Pricing" for item in fallback.sections)
-    for plan in (normalized, fallback):
-        coverage = [point for section in plan.sections for point in section.coverage_points]
-        assert "Common competitor structure: Pricing" in coverage
-        assert "Competitor opportunity: Add current pricing and decision criteria" in coverage
-        pricing = next(item for item in plan.sections if item.heading == "Pricing")
-        assert pricing.competitor_gaps == ["Add current pricing and decision criteria"]
-        assert pricing.word_target == 550
-        assert plan.gap_to_section_mapping == {
-            "Add current pricing and decision criteria": pricing.section_id
-        }
+    assert [item.heading for item in normalized.sections] == ["Section 1"]
+    assert all(item.heading != "Pricing" for item in fallback.sections)
+    coverage = [point for section in fallback.sections for point in section.coverage_points]
+    assert "Common competitor structure: Pricing" not in coverage
 
 
-def test_competitor_gap_maps_to_semantically_relevant_section() -> None:
+def test_competitor_gap_does_not_modify_model_sections() -> None:
     plan = ArticlePlan(
         title="Solar battery guide",
         search_intent="Compare solar battery choices",
@@ -2509,9 +3365,9 @@ def test_competitor_gap_maps_to_semantically_relevant_section() -> None:
 
     assert normalized.sections[0].competitor_gaps == []
     pricing = next(item for item in normalized.sections if item.heading == "Pricing and costs")
-    assert pricing.competitor_gaps == [gap]
-    assert pricing.word_target == 550
-    assert normalized.gap_to_section_mapping[gap] == pricing.section_id
+    assert pricing.competitor_gaps == []
+    assert pricing.word_target == 300
+    assert normalized.gap_to_section_mapping == {}
 
 
 def test_semantic_matching_uses_whole_latin_tokens() -> None:
@@ -2524,7 +3380,7 @@ def test_semantic_matching_uses_whole_latin_tokens() -> None:
     assert "configure" in generation._semantic_terms("setup process")
 
 
-def test_section_plan_consumes_evidence_requirements_and_controls_ctas() -> None:
+def test_section_plan_preserves_model_evidence_requirements_and_ctas() -> None:
     plan = ArticlePlan(
         title="Solar battery guide",
         search_intent="Understand solar battery choices",
@@ -2570,28 +3426,24 @@ def test_section_plan_consumes_evidence_requirements_and_controls_ctas() -> None
     without_conversions = generation.normalize_plan(plan, pack)
     pricing = next(item for item in without_conversions.sections if item.heading == "Pricing")
 
-    assert len(pricing.data_requirements) == 2
-    assert all(item.cta_type is None for item in without_conversions.sections)
+    assert pricing.data_requirements == []
+    assert [item.cta_type for item in without_conversions.sections] == [
+        "strong",
+        None,
+        None,
+    ]
 
     pack["project"]["profile"]["conversion_actions"] = ["Start a free assessment"]
     with_conversions = generation.normalize_plan(plan, pack)
-    assert with_conversions.sections[1].cta_type == "soft"
-    assert with_conversions.sections[-1].cta_type == "strong"
+    assert [item.cta_type for item in with_conversions.sections] == [
+        "strong",
+        None,
+        None,
+    ]
 
 
-@pytest.mark.parametrize(
-    ("section_count", "expected"),
-    [
-        (2, [None, "soft"]),
-        (3, [None, "soft", "strong"]),
-        (4, [None, "soft", "medium", "strong"]),
-        (5, [None, "soft", "medium", None, "strong"]),
-        (6, [None, "soft", None, "medium", None, "strong"]),
-    ],
-)
-def test_cta_distribution_matches_seomachine_collision_order(
-    section_count: int, expected: list[str | None]
-) -> None:
+@pytest.mark.parametrize("section_count", [2, 3, 4, 5, 6])
+def test_section_finalization_does_not_invent_ctas(section_count: int) -> None:
     sections = [
         OutlineSection(
             section_id=f"raw-{index}",
@@ -2613,7 +3465,7 @@ def test_cta_distribution_matches_seomachine_collision_order(
 
     finalized = generation._finalize_section_plans(sections, pack)
 
-    assert [item.cta_type for item in finalized] == expected
+    assert [item.cta_type for item in finalized] == [None] * section_count
 
 
 def test_section_classification_and_snippet_targets_match_seomachine() -> None:
@@ -2679,8 +3531,11 @@ def test_mixed_heading_classification_uses_seomachine_priority(
     assert generation._classify_section_type(heading, 1) == expected
 
 
-def test_first_section_asked_without_question_remains_intro_like_seomachine() -> None:
-    assert generation._classify_section_type("Most asked topics", 0) == "intro"
+def test_first_answer_heading_is_not_forced_to_be_an_intro() -> None:
+    assert (
+        generation._classify_section_type("Best for small teams: Example One", 0)
+        == "body_comparison"
+    )
 
 
 def test_faq_uses_four_to_six_real_serp_questions_without_inventing() -> None:
@@ -2724,7 +3579,125 @@ def test_faq_uses_every_real_question_when_fewer_than_four_are_available() -> No
     assert finalized.required_questions == ["First question?", "Second question?"]
 
 
-def test_quality_checks_section_targets_and_type_specific_structure() -> None:
+def test_section_plans_deduplicate_the_same_question_without_topic_rules() -> None:
+    sections = [
+        OutlineSection(
+            section_id="choices",
+            heading="Compare the choices",
+            objective="Help the reader choose",
+            required_questions=["Which option fits a small team?"],
+            coverage_points=["Compare the options by team size."],
+        ),
+        OutlineSection(
+            section_id="setup",
+            heading="Set up the service",
+            objective="Get ready to start",
+            required_questions=["Which option fits a small team?"],
+            coverage_points=["Compare the options by implementation time."],
+        ),
+        OutlineSection(
+            section_id="faq",
+            heading="Frequently asked questions",
+            objective="Answer remaining questions",
+            required_questions=["Which option fits a small team?"],
+        ),
+    ]
+    pack = {
+        "project": {"profile": {}},
+        "competitor_blueprint": {},
+        "required_questions": ["Which option fits a small team?"],
+    }
+
+    finalized = generation._finalize_section_plans(sections, pack)
+
+    assert sum(
+        "Which option fits a small team?" in section.required_questions
+        for section in finalized
+    ) == 1
+
+
+def test_faq_keeps_only_questions_not_already_covered_by_the_body() -> None:
+    sections = [
+        OutlineSection(
+            section_id="watch",
+            heading="Where to watch live sports",
+            objective="Name the available live sports options.",
+            required_questions=["Where can I watch live sports?"],
+        ),
+        OutlineSection(
+            section_id="faq",
+            heading="Frequently asked questions",
+            objective="Answer remaining questions",
+            required_questions=[
+                "Where can I watch live sports?",
+                "Which devices support the application?",
+            ],
+        ),
+    ]
+    pack = {
+        "project": {"profile": {}},
+        "competitor_blueprint": {},
+        "required_questions": [
+            "Where can I watch live sports?",
+            "Which devices support the application?",
+        ],
+    }
+
+    finalized = generation._finalize_section_plans(sections, pack)
+    faq = next(section for section in finalized if section.section_type == "faq")
+
+    assert faq.required_questions == ["Which devices support the application?"]
+
+
+def test_redundant_faq_section_is_removed_when_it_has_no_new_question() -> None:
+    sections = [
+        OutlineSection(
+            section_id="watch",
+            heading="Where to watch live sports",
+            objective="Name the available live sports options.",
+            required_questions=["Where can I watch live sports?"],
+        ),
+        OutlineSection(
+            section_id="faq",
+            heading="Frequently asked questions",
+            objective="Answer remaining questions",
+            required_questions=["Where can I watch live sports?"],
+        ),
+    ]
+    pack = {
+        "project": {"profile": {}},
+        "competitor_blueprint": {},
+        "required_questions": ["Where can I watch live sports?"],
+    }
+
+    finalized = generation._finalize_section_plans(sections, pack)
+
+    assert all(section.section_type != "faq" for section in finalized)
+
+
+def test_critical_research_uses_the_complete_query_without_fixed_topics() -> None:
+    plan = plan_with_sections(1).model_copy(
+        update={
+            "critical_research_gaps": [
+                CriticalResearchGap(
+                    missing_information="Current platform account access requirements",
+                    why_it_blocks_core_answer="The reader cannot complete account access without it.",
+                    research_query=(
+                        "Research current platform account access requirements "
+                        "as one complete task"
+                    ),
+                )
+            ]
+        }
+    )
+    queries = generation._critical_research_tasks(plan)
+
+    assert queries == [
+        "Research current platform account access requirements as one complete task"
+    ]
+
+
+def test_quality_does_not_enforce_section_length_or_type_templates() -> None:
     plans = [
         OutlineSection(
             section_id="how-to",
@@ -2774,14 +3747,7 @@ def test_quality_checks_section_targets_and_type_specific_structure() -> None:
         allowed_internal_urls=set(),
     )
 
-    codes = {item.code for item in report.issues}
-    assert "section_too_short" in codes
-    assert "how_to_steps_missing" in codes
-    assert "list_structure_missing" in codes
-    assert "faq_qa_structure_missing" in codes
-    assert "conclusion_actions_missing" in codes
-    assert report.checks["short_sections"] == 4
-    assert report.checks["invalid_section_structures"] == 4
+    assert report.issues == []
 
 
 def test_numbered_how_to_steps_are_not_treated_as_unsupported_facts() -> None:
@@ -2813,7 +3779,7 @@ def test_numbered_how_to_steps_are_not_treated_as_unsupported_facts() -> None:
     assert report.passed is True
 
 
-def test_section_payload_contains_type_specific_rules_and_supported_cta() -> None:
+def test_section_payload_omits_unrelated_project_cta() -> None:
     section = OutlineSection(
         section_id="section-1",
         heading="Compare options",
@@ -2828,7 +3794,16 @@ def test_section_payload_contains_type_specific_rules_and_supported_cta() -> Non
         "language": "en",
         "project": {
             "domain": "project.example",
-            "profile": {"conversion_actions": ["Start a free assessment"]},
+            "profile": {
+                "conversion_actions": ["Start a free assessment"],
+                "key_pages": [
+                    {
+                        "url": "https://project.example/assessment",
+                        "title": "Start a free assessment",
+                        "description": "Assessment form",
+                    }
+                ],
+            },
         },
         "authority_sources": [],
         "competitors": [],
@@ -2837,18 +3812,399 @@ def test_section_payload_contains_type_specific_rules_and_supported_cta() -> Non
 
     payload = generation.section_payload(plan, section, pack, [], compact=False)
 
-    assert "State the decision criteria before comparing options" in payload[
-        "writing_requirements"
-    ]["must"]
-    assert payload["conversion_actions"] == ["Start a free assessment"]
+    assert "writing_requirements" not in payload
+    assert payload["official_product"]["conversion_actions"] == []
+    assert payload["official_product"]["cta_targets"] == []
+
+
+def test_section_payload_always_includes_project_answer_context_and_real_cta_url() -> None:
+    section = OutlineSection(
+        section_id="section-1",
+        heading="Download the application",
+        objective="Show the reader where and how to download it",
+        section_type="body_how_to",
+    )
+    plan = plan_with_sections(1).model_copy(
+        update={
+            "title": "ExampleTV download",
+            "search_intent": "Download and install ExampleTV",
+            "sections": [section],
+        }
+    )
+    pack = {
+        "keyword": "ExampleTV download",
+        "language": "en",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "business_summary": "A streaming application for supported devices.",
+                "products_services": ["Streaming application"],
+                "value_propositions": ["Simple installation"],
+                "conversion_actions": ["Download ExampleTV"],
+                "key_pages": [
+                    {
+                        "url": "https://example.com/download",
+                        "title": "Download ExampleTV",
+                        "description": "Official download page",
+                    }
+                ],
+                "evidence": [
+                    {
+                        "field": "products_services",
+                        "value": "Live sports streaming",
+                        "source_url": "https://example.com/",
+                        "quote": "Watch live sports on supported devices.",
+                    }
+                ],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    payload = generation.section_payload(plan, section, pack, [], compact=False)
+
+    assert payload["official_product"]["business_name"] == "ExampleTV"
+    assert payload["official_product"]["products_services"] == [
+        "Streaming application"
+    ]
+    assert payload["official_product"]["product_evidence"] == [
+        {
+            "field": "products_services",
+            "value": "Live sports streaming",
+            "quote": "Watch live sports on supported devices.",
+            "source_url": "https://example.com/",
+        }
+    ]
+    assert payload["official_product"]["cta_targets"] == [
+        {
+            "label": "Download ExampleTV",
+            "url": "https://example.com/download",
+            "title": "Download ExampleTV",
+            "description": "Official download page",
+        }
+    ]
+
+
+def test_planning_payload_includes_structured_project_product_evidence() -> None:
+    pack = {
+        "keyword": "live tv streaming sports",
+        "country": "ZA",
+        "language": "en",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "products_services": ["Live sports streaming"],
+                "evidence": [
+                    {
+                        "field": "products_services",
+                        "value": "Live sports streaming",
+                        "source_url": "https://example.com/",
+                        "quote": "Watch live sports on supported devices.",
+                    },
+                    {
+                        "field": "conversion_actions",
+                        "value": "Download for Free",
+                        "source_url": "https://example.com/",
+                        "quote": "Download for Free",
+                    },
+                ],
+            },
+        },
+        "authority_sources": [],
+        "internal_sources": [],
+    }
+
+    payload = generation._planning_research_pack(pack)
+
+    assert payload["project"]["profile"]["product_evidence"] == [
+        {
+            "field": "products_services",
+            "value": "Live sports streaming",
+            "quote": "Watch live sports on supported devices.",
+            "source_url": "https://example.com/",
+        },
+        {
+            "field": "conversion_actions",
+            "value": "Download for Free",
+            "quote": "Download for Free",
+            "source_url": "https://example.com/",
+        },
+    ]
+
+
+def test_generation_payloads_keep_full_planning_data_but_scope_section_sources() -> None:
+    authority_sources = [
+        {
+            "url": f"https://source{index}.example/report",
+            "title": f"Source {index}",
+            "excerpt": f"Full excerpt {index}",
+            "research_claim": f"Research claim {index}",
+            "verification_claims": [
+                {
+                    "claim": f"Claim {index}-{claim_index}",
+                    "evidence": f"Evidence {index}-{claim_index}",
+                    "status": "unreviewed",
+                }
+                for claim_index in range(1, 4)
+            ],
+        }
+        for index in range(1, 26)
+    ]
+    serp_results = [
+        {
+            "url": f"https://serp{index}.example/article",
+            "title": f"SERP {index}",
+            "description": f"Description {index}",
+        }
+        for index in range(1, 12)
+    ]
+    profile = {
+        "business_name": "ExampleTV",
+        "products_services": ["Streaming application"],
+        "custom_product_detail": {"platforms": ["Android", "TV"]},
+    }
+    pack = {
+        "keyword": "ExampleTV sports",
+        "country": "ZA",
+        "language": "en",
+        "project": {"domain": "example.com", "profile": profile},
+        "authority_sources": authority_sources,
+        "serp": {"organic_results": serp_results},
+        "internal_sources": [],
+    }
+    section = OutlineSection(
+        section_id="answer",
+        heading="How to watch",
+        objective="Answer the reader",
+    )
+    plan = plan_with_sections(1).model_copy(update={"sections": [section]})
+
+    planning = generation._planning_research_pack(pack, compact=False)
+    writing = generation.section_payload(plan, section, pack, [], compact=False)
+
+    assert len(planning["research_sources"]) <= 20
+    assert all(len(item["verification_claims"]) <= 3 for item in planning["research_sources"])
+    assert len(planning["serp_results"]) <= 10
+    assert planning["project"]["profile"]["custom_product_detail"] == {
+        "platforms": ["Android", "TV"]
+    }
+    assert len(writing["sources"]) <= 3
+    assert not any(item["url"] == authority_sources[24]["url"] for item in writing["sources"])
     assert all(
-        "story" not in rule.casefold()
-        for rules in payload["writing_requirements"].values()
-        for rule in rules
+        "status" not in claim
+        for source in writing["sources"]
+        for claim in source.get("verification_claims", [])
+    )
+    assert len(writing["serp_results"]) == 10
+    assert writing["official_product"]["profile"] == profile
+
+    compact = generation._planning_research_pack(pack, compact=True)
+    assert len(compact["research_sources"]) == 10
+    assert len(compact["research_sources"][0]["verification_claims"]) == 1
+    assert len(compact["serp_results"]) == 10
+
+
+def test_plan_normalization_caps_imported_research_claims() -> None:
+    pack = {
+        "keyword": "warehouse automation",
+        "project": {},
+        "authority_sources": [
+            {
+                "url": f"https://source{source_index}.example/report",
+                "title": f"Report {source_index}",
+                "excerpt": f"Evidence {source_index}",
+                "verification_claims": [
+                    {
+                        "claim": f"Finding {source_index}-{claim_index}",
+                        "evidence": f"Evidence {source_index}-{claim_index}",
+                    }
+                    for claim_index in range(5)
+                ],
+            }
+            for source_index in range(30)
+        ],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    normalized = generation.normalize_plan(plan_with_sections(6), pack)
+
+    assert len(normalized.claims) <= 48
+    assert all(len(section.claim_ids) <= 8 for section in normalized.sections)
+
+
+def test_supplemental_research_stops_at_its_total_time_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = patch_store(monkeypatch)
+    pack = {
+        "keyword": "heat pump rebates",
+        "country": "US",
+        "language": "en",
+        "project": {},
+        "required_questions": [],
+        "competitors": [],
+        "competitor_blueprint": {},
+        "authority_sources": [],
+        "internal_sources": [],
+        "serp": {},
+        "serp_analysis": {},
+    }
+    planned = plan_with_sections(1).model_copy(
+        update={
+            "sections": [
+                plan_with_sections(1).sections[0].model_copy(
+                    update={"data_requirements": ["current federal rebate amounts"]}
+                )
+            ],
+            "critical_research_gaps": [
+                CriticalResearchGap(
+                    missing_information="Current federal rebate amounts",
+                    why_it_blocks_core_answer="The reader cannot calculate the rebate without it.",
+                    research_query="Research current US federal heat pump rebate amounts",
+                )
+            ],
+        }
+    )
+    research_calls = 0
+
+    async def build_pack(*_: Any, **__: Any) -> dict[str, Any]:
+        return deepcopy(pack)
+
+    async def generate(*_: Any, **__: Any) -> Any:
+        return SimpleNamespace(value=planned, usage={})
+
+    async def collect_research(*_: Any, **__: Any) -> tuple[None, int]:
+        nonlocal research_calls
+        research_calls += 1
+        await asyncio.sleep(1)
+        return None, 1
+
+    monkeypatch.setattr(generation, "build_research_pack", build_pack)
+    monkeypatch.setattr(generation, "cached_generate", generate)
+    monkeypatch.setattr(generation, "_collect_research", collect_research)
+    monkeypatch.setattr(generation, "MAX_SUPPLEMENTAL_RESEARCH_SECONDS", 0.02)
+    context = {
+        **base_context(),
+        "hard_deadline_at": datetime.now(UTC) + timedelta(minutes=10),
+    }
+
+    result = asyncio.run(
+        plan_article(FakeRepository(), Settings(app_env="test"), context, POLICY)
     )
 
+    assert research_calls == 1
+    assert store.objects[result["output_ref"]]["plan"]["sections"]
+    assert [item["code"] for item in result["warnings"]] == [
+        "supplemental_research_degraded"
+    ]
 
-def test_section_payload_matches_seomachine_editing_checklists_and_word_lists() -> None:
+
+def test_section_payload_recovers_conversion_action_from_profile_evidence() -> None:
+    section = OutlineSection(
+        section_id="section-1",
+        heading="Download the application",
+        objective="Show the reader where and how to download it",
+        section_type="body_how_to",
+    )
+    plan = plan_with_sections(1).model_copy(update={"sections": [section]})
+    pack = {
+        "keyword": "ExampleTV download",
+        "language": "en",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "conversion_actions": None,
+                "key_pages": [
+                    {
+                        "url": "https://example.com/",
+                        "title": "ExampleTV",
+                        "description": "Official website",
+                    }
+                ],
+                "evidence": [
+                    {
+                        "field": "conversion_actions",
+                        "value": "Download",
+                        "source_url": "https://example.com/",
+                    },
+                    {
+                        "field": "conversion_actions",
+                        "value": "Download for Free",
+                        "source_url": "https://example.com/",
+                        "quote": "Download the application from the official website.",
+                    },
+                ],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    payload = generation.section_payload(plan, section, pack, [], compact=False)
+
+    assert payload["official_product"]["conversion_actions"] == ["Download for Free"]
+    assert payload["official_product"]["cta_targets"] == [
+        {
+            "label": "Download for Free",
+            "url": "https://example.com/",
+            "title": "ExampleTV",
+            "description": "Official website",
+        }
+    ]
+
+
+def test_cta_uses_the_project_configured_target_without_url_keyword_guessing() -> None:
+    pack = {
+        "keyword": "live tv streaming sports",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "key_pages": [
+                    {
+                        "url": "https://example.com/",
+                        "title": "ExampleTV",
+                        "description": "Official website",
+                    }
+                ],
+                "evidence": [
+                    {
+                        "field": "conversion_actions",
+                        "value": "Download for Free",
+                        "source_url": "https://example.com/",
+                    }
+                ],
+            },
+        },
+        "authority_sources": [
+            {
+                "url": "https://example.com/download-exampletv/",
+                "title": "Download ExampleTV",
+                "excerpt": "Works on supported phones and televisions.",
+                "research_claim": "Works on supported phones and televisions.",
+                "verification_claims": [],
+            }
+        ],
+    }
+
+    context = generation._project_answer_context(None, pack)
+
+    assert context["cta_targets"][0] == {
+        "label": "Download for Free",
+        "url": "https://example.com/",
+        "title": "ExampleTV",
+        "description": "Official website",
+    }
+
+
+def test_section_payload_does_not_send_explicit_editing_checklists() -> None:
     section = OutlineSection(
         section_id="section-1",
         heading="Compare options",
@@ -2883,18 +4239,13 @@ def test_section_payload_matches_seomachine_editing_checklists_and_word_lists() 
 
     payload = generation.section_payload(plan, section, pack, [], compact=False)
 
-    assert payload["universal_editing_checks"] == generation.SECTION_EDITING_CHECKS
-    assert payload["section_specific_checks"] == [
-        "Comparison is fair",
-        "Specific data points present",
-        "'Best for' recommendations included",
-        "Not overly promotional",
-    ]
-    assert payload["ai_phrases_to_remove"] == generation.AI_PHRASES_TO_REMOVE[:8]
-    assert payload["vague_words_to_replace"] == dict(
-        list(generation.VAGUE_WORD_REPLACEMENTS.items())[:6]
-    )
-    assert payload["supported_claims"] == [claim.model_dump(mode="json")]
+    assert "writing_requirements" not in payload
+    assert "universal_editing_checks" not in payload
+    assert "section_specific_checks" not in payload
+    assert "ai_phrases_to_remove" not in payload
+    assert "vague_words_to_replace" not in payload
+    assert "project_writing_rules" not in payload
+    assert payload["facts"] == [claim.model_dump(mode="json")]
 
 
 def test_section_source_mapping_matches_alwrity_granularity_and_is_stable() -> None:
@@ -2976,13 +4327,14 @@ def test_section_source_mapping_matches_alwrity_granularity_and_is_stable() -> N
     assert len(first) == 3
     assert first[0]["url"] == direct_url
     assert irrelevant["url"] not in {item["url"] for item in first}
-    assert payload["authority_sources"] == first
-    assert [item["claim_id"] for item in payload["supported_claims"]] == [
-        "claim-direct"
+    assert payload["sources"] == first
+    assert [item["claim_id"] for item in payload["facts"]] == [
+        "claim-direct",
+        "claim-unmapped",
     ]
 
 
-def test_body_sections_are_written_in_bounded_batches_with_previous_summaries(
+def test_complete_article_is_written_in_one_call_with_plan_and_materials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -3005,26 +4357,15 @@ def test_body_sections_are_written_in_bounded_batches_with_previous_summaries(
             },
         )
     )
-    calls: list[tuple[str, str]] = []
-    section_contexts: dict[str, list[str]] = {}
+    calls: list[tuple[str, dict[str, Any]]] = []
 
     class Gateway:
         async def generate(
             self, call: str, payload: dict[str, Any], _output: Any
         ) -> Any:
-            section_id = str(payload["section"]["section_id"])
-            calls.append((call, section_id))
-            section_contexts[section_id] = list(payload["previous_section_summaries"])
-            assert call == "write_and_edit_section"
+            calls.append((call, deepcopy(payload)))
             return SimpleNamespace(
-                value=SectionDraft(
-                    section_id=section_id,
-                    markdown=(
-                        f"## {payload['section']['heading']}\n\n"
-                        "Edited prose explains the practical choice without unsupported facts."
-                    ),
-                    summary=f"edited summary {section_id}",
-                ),
+                value=unified_for_plan(plan),
                 usage={"input_tokens": 4, "output_tokens": 4},
             )
 
@@ -3042,23 +4383,18 @@ def test_body_sections_are_written_in_bounded_batches_with_previous_summaries(
     )
     artifact = store.objects[result["output_ref"]]
 
-    assert sorted(calls) == [
-        ("write_and_edit_section", f"section-{index}") for index in range(1, 6)
+    assert len(calls) == 1
+    call, payload = calls[0]
+    assert call == "unify_article"
+    assert [item["section_id"] for item in payload["article_plan"]["sections"]] == [
+        f"section-{index}" for index in range(1, 6)
     ]
-    assert section_contexts == {
-        "section-1": [],
-        "section-2": ["edited summary section-1"],
-        "section-3": ["edited summary section-1"],
-        "section-4": ["edited summary section-1"],
-        "section-5": [
-            "edited summary section-3",
-            "edited summary section-4",
-        ],
-    }
-    assert all("Edited" in item["markdown"] for item in artifact["sections"])
+    assert "relevant_research" in payload
+    assert "project_information" in payload
+    assert all("Complete article prose" in item["markdown"] for item in artifact["sections"])
 
 
-def test_completed_section_edit_is_reused_after_restart(
+def test_legacy_section_cache_is_not_reused_by_full_article_writing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -3098,9 +4434,15 @@ def test_completed_section_edit_is_reused_after_restart(
         )
     )
 
+    calls: list[str] = []
+
     class Gateway:
-        async def generate(self, *_: Any, **__: Any) -> Any:
-            raise AssertionError("completed write/edit must not run again")
+        async def generate(self, call: str, *_: Any, **__: Any) -> Any:
+            calls.append(call)
+            return SimpleNamespace(
+                value=unified_for_plan(plan, "Fresh complete article"),
+                usage={"input_tokens": 8, "output_tokens": 12},
+            )
 
     monkeypatch.setattr(generation, "writing_gateway", lambda _context: Gateway())
     context = base_context()
@@ -3115,12 +4457,13 @@ def test_completed_section_edit_is_reused_after_restart(
         )
     )
 
-    assert "Previously edited complete prose" in store.objects[result["output_ref"]][
-        "markdown"
-    ]
+    markdown = store.objects[result["output_ref"]]["markdown"]
+    assert calls == ["unify_article"]
+    assert "Fresh complete article" in markdown
+    assert "Previously edited complete prose" not in markdown
 
 
-def test_single_write_and_edit_call_persists_complete_section(
+def test_single_full_article_call_persists_complete_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -3152,12 +4495,20 @@ def test_single_write_and_edit_call_persists_complete_section(
         async def generate(
             self, call: str, payload: dict[str, Any], _output: Any
         ) -> Any:
-            assert call == "write_and_edit_section"
+            assert call == "unify_article"
             return SimpleNamespace(
-                value=SectionDraft(
-                    section_id=str(payload["section"]["section_id"]),
-                    markdown=original_markdown,
-                    summary="complete original summary",
+                value=UnifiedArticle(
+                    title=plan.title,
+                    meta_title=plan.meta_title,
+                    meta_description=plan.meta_description,
+                    slug=plan.slug,
+                    sections=[
+                        SectionDraft(
+                            section_id="section-1",
+                            markdown=original_markdown,
+                            summary="complete original summary",
+                        )
+                    ],
                 ),
                 usage={"input_tokens": 4, "output_tokens": 4},
             )
@@ -3172,18 +4523,15 @@ def test_single_write_and_edit_call_persists_complete_section(
         )
     )
     artifact = store.objects[result["output_ref"]]
-    stored_section = store.objects[
-        "s3://test-bucket/article-runs/run-1/writing/section-1.json.gz"
-    ]
 
     assert artifact["sections"][0]["markdown"] == original_markdown
-    assert stored_section["write_and_edit_completed"] is True
-    assert stored_section["section"]["markdown"] == original_markdown
+    assert result["summary"]["section_count"] == 1
+    assert result["summary"]["complete"] is True
     assert result["warnings"] == []
     assert result["summary"]["model_failures"] == []
 
 
-def test_writing_recovery_regenerates_incomplete_cached_section(
+def test_writing_recovery_regenerates_the_complete_article(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -3225,9 +4573,17 @@ def test_writing_recovery_regenerates_incomplete_cached_section(
         ) -> Any:
             calls.append(call)
             return SimpleNamespace(
-                value=SectionDraft(
-                    section_id=str(payload["section"]["section_id"]),
-                    markdown="## Section 1\n\nEdited recovery section prose.",
+                value=UnifiedArticle(
+                    title=plan.title,
+                    meta_title=plan.meta_title,
+                    meta_description=plan.meta_description,
+                    slug=plan.slug,
+                    sections=[
+                        SectionDraft(
+                            section_id="section-1",
+                            markdown="## Section 1\n\nEdited recovery article prose.",
+                        )
+                    ],
                 ),
                 usage={"input_tokens": 4, "output_tokens": 5},
             )
@@ -3246,15 +4602,10 @@ def test_writing_recovery_regenerates_incomplete_cached_section(
         )
     )
     artifact = store.objects[result["output_ref"]]
-    stored = store.objects[
-        "s3://test-bucket/article-runs/run-1/writing/section-1.json.gz"
-    ]
 
-    assert calls == ["write_and_edit_section"]
-    assert "Edited recovery section prose" in artifact["markdown"]
-    assert stored["write_and_edit_completed"] is True
-    assert stored["usage"]["input_tokens"] == 4
-    assert stored["usage"]["output_tokens"] == 5
+    assert calls == ["unify_article"]
+    assert "Edited recovery article prose" in artifact["markdown"]
+    assert result["usage"] == {"input_tokens": 4, "output_tokens": 5}
 
 
 def test_content_scorer_matches_seomachine_dimensions_and_penalties() -> None:
@@ -3320,7 +4671,7 @@ def test_content_scorer_matches_seomachine_composite_rounding_order() -> None:
     assert scorer.score("content")["composite_score"] == 94.4
 
 
-def test_content_score_revision_applies_top_five_and_stops_after_two_rounds(
+def test_content_score_is_recorded_without_sending_quality_fixes_to_the_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -3352,14 +4703,11 @@ def test_content_score_revision_applies_top_five_and_stops_after_two_rounds(
             "score-draft.json.gz", generation.article_artifact(plan, [section], pack)
         )
     )
-    scores = iter([60.0, 65.0, 68.0])
-
     class Scorer:
         def score(self, *_: Any, **__: Any) -> dict[str, Any]:
-            value = next(scores)
             return {
-                "composite_score": value,
-                "passed": value >= 70,
+                "composite_score": 60.0,
+                "passed": False,
                 "threshold": 70,
                 "dimensions": {},
                 "priority_fixes": [
@@ -3375,12 +4723,14 @@ def test_content_score_revision_applies_top_five_and_stops_after_two_rounds(
             self, call: str, payload: dict[str, Any], _output: Any
         ) -> Any:
             calls.append((call, deepcopy(payload)))
-            iteration = int(payload.get("iteration") or 0)
-            markdown = (
-                section.markdown
-                if call == "unify_article"
-                else f"## Section 1\n\nComplete revision {iteration}."
-            )
+            assert call == "unify_article"
+            assert not {
+                "priority_fixes",
+                "issues",
+                "article_contract",
+                "section_contracts",
+                "locked_requirements",
+            }.intersection(payload)
             return SimpleNamespace(
                 value=UnifiedArticle(
                     title=plan.title,
@@ -3390,7 +4740,7 @@ def test_content_score_revision_applies_top_five_and_stops_after_two_rounds(
                     sections=[
                         section.model_copy(
                             update={
-                                "markdown": markdown
+                                    "markdown": section.markdown
                             }
                         )
                     ],
@@ -3410,26 +4760,16 @@ def test_content_score_revision_applies_top_five_and_stops_after_two_rounds(
         unify_article(FakeRepository(), Settings(app_env="test"), context, POLICY)
     )
     artifact = store.objects[result["output_ref"]]
-    revision_calls = [payload for call, payload in calls if call == "revise_quality"]
-
-    assert [call for call, _payload in calls] == [
-        "unify_article",
-        "revise_quality",
-        "revise_quality",
-    ]
-    assert [item["iteration"] for item in revision_calls] == [1, 2]
-    assert all(len(item["priority_fixes"]) == 5 for item in revision_calls)
+    assert [call for call, _payload in calls] == ["unify_article"]
     assert [item["composite_score"] for item in artifact["content_score_history"]] == [
-        60.0,
-        65.0,
-        68.0,
+        60.0
     ]
-    assert result["summary"]["content_score_iterations"] == 2
+    assert result["summary"]["content_score_iterations"] == 0
     assert result["summary"]["complete"] is True
-    assert result["warnings"][-1]["code"] == "content_quality_below_threshold"
+    assert result["warnings"] == []
 
 
-def test_content_score_revision_stops_as_soon_as_first_revision_passes(
+def test_low_content_score_does_not_trigger_a_second_model_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -3457,14 +4797,11 @@ def test_content_score_revision_stops_as_soon_as_first_revision_passes(
             "pass-draft.json.gz", generation.article_artifact(plan, [section], pack)
         )
     )
-    scores = iter([60.0, 72.0])
-
     class Scorer:
         def score(self, *_: Any, **__: Any) -> dict[str, Any]:
-            value = next(scores)
             return {
-                "composite_score": value,
-                "passed": value >= 70,
+                "composite_score": 60.0,
+                "passed": False,
                 "threshold": 70,
                 "dimensions": {},
                 "priority_fixes": [{"issue": "issue", "fix": "fix"}] * 3,
@@ -3500,16 +4837,13 @@ def test_content_score_revision_stops_as_soon_as_first_revision_passes(
         unify_article(FakeRepository(), Settings(app_env="test"), context, POLICY)
     )
 
-    assert calls == ["unify_article", "revise_quality"]
-    assert result["summary"]["content_score"] == 72.0
-    assert result["summary"]["content_score_iterations"] == 1
-    assert all(
-        item["code"] != "content_quality_below_threshold"
-        for item in result["warnings"]
-    )
+    assert calls == ["unify_article"]
+    assert result["summary"]["content_score"] == 60.0
+    assert result["summary"]["content_score_iterations"] == 0
+    assert result["warnings"] == []
 
 
-def test_editing_recovery_runs_two_quality_revisions_and_rescores(
+def test_editing_recovery_scores_once_without_model_quality_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -3538,37 +4872,19 @@ def test_editing_recovery_runs_two_quality_revisions_and_rescores(
             generation.article_artifact(plan, [section], pack),
         )
     )
-    scores = iter([60.0, 65.0, 72.0])
-
     class Scorer:
         def score(self, *_: Any, **__: Any) -> dict[str, Any]:
-            value = next(scores)
             return {
-                "composite_score": value,
-                "passed": value >= 70,
+                "composite_score": 60.0,
+                "passed": False,
                 "threshold": 70,
                 "dimensions": {},
                 "priority_fixes": [{"issue": "issue", "fix": "fix"}] * 5,
             }
 
-    calls: list[int] = []
-
     class Gateway:
-        async def generate(
-            self, call: str, payload: dict[str, Any], _output: Any
-        ) -> Any:
-            assert call == "revise_quality"
-            calls.append(int(payload["iteration"]))
-            return SimpleNamespace(
-                value=UnifiedArticle(
-                    title=plan.title,
-                    meta_title=plan.meta_title,
-                    meta_description=plan.meta_description,
-                    slug=plan.slug,
-                    sections=[section],
-                ),
-                usage={"input_tokens": 5, "output_tokens": 5},
-            )
+        async def generate(self, *_: Any, **__: Any) -> Any:
+            raise AssertionError("editing recovery must not run model quality revision")
 
     monkeypatch.setattr(generation, "ContentScorer", Scorer)
     monkeypatch.setattr(generation, "writing_gateway", lambda _context: Gateway())
@@ -3586,21 +4902,68 @@ def test_editing_recovery_runs_two_quality_revisions_and_rescores(
     )
     artifact = store.objects[result["output_ref"]]
 
-    assert calls == [1, 2]
     assert [item["composite_score"] for item in artifact["content_score_history"]] == [
-        60.0,
-        65.0,
-        72.0,
+        60.0
     ]
-    assert result["summary"]["content_score_passed"] is True
-    assert result["summary"]["content_score_iterations"] == 2
-    assert all(
-        item["code"] != "content_quality_below_threshold"
-        for item in result["warnings"]
+    assert result["summary"]["content_score_passed"] is False
+    assert result["summary"]["content_score_iterations"] == 0
+    assert result["warnings"] == []
+
+
+def test_checking_recovery_keeps_fallback_sections_repairable_and_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = patch_store(monkeypatch)
+    plan = plan_with_sections(1)
+    pack = {
+        "keyword": "solar battery payback",
+        "language": "en",
+        "questions": [],
+        "required_questions": [],
+        "project": {"domain": "project.example"},
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+    section = generation.fallback_section(plan.sections[0], "en", pack, plan)
+    pack_ref = asyncio.run(store.write_json("recovered-check-pack.json.gz", pack))
+    planning_ref = asyncio.run(
+        store.write_json(
+            "recovered-check-plan.json.gz",
+            {"research_pack_ref": pack_ref, "plan": plan.model_dump(mode="json")},
+        )
+    )
+    editing_ref = asyncio.run(
+        store.write_json(
+            "recovered-check-article.json.gz",
+            generation.article_artifact(
+                plan,
+                [section],
+                pack,
+                degraded_section_ids=["section-1"],
+            ),
+        )
+    )
+    context = base_context()
+    context["step_key"] = "checking_1"
+    context["input_step_key"] = "editing"
+    context["completed_steps"] = {
+        "planning": {"output_ref": planning_ref},
+        "editing": {"output_ref": editing_ref},
+    }
+
+    result = asyncio.run(
+        generation.recover_generation_stage(
+            FakeRepository(), Settings(app_env="test"), context, POLICY, "checking"
+        )
     )
 
+    assert result["summary"]["repairable"] is True
+    assert result["summary"]["repair_scope"] == ["section-1"]
+    assert result["summary"]["blocking_issue_codes"] == ["fallback_section"]
 
-def test_quality_revision_failure_keeps_article_score_history_and_bindings(
+
+def test_low_quality_score_keeps_article_history_and_bindings_without_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = patch_store(monkeypatch)
@@ -3677,8 +5040,7 @@ def test_quality_revision_failure_keeps_article_score_history_and_bindings(
         async def generate(
             self, call: str, _payload: dict[str, Any], _output: Any
         ) -> Any:
-            if call == "revise_quality":
-                raise RuntimeError("quality revision unavailable")
+            assert call == "unify_article"
             return SimpleNamespace(
                 value=UnifiedArticle(
                     title=plan.title,
@@ -3720,11 +5082,9 @@ def test_quality_revision_failure_keeps_article_score_history_and_bindings(
     assert final_section["used_claim_ids"] == ["claim-1"]
     assert final_section["used_source_urls"] == [authority_url]
     assert final_section["used_internal_urls"] == [internal_url]
-    assert [item["code"] for item in result["warnings"]] == [
-        "content_quality_revision_degraded",
-        "content_quality_below_threshold",
-    ]
-    assert result["summary"]["model_failures"][-1]["mode"] == "quality_revision"
+    assert result["warnings"] == []
+    assert result["summary"]["model_failures"] == []
+    assert result["summary"]["content_score_iterations"] == 0
 
 
 @pytest.mark.parametrize(
@@ -3756,7 +5116,280 @@ def test_missing_optional_source_group_still_builds_a_complete_fallback_plan(
 
     assert len(artifact["plan"]["sections"]) == 4
     assert all(item["objective"] for item in artifact["plan"]["sections"])
-    assert result["warnings"][0]["code"] == "planning_degraded"
+    assert "planning_degraded" in {
+        warning["code"] for warning in result["warnings"]
+    }
+
+
+def test_planning_failure_uses_fallback_without_a_second_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = patch_store(monkeypatch)
+    pack = {
+        "keyword": "live video streaming",
+        "secondary_keywords": [],
+        "planned_title": {},
+        "writing_direction": {},
+        "requested_article_type": {},
+        "country": "ZA",
+        "language": "en",
+        "project": {"domain": "example.com", "profile": {}},
+        "serp": {"organic_results": [{"title": "Result", "description": "x" * 5000}]},
+        "serp_analysis": {},
+        "content_brief": {},
+        "questions": [],
+        "required_questions": [],
+        "competitors": [{"analysis": {"opening": "x" * 5000}}],
+        "competitor_blueprint": {},
+        "authority_sources": [],
+        "internal_sources": [],
+    }
+    payloads: list[dict[str, Any]] = []
+
+    async def build_pack(*_: Any, **__: Any) -> dict[str, Any]:
+        return deepcopy(pack)
+
+    async def generate(
+        _gateway: Any,
+        _settings: Settings,
+        _context: dict[str, Any],
+        call: str,
+        payload: dict[str, Any],
+        _output: Any,
+    ) -> Any:
+        assert call == "plan_article"
+        payloads.append(deepcopy(payload))
+        raise WritingRequestError(
+            "writing_provider_timeout", retryable=True, attempts=1
+        )
+
+    monkeypatch.setattr(generation, "build_research_pack", build_pack)
+    monkeypatch.setattr(generation, "cached_generate", generate)
+
+    result = asyncio.run(
+        plan_article(FakeRepository(), Settings(app_env="test"), base_context(), POLICY)
+    )
+
+    assert len(payloads) == 1
+    assert "serp" not in payloads[0]["research_pack"]
+    assert "competitors" not in payloads[0]["research_pack"]
+    assert any(item["code"] == "planning_degraded" for item in result["warnings"])
+    assert "Live Video Streaming" in store.objects[result["output_ref"]]["plan"]["title"]
+
+
+def test_generic_planning_omits_project_profile_from_the_first_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = patch_store(monkeypatch)
+    pack = {
+        "keyword": "live video streaming",
+        "secondary_keywords": [],
+        "planned_title": {},
+        "writing_direction": {},
+        "requested_article_type": {},
+        "country": "ZA",
+        "language": "en",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "business_summary": "ExampleTV provides live video streaming.",
+            },
+        },
+        "serp": {
+            "organic_results": [
+                {
+                    "url": "https://publisher.example/live-video",
+                    "title": "Live video options",
+                    "description": "A comparison of available options.",
+                }
+            ]
+        },
+        "serp_analysis": {},
+        "content_brief": {},
+        "questions": [],
+        "required_questions": [],
+        "competitors": [],
+        "competitor_blueprint": {},
+        "authority_sources": [
+            {
+                "url": "https://publisher.example/live-video",
+                "title": "Live video options",
+                "excerpt": "Readers can compare live video services by availability and device support.",
+            }
+        ],
+        "internal_sources": [],
+    }
+    neutral = plan_with_sections(1).model_copy(
+        update={
+            "title": "How to choose a live video streaming service",
+            "search_intent": "Compare live video streaming options",
+        }
+    )
+    payloads: list[dict[str, Any]] = []
+
+    async def build_pack(*_: Any, **__: Any) -> dict[str, Any]:
+        return deepcopy(pack)
+
+    async def generate(
+        _gateway: Any,
+        _settings: Settings,
+        _context: dict[str, Any],
+        call: str,
+        payload: dict[str, Any],
+        _output: Any,
+    ) -> Any:
+        assert call == "plan_article"
+        payloads.append(deepcopy(payload))
+        return SimpleNamespace(
+            value=neutral,
+            usage={"input_tokens": 8, "output_tokens": 4},
+        )
+
+    monkeypatch.setattr(generation, "build_research_pack", build_pack)
+    monkeypatch.setattr(generation, "cached_generate", generate)
+
+    result = asyncio.run(
+        plan_article(FakeRepository(), Settings(app_env="test"), base_context(), POLICY)
+    )
+    artifact = store.objects[result["output_ref"]]
+
+    assert len(payloads) == 1
+    assert payloads[0]["research_pack"]["project"] == {}
+    assert artifact["plan"]["title"] == neutral.title
+    assert "ExampleTV" not in artifact["plan"]["title"]
+    assert result["usage"]["input_tokens"] == 8
+    assert result["usage"]["output_tokens"] == 4
+
+
+def test_explicit_brand_planning_keeps_project_profile_in_first_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_store(monkeypatch)
+    pack = {
+        "keyword": "ExampleCRM pricing",
+        "country": "US",
+        "language": "en",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleCRM",
+                "products_services": ["Customer relationship management software"],
+            },
+        },
+        "serp": {},
+        "serp_analysis": {},
+        "required_questions": [],
+        "competitors": [],
+        "competitor_blueprint": {},
+        "authority_sources": [],
+        "internal_sources": [],
+    }
+    payloads: list[dict[str, Any]] = []
+
+    async def build_pack(*_: Any, **__: Any) -> dict[str, Any]:
+        return deepcopy(pack)
+
+    async def generate(
+        _gateway: Any,
+        _settings: Settings,
+        _context: dict[str, Any],
+        _call: str,
+        payload: dict[str, Any],
+        _output: Any,
+    ) -> Any:
+        payloads.append(deepcopy(payload))
+        return SimpleNamespace(value=plan_with_sections(1), usage={})
+
+    monkeypatch.setattr(generation, "build_research_pack", build_pack)
+    monkeypatch.setattr(generation, "cached_generate", generate)
+
+    asyncio.run(plan_article(FakeRepository(), Settings(app_env="test"), base_context(), POLICY))
+
+    assert payloads[0]["research_pack"]["project"]["profile"]["business_name"] == "ExampleCRM"
+
+
+def test_explicit_brand_keyword_does_not_trigger_neutral_replanning() -> None:
+    plan = plan_with_sections(1).model_copy(
+        update={
+            "title": "ExampleTV download guide",
+            "search_intent": "Download ExampleTV",
+        }
+    )
+    pack = {
+        "keyword": "ExampleTV download",
+        "project": {
+            "domain": "example.com",
+            "profile": {"business_name": "ExampleTV"},
+        },
+    }
+
+    assert generation._plan_has_unrequested_project_focus(plan, pack) is False
+
+
+def test_fallback_plan_keeps_sources_without_making_project_the_answer() -> None:
+    authority_url = "https://authority.example/live-video"
+    project_url = "https://example.com/download"
+    pack = {
+        "keyword": "live video streaming",
+        "required_questions": ["Where can I start?"],
+        "content_brief": {"content_type": "Guide"},
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "business_summary": "ExampleTV provides live video streaming.",
+                "products_services": ["Live video streaming"],
+                "value_propositions": ["Supports phones and televisions"],
+                "conversion_actions": ["Download ExampleTV"],
+                "key_pages": [
+                    {
+                        "url": project_url,
+                        "title": "Download ExampleTV",
+                        "description": "Official download page",
+                    }
+                ],
+            },
+        },
+        "authority_sources": [
+            {
+                "url": authority_url,
+                "title": "Official live video information",
+                "excerpt": "The service provides live video streaming on supported devices.",
+                "research_claim": "The service provides live video streaming on supported devices.",
+                "verification_claims": [
+                    {
+                        "claim": "The service provides live video streaming on supported devices.",
+                        "evidence": "The service provides live video streaming on supported devices.",
+                        "status": "verified",
+                    }
+                ],
+            },
+            {
+                "url": "https://example.com/product",
+                "title": "ExampleTV product page",
+                "excerpt": "ExampleTV product details.",
+                "verification_claims": [
+                    {
+                        "claim": "ExampleTV product claim.",
+                        "evidence": "ExampleTV product details.",
+                    }
+                ],
+            },
+        ],
+        "competitors": [],
+        "competitor_blueprint": {},
+        "internal_sources": [],
+    }
+
+    plan = generation.fallback_plan(pack)
+
+    assert plan.title != pack["keyword"]
+    assert "ExampleTV" not in plan.title
+    assert all("ExampleTV" not in section.heading for section in plan.sections)
+    assert {claim.source_url for claim in plan.claims} == {authority_url}
+    assert any(plan.claims[0].claim_id in section.claim_ids for section in plan.sections)
+    assert all(project_url not in section.internal_urls for section in plan.sections)
 
 
 def test_research_pack_has_stable_fields_when_all_optional_sources_are_missing(
@@ -3777,27 +5410,7 @@ def test_research_pack_has_stable_fields_when_all_optional_sources_are_missing(
     assert pack["internal_sources"] == []
     assert pack["questions"] == []
     assert pack["required_questions"] == []
-    assert pack["evidence_capabilities"] == {
-        "verified_claim_count": 0,
-        "verified_source_count": 0,
-        "competitor_count": 0,
-        "internal_source_count": 0,
-        "named_entities": [],
-        "named_product_count": 0,
-        "price_evidence_available": False,
-        "professional_source_available": False,
-        "official_source_available": False,
-        "supported_comparison_dimensions": [],
-        "unsupported_promises": [
-            "fixed product count",
-            "ranking",
-            "winner",
-            "current prices",
-            "professional recommendation",
-            "hands-on test",
-            "award",
-        ],
-    }
+    assert "evidence_capabilities" not in pack
 
 
 def test_research_pack_carries_serp_analysis_and_content_brief(
@@ -3870,7 +5483,7 @@ def test_research_pack_backfills_analysis_from_legacy_serp_summary(
     assert pack["content_brief"]["content_type"] == "How-To Guide"
 
 
-def test_plan_normalization_forces_dominant_serp_type() -> None:
+def test_plan_normalization_preserves_model_article_type() -> None:
     plan = plan_with_sections(1).model_copy(update={"article_type": "Review"})
     pack = {
         "keyword": "solar battery",
@@ -3883,10 +5496,657 @@ def test_plan_normalization_forces_dominant_serp_type() -> None:
 
     normalized = generation.normalize_plan(plan, pack)
 
-    assert normalized.article_type == "How-To Guide"
+    assert normalized.article_type == "Review"
 
 
-def test_commercial_plan_without_product_evidence_becomes_truthful_selection_guide() -> None:
+def test_plan_normalization_canonicalizes_a_best_options_listicle_type() -> None:
+    plan = plan_with_sections(1).model_copy(
+        update={"article_type": "listicle / best options comparison"}
+    )
+    pack = {
+        "keyword": "best remote team tools",
+        "project": {"domain": "project.example"},
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    normalized = generation.normalize_plan(plan, pack)
+
+    assert normalized.article_type == "Listicle / Best X"
+
+
+def test_generic_plan_is_not_rewritten_as_a_project_product_article() -> None:
+    cta_url = "https://example.com/download"
+    home_url = "https://example.com/"
+    plan = ArticlePlan(
+        title="Live TV streaming for sports",
+        search_intent="Find a practical way to stream live sports",
+        article_type="Guide",
+        meta_title="Live TV streaming for sports",
+        meta_description="Compare ways to stream live sports.",
+        slug="live-tv-streaming-sports",
+        sections=[
+            OutlineSection(
+                section_id="intro",
+                heading="Live sports streaming options",
+                objective="Introduce the available options",
+                internal_urls=[home_url],
+                required_questions=[
+                    "Where can I stream free live sports in South Africa?",
+                    "Which streaming service is best for live sports?",
+                ],
+                competitor_gaps=["Compare the leading paid services"],
+                data_requirements=["Include a broadcaster channel lineup"],
+            ),
+            OutlineSection(
+                section_id="comparison",
+                heading="Compare broadcasters",
+                objective="Compare public and paid broadcasters",
+            ),
+            OutlineSection(
+                section_id="conclusion",
+                heading="Choose a service",
+                objective="Help the reader choose",
+            ),
+            OutlineSection(
+                section_id="setup",
+                heading="Device setup",
+                objective="Explain installation and device setup",
+            ),
+            OutlineSection(
+                section_id="data",
+                heading="Data and reliability",
+                objective="Explain data use and playback reliability",
+            ),
+            OutlineSection(
+                section_id="examples",
+                heading="Viewer examples",
+                objective="Repeat the same choices through examples",
+            ),
+            OutlineSection(
+                section_id="faq",
+                heading="Frequently asked questions",
+                objective="Repeat questions already answered above",
+                required_questions=["Where can I watch live sports online?"],
+            ),
+            OutlineSection(
+                section_id="reminder",
+                heading="Before the match",
+                objective="Check the fixture and verify availability before kickoff",
+                coverage_points=[
+                    "Confirm the schedule before the match",
+                    "Recheck rights and availability before the event",
+                ],
+            ),
+        ],
+    )
+    pack = {
+        "keyword": "live tv streaming sports",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "business_summary": (
+                    "ExampleTV provides streaming entertainment with live sports."
+                ),
+                "products_services": [
+                    "Live sports streaming",
+                    "APK and application download access",
+                ],
+                "value_propositions": [
+                    "Supports Android phones, TV boxes, smart TVs, and Windows PC"
+                ],
+                "conversion_actions": [],
+                "key_pages": [
+                    {"url": home_url, "title": "ExampleTV"},
+                    {"url": cta_url, "title": "Download ExampleTV"},
+                ],
+                "evidence": [
+                    {
+                        "field": "products_services",
+                        "value": "Live sports streaming",
+                        "quote": "Live sports streaming",
+                        "source_url": home_url,
+                    },
+                    {
+                        "field": "value_propositions",
+                        "value": (
+                            "Supports Android phones, TV boxes, smart TVs, and Windows PC"
+                        ),
+                        "quote": (
+                            "Supports Android phones, TV boxes, smart TVs, and Windows PC"
+                        ),
+                        "source_url": home_url,
+                    },
+                    {
+                        "field": "conversion_actions",
+                        "value": "Download for Free",
+                        "source_url": home_url,
+                    },
+                    {
+                        "field": "languages",
+                        "value": "en-US",
+                        "source_url": home_url,
+                    },
+                    {
+                        "field": "target_audiences",
+                        "value": "Resellers",
+                        "quote": "Reseller",
+                        "source_url": cta_url,
+                    },
+                ],
+            },
+        },
+        "serp_analysis": {"dominant_content_type": "Guide"},
+        "content_brief": {},
+        "competitor_blueprint": {},
+        "authority_sources": [
+            {
+                "url": "https://example.com/sports",
+                "title": "Sports on ExampleTV",
+                "excerpt": "Watch rugby, football and cricket. Open Live TV and filter by Sports.",
+                "verification_claims": [
+                    {
+                        "claim": "ExampleTV carries rugby, football and cricket.",
+                        "evidence": "Watch rugby, football and cricket.",
+                        "status": "verified",
+                    },
+                    {
+                        "claim": "Open Live TV and filter by Sports.",
+                        "evidence": "Open Live TV and filter by Sports.",
+                        "status": "verified",
+                    },
+                ],
+            },
+            {
+                "url": "https://example.com/account",
+                "title": "Register for ExampleTV",
+                "excerpt": "Open Profile, choose Register, enter an email or phone number, then enter the verification code.",
+                "verification_claims": [
+                    {
+                        "claim": "Register from Profile with an email or phone number and verification code.",
+                        "evidence": "Open Profile, choose Register, enter an email or phone number, then enter the verification code.",
+                        "status": "paraphrase",
+                    }
+                ],
+            },
+            {
+                "url": "https://competitor.example/sports",
+                "title": "Competitor sports package",
+                "excerpt": "CompetitorTV requires a premium sports package.",
+                "verification_claims": [
+                    {
+                        "claim": "CompetitorTV requires a premium sports package.",
+                        "evidence": "CompetitorTV requires a premium sports package.",
+                        "status": "verified",
+                    }
+                ],
+            },
+        ],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    normalized = generation.normalize_plan(plan, pack)
+
+    answer = normalized.sections[0]
+    answer_text = " ".join(
+        [
+            answer.heading,
+            answer.objective,
+            *answer.coverage_points,
+        ]
+    )
+    assert [section.heading for section in normalized.sections] == [
+        section.heading for section in plan.sections
+    ]
+    assert normalized.title == plan.title
+    assert normalized.meta_title == plan.meta_title
+    assert normalized.meta_description == plan.meta_description
+    assert normalized.search_intent == plan.search_intent
+    assert "exampletv" not in answer_text.casefold()
+    assert cta_url not in answer.internal_urls
+    assert answer.cta_type is None
+    assert len(normalized.sections) == len(plan.sections)
+    assert normalized.total_word_target == sum(
+        section.word_target for section in normalized.sections
+    )
+    product_claims = [
+        claim
+        for claim in normalized.claims
+        if claim.source_url.startswith("https://example.com/")
+    ]
+    assert [claim.claim for claim in product_claims] == ["Live sports streaming"]
+    assert all("exampletv" not in claim.claim.casefold() for claim in product_claims)
+    assert len({claim.claim_id for claim in normalized.claims}) == len(normalized.claims)
+    assert any(
+        claim.source_url == "https://competitor.example/sports"
+        for claim in normalized.claims
+    )
+
+
+def test_generic_planning_pack_excludes_project_owned_material() -> None:
+    pack = {
+        "keyword": "solar battery payback",
+        "project": {
+            "domain": "project.example",
+            "profile": {
+                "business_name": "ExampleEnergy",
+                "business_summary": "ExampleEnergy sells home energy products.",
+            },
+        },
+        "serp": {
+            "organic_results": [
+                {"url": "https://project.example/solar", "title": "ExampleEnergy"},
+                {"url": "https://authority.example/solar", "title": "Solar guide"},
+            ]
+        },
+        "authority_sources": [
+            {
+                "url": "https://project.example/solar",
+                "title": "ExampleEnergy solar products",
+                "excerpt": "Project product information.",
+            },
+            {
+                "url": "https://authority.example/solar",
+                "title": "Independent solar guide",
+                "excerpt": "Independent research.",
+            },
+        ],
+        "competitors": [
+            {"url": "https://project.example/solar", "title": "ExampleEnergy"},
+            {"url": "https://competitor.example/solar", "title": "Market guide"},
+        ],
+        "internal_sources": [
+            {"url": "https://project.example/contact", "title": "Contact"}
+        ],
+    }
+
+    payload = generation._planning_research_pack(
+        pack, include_project_profile=False
+    )
+
+    assert payload["project"] == {}
+    assert payload["internal_sources"] == []
+    assert [item["url"] for item in payload["serp_results"]] == [
+        "https://authority.example/solar"
+    ]
+    assert [item["url"] for item in payload["research_sources"]] == [
+        "https://authority.example/solar"
+    ]
+    assert [item["url"] for item in payload["competitor_articles"]] == [
+        "https://competitor.example/solar"
+    ]
+
+
+def test_generic_article_rejects_unrelated_explicit_or_prompted_cta() -> None:
+    cta_url = "https://project.example/payroll-trial"
+    sections = [
+        OutlineSection(
+            section_id="maintenance",
+            heading="Solar battery maintenance",
+            objective="Explain routine battery maintenance",
+            internal_urls=[cta_url],
+            cta_type="strong",
+        )
+    ]
+    pack = {
+        "keyword": "solar battery maintenance",
+        "project": {
+            "domain": "project.example",
+            "profile": {
+                "business_name": "ExamplePayroll",
+                "business_summary": "Payroll software for small businesses.",
+                "products_services": ["Payroll and employee scheduling"],
+                "conversion_actions": ["Start a payroll trial"],
+                "key_pages": [
+                    {
+                        "url": cta_url,
+                        "title": "Start a payroll trial",
+                        "description": "Payroll software trial",
+                    }
+                ],
+            },
+        },
+    }
+
+    assert generation._select_cta_assignment(sections, pack) is None
+
+
+def test_generic_article_uses_same_category_project_as_a_conversion_option() -> None:
+    project_url = "https://project.example/"
+    plan = ArticlePlan(
+        title="Live sports streaming options",
+        search_intent="Compare live sports streaming options",
+        article_type="comparison",
+        meta_title="Live sports streaming options",
+        meta_description="Compare live sports streaming options.",
+        slug="live-sports-streaming-options",
+        sections=[
+            OutlineSection(
+                section_id="comparison",
+                heading="Compare live sports streaming services",
+                objective="Compare coverage, devices and cost",
+                internal_urls=[project_url],
+                cta_type="strong",
+            )
+        ],
+    )
+    pack = {
+        "keyword": "live sports streaming",
+        "project": {
+            "domain": "project.example",
+            "profile": {
+                "business_name": "ExampleTV",
+                "business_summary": "ExampleTV provides live sports streaming.",
+                "products_services": ["Live sports streaming"],
+                "conversion_actions": ["Download ExampleTV"],
+                "key_pages": [
+                    {
+                        "url": project_url,
+                        "title": "Download ExampleTV",
+                        "description": "Live sports streaming app",
+                    }
+                ],
+                "evidence": [
+                    {
+                        "field": "products_services",
+                        "value": "Live sports streaming",
+                        "quote": "Live sports streaming",
+                        "source_url": project_url,
+                    },
+                    {
+                        "field": "conversion_actions",
+                        "value": "Download ExampleTV",
+                        "source_url": project_url,
+                    },
+                ],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+        "required_questions": [],
+    }
+
+    normalized = generation.normalize_plan(plan, pack)
+
+    assert generation._project_article_role(pack) == "conversion"
+    assert generation._select_cta_assignment(normalized.sections, pack) == (
+        "section-1",
+        project_url,
+    )
+    assert any(
+        claim.source_url.startswith("https://project.example")
+        for claim in normalized.claims
+    )
+
+
+def test_article_writing_brief_uses_the_matching_type_template_without_stale_dimensions() -> None:
+    pack = {
+        "keyword": "remote team collaboration tools",
+        "country": "GB",
+        "required_questions": [
+            "Which collaboration tool is best for a remote team?",
+        ],
+        "competitor_blueprint": {
+            "comparison_dimensions": [
+                "subscription price",
+                "cleaning performance",
+                "size and capacity",
+            ]
+        },
+        "authority_sources": [
+            {
+                "url": "https://authority.example/tools",
+                "title": "Collaboration tool subscription prices",
+                "excerpt": "Compare subscription price and team access.",
+            }
+        ],
+        "project": {"domain": "project.example", "profile": {}},
+    }
+
+    brief = generation._article_writing_brief(pack)
+
+    assert brief["recommended_article_type"] == "Listicle / Best X"
+    assert "H2: Best for [scenario]: [item]" in brief["article_type_structure"]
+    assert "Direct answer" in brief["article_type_structure"]
+    assert "not a visible H2" in brief["heading_rule"]
+    assert brief["comparison_dimensions"] == ["subscription price"]
+
+
+def test_project_article_role_distinguishes_core_conversion_and_unrelated() -> None:
+    conversion_pack = {
+        "keyword": "remote team collaboration tools",
+        "project": {
+            "domain": "project.example",
+            "profile": {
+                "business_name": "ExampleWork",
+                "products_services": ["Remote team collaboration software"],
+                "conversion_actions": ["Start a trial"],
+                "key_pages": [
+                    {
+                        "url": "https://project.example/trial",
+                        "title": "Start an ExampleWork trial",
+                    }
+                ],
+                "evidence": [
+                    {
+                        "field": "products_services",
+                        "value": "Remote team collaboration software",
+                        "quote": "Remote team collaboration software",
+                        "source_url": "https://project.example/",
+                    },
+                    {
+                        "field": "conversion_actions",
+                        "value": "Start a trial",
+                        "source_url": "https://project.example/trial",
+                    },
+                ],
+            },
+        },
+    }
+    core_pack = {
+        **conversion_pack,
+        "keyword": "ExampleWork review",
+    }
+    unrelated_pack = {
+        **conversion_pack,
+        "keyword": "solar battery maintenance",
+    }
+
+    assert generation._project_article_role(core_pack) == "core"
+    assert generation._project_article_role(conversion_pack) == "conversion"
+    assert generation._project_article_role(unrelated_pack) == "unrelated"
+
+
+def test_conversion_planning_pack_contains_only_verified_project_context() -> None:
+    cta_url = "https://project.example/trial"
+    pack = {
+        "keyword": "remote team collaboration tools",
+        "project": {
+            "domain": "project.example",
+            "profile": {
+                "business_name": "ExampleWork",
+                "business_summary": "ExampleWork is used for remote collaboration.",
+                "products_services": [
+                    "Remote team collaboration software",
+                    "Unverified adjacent service",
+                ],
+                "conversion_actions": ["Start a trial"],
+                "key_pages": [
+                    {"url": cta_url, "title": "Start an ExampleWork trial"},
+                    {
+                        "url": "https://project.example/other",
+                        "title": "Unrelated page",
+                    },
+                ],
+                "evidence": [
+                    {
+                        "field": "products_services",
+                        "value": "Remote team collaboration software",
+                        "quote": "Remote team collaboration software",
+                        "source_url": "https://project.example/",
+                    },
+                    {
+                        "field": "conversion_actions",
+                        "value": "Start a trial",
+                        "source_url": cta_url,
+                    },
+                ],
+            },
+        },
+        "serp": {"organic_results": []},
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [
+            {"url": cta_url, "title": "Start an ExampleWork trial"},
+            {"url": "https://project.example/other", "title": "Unrelated page"},
+        ],
+    }
+
+    payload = generation._planning_research_pack(pack)
+    profile = payload["project"]["profile"]
+
+    assert payload["project"]["role"] == "conversion"
+    assert profile["business_name"] == "ExampleWork"
+    assert profile["products_services"] == ["Remote team collaboration software"]
+    assert "Unverified adjacent service" not in str(profile)
+    assert [item["url"] for item in profile["cta_targets"]] == [cta_url]
+    assert [item["url"] for item in payload["internal_sources"]] == [cta_url]
+
+
+def test_plan_claim_ids_remain_unique_when_model_claims_are_preserved() -> None:
+    source_url = "https://example.com/verified"
+    plan = plan_with_sections(1).model_copy(
+        update={
+            "claims": [
+                EvidenceClaim(
+                    claim_id="model-invalid",
+                    claim="Unsupported claim",
+                    source_url="https://unverified.example/fact",
+                    quote="Unsupported claim",
+                ),
+                EvidenceClaim(
+                    claim_id="model-valid",
+                    claim="Verified model claim",
+                    source_url=source_url,
+                    quote="Verified model claim",
+                ),
+            ],
+            "sections": [
+                plan_with_sections(1).sections[0].model_copy(
+                    update={"claim_ids": ["model-valid"]}
+                )
+            ],
+        }
+    )
+    pack = {
+        "keyword": "Example streaming app",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "Example",
+                "products_services": ["Project streaming app claim"],
+                "evidence": [
+                    {
+                        "field": "products_services",
+                        "value": "Project streaming app claim",
+                        "quote": "Project streaming app claim",
+                        "source_url": source_url,
+                    }
+                ],
+            },
+        },
+        "serp_analysis": {"dominant_content_type": "Guide"},
+        "content_brief": {},
+        "competitor_blueprint": {},
+        "authority_sources": [
+            {
+                "url": source_url,
+                "title": "Verified source",
+                "excerpt": "Verified model claim. Project streaming app claim.",
+            }
+        ],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    normalized = generation.normalize_plan(plan, pack)
+
+    assert {claim.claim for claim in normalized.claims} == {
+        "Unsupported claim",
+        "Verified model claim",
+        "Project streaming app claim",
+    }
+    assert len({claim.claim_id for claim in normalized.claims}) == 3
+    assigned_claim_ids = {
+        claim_id for section in normalized.sections for claim_id in section.claim_ids
+    }
+    assert "claim-2" in assigned_claim_ids
+
+
+def test_project_evidence_is_available_to_the_product_answer_section() -> None:
+    source_url = "https://example.com/live-sports"
+    section = OutlineSection(
+        section_id="answer",
+        heading="ExampleTV for live sports",
+        objective="Explain the product answer",
+        claim_ids=["claim-1"],
+    )
+    claim = EvidenceClaim(
+        claim_id="claim-1",
+        claim="ExampleTV provides live sports streaming.",
+        quote="ExampleTV provides live sports streaming.",
+        source_url=source_url,
+        section_id="answer",
+    )
+    plan = plan_with_sections(1).model_copy(
+        update={"sections": [section], "claims": [claim]}
+    )
+    pack = {
+        "keyword": "live tv streaming sports",
+        "language": "en",
+        "project": {
+            "domain": "example.com",
+            "profile": {
+                "business_name": "ExampleTV",
+                "evidence": [
+                    {
+                        "field": "products_services",
+                        "value": "ExampleTV provides live sports streaming.",
+                        "quote": "ExampleTV provides live sports streaming.",
+                        "source_url": source_url,
+                    }
+                ],
+            },
+        },
+        "authority_sources": [],
+        "competitors": [],
+        "internal_sources": [],
+    }
+
+    payload = generation.section_payload(plan, section, pack, [], compact=False)
+
+    assert payload["facts"] == [claim.model_dump(mode="json")]
+    assert payload["sources"] == [
+        {
+            "url": source_url,
+            "title": "ExampleTV",
+            "excerpt": "ExampleTV provides live sports streaming.",
+            "research_claim": "ExampleTV provides live sports streaming.",
+            "verification_claims": [
+                {
+                    "claim": "ExampleTV provides live sports streaming.",
+                    "evidence": "ExampleTV provides live sports streaming.",
+                }
+            ],
+        }
+    ]
+
+
+def test_commercial_plan_without_product_evidence_preserves_the_requested_question() -> None:
     plan = ArticlePlan(
         title="10 Best Car Interior Cleaners: Tested Winners and Current Prices",
         search_intent="Choose a car interior cleaner",
@@ -3915,19 +6175,6 @@ def test_commercial_plan_without_product_evidence_becomes_truthful_selection_gui
         "authority_sources": [],
         "competitors": [],
         "internal_sources": [],
-        "evidence_capabilities": {
-            "named_product_count": 0,
-            "price_evidence_available": False,
-            "professional_source_available": False,
-            "unsupported_promises": [
-                "fixed product count",
-                "ranking",
-                "winner",
-                "current prices",
-                "professional recommendation",
-                "hands-on test",
-            ],
-        },
     }
 
     normalized = generation.normalize_plan(plan, pack)
@@ -3946,24 +6193,14 @@ def test_commercial_plan_without_product_evidence_becomes_truthful_selection_gui
         ]
     ).casefold()
 
-    assert normalized.article_type == "Selection Guide"
-    assert all(
-        promise not in searchable
-        for promise in (
-            "10 best",
-            "10 products",
-            "winner",
-            "ranked",
-            "current prices",
-            "hands-on test",
-            "professional recommendation",
-        )
-    )
-    assert "selection guide" in searchable or "selection criteria" in searchable
+    assert normalized.article_type == "Listicle"
+    assert normalized.title == plan.title
+    assert normalized.sections[0].heading == plan.sections[0].heading
+    assert "selection guide" not in searchable
 
 
-def test_quality_issue_classification_separates_data_gaps_from_rewrites() -> None:
-    evidence_gap = generation._classify_quality_issue(
+def test_quality_issue_classification_does_not_block_writing_for_data_gaps() -> None:
+    data_gap = generation._classify_quality_issue(
         SectionIssue(
             section_id="section-1",
             code="missing_product_evidence",
@@ -3978,10 +6215,126 @@ def test_quality_issue_classification_separates_data_gaps_from_rewrites() -> Non
         )
     )
 
-    assert evidence_gap.category == "evidence"
-    assert evidence_gap.repairable is False
+    assert data_gap.category == "prose"
+    assert data_gap.repairable is True
     assert prose_issue.category == "prose"
     assert prose_issue.repairable is True
+
+
+def test_shorter_revision_is_accepted_when_it_preserves_contract_and_evidence() -> None:
+    authority_url = "https://authority.example/streaming-guide"
+    section_plan = OutlineSection(
+        section_id="answer",
+        heading="How to start streaming",
+        objective="Answer the reader directly",
+        section_type="body_explanation",
+        word_target=500,
+        claim_ids=["claim-1"],
+    )
+    claim = EvidenceClaim(
+        claim_id="claim-1",
+        claim="The service supports live streaming.",
+        source_url=authority_url,
+        quote="The service supports live streaming.",
+        section_id="answer",
+    )
+    plan = plan_with_sections(1).model_copy(
+        update={"sections": [section_plan], "claims": [claim]}
+    )
+    baseline = SectionDraft(
+        section_id="answer",
+        markdown=(
+            "## How to start streaming\n\n"
+            + "The same vague sentence is repeated without helping the reader. " * 12
+            + f"The service supports live streaming [Source]({authority_url})."
+        ),
+        used_claim_ids=[],
+        used_source_urls=[],
+    )
+    candidate = SectionDraft(
+        section_id="answer",
+        markdown=(
+            "## How to start streaming\n\n"
+            "Open the official service, choose the live channel you need, and confirm "
+            "that it is available in your region before playback. "
+            f"The service supports live streaming [Source]({authority_url})."
+        ),
+        used_claim_ids=[],
+        used_source_urls=[],
+    )
+
+    accepted, reasons = generation._candidate_improves_article(
+        plan,
+        [baseline],
+        {"composite_score": 70},
+        plan,
+        [candidate],
+        {"composite_score": 70},
+        {authority_url},
+        set(),
+        [],
+        require_measurable_improvement=False,
+    )
+
+    assert accepted is True
+    assert reasons == []
+
+
+def test_unified_edit_is_accepted_without_inline_source_links_or_score_gain() -> None:
+    authority_url = "https://authority.example/streaming-guide"
+    section_plan = OutlineSection(
+        section_id="answer",
+        heading="How to watch live sports",
+        objective="Give the complete playback path",
+        claim_ids=["claim-1"],
+    )
+    claim = EvidenceClaim(
+        claim_id="claim-1",
+        claim="Open Live TV and choose Sports.",
+        source_url=authority_url,
+        quote="Open Live TV and choose Sports.",
+        section_id="answer",
+    )
+    plan = plan_with_sections(1).model_copy(
+        update={"sections": [section_plan], "claims": [claim]}
+    )
+    baseline = SectionDraft(
+        section_id="answer",
+        markdown=(
+            "## How to watch live sports\n\n"
+            f"According to the source, open Live TV and choose Sports "
+            f"[source]({authority_url})."
+        ),
+        used_claim_ids=["claim-1"],
+        used_source_urls=[authority_url],
+    )
+    candidate = SectionDraft(
+        section_id="answer",
+        markdown=(
+            "## How to watch live sports\n\n"
+            "Open Live TV, choose Sports, then select the channel or event you want."
+        ),
+        used_claim_ids=["claim-1"],
+        used_source_urls=[authority_url],
+    )
+
+    accepted, reasons = generation._candidate_improves_article(
+        plan,
+        [baseline],
+        {"composite_score": 70},
+        plan,
+        [candidate],
+        {"composite_score": 70},
+        {authority_url},
+        set(),
+        [],
+        require_inline_citations=False,
+        require_claim_bindings=False,
+        require_measurable_improvement=False,
+    )
+
+    assert accepted is True
+    assert reasons == []
 
 
 def test_revision_sends_only_repairable_affected_sections(
@@ -4069,11 +6422,133 @@ def test_revision_sends_only_repairable_affected_sections(
     artifact = store.objects[result["output_ref"]]
 
     assert [item["section_id"] for item in received["sections"]] == ["section-2"]
-    assert [item["code"] for item in received["issues"]] == [
-        "required_question_unanswered"
+    assert [item["section_id"] for item in received["section_goals"]] == [
+        "section-2"
     ]
+    assert "official_product" not in received
+    assert received["section_goals"][0]["official_product"] == {
+        "conversion_actions": [],
+        "cta_targets": [],
+    }
+    assert "issues" not in received
     assert "Original section 1" in artifact["sections"][0]["markdown"]
     assert "Revised answer" in artifact["sections"][1]["markdown"]
+
+
+def test_revision_accepts_sections_without_requiring_inline_citations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = patch_store(monkeypatch)
+    source_url = "https://authority.example/fact"
+    plan = plan_with_sections(2).model_copy(
+        update={
+            "claims": [
+                EvidenceClaim(
+                    claim_id="claim-2",
+                    claim="The documented fact is available.",
+                    quote="The documented fact is available.",
+                    source_url=source_url,
+                    section_id="section-2",
+                )
+            ],
+            "sections": [
+                plan_with_sections(2).sections[0],
+                plan_with_sections(2).sections[1].model_copy(
+                    update={"claim_ids": ["claim-2"]}
+                ),
+            ],
+        }
+    )
+    pack = {
+        "keyword": "solar battery payback",
+        "language": "en",
+        "required_questions": [],
+        "project": {"domain": "project.example", "profile": {}},
+        "authority_sources": [{"url": source_url}],
+        "competitors": [],
+        "internal_sources": [],
+    }
+    sections = [
+        SectionDraft(
+            section_id="section-1",
+            markdown=f"## Section 1\n\nBroken | table | row. {QUALITY_PROSE}",
+        ),
+        SectionDraft(
+            section_id="section-2",
+            markdown=(
+                "## Section 2\n\n"
+                f"[The documented fact is available.]({source_url}) {QUALITY_PROSE}"
+            ),
+        ),
+    ]
+    pack_ref = asyncio.run(store.write_json("partial-pack.json.gz", pack))
+    planning_ref = asyncio.run(
+        store.write_json(
+            "partial-plan.json.gz",
+            {"research_pack_ref": pack_ref, "plan": plan.model_dump(mode="json")},
+        )
+    )
+    checked = generation.article_artifact(plan, sections, pack)
+    checked["quality"] = {
+        "passed": False,
+        "repairable": True,
+        "repair_scope": ["section-1", "section-2"],
+        "issues": [
+            {
+                "section_id": "section-1",
+                "code": "malformed_markdown",
+                "message": "Repair the table",
+                "category": "prose",
+                "repairable": True,
+            },
+            {
+                "section_id": "section-2",
+                "code": "unclear_prose",
+                "message": "Clarify the prose",
+                "category": "prose",
+                "repairable": True,
+            },
+        ],
+    }
+    checked_ref = asyncio.run(store.write_json("partial-checked.json.gz", checked))
+
+    class Gateway:
+        async def generate(self, *_: Any, **__: Any) -> Any:
+            return SimpleNamespace(
+                value=generation.RevisedSections(
+                    sections=[
+                        SectionDraft(
+                            section_id="section-1",
+                            markdown=f"## Section 1\n\nRepaired table explanation. {QUALITY_PROSE}",
+                        ),
+                        SectionDraft(
+                            section_id="section-2",
+                            markdown=f"## Section 2\n\nClarified but uncited. {QUALITY_PROSE}",
+                        ),
+                    ]
+                ),
+                usage={"input_tokens": 5, "output_tokens": 5},
+            )
+
+    monkeypatch.setattr(generation, "writing_gateway", lambda _context: Gateway())
+    context = base_context()
+    context["completed_steps"] = {
+        "planning": {"output_ref": planning_ref},
+        "checking": {"output_ref": checked_ref},
+    }
+
+    result = asyncio.run(
+        revise_article_sections(
+            FakeRepository(), Settings(app_env="test"), context, POLICY
+        )
+    )
+    artifact = store.objects[result["output_ref"]]
+
+    assert result["summary"]["revised_sections"] == 2
+    assert "Repaired table explanation" in artifact["sections"][0]["markdown"]
+    assert source_url not in artifact["sections"][1]["markdown"]
+    assert "Clarified but uncited" in artifact["sections"][1]["markdown"]
+    assert result["warnings"] == []
 
 
 def test_section_revision_rescores_without_duplicate_full_article_revision(
@@ -4316,7 +6791,7 @@ def test_low_score_section_revision_returns_complete_article_without_duplicate_r
     assert result["warnings"] == []
 
 
-def test_plan_normalization_puts_every_content_brief_requirement_in_outline() -> None:
+def test_plan_normalization_does_not_force_content_brief_into_outline() -> None:
     plan = plan_with_sections(1).model_copy(update={"article_type": "guide"})
     structure = [
         "Introduction (what you'll learn)",
@@ -4360,10 +6835,12 @@ def test_plan_normalization_puts_every_content_brief_requirement_in_outline() ->
         point for section in normalized.sections for point in section.coverage_points
     }
 
-    assert len(normalized.sections) == 6
-    assert {f"SERP structure: {item}" for item in structure} <= coverage
-    assert {f"Required element: {item}" for item in must_have} <= coverage
-    assert {f"SERP feature target: {item}" for item in feature_targets} <= coverage
+    assert len(normalized.sections) == 1
+    assert not {f"SERP structure: {item}" for item in structure}.intersection(coverage)
+    assert not {f"Required element: {item}" for item in must_have}.intersection(coverage)
+    assert not {f"SERP feature target: {item}" for item in feature_targets}.intersection(
+        coverage
+    )
 
     writing_payloads = [
         generation.section_payload(normalized, section, pack, [], compact=False)
@@ -4374,14 +6851,10 @@ def test_plan_normalization_puts_every_content_brief_requirement_in_outline() ->
         for payload in writing_payloads
         for point in payload["section"]["coverage_points"]
     }
-    assert {f"SERP structure: {item}" for item in structure} <= writing_coverage
-    assert {f"Required element: {item}" for item in must_have} <= writing_coverage
-    assert {
-        f"SERP feature target: {item}" for item in feature_targets
-    } <= writing_coverage
+    assert writing_coverage == coverage
 
 
-def test_fallback_plan_uses_serp_content_brief_structure() -> None:
+def test_fallback_plan_does_not_use_serp_content_brief_structure() -> None:
     pack = {
         "keyword": "solar battery",
         "required_questions": ["How long does installation take?"],
@@ -4400,13 +6873,18 @@ def test_fallback_plan_uses_serp_content_brief_structure() -> None:
 
     plan = generation.fallback_plan(pack)
 
-    assert plan.article_type == "How-To Guide"
-    assert [item.heading for item in plan.sections] == pack["content_brief"][
-        "structure_recommendations"
+    assert plan.article_type == "guide"
+    assert [item.heading for item in plan.sections] == [
+        "Understanding solar battery",
+        "Key considerations",
+        "A practical process",
     ]
+    assert not set(item.heading for item in plan.sections).intersection(
+        pack["content_brief"]["structure_recommendations"]
+    )
 
 
-def test_serp_requirements_are_not_truncated_by_full_model_coverage() -> None:
+def test_serp_requirements_do_not_modify_full_model_coverage() -> None:
     plan = plan_with_sections(1)
     plan.sections[0].coverage_points = [f"Model point {index}" for index in range(12)]
     pack = {
@@ -4430,9 +6908,4 @@ def test_serp_requirements_are_not_truncated_by_full_model_coverage() -> None:
     coverage = normalized.sections[0].coverage_points
 
     assert len(coverage) == 12
-    assert "SERP structure: Introduction (what you'll learn)" in coverage
-    assert "Required element: Step-by-step instructions" in coverage
-    assert (
-        "SERP feature target: Featured Snippet - Add concise definition/answer "
-        "in first 100 words"
-    ) in coverage
+    assert coverage == [f"Model point {index}" for index in range(12)]

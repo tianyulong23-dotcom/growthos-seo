@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from temporalio import activity
 from temporalio.api.enums.v1 import TaskQueueType
@@ -22,7 +23,6 @@ from app.modules.agent.activities import (
     repository,
     set_status,
     skip_tool_calls,
-    stream_final,
 )
 from app.modules.agent.tools import ToolRegistry
 from app.modules.agent.workflows import AgentWorkflow
@@ -59,16 +59,9 @@ async def deterministic_model_decide(payload: dict[str, Any]) -> dict[str, Any]:
         "type": "final",
         "answer": f"{TOOL_NAME} 已完成。",
         "evidence": [],
-    }
-
-
-@activity.defn(name="agent_judge_final")
-async def deterministic_judge_final(_: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "status": "completed",
-        "reason": "正式业务写入已经完成并通过工具校验",
-        "criteria": [],
-        "remaining_work": [],
+        "message_id": str(
+            uuid5(NAMESPACE_URL, f"seo-agent-final:{payload['run_id']}")
+        ),
     }
 
 
@@ -169,8 +162,6 @@ async def run_worker(address: str, queue: str, ready_file: Path) -> None:
             finish_turn,
             check_run,
             deterministic_model_decide,
-            deterministic_judge_final,
-            stream_final,
             execute_tool,
             skip_tool_calls,
             finish,

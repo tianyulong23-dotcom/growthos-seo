@@ -15,11 +15,13 @@ const (
 	TaskSiteUnderstanding  TaskType = "site_understanding"
 	TaskTechnicalAudit     TaskType = "technical_audit"
 	TaskBacklinkValidation TaskType = "backlink_validation"
+	TaskContentResearch    TaskType = "content_research"
+	TaskSourceVerification TaskType = "source_verification"
 
-	siteUnderstandingMinimumPages = 3
-	siteUnderstandingDefaultPages = 5
-	siteUnderstandingHardLimit    = 10
-	technicalAuditHardLimit       = 5000
+	siteUnderstandingMinimumAttempts = 3
+	siteUnderstandingDefaultPages    = 5
+	siteUnderstandingHardLimit       = 10
+	technicalAuditHardLimit          = 5000
 )
 
 type ScopeMode string
@@ -113,6 +115,26 @@ func (t Task) Validate() error {
 		if len(t.URLs) == 0 {
 			return errors.New("urls are required for backlink validation")
 		}
+	case TaskContentResearch, TaskSourceVerification:
+		if len(t.URLs) == 0 {
+			return errors.New("urls are required for direct URL research")
+		}
+		if strings.TrimSpace(t.Country) == "" {
+			return errors.New("country is required")
+		}
+		if strings.TrimSpace(t.Language) == "" {
+			return errors.New("language is required")
+		}
+		for _, rawURL := range t.URLs {
+			if _, err := parsedURL(rawURL); err != nil {
+				return fmt.Errorf("invalid research URL %q: %w", rawURL, err)
+			}
+		}
+		switch t.RenderingMode() {
+		case RenderingAuto, RenderingOff, RenderingAll:
+		default:
+			return fmt.Errorf("unsupported rendering mode %q", t.Rendering)
+		}
 	default:
 		return fmt.Errorf("unsupported task type %q", t.Type)
 	}
@@ -159,7 +181,10 @@ func (t Task) PageLimit() int {
 			return min(t.MaxPages, technicalAuditHardLimit)
 		}
 		return 1000
-	case TaskBacklinkValidation:
+	case TaskBacklinkValidation, TaskContentResearch, TaskSourceVerification:
+		if t.MaxPages > 0 {
+			return min(t.MaxPages, len(t.URLs))
+		}
 		return len(t.URLs)
 	default:
 		return 0
@@ -382,6 +407,7 @@ type Result struct {
 type CandidateState struct {
 	URL             string  `json:"url"`
 	Depth           int     `json:"depth"`
+	DiscoveryOrder  int     `json:"discovery_order,omitempty"`
 	DiscoveredFrom  string  `json:"discovered_from,omitempty"`
 	AnchorText      string  `json:"anchor_text,omitempty"`
 	Placement       string  `json:"placement,omitempty"`

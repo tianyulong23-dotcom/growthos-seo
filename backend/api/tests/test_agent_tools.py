@@ -1,4 +1,6 @@
 import asyncio
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +16,7 @@ from app.modules.agent.tools import (
     ToolRegistry,
     tool_catalog_payload,
 )
+from app.modules.onboarding.service import OnboardingNotFoundError
 
 
 PROFILE = {
@@ -202,6 +205,269 @@ def build_registry() -> tuple[ToolRegistry, FakeProjects]:
     return ToolRegistry(Settings(), projects, FakeAudits()), projects
 
 
+class FakeKeywords:
+    def __init__(self, status: str | None) -> None:
+        self.run_status = status
+
+    async def status(self, project_id: str) -> SimpleNamespace:
+        assert project_id == "project-1"
+        run = (
+            SimpleNamespace(status=self.run_status)
+            if self.run_status is not None
+            else None
+        )
+        return SimpleNamespace(run=run)
+
+
+class FakeContentPlans:
+    def __init__(self, batch: SimpleNamespace | None = None) -> None:
+        self.batch = batch
+        self.create_calls: list[tuple[str, str, str]] = []
+
+    async def create_automatic(
+        self, organization_id: str, project_id: str, *, idempotency_key: str
+    ) -> SimpleNamespace:
+        self.create_calls.append((organization_id, project_id, idempotency_key))
+        return SimpleNamespace(batch_id="batch-created")
+
+    async def get_batch(
+        self, organization_id: str, project_id: str, batch_id: str
+    ) -> SimpleNamespace:
+        assert organization_id == Settings().default_organization_id
+        assert project_id == "project-1"
+        assert self.batch is not None
+        assert batch_id == self.batch.batch_id
+        return self.batch
+
+
+class FakeContent:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, str, str]] = []
+        self.read_calls: list[tuple[str, str, str]] = []
+        self.create_calls: list[tuple[str, dict[str, Any], str, str]] = []
+
+    async def create_article(
+        self,
+        project_id: str,
+        request: Any,
+        idempotency_key: str,
+        *,
+        organization_id: str,
+    ) -> SimpleNamespace:
+        self.create_calls.append((
+            project_id,
+            request.model_dump(mode="json"),
+            idempotency_key,
+            organization_id,
+        ))
+        return SimpleNamespace(
+            id="article-direct-1",
+            primary_keyword=request.primary_keyword,
+            title=request.title,
+            run=SimpleNamespace(
+                id="article-run-direct-1",
+                status="queued",
+                stage="queued",
+                progress=0,
+            ),
+        )
+
+    async def generate_next_planned_articles(
+        self,
+        project_id: str,
+        count: int,
+        *,
+        organization_id: str,
+        batch_id: str,
+    ) -> list[SimpleNamespace]:
+        self.calls.append((project_id, count, organization_id, batch_id))
+        return [
+            SimpleNamespace(
+                id=f"article-{index}",
+                title=f"Article {index}",
+                run=SimpleNamespace(id=f"article-run-{index}", status="queued"),
+            )
+            for index in range(1, count + 1)
+        ]
+
+    async def get_article(
+        self,
+        project_id: str,
+        article_id: str,
+        *,
+        organization_id: str,
+    ) -> Dumpable:
+        self.read_calls.append((project_id, article_id, organization_id))
+        index = article_id.rsplit("-", 1)[-1]
+        return Dumpable({
+            "id": article_id,
+            "title": f"Article {index}",
+            "run": {
+                "id": f"article-run-{index}",
+                "article_id": article_id,
+                "status": "completed_with_warnings",
+                "stage": "completed",
+                "progress": 100,
+                "warnings": ["review_recommended"],
+                "error_code": None,
+                "error_detail": None,
+            },
+        })
+
+    async def get_article_generation_snapshot(
+        self,
+        project_id: str,
+        article_id: str,
+        *,
+        organization_id: str,
+    ) -> dict[str, Any]:
+        article = (
+            await self.get_article(
+                project_id, article_id, organization_id=organization_id
+            )
+        ).model_dump(mode="json")
+        run = article["run"]
+        return {
+            "article_id": article["id"],
+            "primary_keyword": article.get("primary_keyword", f"keyword {article_id}"),
+            "title": article.get("title"),
+            "run_id": run.get("id"),
+            "status": run.get("status"),
+            "stage": run.get("stage"),
+            "progress": run.get("progress"),
+            "warnings": run.get("warnings", []),
+            "error_code": run.get("error_code"),
+            "error_detail": run.get("error_detail"),
+            "billing": {
+                "reported_cost": None,
+                "estimated_cost": None,
+                "complete": False,
+            },
+        }
+
+    async def list_articles(
+        self,
+        project_id: str,
+        page: int,
+        page_size: int,
+        article_status: str | None,
+        search: str | None,
+        *,
+        organization_id: str,
+    ) -> SimpleNamespace:
+        assert project_id == "project-1"
+        assert (page, page_size, article_status) == (1, 2, None)
+        assert organization_id == Settings().default_organization_id
+        article_id = "article-hd" if search else "article-recent"
+        return SimpleNamespace(items=[SimpleNamespace(id=article_id)])
+
+
+class FakeOnboarding:
+    def __init__(self, article_ids: list[str]) -> None:
+        self.article_ids = article_ids
+        self.calls: list[tuple[str, str]] = []
+
+    async def article_ids_for_initial_generation(
+        self, organization_id: str, project_id: str
+    ) -> list[str]:
+        self.calls.append((organization_id, project_id))
+        return list(self.article_ids)
+
+
+class MissingOnboarding(FakeOnboarding):
+    async def observe_started_step(
+        self,
+        organization_id: str,
+        project_id: str,
+        step_key: str,
+        external_run_id: str,
+    ) -> None:
+        raise OnboardingNotFoundError
+
+
+class FakeKeywordsWithBilling(FakeKeywords):
+    async def status(self, project_id: str) -> Dumpable:
+        assert project_id == "project-1"
+        return Dumpable({
+            "run": {
+                "run_id": "public-status-run",
+                "status": "completed",
+            }
+        })
+
+    async def keyword_library_billing(
+        self, project_id: str
+    ) -> dict[str, str | float | bool]:
+        assert project_id == "project-1"
+        return {
+            "run_id": "keyword-run-1",
+            "reported_cost_usd": 0.15,
+            "complete": True,
+        }
+
+
+class FakeContentPlansWithBilling(FakeContentPlans):
+    async def get_batch(
+        self, organization_id: str, project_id: str, batch_id: str
+    ) -> Dumpable:
+        return Dumpable({
+            "batch_id": batch_id,
+            "project_id": project_id,
+            "source": "automatic",
+            "target_count": 30,
+            "status": "completed",
+            "stage": "completed",
+            "candidate_snapshot_count": 30,
+            "selected_count": 30,
+            "valid_pack_count": 30,
+            "preparation_count": 30,
+            "preview_ready_count": 30,
+            "plan_item_count": 30,
+            "external_request_count": 3,
+            "total_cost_usd": 0.42,
+            "retryable": False,
+            "error_code": None,
+            "error_detail": None,
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
+            "finished_at": datetime.now(UTC),
+        })
+
+
+class FakeContentWithBilling(FakeContent):
+    async def get_article_generation_snapshot(
+        self,
+        project_id: str,
+        article_id: str,
+        *,
+        organization_id: str,
+    ) -> dict[str, Any]:
+        payload = await super().get_article_generation_snapshot(
+            project_id, article_id, organization_id=organization_id
+        )
+        payload["billing"] = {
+            "reported_cost": 0.21,
+            "estimated_cost": None,
+            "complete": True,
+        }
+        return payload
+
+
+async def execute_prepared_write(
+    registry: ToolRegistry, name: str, arguments: dict[str, Any], operation_id: str
+) -> dict[str, Any]:
+    prepared = await registry.prepare_write(
+        "project-1", name, arguments, operation_id
+    )
+    return await registry.execute_write(
+        "project-1",
+        name,
+        prepared.arguments,
+        prepared.before,
+        prepared.parameters_hash,
+    )
+
+
 def test_tool_models_reject_project_identity_and_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         READ_MODELS["get_latest_audit"].model_validate({"project_id": "other-project"})
@@ -209,6 +475,355 @@ def test_tool_models_reject_project_identity_and_unknown_fields() -> None:
         WRITE_MODELS["update_business_profile"].model_validate(
             {"changes": {"project_id": "other-project"}}
         )
+    with pytest.raises(ValidationError):
+        READ_MODELS["get_article_generation_status"].model_validate(
+            {"project_id": "other-project"}
+        )
+    for name in (
+        "start_keyword_library",
+        "start_content_plan",
+        "start_articles",
+        "create_article",
+    ):
+        with pytest.raises(ValidationError):
+            WRITE_MODELS[name].model_validate({"project_id": "other-project"})
+
+
+def test_article_start_only_accepts_one_or_two_articles() -> None:
+    assert WRITE_MODELS["start_articles"].model_validate(
+        {"batch_id": "batch-1", "count": 1}
+    ).count == 1
+    assert WRITE_MODELS["start_articles"].model_validate(
+        {"batch_id": "batch-1", "count": 2}
+    ).count == 2
+    with pytest.raises(ValidationError):
+        WRITE_MODELS["start_articles"].model_validate(
+            {"batch_id": "batch-1", "count": 0}
+        )
+    with pytest.raises(ValidationError):
+        WRITE_MODELS["start_articles"].model_validate(
+            {"batch_id": "batch-1", "count": 3}
+        )
+    with pytest.raises(ValidationError):
+        WRITE_MODELS["start_articles"].model_validate({"count": 2})
+
+
+@pytest.mark.parametrize("status", [None, "queued", "running", "failed"])
+def test_content_plan_requires_a_usable_keyword_library(
+    status: str | None,
+) -> None:
+    registry = ToolRegistry(
+        Settings(),
+        FakeProjects(),
+        FakeAudits(),
+        keywords=FakeKeywords(status),
+        content_plans=FakeContentPlans(),
+    )
+
+    with pytest.raises(RuntimeError, match="keyword_library_not_ready"):
+        asyncio.run(
+            execute_prepared_write(
+                registry, "start_content_plan", {}, "content-plan-operation"
+            )
+        )
+
+
+@pytest.mark.parametrize("status", ["partial", "completed"])
+def test_content_plan_accepts_usable_keyword_library(status: str) -> None:
+    content_plans = FakeContentPlans()
+    registry = ToolRegistry(
+        Settings(),
+        FakeProjects(),
+        FakeAudits(),
+        keywords=FakeKeywords(status),
+        content_plans=content_plans,
+    )
+
+    result = asyncio.run(
+        execute_prepared_write(
+            registry, "start_content_plan", {}, "content-plan-operation"
+        )
+    )
+
+    assert result["batch_id"] == "batch-created"
+    assert len(content_plans.create_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "status", "target_count", "plan_item_count"),
+    [
+        ("manual", "completed", 30, 30),
+        ("automatic", "running", 30, 30),
+        ("automatic", "completed", 29, 30),
+        ("automatic", "completed", 30, 29),
+    ],
+)
+def test_articles_require_the_completed_automatic_thirty_item_batch(
+    source: str, status: str, target_count: int, plan_item_count: int
+) -> None:
+    batch = SimpleNamespace(
+        batch_id="batch-1",
+        source=source,
+        status=status,
+        target_count=target_count,
+        plan_item_count=plan_item_count,
+    )
+    registry = ToolRegistry(
+        Settings(),
+        FakeProjects(),
+        FakeAudits(),
+        content_plans=FakeContentPlans(batch),
+        content=FakeContent(),
+    )
+
+    with pytest.raises(RuntimeError, match="content_plan_not_ready"):
+        asyncio.run(
+            execute_prepared_write(
+                registry,
+                "start_articles",
+                {"batch_id": "batch-1", "count": 2},
+                "article-operation",
+            )
+        )
+
+
+def test_articles_are_generated_from_the_authorized_batch() -> None:
+    settings = Settings()
+    batch = SimpleNamespace(
+        batch_id="batch-1",
+        source="automatic",
+        status="completed",
+        target_count=30,
+        plan_item_count=30,
+    )
+    content = FakeContent()
+    registry = ToolRegistry(
+        settings,
+        FakeProjects(),
+        FakeAudits(),
+        content_plans=FakeContentPlans(batch),
+        content=content,
+    )
+
+    result = asyncio.run(
+        execute_prepared_write(
+            registry,
+            "start_articles",
+            {"batch_id": "batch-1", "count": 2},
+            "article-operation",
+        )
+    )
+
+    assert result["verified"] is True
+    assert result["article_ids"] == ["article-1", "article-2"]
+    assert content.calls == [
+        ("project-1", 2, settings.default_organization_id, "batch-1")
+    ]
+
+
+def test_direct_article_creation_uses_the_existing_content_service() -> None:
+    settings = Settings()
+    content = FakeContent()
+    registry = ToolRegistry(
+        settings,
+        FakeProjects(),
+        FakeAudits(),
+        content=content,
+    )
+
+    result = asyncio.run(
+        execute_prepared_write(
+            registry,
+            "create_article",
+            {
+                "primary_keyword": "AI search visibility",
+                "secondary_keywords": ["AI SEO"],
+                "language": "en",
+            },
+            "direct-article-operation",
+        )
+    )
+
+    assert result == {
+        "operation_id": "direct-article-operation",
+        "verified": True,
+        "article_id": "article-direct-1",
+        "run_id": "article-run-direct-1",
+        "primary_keyword": "AI search visibility",
+        "title": None,
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+    }
+    assert content.create_calls == [(
+        "project-1",
+        {
+            "primary_keyword": "AI search visibility",
+            "secondary_keywords": ["AI SEO"],
+            "article_type": None,
+            "title": None,
+            "writing_direction": None,
+            "language": "en",
+        },
+        "agent:direct-article-operation:article",
+        settings.default_organization_id,
+    )]
+
+
+def test_article_status_discovers_initial_articles_from_onboarding() -> None:
+    settings = Settings()
+    content = FakeContent()
+    onboarding = FakeOnboarding(["article-1", "article-2"])
+    registry = ToolRegistry(
+        settings,
+        FakeProjects(),
+        FakeAudits(),
+        content=content,
+        onboarding=onboarding,
+    )
+
+    result = asyncio.run(
+        registry.execute_read("project-1", "get_article_generation_status", {})
+    )
+
+    assert onboarding.calls == [
+        (settings.default_organization_id, "project-1")
+    ]
+    assert [item["article_id"] for item in result["articles"]] == [
+        "article-1",
+        "article-2",
+    ]
+    assert result["articles"][0] == {
+        "article_id": "article-1",
+        "primary_keyword": "keyword article-1",
+        "title": "Article 1",
+        "run_id": "article-run-1",
+        "status": "completed_with_warnings",
+        "stage": "completed",
+        "progress": 100,
+        "warnings": ["review_recommended"],
+        "error_code": None,
+        "error_detail": None,
+    }
+
+
+def test_article_status_keeps_explicit_article_id_compatibility() -> None:
+    settings = Settings()
+    content = FakeContent()
+    onboarding = FakeOnboarding(["article-1", "article-2"])
+    registry = ToolRegistry(
+        settings,
+        FakeProjects(),
+        FakeAudits(),
+        content=content,
+        onboarding=onboarding,
+    )
+
+    result = asyncio.run(
+        registry.execute_read(
+            "project-1",
+            "get_article_generation_status",
+            {"article_ids": ["article-manual"]},
+        )
+    )
+
+    assert onboarding.calls == []
+    assert result["articles"][0]["article_id"] == "article-manual"
+    assert content.read_calls == [
+        ("project-1", "article-manual", settings.default_organization_id)
+    ]
+
+
+def test_article_status_finds_manual_article_by_keyword() -> None:
+    settings = Settings()
+    content = FakeContent()
+    onboarding = FakeOnboarding([])
+    registry = ToolRegistry(
+        settings,
+        FakeProjects(),
+        FakeAudits(),
+        content=content,
+        onboarding=onboarding,
+    )
+
+    result = asyncio.run(
+        registry.execute_read(
+            "project-1",
+            "get_article_generation_status",
+            {"search": "hd streaming"},
+        )
+    )
+
+    assert onboarding.calls == []
+    assert result["articles"][0]["article_id"] == "article-hd"
+
+
+def test_article_status_falls_back_to_recent_articles() -> None:
+    settings = Settings()
+    content = FakeContent()
+    onboarding = FakeOnboarding([])
+    registry = ToolRegistry(
+        settings,
+        FakeProjects(),
+        FakeAudits(),
+        content=content,
+        onboarding=onboarding,
+    )
+
+    result = asyncio.run(
+        registry.execute_read("project-1", "get_article_generation_status", {})
+    )
+
+    assert onboarding.calls == [
+        (settings.default_organization_id, "project-1")
+    ]
+    assert result["articles"][0]["article_id"] == "article-recent"
+
+
+def test_async_status_tools_return_real_downstream_billing() -> None:
+    settings = Settings()
+    registry = ToolRegistry(
+        settings,
+        FakeProjects(),
+        FakeAudits(),
+        keywords=FakeKeywordsWithBilling("completed"),
+        content_plans=FakeContentPlansWithBilling(),
+        content=FakeContentWithBilling(),
+        onboarding=FakeOnboarding(["article-1", "article-2"]),
+    )
+
+    keyword_result = asyncio.run(
+        registry.execute_read("project-1", "get_keyword_library_status", {})
+    )
+    plan_result = asyncio.run(
+        registry.execute_read(
+            "project-1", "get_content_plan_status", {"batch_id": "batch-1"}
+        )
+    )
+    article_result = asyncio.run(
+        registry.execute_read("project-1", "get_article_generation_status", {})
+    )
+
+    assert keyword_result["billing"] == {
+        "source": "keyword_external_requests",
+        "reference_id": "keyword-run-1",
+        "reported_cost_usd": 0.15,
+        "complete": True,
+    }
+    assert "total_cost_usd" not in keyword_result["run"]
+    assert plan_result["billing"] == {
+        "source": "content_plan_external_requests",
+        "reference_id": "batch-1",
+        "reported_cost_usd": 0.42,
+        "complete": True,
+    }
+    assert article_result["billing"] == {
+        "source": "article_run_steps",
+        "reference_id": "article-run-1,article-run-2",
+        "reported_cost_usd": 0.42,
+        "estimated_cost_usd": 0.0,
+        "complete": True,
+    }
 
 
 def test_memory_search_requires_a_keyword_or_category() -> None:
@@ -263,6 +878,10 @@ def test_state_changing_tools_invalidate_remaining_calls() -> None:
         "update_business_profile",
         "refresh_business_profile",
         "start_technical_audit",
+        "start_keyword_library",
+        "start_content_plan",
+        "start_articles",
+        "create_article",
         "update_project_memory",
     }
     assert all(
@@ -476,6 +1095,24 @@ def test_start_technical_audit_replay_reuses_the_same_run() -> None:
     assert repeated["already_completed"] is True
     assert repeated["run_id"] == "audit-operation-1"
     assert registry.audits.create_calls == 1
+
+
+def test_start_technical_audit_succeeds_for_project_without_onboarding() -> None:
+    registry = ToolRegistry(
+        Settings(),
+        FakeProjects(),
+        FakeAudits(),
+        onboarding=MissingOnboarding([]),
+    )
+
+    result = asyncio.run(
+        execute_prepared_write(
+            registry, "start_technical_audit", {}, "audit-operation-1"
+        )
+    )
+
+    assert result["verified"] is True
+    assert result["run_id"] == "audit-operation-1"
 
 
 def test_start_technical_audit_replay_treats_a_later_audit_failure_as_created() -> None:

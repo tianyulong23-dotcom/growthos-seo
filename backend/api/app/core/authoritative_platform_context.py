@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from fastapi import Request
 
@@ -122,5 +123,66 @@ class AuthoritativePlatformContextResolver:
                 website_project_key=project.website_project_key,
             ),
             permissions=membership.permissions,
+            correlation_id=correlation_id,
+        )
+
+
+class LocalDevelopmentPlatformContextResolver:
+    _permissions = (
+        "backlinks:read",
+        "backlinks:write",
+        "content:ai_edit",
+        "content:edit",
+        "content:manage_assets",
+        "content:manage_locks",
+        "content:manage_seo_advanced",
+        "content:publish",
+        "content:read",
+        "content:review",
+        "content:submit_review",
+        "content:write",
+    )
+
+    def __init__(self, *, projects: WebsiteProjectAuthority) -> None:
+        self._projects = projects
+
+    async def resolve(
+        self,
+        *,
+        request: Request,
+        website_project_key: str,
+        required_permission: str | None = None,
+    ) -> ResolvedPlatformRequestContext:
+        project = await self._projects.get_by_key(website_project_key)
+        if project is None:
+            raise PlatformContextResolutionError(
+                status=404,
+                code="PLATFORM_PROJECT_NOT_FOUND",
+                title="Platform project not found",
+                detail="The requested Website Project does not exist.",
+            )
+
+        del required_permission
+
+        correlation_id = (
+            request.headers.get("x-request-id", "").strip()
+            or request.headers.get("x-correlation-id", "").strip()
+            or f"local-{uuid4().hex}"
+        )
+        return ResolvedPlatformRequestContext(
+            actor=PlatformActor(
+                user_id="local-user",
+                session_id="local-development",
+                roles=("owner",),
+            ),
+            tenant=PlatformTenant(
+                organization_id=project.organization_id,
+                workspace_id="local",
+            ),
+            project=PlatformProject(
+                website_project_id=project.website_project_id,
+                website_project_key=project.website_project_key,
+            ),
+            permissions=self._permissions,
             correlation_id=correlation_id,
         )

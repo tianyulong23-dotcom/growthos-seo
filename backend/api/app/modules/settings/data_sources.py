@@ -35,6 +35,7 @@ from app.modules.settings.schemas import (
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 CONNECTION_TEST_TIMEOUT_SECONDS = 20
+PLAINTEXT_SECRET_PREFIX = b"plaintext:v1:"
 
 
 class DataSourceProjectNotFoundError(Exception):
@@ -93,27 +94,31 @@ class DataSourceSettingsRepository(Protocol):
     async def get_google_ads(
         self,
         organization_id: str,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GoogleAdsSettingsRecord | None: ...
 
     async def upsert_google_ads(
         self,
         organization_id: str,
         record: GoogleAdsSettingsRecord,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GoogleAdsSettingsRecord: ...
 
     async def get_dataforseo(
         self,
         organization_id: str,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> DataForSEOSettingsRecord | None: ...
 
     async def upsert_dataforseo(
         self,
         organization_id: str,
         record: DataForSEOSettingsRecord,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> DataForSEOSettingsRecord: ...
 
 
@@ -134,25 +139,17 @@ class SQLAlchemyDataSourceSettingsRepository:
     async def get_google_ads(
         self,
         organization_id: str,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GoogleAdsSettingsRecord | None:
         async with self.sessions() as session:
             row = (
                 await session.execute(
                     select(
-                        func.pgp_sym_decrypt(
-                            GoogleAdsProviderSetting.developer_token_encrypted,
-                            encryption_key,
-                        ).label("developer_token"),
+                        GoogleAdsProviderSetting.developer_token_encrypted,
                         GoogleAdsProviderSetting.client_id,
-                        func.pgp_sym_decrypt(
-                            GoogleAdsProviderSetting.client_secret_encrypted,
-                            encryption_key,
-                        ).label("client_secret"),
-                        func.pgp_sym_decrypt(
-                            GoogleAdsProviderSetting.refresh_token_encrypted,
-                            encryption_key,
-                        ).label("refresh_token"),
+                        GoogleAdsProviderSetting.client_secret_encrypted,
+                        GoogleAdsProviderSetting.refresh_token_encrypted,
                         GoogleAdsProviderSetting.customer_id,
                         GoogleAdsProviderSetting.login_customer_id,
                         GoogleAdsProviderSetting.updated_at,
@@ -161,28 +158,56 @@ class SQLAlchemyDataSourceSettingsRepository:
                     )
                 )
             ).one_or_none()
-        if row is None:
-            return None
-        return GoogleAdsSettingsRecord(
-            developer_token=row.developer_token,
-            client_id=row.client_id,
-            client_secret=row.client_secret,
-            refresh_token=row.refresh_token,
-            customer_id=row.customer_id,
-            login_customer_id=row.login_customer_id,
-            updated_at=row.updated_at,
-        )
+            if row is None:
+                return None
+            developer_token = await self._read_secret(
+                session,
+                GoogleAdsProviderSetting.developer_token_encrypted,
+                GoogleAdsProviderSetting.organization_id == organization_id,
+                row.developer_token_encrypted,
+                encryption_key,
+                allow_plaintext,
+            )
+            client_secret = await self._read_secret(
+                session,
+                GoogleAdsProviderSetting.client_secret_encrypted,
+                GoogleAdsProviderSetting.organization_id == organization_id,
+                row.client_secret_encrypted,
+                encryption_key,
+                allow_plaintext,
+            )
+            refresh_token = await self._read_secret(
+                session,
+                GoogleAdsProviderSetting.refresh_token_encrypted,
+                GoogleAdsProviderSetting.organization_id == organization_id,
+                row.refresh_token_encrypted,
+                encryption_key,
+                allow_plaintext,
+            )
+            return GoogleAdsSettingsRecord(
+                developer_token=developer_token,
+                client_id=row.client_id,
+                client_secret=client_secret,
+                refresh_token=refresh_token,
+                customer_id=row.customer_id,
+                login_customer_id=row.login_customer_id,
+                updated_at=row.updated_at,
+            )
 
     async def upsert_google_ads(
         self,
         organization_id: str,
         record: GoogleAdsSettingsRecord,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GoogleAdsSettingsRecord:
+        if not encryption_key and not allow_plaintext:
+            raise DataSourceEncryptionUnavailableError
+        secret_expression = self._secret_expression(encryption_key)
         async with self.sessions() as session:
             await session.execute(
                 text(
-                    """
+                    f"""
                     INSERT INTO google_ads_provider_settings (
                         organization_id,
                         developer_token_encrypted,
@@ -194,22 +219,10 @@ class SQLAlchemyDataSourceSettingsRepository:
                     )
                     VALUES (
                         :organization_id,
-                        pgp_sym_encrypt(
-                            :developer_token,
-                            :encryption_key,
-                            'cipher-algo=aes256, compress-algo=1'
-                        ),
+                        {secret_expression.format(value='developer_token')},
                         :client_id,
-                        pgp_sym_encrypt(
-                            :client_secret,
-                            :encryption_key,
-                            'cipher-algo=aes256, compress-algo=1'
-                        ),
-                        pgp_sym_encrypt(
-                            :refresh_token,
-                            :encryption_key,
-                            'cipher-algo=aes256, compress-algo=1'
-                        ),
+                        {secret_expression.format(value='client_secret')},
+                        {secret_expression.format(value='refresh_token')},
                         :customer_id,
                         :login_customer_id
                     )
@@ -226,16 +239,24 @@ class SQLAlchemyDataSourceSettingsRepository:
                 {
                     "organization_id": organization_id,
                     "developer_token": record.developer_token,
+                    "developer_token_plaintext": PLAINTEXT_SECRET_PREFIX
+                    + record.developer_token.encode("utf-8"),
                     "client_id": record.client_id,
                     "client_secret": record.client_secret,
+                    "client_secret_plaintext": PLAINTEXT_SECRET_PREFIX
+                    + record.client_secret.encode("utf-8"),
                     "refresh_token": record.refresh_token,
+                    "refresh_token_plaintext": PLAINTEXT_SECRET_PREFIX
+                    + record.refresh_token.encode("utf-8"),
                     "customer_id": record.customer_id,
                     "login_customer_id": record.login_customer_id,
                     "encryption_key": encryption_key,
                 },
             )
             await session.commit()
-        saved = await self.get_google_ads(organization_id, encryption_key)
+        saved = await self.get_google_ads(
+            organization_id, encryption_key, allow_plaintext
+        )
         if saved is None:
             raise RuntimeError("Google Ads settings were not saved")
         return saved
@@ -243,41 +264,53 @@ class SQLAlchemyDataSourceSettingsRepository:
     async def get_dataforseo(
         self,
         organization_id: str,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> DataForSEOSettingsRecord | None:
         async with self.sessions() as session:
             row = (
                 await session.execute(
                     select(
                         DataForSEOProviderSetting.login,
-                        func.pgp_sym_decrypt(
-                            DataForSEOProviderSetting.password_encrypted,
-                            encryption_key,
-                        ).label("password"),
+                        DataForSEOProviderSetting.password_encrypted,
                         DataForSEOProviderSetting.updated_at,
                     ).where(
                         DataForSEOProviderSetting.organization_id == organization_id
                     )
                 )
             ).one_or_none()
-        if row is None:
-            return None
-        return DataForSEOSettingsRecord(
-            login=row.login,
-            password=row.password,
-            updated_at=row.updated_at,
-        )
+            if row is None:
+                return None
+            password = await self._read_secret(
+                session,
+                DataForSEOProviderSetting.password_encrypted,
+                DataForSEOProviderSetting.organization_id == organization_id,
+                row.password_encrypted,
+                encryption_key,
+                allow_plaintext,
+            )
+            return DataForSEOSettingsRecord(
+                login=row.login,
+                password=password,
+                updated_at=row.updated_at,
+            )
 
     async def upsert_dataforseo(
         self,
         organization_id: str,
         record: DataForSEOSettingsRecord,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> DataForSEOSettingsRecord:
+        if not encryption_key and not allow_plaintext:
+            raise DataSourceEncryptionUnavailableError
+        secret_expression = self._secret_expression(encryption_key).format(
+            value="password"
+        )
         async with self.sessions() as session:
             await session.execute(
                 text(
-                    """
+                    f"""
                     INSERT INTO dataforseo_provider_settings (
                         organization_id,
                         login,
@@ -286,11 +319,7 @@ class SQLAlchemyDataSourceSettingsRepository:
                     VALUES (
                         :organization_id,
                         :login,
-                        pgp_sym_encrypt(
-                            :password,
-                            :encryption_key,
-                            'cipher-algo=aes256, compress-algo=1'
-                        )
+                        {secret_expression}
                     )
                     ON CONFLICT (organization_id) DO UPDATE SET
                         login = EXCLUDED.login,
@@ -302,14 +331,48 @@ class SQLAlchemyDataSourceSettingsRepository:
                     "organization_id": organization_id,
                     "login": record.login,
                     "password": record.password,
+                    "password_plaintext": PLAINTEXT_SECRET_PREFIX
+                    + record.password.encode("utf-8"),
                     "encryption_key": encryption_key,
                 },
             )
             await session.commit()
-        saved = await self.get_dataforseo(organization_id, encryption_key)
+        saved = await self.get_dataforseo(
+            organization_id, encryption_key, allow_plaintext
+        )
         if saved is None:
             raise RuntimeError("DataForSEO settings were not saved")
         return saved
+
+    @staticmethod
+    def _secret_expression(encryption_key: str | None) -> str:
+        if encryption_key:
+            return (
+                "pgp_sym_encrypt(:{value}, :encryption_key, "
+                "'cipher-algo=aes256, compress-algo=1')"
+            )
+        return ":{value}_plaintext"
+
+    @staticmethod
+    async def _read_secret(
+        session: AsyncSession,
+        column: Any,
+        predicate: Any,
+        stored_value: bytes,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> str:
+        value = bytes(stored_value)
+        if value.startswith(PLAINTEXT_SECRET_PREFIX):
+            if not allow_plaintext:
+                raise DataSourceEncryptionUnavailableError
+            return value.removeprefix(PLAINTEXT_SECRET_PREFIX).decode("utf-8")
+        if not encryption_key:
+            raise DataSourceEncryptionUnavailableError
+        decrypted = await session.scalar(
+            select(func.pgp_sym_decrypt(column, encryption_key)).where(predicate)
+        )
+        return str(decrypted or "")
 
 
 class GoogleAdsConnectionTester(Protocol):
@@ -479,11 +542,16 @@ class GoogleAdsSettingsService:
         request: UpdateGoogleAdsSettingsRequest,
     ) -> GoogleAdsSettingsResponse:
         await self._ensure_project(project_id)
+        encryption_key = self._encryption_key()
+        allow_plaintext = self._allow_plaintext_storage()
+        if not encryption_key and not allow_plaintext:
+            raise DataSourceEncryptionUnavailableError
         record = await self._merged_record(request)
         saved = await self.repository.upsert_google_ads(
             self.settings.default_organization_id,
             record,
-            self._encryption_key(),
+            encryption_key,
+            allow_plaintext,
         )
         return google_ads_response(saved, "database")
 
@@ -524,14 +592,13 @@ class GoogleAdsSettingsService:
     async def _effective_record(
         self,
     ) -> tuple[GoogleAdsSettingsRecord | None, str]:
-        encryption_key = (self.settings.ai_settings_encryption_key or "").strip()
-        if encryption_key:
-            stored = await self.repository.get_google_ads(
-                self.settings.default_organization_id,
-                encryption_key,
-            )
-            if stored is not None:
-                return stored, "database"
+        stored = await self.repository.get_google_ads(
+            self.settings.default_organization_id,
+            self._encryption_key(),
+            self._allow_plaintext_storage(),
+        )
+        if stored is not None:
+            return stored, "database"
         environment = GoogleAdsSettingsRecord(
             developer_token=(self.settings.google_ads_developer_token or "").strip(),
             client_id=(self.settings.google_ads_client_id or "").strip(),
@@ -562,11 +629,15 @@ class GoogleAdsSettingsService:
         ):
             raise DataSourceProjectNotFoundError
 
-    def _encryption_key(self) -> str:
+    def _encryption_key(self) -> str | None:
         value = (self.settings.ai_settings_encryption_key or "").strip()
-        if not value:
-            raise DataSourceEncryptionUnavailableError
-        return value
+        return value or None
+
+    def _allow_plaintext_storage(self) -> bool:
+        return (
+            self.settings.ai_settings_allow_plaintext
+            or self.settings.app_env != "production"
+        )
 
 
 class DataForSEOSettingsService:
@@ -616,11 +687,16 @@ class DataForSEOSettingsService:
         self,
         request: UpdateDataForSEOSettingsRequest,
     ) -> DataForSEOSettingsResponse:
+        encryption_key = self._encryption_key()
+        allow_plaintext = self._allow_plaintext_storage()
+        if not encryption_key and not allow_plaintext:
+            raise DataSourceEncryptionUnavailableError
         record = await self._merged_record(request)
         saved = await self.repository.upsert_dataforseo(
             self.settings.default_organization_id,
             record,
-            self._encryption_key(),
+            encryption_key,
+            allow_plaintext,
         )
         return dataforseo_response(saved, "database")
 
@@ -670,14 +746,13 @@ class DataForSEOSettingsService:
     async def _effective_record_for_organization(
         self, organization_id: str
     ) -> tuple[DataForSEOSettingsRecord | None, str]:
-        encryption_key = (self.settings.ai_settings_encryption_key or "").strip()
-        if encryption_key:
-            stored = await self.repository.get_dataforseo(
-                organization_id,
-                encryption_key,
-            )
-            if stored is not None:
-                return stored, "database"
+        stored = await self.repository.get_dataforseo(
+            organization_id,
+            self._encryption_key(),
+            self._allow_plaintext_storage(),
+        )
+        if stored is not None:
+            return stored, "database"
         environment = DataForSEOSettingsRecord(
             login=(self.settings.dataforseo_login or "").strip(),
             password=(self.settings.dataforseo_password or "").strip(),
@@ -693,11 +768,15 @@ class DataForSEOSettingsService:
         ):
             raise DataSourceProjectNotFoundError
 
-    def _encryption_key(self) -> str:
+    def _encryption_key(self) -> str | None:
         value = (self.settings.ai_settings_encryption_key or "").strip()
-        if not value:
-            raise DataSourceEncryptionUnavailableError
-        return value
+        return value or None
+
+    def _allow_plaintext_storage(self) -> bool:
+        return (
+            self.settings.ai_settings_allow_plaintext
+            or self.settings.app_env != "production"
+        )
 
 
 def google_ads_response(

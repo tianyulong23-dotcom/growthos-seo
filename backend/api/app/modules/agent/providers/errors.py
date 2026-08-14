@@ -9,6 +9,7 @@ class ProviderErrorDetails:
     retryable: bool
     status_code: int | None = None
     retry_after_seconds: float | None = None
+    request_not_submitted: bool = False
 
 
 class ProviderError(Exception):
@@ -20,6 +21,7 @@ class ProviderError(Exception):
         retryable: bool,
         status_code: int | None = None,
         retry_after_seconds: float | None = None,
+        request_not_submitted: bool = False,
     ) -> None:
         super().__init__(message)
         self.details = ProviderErrorDetails(
@@ -27,6 +29,7 @@ class ProviderError(Exception):
             retryable=retryable,
             status_code=status_code,
             retry_after_seconds=retry_after_seconds,
+            request_not_submitted=request_not_submitted,
         )
 
     @property
@@ -44,3 +47,7 @@ class ProviderError(Exception):
     @property
     def retry_after_seconds(self) -> float | None:
         return self.details.retry_after_seconds
+
+    @property
+    def request_not_submitted(self) -> bool:
+        return self.details.request_not_submitted

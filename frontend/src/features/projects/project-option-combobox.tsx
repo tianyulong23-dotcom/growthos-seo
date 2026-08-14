@@ -16,6 +16,7 @@ import {
   ComboboxValue,
 } from "@/components/ui/combobox"
 import type { ProjectOption } from "@/features/projects/project-options"
+import { cn } from "@/lib/utils"
 
 type ProjectOptionComboboxProps = {
   value: string
@@ -25,6 +26,8 @@ type ProjectOptionComboboxProps = {
   searchPlaceholder: string
   emptyText: string
   ariaLabel: string
+  disabled?: boolean
+  triggerClassName?: string
 }
 
 export function ProjectOptionCombobox({
@@ -35,6 +38,8 @@ export function ProjectOptionCombobox({
   searchPlaceholder,
   emptyText,
   ariaLabel,
+  disabled = false,
+  triggerClassName,
 }: ProjectOptionComboboxProps) {
   const [query, setQuery] = useState("")
   const selectedOption =
@@ -106,8 +111,12 @@ export function ProjectOptionCombobox({
           <Button
             type="button"
             variant="outline"
-            className="w-full justify-between px-3 font-normal"
+            className={cn(
+              "w-full justify-between px-3 font-normal",
+              triggerClassName
+            )}
             aria-label={ariaLabel}
+            disabled={disabled}
           />
         }
       >

@@ -24,6 +24,16 @@ export type AgentMessage = {
   streamError?: string | null
 }
 
+export type AgentDisplayPart =
+  | { type: "text"; text: string }
+  | {
+      type: "tool"
+      toolCallId?: string
+      tool: string
+      label: string
+      status: "completed" | "failed" | "interrupted"
+    }
+
 export type AgentAction = {
   id: string
   runId: string
@@ -63,11 +73,18 @@ export type AgentRun = {
 
 export type AgentRunStep = {
   sequence: number
-  stepType: "model" | "tool" | "action" | "execution" | "verification" | "cancellation"
+  stepType:
+    | "model"
+    | "tool"
+    | "action"
+    | "execution"
+    | "verification"
+    | "cancellation"
+    | "budget"
   name: string
   label: string
   summary: string | null
-  status: "running" | "completed" | "failed" | "cancelled"
+  status: "running" | "waiting" | "completed" | "failed" | "cancelled"
   input: Record<string, unknown>
   output: Record<string, unknown>
   durationMs: number | null
@@ -82,9 +99,25 @@ export type AgentConversation = {
   updatedAt: string
 }
 
+export type AgentTimelineEvent = {
+  id: string
+  eventKey: string
+  conversationId: string | null
+  sequence: number
+  kind: "message" | "task" | "action"
+  status: "running" | "waiting" | "completed" | "failed" | "cancelled"
+  title: string
+  content: string | null
+  action: Record<string, unknown>
+  metadata: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+}
+
 export type AgentConversationDetail = {
   conversation: AgentConversation
   messages: AgentMessage[]
+  timeline: AgentTimelineEvent[]
   run: AgentRun | null
   action: AgentAction | null
   runtime?: AgentRuntime
@@ -137,6 +170,7 @@ export type AgentAssistantMessageEvent =
 
 export type AgentRuntimeMessage = {
   id: string
+  order?: number
   phase: "decision" | "final"
   attempt: number
   round: number | null
@@ -154,9 +188,20 @@ export type AgentRuntimeMessage = {
 
 export type AgentRuntimeTool = {
   toolCallId: string
+  order?: number
   toolName: string
   attempt: number
-  stage: "claimed" | "running" | "writing" | "verifying" | "retrying" | "completed" | "failed" | "rejected" | "cancelled" | "recovered"
+  stage:
+    | "claimed"
+    | "running"
+    | "writing"
+    | "verifying"
+    | "retrying"
+    | "completed"
+    | "failed"
+    | "rejected"
+    | "cancelled"
+    | "recovered"
   isError: boolean
   summary: string
   errorCode: string
@@ -165,7 +210,8 @@ export type AgentRuntimeTool = {
 
 export type AgentRuntime = {
   runId: string
-  agentStatus: "running" | "completed" | "failed" | "cancelled" | "limit_reached"
+  agentStatus:
+    "running" | "completed" | "failed" | "cancelled" | "limit_reached"
   activeRound: number | null
   messages: AgentRuntimeMessage[]
   tools: AgentRuntimeTool[]

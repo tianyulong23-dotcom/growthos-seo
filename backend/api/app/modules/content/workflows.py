@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 
@@ -20,12 +21,35 @@ ARTICLE_STAGES = (
     ("collecting", 15),
     ("competitor_research", 30),
     ("planning", 45),
-    ("writing", 65),
-    ("editing", 80),
 )
 MAX_REPAIR_ITERATIONS = 3
 RETRY_INITIAL_SECONDS = 5
 RETRY_MAX_SECONDS = 60
+MAX_STAGE_RECOVERY_ATTEMPTS = 3
+MAX_BUSY_ATTEMPTS = 12
+MAX_FINISH_ATTEMPTS = 5
+MAX_FAILURE_PERSIST_ATTEMPTS = 3
+AI_EDIT_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=5),
+    maximum_attempts=3,
+)
+
+
+@workflow.defn(name="ArticleAIEditWorkflow")
+class ArticleAIEditWorkflow:
+    @workflow.run
+    async def run(self, payload: dict[str, Any]) -> None:
+        if set(payload) != {"operation_id"}:
+            raise ValueError("ArticleAIEditWorkflow only accepts operation_id")
+        await workflow.execute_activity(
+            "article_ai_edit_execute",
+            {"operation_id": str(payload["operation_id"])},
+            start_to_close_timeout=timedelta(minutes=5),
+            heartbeat_timeout=timedelta(seconds=30),
+            retry_policy=AI_EDIT_RETRY,
+        )
 
 
 def retry_delay(attempt: int) -> float:
@@ -36,6 +60,157 @@ def retry_delay(attempt: int) -> float:
 class ArticleGenerationWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> None:
+        if set(payload) != {"run_id"}:
+            raise ValueError("ArticleGenerationWorkflow only accepts run_id")
+        run_id = str(payload["run_id"])
+        started = await self._call("content_begin_run", {"run_id": run_id})
+        if started is None or started.get("status") != "running":
+            return
+
+        warnings: list[dict[str, str]] = []
+        for step_key, progress in ARTICLE_STAGES:
+            result = await self._run_stage(
+                run_id,
+                step_key=step_key,
+                stage_kind=step_key,
+                progress=progress,
+            )
+            if result is None or result.get("status") == "cancelled":
+                return
+            self._append_warnings(warnings, result)
+
+        writing_task = asyncio.create_task(
+            self._run_stage(
+                run_id,
+                step_key="writing",
+                stage_kind="writing",
+                progress=65,
+            )
+        )
+        visual_task = asyncio.create_task(
+            self._run_stage(
+                run_id,
+                step_key="visual_resolving",
+                stage_kind="visual_resolving",
+                progress=55,
+            )
+        )
+        result = await writing_task
+        if result is None or result.get("status") == "cancelled":
+            await visual_task
+            return
+        self._append_warnings(warnings, result)
+
+        result = await self._run_stage(
+            run_id,
+            step_key="editing",
+            stage_kind="editing",
+            input_step_key="writing",
+            progress=80,
+        )
+        if result is None or result.get("status") == "cancelled":
+            return
+        self._append_warnings(warnings, result)
+
+        result = await self._run_stage(
+            run_id,
+            step_key="checking_1",
+            stage_kind="checking",
+            input_step_key="editing",
+            repair_iteration=0,
+            progress=88,
+        )
+        if result is None or result.get("status") == "cancelled":
+            return
+        self._append_warnings(warnings, result)
+
+        blocking_issue_codes = self._blocking_issue_codes(result)
+        if blocking_issue_codes:
+            detail = (
+                "generated article contains fallback sections"
+                if "fallback_section" in blocking_issue_codes
+                else "generated article did not pass blocking quality checks"
+            )
+            await self._mark_failed(
+                run_id,
+                error_code="article_quality_blocked",
+                error_detail=detail,
+                failed_stage="checking",
+                retryable=True,
+            )
+            return
+
+        if not self._checking_passed(result) and self._checking_repairable(result):
+            warnings.append(
+                {
+                    "code": "quality_issues_remaining",
+                    "message": "The complete article was saved with deterministic quality warnings.",
+                }
+            )
+        if self._evidence_issue_count(result) > 0:
+            warnings.append(
+                {
+                    "code": "quality_evidence_gaps",
+                    "message": "The complete article was saved with evidence-gap warnings.",
+                }
+            )
+        if self._content_score_passed(result) is True:
+            warnings = [
+                item
+                for item in warnings
+                if item.get("code") != "content_quality_below_threshold"
+            ]
+
+        visual_result = await visual_task
+        if visual_result is None or visual_result.get("status") == "cancelled":
+            return
+        self._append_warnings(warnings, visual_result)
+
+        result = await self._run_stage(
+            run_id,
+            step_key="visual_assembling",
+            stage_kind="visual_assembling",
+            input_step_key="checking_1",
+            progress=96,
+        )
+        if result is None or result.get("status") == "cancelled":
+            return
+        self._append_warnings(warnings, result)
+
+        result = await self._run_stage(
+            run_id,
+            step_key="visual_checking",
+            stage_kind="visual_checking",
+            input_step_key="visual_assembling",
+            progress=98,
+        )
+        if result is None or result.get("status") == "cancelled":
+            return
+        self._append_warnings(warnings, result)
+
+        finish_payload = {
+            "run_id": run_id,
+            "status": "completed_with_warnings" if warnings else "completed",
+            "warnings": warnings,
+            "final_step_key": "visual_checking",
+        }
+        for finish_attempt in range(MAX_FINISH_ATTEMPTS):
+            try:
+                await self._call("content_finish_run", finish_payload)
+                return
+            except ActivityError:
+                if finish_attempt + 1 >= MAX_FINISH_ATTEMPTS:
+                    break
+                await self._sleep(retry_delay(finish_attempt))
+        await self._mark_failed(
+            run_id,
+            error_code="article_finish_exhausted",
+            error_detail="generated article could not be finalized after bounded retries",
+            failed_stage="finalizing",
+            retryable=True,
+        )
+
+    async def _run_with_quality_revisions(self, payload: dict[str, Any]) -> None:
         if set(payload) != {"run_id"}:
             raise ValueError("ArticleGenerationWorkflow only accepts run_id")
         run_id = str(payload["run_id"])
@@ -69,10 +244,12 @@ class ArticleGenerationWorkflow:
         self._append_warnings(warnings, result)
         checking_passed = self._checking_passed(result)
         checking_repairable = self._checking_repairable(result)
+        blocking_issue_codes = self._blocking_issue_codes(result)
         evidence_issue_count = self._evidence_issue_count(result)
         content_score_passed = self._content_score_passed(result)
         previous_repairable_fingerprint = self._repairable_fingerprint(result)
         previous_repairable_count = self._repairable_issue_count(result)
+        best_check_key = check_key
         repaired = False
         converged = False
 
@@ -108,6 +285,7 @@ class ArticleGenerationWorkflow:
             self._append_warnings(warnings, result)
             checking_passed = self._checking_passed(result)
             checking_repairable = self._checking_repairable(result)
+            blocking_issue_codes = self._blocking_issue_codes(result)
             evidence_issue_count = self._evidence_issue_count(result)
             latest_content_score_passed = self._content_score_passed(result)
             if latest_content_score_passed is not None:
@@ -133,8 +311,24 @@ class ArticleGenerationWorkflow:
             ):
                 converged = True
                 break
+            best_check_key = check_key
             previous_repairable_fingerprint = current_fingerprint
             previous_repairable_count = current_count
+
+        if blocking_issue_codes:
+            detail = (
+                "generated article contains fallback sections"
+                if "fallback_section" in blocking_issue_codes
+                else "generated article did not pass blocking quality checks"
+            )
+            await self._mark_failed(
+                run_id,
+                error_code="article_quality_blocked",
+                error_detail=detail,
+                failed_stage="checking",
+                retryable=True,
+            )
+            return
 
         if checking_passed and repaired:
             warnings = self._clear_resolved_quality_warnings(warnings)
@@ -170,14 +364,23 @@ class ArticleGenerationWorkflow:
             "status": "completed_with_warnings" if warnings else "completed",
             "warnings": warnings,
         }
-        finish_attempt = 0
-        while True:
+        if best_check_key != check_key:
+            finish_payload["final_step_key"] = best_check_key
+        for finish_attempt in range(MAX_FINISH_ATTEMPTS):
             try:
                 await self._call("content_finish_run", finish_payload)
-                break
+                return
             except ActivityError:
+                if finish_attempt + 1 >= MAX_FINISH_ATTEMPTS:
+                    break
                 await self._sleep(retry_delay(finish_attempt))
-                finish_attempt += 1
+        await self._mark_failed(
+            run_id,
+            error_code="article_finish_exhausted",
+            error_detail="generated article could not be finalized after bounded retries",
+            failed_stage="finalizing",
+            retryable=True,
+        )
 
     async def _run_stage(
         self,
@@ -198,23 +401,69 @@ class ArticleGenerationWorkflow:
         }
         if input_step_key:
             payload["input_step_key"] = input_step_key
-        busy_attempt = 0
-        while True:
+        for busy_attempt in range(MAX_BUSY_ATTEMPTS):
             try:
                 result = await self._call("content_execute_stage", payload)
             except ActivityError:
-                recovery_attempt = 0
-                while True:
+                result = None
+                for recovery_attempt in range(MAX_STAGE_RECOVERY_ATTEMPTS):
                     try:
                         result = await self._call("content_recover_stage", payload)
                         break
                     except ActivityError:
+                        if recovery_attempt + 1 >= MAX_STAGE_RECOVERY_ATTEMPTS:
+                            break
                         await self._sleep(retry_delay(recovery_attempt))
-                        recovery_attempt += 1
+                if result is None:
+                    await self._mark_failed(
+                        run_id,
+                        error_code="article_stage_recovery_exhausted",
+                        error_detail=(
+                            f"{stage_kind} could not be recovered after bounded retries"
+                        ),
+                        failed_stage=stage_kind,
+                        retryable=True,
+                    )
+                    return None
             if result is None or result.get("status") != "busy":
                 return result
-            await self._sleep(retry_delay(busy_attempt))
-            busy_attempt += 1
+            if busy_attempt + 1 >= MAX_BUSY_ATTEMPTS:
+                break
+            lease_wait = float(result.get("retry_after_seconds") or 0)
+            await self._sleep(max(retry_delay(busy_attempt), lease_wait))
+        await self._mark_failed(
+            run_id,
+            error_code="article_stage_busy_exhausted",
+            error_detail=f"{stage_kind} remained busy beyond the bounded wait",
+            failed_stage=stage_kind,
+            retryable=True,
+        )
+        return None
+
+    async def _mark_failed(
+        self,
+        run_id: str,
+        *,
+        error_code: str,
+        error_detail: str,
+        failed_stage: str,
+        retryable: bool,
+    ) -> None:
+        payload = {
+            "run_id": run_id,
+            "error_code": error_code,
+            "error_detail": error_detail,
+            "failed_stage": failed_stage,
+            "retryable": retryable,
+        }
+        for attempt in range(MAX_FAILURE_PERSIST_ATTEMPTS):
+            try:
+                await self._call("content_fail_run", payload)
+                return
+            except ActivityError:
+                if attempt + 1 >= MAX_FAILURE_PERSIST_ATTEMPTS:
+                    raise
+                await self._sleep(retry_delay(attempt))
 
     @staticmethod
     def _checking_passed(result: dict[str, Any]) -> bool:
@@ -243,6 +492,16 @@ class ArticleGenerationWorkflow:
         if not isinstance(checking_result, dict):
             return 0
         return int(checking_result.get("evidence_issue_count") or 0)
+
+    @staticmethod
+    def _blocking_issue_codes(result: dict[str, Any]) -> set[str]:
+        checking_result = result.get("result")
+        if not isinstance(checking_result, dict):
+            return set()
+        values = checking_result.get("blocking_issue_codes")
+        if not isinstance(values, list):
+            return set()
+        return {str(item) for item in values if str(item)}
 
     @staticmethod
     def _content_score_passed(result: dict[str, Any]) -> bool | None:

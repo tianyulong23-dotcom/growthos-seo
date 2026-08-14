@@ -958,7 +958,7 @@ def test_serp_raw_storage_failure_keeps_normalized_result(
     )
 
 
-def test_collection_keeps_all_independent_source_warnings(
+def test_collection_only_collects_internal_and_serp_before_brand_research(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def internal(*_: Any, **__: Any) -> tuple[str, int]:
@@ -967,11 +967,12 @@ def test_collection_keeps_all_independent_source_warnings(
     async def serp(*_: Any, **__: Any) -> tuple[str, int]:
         return "dataforseo_unavailable", 0
 
-    async def research(*_: Any, **__: Any) -> tuple[str, int]:
-        return "research_unavailable", 0
-
     monkeypatch.setattr(collection, "_collect_internal", internal)
     monkeypatch.setattr(collection, "_collect_serp", serp)
+
+    async def research(*_: Any, **__: Any) -> tuple[str, int]:
+        raise AssertionError("brand research must run after competitor collection")
+
     monkeypatch.setattr(collection, "_collect_research", research)
 
     repo = FakeSourceRepository()
@@ -991,18 +992,22 @@ def test_collection_keeps_all_independent_source_warnings(
     assert [item["code"] for item in result["warnings"]] == [
         "internal_sources_unavailable",
         "dataforseo_unavailable",
-        "research_unavailable",
     ]
+    assert result["summary"] == {
+        "internal_sources_unavailable": 0,
+        "dataforseo_unavailable": 0,
+    }
 
 
-def test_collection_starts_research_without_waiting_for_dataforseo(
+def test_collection_runs_internal_and_serp_in_parallel_without_early_research(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     serp_started = asyncio.Event()
-    research_started = asyncio.Event()
+    internal_started = asyncio.Event()
     release_serp = asyncio.Event()
 
     async def internal(*_: Any, **__: Any) -> tuple[str | None, int]:
+        internal_started.set()
         return None, 0
 
     async def serp(*_: Any, **__: Any) -> tuple[str | None, int]:
@@ -1011,8 +1016,7 @@ def test_collection_starts_research_without_waiting_for_dataforseo(
         return None, 0
 
     async def research(*_: Any, **__: Any) -> tuple[str | None, int]:
-        research_started.set()
-        return None, 0
+        raise AssertionError("brand research must run after competitor collection")
 
     monkeypatch.setattr(collection, "_collect_internal", internal)
     monkeypatch.setattr(collection, "_collect_serp", serp)
@@ -1031,7 +1035,7 @@ def test_collection_starts_research_without_waiting_for_dataforseo(
             )
         )
         await asyncio.wait_for(serp_started.wait(), timeout=1)
-        await asyncio.wait_for(research_started.wait(), timeout=1)
+        await asyncio.wait_for(internal_started.wait(), timeout=1)
         assert not task.done()
         release_serp.set()
         return await task
@@ -1143,12 +1147,15 @@ def test_research_request_requires_opened_page_evidence(
     prompt = json.loads(captured["input"])
     instructions = prompt["instructions"]
     assert captured["include"] == ["web_search_call.action.sources"]
-    assert "open each candidate source page" in instructions
-    assert "find-in-page" in instructions
+    assert "open useful result pages" in instructions
     assert "EXACT_QUOTE" in instructions
+    assert "untrusted data" not in instructions
+    assert "number, price, date, or strong conclusion" not in instructions
+    assert "Return at most three" not in instructions
 
 
 def test_research_gateway_limits_fixed_question_concurrency() -> None:
+    request = ResearchRequest("solar battery", "US", "en")
     gateway = ResearchGateway(
         ResearchProviderConfig("responses", "https://primary", "key", "primary"),
         ResearchProviderConfig("", "", "", ""),
@@ -1189,7 +1196,7 @@ def test_research_gateway_limits_fixed_question_concurrency() -> None:
 
     async def scenario() -> ResearchResult:
         task = asyncio.create_task(
-            gateway.research(ResearchRequest("solar battery", "US", "en"))
+            gateway.research(request)
         )
         await asyncio.wait_for(two_started.wait(), timeout=1)
         await asyncio.sleep(0)
@@ -1199,7 +1206,7 @@ def test_research_gateway_limits_fixed_question_concurrency() -> None:
 
     result = asyncio.run(scenario())
 
-    assert len(result.queries) == 4
+    assert len(result.queries) == len(research_questions(request))
     assert max_active == 2
 
 
@@ -1344,6 +1351,7 @@ def test_research_gateway_does_not_retry_permanent_http_failures(status: int) ->
 
 
 def test_research_gateway_opens_primary_circuit_and_keeps_fallback_results() -> None:
+    research_request = ResearchRequest("solar battery", "US", "en")
     gateway = ResearchGateway(
         ResearchProviderConfig("responses", "https://primary", "key", "primary"),
         ResearchProviderConfig("responses", "https://fallback", "key", "fallback"),
@@ -1374,20 +1382,23 @@ def test_research_gateway_opens_primary_circuit_and_keeps_fallback_results() -> 
         )
 
     gateway._request = request  # type: ignore[method-assign]
-    result = asyncio.run(gateway.research(ResearchRequest("solar battery", "US", "en")))
+    result = asyncio.run(gateway.research(research_request))
 
-    assert calls == {"primary": 2, "fallback": 4}
+    question_count = len(research_questions(research_request))
+    assert calls == {"primary": min(2, question_count), "fallback": question_count}
     assert result.failed_queries == []
     assert result.model == "fallback"
 
 
 def test_research_gateway_keeps_successful_questions_when_one_fails() -> None:
+    research_request = ResearchRequest("solar battery", "US", "en")
     gateway = ResearchGateway(
         ResearchProviderConfig("responses", "https://primary", "key", "primary"),
         ResearchProviderConfig("", "", "", ""),
         10,
     )
-    failed_question = research_questions(ResearchRequest("solar battery", "US", "en"))[1]
+    questions = research_questions(research_request)
+    failed_question = questions[1]
 
     async def research_question(
         _request: ResearchRequest, question: str
@@ -1403,14 +1414,15 @@ def test_research_gateway_keeps_successful_questions_when_one_fails() -> None:
         )
 
     gateway._research_question = research_question  # type: ignore[method-assign]
-    result = asyncio.run(gateway.research(ResearchRequest("solar battery", "US", "en")))
+    result = asyncio.run(gateway.research(research_request))
 
     assert result.failed_queries == [failed_question]
-    assert len(result.queries) == 4
+    assert len(result.queries) == len(questions)
     assert result.citations
 
 
 def test_research_gateway_retains_sanitized_primary_and_fallback_failures() -> None:
+    research_request = ResearchRequest("solar battery", "US", "en")
     gateway = ResearchGateway(
         ResearchProviderConfig("responses", "https://primary", "primary-secret", "primary"),
         ResearchProviderConfig("responses", "https://fallback", "fallback-secret", "fallback"),
@@ -1429,18 +1441,19 @@ def test_research_gateway_retains_sanitized_primary_and_fallback_failures() -> N
     gateway._request = request  # type: ignore[method-assign]
 
     with pytest.raises(ResearchError) as captured:
-        asyncio.run(gateway.research(ResearchRequest("solar battery", "US", "en")))
+        asyncio.run(gateway.research(research_request))
 
     error = captured.value
     assert error.code == "research_providers_failed"
     details = error.failure_details()
-    assert len(details) == 4
+    question_count = len(research_questions(research_request))
+    assert len(details) == question_count
     assert [item["providers"][0]["code"] for item in details] == [
         "research_http_503"
-    ] * 4
+    ] * question_count
     assert [item["providers"][1]["code"] for item in details] == [
         "research_http_429"
-    ] * 4
+    ] * question_count
     assert all(
         provider["attempts"] == 1
         for item in details
@@ -1541,6 +1554,109 @@ def test_collect_research_persists_bounded_sanitized_failure_details(
     assert "Authorization" not in serialized
 
 
+def test_collect_research_retries_copied_failure_instead_of_treating_it_as_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = FakeUpsertSourceRepository()
+    repo.sources.append(
+        {
+            "source_type": "authority",
+            "url": "research://web/parent-run",
+            "status": "failed",
+            "metadata": {
+                "source": "web_research",
+                "verification_status": "research_failed",
+                "error_code": "research_not_configured",
+                "copied_from_run_id": "parent-run",
+            },
+        }
+    )
+    citation = ResearchCitation(
+        "https://authority.example/source",
+        "Official source",
+        "A supported fact.",
+        claim="A supported fact.",
+        exact_quote="A supported fact.",
+    )
+    calls = 0
+
+    async def research(*_: Any, **__: Any) -> ResearchResult:
+        nonlocal calls
+        calls += 1
+        return ResearchResult("Supported answer", [citation], "responses", "model")
+
+    async def verify(*_: Any, **__: Any) -> list[tuple[ResearchCitation, dict[str, Any]]]:
+        return [
+            (
+                citation,
+                {
+                    "source_tier": "tier_1",
+                    "verification_status": "unreachable",
+                    "verification_method": "crawler_page_unavailable_v1",
+                    "independent_source": False,
+                },
+            )
+        ]
+
+    monkeypatch.setattr(collection.ResearchGateway, "research", research)
+    monkeypatch.setattr(collection, "_verify_research_sources", verify)
+
+    outcome = asyncio.run(
+        collection._collect_research(
+            repo,  # type: ignore[arg-type]
+            Settings(
+                app_env="test",
+                article_research_provider="responses",
+                article_research_base_url="https://research.example/v1",
+                article_research_api_key="key",
+                article_research_model="model",
+            ),
+            "run",
+            "solar battery",
+            {"country": "US", "language": "en"},
+        )
+    )
+
+    assert calls == 1
+    assert outcome == (None, 1)
+    assert any(
+        item["url"] == citation.url and item["status"] == "available"
+        for item in repo.sources
+    )
+
+
+def test_collect_research_reuses_available_web_research_without_verification_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = FakeSourceRepository()
+    repo.sources.append(
+        {
+            "source_type": "authority",
+            "url": "https://research.example/useful-page",
+            "status": "available",
+            "summary": {"research_answer": "Useful research already collected."},
+            "metadata": {"source": "web_research"},
+        }
+    )
+
+    async def research(*_: Any, **__: Any) -> ResearchResult:
+        raise AssertionError("available web research must be reused")
+
+    monkeypatch.setattr(collection.ResearchGateway, "research", research)
+
+    outcome = asyncio.run(
+        collection._collect_research(
+            repo,  # type: ignore[arg-type]
+            Settings(app_env="test"),
+            "run",
+            "solar battery",
+            {"country": "US", "language": "en"},
+        )
+    )
+
+    assert outcome == (None, 1)
+
+
 def test_research_questions_include_observed_paa_and_related_searches() -> None:
     questions = research_questions(
         ResearchRequest(
@@ -1552,11 +1668,10 @@ def test_research_questions_include_observed_paa_and_related_searches() -> None:
     )
 
     assert len(questions) == 4
-    assert "eligible" in questions[0]
-    assert "effective dates" in questions[1]
-    assert "documents" in questions[2]
-    assert "How long do batteries last?" in questions[3]
-    assert "solar battery price" in questions[3]
+    assert questions[0] == "solar battery"
+    assert "How long do batteries last?" in questions
+    assert "solar battery price" in questions
+    assert any("official" in question.casefold() for question in questions)
 
 
 def test_research_gateway_sends_exact_queries_without_broad_expansion() -> None:
@@ -1589,6 +1704,158 @@ def test_research_gateway_sends_exact_queries_without_broad_expansion() -> None:
 
     assert observed == [query]
     assert result.queries == [query]
+
+
+def test_collect_research_runs_brand_tasks_in_parallel_and_keeps_partial_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = FakeUpsertSourceRepository()
+    tasks = [
+        f"Research the brand Brand {index} in GB as one complete brand profile."
+        for index in range(1, 5)
+    ]
+    observed: dict[str, Any] = {}
+    citation = ResearchCitation(
+        "https://brand1.example/plans",
+        "Brand 1 plans",
+        "Brand 1 publishes its current plans.",
+        queries=(tasks[0],),
+        claim="Brand 1 publishes its current plans.",
+        exact_quote="Brand 1 publishes its current plans.",
+    )
+
+    class Gateway:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            observed["timeout_seconds"] = args[2]
+            observed["max_concurrency"] = kwargs["max_concurrency"]
+            observed["timeout_max_retries"] = kwargs["timeout_max_retries"]
+
+        async def research(self, request: ResearchRequest) -> ResearchResult:
+            observed["request"] = request
+            return ResearchResult(
+                "Brand 1 research succeeded.",
+                [citation],
+                "responses",
+                "research-model",
+                queries=tasks,
+                failed_queries=[tasks[-1]],
+                research_failures=[
+                    {
+                        "query": tasks[-1],
+                        "providers": [
+                            {
+                                "provider": "responses",
+                                "model": "research-model",
+                                "code": "research_network_timeout",
+                                "attempts": 1,
+                                "circuit_open": False,
+                            }
+                        ],
+                    }
+                ],
+            )
+
+    async def verify(*_: Any, **__: Any) -> list[tuple[ResearchCitation, dict[str, Any]]]:
+        return [
+            (
+                citation,
+                {
+                    "source_tier": "tier_1",
+                    "verification_status": "verified",
+                    "verification_method": "page_text_match_v1",
+                    "research_excerpt": citation.exact_quote,
+                    "verified_url": citation.url,
+                    "independent_source": True,
+                },
+            )
+        ]
+
+    monkeypatch.setattr(collection, "ResearchGateway", Gateway)
+    monkeypatch.setattr(collection, "_verify_research_sources", verify)
+
+    outcome = asyncio.run(
+        collection._collect_research(
+            repo,  # type: ignore[arg-type]
+            Settings(
+                app_env="test",
+                article_research_provider="responses",
+                article_research_base_url="https://research.example/v1",
+                article_research_api_key="key",
+                article_research_model="model",
+                article_research_timeout_seconds=180,
+                article_research_max_concurrency=2,
+            ),
+            "run",
+            "business phone service",
+            {"country": "GB", "language": "en"},
+            tasks,
+        )
+    )
+
+    assert observed["max_concurrency"] == 4
+    assert observed["timeout_seconds"] == 140
+    assert observed["timeout_max_retries"] == 0
+    request = observed["request"]
+    assert request.questions == tasks
+    assert request.exact_queries is True
+    assert outcome == (None, 1)
+    saved = next(item for item in repo.sources if item["url"] == citation.url)
+    assert saved["metadata"]["failed_queries"] == [tasks[-1]]
+    assert saved["metadata"]["research_failures"][0]["query"] == tasks[-1]
+
+
+def test_collect_research_keeps_search_results_when_verification_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = FakeUpsertSourceRepository()
+    task = "Research the brand North Star in GB as one complete brand profile."
+    citation = ResearchCitation(
+        "https://northstar.example/plans",
+        "North Star plans",
+        "North Star publishes its current plans.",
+        queries=(task,),
+        claim="North Star publishes its current plans.",
+        exact_quote="North Star publishes its current plans.",
+    )
+
+    async def research(*_: Any, **__: Any) -> ResearchResult:
+        return ResearchResult(
+            "North Star research succeeded.",
+            [citation],
+            "responses",
+            "research-model",
+            queries=[task],
+        )
+
+    async def slow_verification(*_: Any, **__: Any) -> Any:
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(collection.ResearchGateway, "research", research)
+    monkeypatch.setattr(collection, "_verify_research_sources", slow_verification)
+    monkeypatch.setattr(collection, "BRAND_RESEARCH_VERIFICATION_SECONDS", 0.01)
+
+    outcome = asyncio.run(
+        collection._collect_research(
+            repo,  # type: ignore[arg-type]
+            Settings(
+                app_env="test",
+                article_research_provider="responses",
+                article_research_base_url="https://research.example/v1",
+                article_research_api_key="key",
+                article_research_model="model",
+            ),
+            "run",
+            "business phone service",
+            {"country": "GB", "language": "en"},
+            [task],
+        )
+    )
+
+    assert outcome == (None, 1)
+    saved = next(item for item in repo.sources if item["url"] == citation.url)
+    assert saved["status"] == "available"
+    assert saved["metadata"]["verification_status"] == "unreachable"
+    assert saved["metadata"]["verification_method"] == "verification_timeout_v1"
 
 
 def test_research_merge_combines_queries_and_excerpts_for_same_url() -> None:
@@ -1980,7 +2247,7 @@ def test_featured_snippet_candidate_does_not_skip_web_research(
     )
 
 
-def test_research_source_verification_keeps_success_when_another_source_fails(
+def test_research_source_verification_keeps_citation_when_body_crawl_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Repository(FakeSourceRepository):
@@ -2044,15 +2311,16 @@ def test_research_source_verification_keeps_success_when_another_source_fails(
         )
     )
 
-    assert outcome == (None, 1)
+    assert outcome == (None, 2)
     assert [item["metadata"]["verification_status"] for item in repo.sources] == [
         "verified",
         "unreachable",
     ]
-    assert [item["status"] for item in repo.sources] == ["available", "failed"]
+    assert [item["status"] for item in repo.sources] == ["available", "available"]
     assert repo.sources[1]["metadata"]["independent_source"] is False
     assert repo.sources[1]["summary"]["research_answer"] == "candidate evidence"
     assert repo.sources[1]["summary"]["research_excerpt"] == ""
+    assert repo.sources[1]["summary"]["research_claim"] == "The program began in 2024."
     assert repo.sources[1]["metadata"]["crawler"]["status"] == "failed"
 
 
@@ -2111,7 +2379,7 @@ def test_duplicate_evidence_is_marked_as_one_echo_cluster(
         )
     )
 
-    assert outcome == (None, 1)
+    assert outcome == (None, 2)
     assert [item["metadata"]["verification_status"] for item in repo.sources] == [
         "verified",
         "echo_duplicate",
@@ -2121,7 +2389,7 @@ def test_duplicate_evidence_is_marked_as_one_echo_cluster(
     )
 
 
-def test_unsourced_numeric_explainer_is_rejected_even_when_wording_matches(
+def test_unsourced_numeric_explainer_remains_available_for_writing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cited_url = "https://blog.example/adoption-statistics"
@@ -2170,7 +2438,8 @@ def test_unsourced_numeric_explainer_is_rejected_even_when_wording_matches(
         )
     )
 
-    assert outcome == ("research_unavailable", 0)
+    assert outcome == (None, 1)
+    assert repo.sources[0]["status"] == "available"
     assert repo.sources[0]["metadata"]["verification_status"] == "rejected_source"
     assert repo.sources[0]["metadata"]["source_rejection_reason"] == (
         "missing_source_trail"
@@ -2399,7 +2668,7 @@ def test_failed_claim_on_same_url_does_not_overwrite_verified_claim(
     ] == ["verified", "not_found"]
 
 
-def test_supplemental_failed_claim_does_not_replace_existing_verified_source(
+def test_supplemental_unverified_claim_is_kept_with_existing_verified_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_url = "https://agency.gov/reports/energy-study"
@@ -2488,7 +2757,7 @@ def test_supplemental_failed_claim_does_not_replace_existing_verified_source(
     )
 
     assert first_outcome == (None, 1)
-    assert supplemental_outcome == ("research_unavailable", 0)
+    assert supplemental_outcome == (None, 1)
     assert len(repo.sources) == 1
     assert repo.sources[0]["status"] == "available"
     assert repo.sources[0]["metadata"]["verification_status"] == "verified"
@@ -2665,8 +2934,8 @@ def test_third_claim_is_compared_with_every_claim_from_the_same_upstream(
         )
     )
 
-    assert outcome == (None, 1)
-    assert [item["status"] for item in repo.sources] == ["available", "failed"]
+    assert outcome == (None, 2)
+    assert [item["status"] for item in repo.sources] == ["available", "available"]
     assert repo.sources[0]["url"] == upstream_url
     assert len(repo.sources[0]["summary"]["verification_claims"]) == 2
     assert repo.sources[1]["metadata"]["verification_status"] == "echo_duplicate"
@@ -2875,7 +3144,7 @@ def test_upstream_source_link_selection_prefers_primary_tiers_and_body_links() -
     ]
 
 
-def test_research_source_verification_rejects_wrong_number_and_keeps_other_source(
+def test_research_source_verification_keeps_diagnostics_without_rejecting_citations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Repository(FakeSourceRepository):
@@ -2939,12 +3208,16 @@ def test_research_source_verification_rejects_wrong_number_and_keeps_other_sourc
         )
     )
 
-    assert outcome == ("research_unavailable", 0)
+    assert outcome == (None, 2)
     assert [item["metadata"]["verification_status"] for item in repo.sources] == [
         "not_found",
         "unreachable",
     ]
-    assert [item["status"] for item in repo.sources] == ["failed", "failed"]
+    assert [item["status"] for item in repo.sources] == ["available", "available"]
+    assert [item["metadata"]["usage_status"] for item in repo.sources] == [
+        "collected",
+        "collected",
+    ]
 
 
 def test_source_verification_matches_exact_numbers_and_rejects_changed_context() -> None:
@@ -3036,7 +3309,7 @@ def test_source_verification_rejects_opposite_polarity_and_direction() -> None:
     )
 
 
-def test_source_verification_limits_twelve_unique_urls_not_claims(
+def test_source_verification_processes_all_unique_urls_and_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     citations: list[ResearchCitation] = []
@@ -3096,11 +3369,75 @@ def test_source_verification_limits_twelve_unique_urls_not_claims(
         )
     )
 
-    assert len(crawled_urls) == 12
-    assert len(set(crawled_urls)) == 12
-    assert crawled_urls[-1] == "https://agency12.gov/report"
-    assert len(outcomes) == 13
-    assert all("agency13.gov" not in citation.url for citation, _ in outcomes)
+    assert len(crawled_urls) == 13
+    assert len(set(crawled_urls)) == 13
+    assert crawled_urls[-1] == "https://agency13.gov/report"
+    assert len(outcomes) == 14
+    assert any("agency13.gov" in citation.url for citation, _ in outcomes)
+
+
+def test_authority_verification_retries_missing_pages_with_full_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://dynamic.example/report"
+    calls: list[str] = []
+
+    async def crawl(
+        _repo: Any,
+        _settings: Settings,
+        _run_id: str,
+        urls: list[str],
+        *,
+        rendering: str = "auto",
+    ) -> list[dict[str, Any]]:
+        calls.append(rendering)
+        if rendering == "auto":
+            return [
+                {
+                    "url": url,
+                    "requested_url": url,
+                    "status": "failed",
+                    "content_ref": None,
+                }
+            ]
+        return [
+            {
+                "url": url,
+                "requested_url": url,
+                "status": "available",
+                "content_ref": "s3://sources/dynamic.txt.gz",
+                "outbound_links": [],
+            }
+        ]
+
+    async def read_text(_self: Any, _reference: str) -> Any:
+        return SimpleNamespace(text="The dynamic report contains the requested fact.")
+
+    monkeypatch.setattr(collection, "_crawl_source_verification_pages", crawl)
+    monkeypatch.setattr(collection.S3TextReader, "read_text", read_text)
+
+    outcomes = asyncio.run(
+        collection._verify_research_sources(
+            FakeSourceRepository(),  # type: ignore[arg-type]
+            Settings(app_env="test"),
+            "run",
+            ResearchResult(
+                "answer",
+                [
+                    ResearchCitation(
+                        url,
+                        "Dynamic report",
+                        "The dynamic report contains the requested fact.",
+                    )
+                ],
+                "responses",
+                "model",
+            ),
+        )
+    )
+
+    assert calls == ["auto", "all"]
+    assert outcomes[0][1]["verification_status"] == "verified"
 
 
 def test_research_collection_degrades_when_primary_and_fallback_fail(
@@ -3133,11 +3470,13 @@ class FakeCompetitorRepository(FakeSourceRepository):
         self.pages = pages
         self.crawl_status = crawl_status
         self.competitor_urls: list[str] = []
+        self.competitor_crawls: list[tuple[list[str], str]] = []
 
     async def ensure_competitor_crawl(
         self, _run_id: str, urls: list[str]
     ) -> tuple[Any, dict[str, Any]]:
         self.competitor_urls = list(urls)
+        self.competitor_crawls.append((list(urls), "auto"))
         return (
             SimpleNamespace(
                 run_id="crawl",
@@ -3149,6 +3488,23 @@ class FakeCompetitorRepository(FakeSourceRepository):
 
     async def list_competitor_pages(self, _crawl_run_id: str) -> list[dict[str, Any]]:
         return self.pages
+
+    async def ensure_source_verification_crawl(
+        self, _run_id: str, urls: list[str], *, rendering: str = "auto"
+    ) -> tuple[Any, dict[str, Any]]:
+        self.competitor_crawls.append((list(urls), rendering))
+        return (
+            SimpleNamespace(
+                run_id=f"crawl-{len(self.competitor_crawls)}",
+                status="completed",
+                temporal_workflow_id=f"crawler:source-verification:{len(self.competitor_crawls)}",
+            ),
+            {
+                "run_id": f"crawl-{len(self.competitor_crawls)}",
+                "type": "source_verification",
+                "rendering": rendering,
+            },
+        )
 
 
 class InterruptingCompetitorRepository(FakeCompetitorRepository):
@@ -3231,6 +3587,37 @@ def competitor_serp_source() -> dict[str, Any]:
     }
 
 
+def test_serp_reference_results_keep_mixed_content_types_in_result_order() -> None:
+    payload = {
+        "organic_results": [
+            {"url": "https://one.example/tool", "title": "Interactive tool"},
+            {"url": "https://two.example/video", "title": "Video result"},
+            {"url": "https://three.example/guide", "title": "Written guide"},
+        ]
+    }
+    analysis = {
+        "dominant_content_type": "How-To Guide",
+        "classified_results": [
+            {"url": "https://one.example/tool", "content_type": "Tool"},
+            {"url": "https://two.example/video", "content_type": "Video"},
+            {"url": "https://three.example/guide", "content_type": "How-To Guide"},
+        ],
+    }
+
+    results = collection._serp_reference_results(
+        payload,
+        analysis,
+        project_domain="project.example",
+        limit=12,
+    )
+
+    assert [item["content_type"] for item in results] == [
+        "Tool",
+        "Video",
+        "How-To Guide",
+    ]
+
+
 @pytest.mark.parametrize(
     ("pages", "warning_code", "available", "failed"),
     [
@@ -3293,6 +3680,139 @@ def test_competitor_collection_keeps_partial_and_total_failure_warnings(
 
     assert result["summary"] == {"available": available, "failed": failed}
     assert result["warnings"][0]["code"] == warning_code
+
+
+def test_competitor_collection_uses_later_serp_sources_when_a_body_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = [
+        {
+            "url": f"https://source-{index}.example/article",
+            "requested_url": f"https://source-{index}.example/article",
+            "title": f"Source {index}",
+            "status": "available",
+            "error_type": None,
+            "content_ref": None if index == 1 else f"s3://bucket/source-{index}.txt.gz",
+            "word_count": 200 if index == 1 else 800,
+        }
+        for index in range(1, 13)
+    ]
+    repo = FakeCompetitorRepository(pages)
+    repo.sources.append(
+        {
+            "source_type": "serp",
+            "status": "available",
+            "summary": {
+                "organic_results": [
+                    {
+                        "url": f"https://source-{index}.example/article",
+                        "content_type": "article",
+                    }
+                    for index in range(1, 13)
+                ],
+                "serp_analysis": {
+                    "dominant_content_type": "article",
+                    "classified_results": [
+                        {
+                            "url": f"https://source-{index}.example/article",
+                            "content_type": "article",
+                        }
+                        for index in range(1, 13)
+                    ],
+                },
+            },
+        }
+    )
+    result = asyncio.run(
+        collection.collect_competitors(
+            repo,  # type: ignore[arg-type]
+            Settings(app_env="test"),
+            {"run_id": "run", "project_snapshot": {"domain": "project.example"}},
+        )
+    )
+
+    stored = {
+        source["url"]: source
+        for source in repo.sources
+        if source["source_type"] == "competitor"
+    }
+    assert repo.competitor_urls == [
+        f"https://source-{index}.example/article" for index in range(1, 13)
+    ]
+    assert stored["https://source-1.example/article"]["status"] == "failed"
+    assert result["summary"] == {"available": 8, "failed": 0}
+    assert result["warnings"] == []
+
+
+def test_competitor_collection_does_not_expand_beyond_reused_serp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_urls = [f"https://initial-{index}.example/article" for index in range(1, 9)]
+    pages_by_crawl = {
+        "crawl": [
+            {
+                "url": url,
+                "requested_url": url,
+                "title": url,
+                "status": "available",
+                "error_type": None,
+                "content_ref": None if index == 1 else f"s3://bucket/initial-{index}.txt.gz",
+                "word_count": 200 if index == 1 else 800,
+            }
+            for index, url in enumerate(initial_urls, 1)
+        ],
+        "crawl-2": [
+            {
+                "url": initial_urls[0],
+                "requested_url": initial_urls[0],
+                "title": "Initial 1 rendered",
+                "status": "available",
+                "error_type": None,
+                "content_ref": None,
+                "word_count": 200,
+            }
+        ],
+    }
+
+    class Repo(FakeCompetitorRepository):
+        async def list_competitor_pages(self, crawl_run_id: str) -> list[dict[str, Any]]:
+            return pages_by_crawl.get(crawl_run_id, [])
+
+    repo = Repo(pages_by_crawl["crawl"])
+    repo.sources.append(
+        {
+            "source_type": "serp",
+            "status": "available",
+            "summary": {
+                "keyword": "live tv streaming sports",
+                "organic_results": [{"url": url} for url in initial_urls],
+            },
+        }
+    )
+
+    async def search(*_: Any, **__: Any) -> Any:
+        raise AssertionError("competitor collection must reuse the existing SERP")
+
+    monkeypatch.setattr(collection.DataForSEOClient, "search", search)
+    result = asyncio.run(
+        collection.collect_competitors(
+            repo,  # type: ignore[arg-type]
+            Settings(app_env="test"),
+            {
+                "run_id": "run",
+                "primary_keyword": "live tv streaming sports",
+                "project_snapshot": {
+                    "domain": "project.example",
+                    "country": "South Africa",
+                    "language": "en",
+                },
+            },
+        )
+    )
+
+    assert result["summary"] == {"available": 7, "failed": 1}
+    assert any(rendering == "all" for _, rendering in repo.competitor_crawls)
+    assert all(set(urls) <= set(initial_urls) for urls, _ in repo.competitor_crawls)
 
 
 def test_competitor_activity_retries_partial_source_sync_without_replaying_stage(
@@ -3408,7 +3928,7 @@ def test_competitor_collection_degrades_when_crawler_worker_is_unavailable(
     assert result["warnings"][0]["code"] == "competitor_sources_unavailable"
 
 
-def test_competitor_collection_crawls_only_dominant_serp_type() -> None:
+def test_competitor_collection_crawls_mixed_serp_types_in_result_order() -> None:
     repo = FakeCompetitorRepository([])
     repo.sources.append(
         {
@@ -3456,6 +3976,7 @@ def test_competitor_collection_crawls_only_dominant_serp_type() -> None:
 
     assert repo.competitor_urls == [
         "https://one.example/how-to",
+        "https://definition.example/article",
         "https://two.example/guide",
     ]
 

@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"encoding/json"
 	"net/url"
 	"sort"
 	"strings"
@@ -9,6 +10,7 @@ import (
 type Candidate struct {
 	URL             *url.URL
 	Depth           int
+	DiscoveryOrder  int
 	DiscoveredFrom  string
 	AnchorText      string
 	Placement       string
@@ -126,7 +128,137 @@ func PageBusinessRole(page Page) BusinessPageRole {
 		[]string{page.Title, page.Description, strings.Join(page.H1, " ")},
 		" ",
 	)
-	return classifyBusinessPage(pageURL, text)
+	role := classifyBusinessPage(pageURL, text)
+	if role == BusinessPageOther && pageHasExplicitPricingEvidence(page) {
+		role = BusinessPagePricing
+	}
+	if role == BusinessPageHomepage || role == BusinessPageAbout ||
+		role == BusinessPagePricing || role == BusinessPageUtility ||
+		role == BusinessPageContent {
+		return role
+	}
+	if pageLooksLikeTutorial(page) {
+		return BusinessPageContent
+	}
+	if pageLooksEditorial(page) &&
+		!(role == BusinessPageProof && pageHasCaseStudyEvidence(page)) {
+		return BusinessPageContent
+	}
+	return role
+}
+
+func pageHasExplicitPricingEvidence(page Page) bool {
+	return containsBusinessTerm(pageBusinessText(page), []string{
+		"pricing plans",
+		"subscription plans",
+		"compare plans",
+		"monthly subscription",
+		"annual subscription",
+		"choose a package",
+		"compare packages",
+	})
+}
+
+func siteUnderstandingPageValue(page Page) int {
+	role := PageBusinessRole(page)
+	score := 0
+	switch role {
+	case BusinessPageHomepage:
+		score = 100
+	case BusinessPageAbout, BusinessPageOffering, BusinessPagePricing:
+		score = 60
+	case BusinessPageProof:
+		score = 50
+	default:
+		return -100
+	}
+
+	text := pageBusinessText(page)
+	if len(strings.Fields(page.MainText)) >= 40 {
+		score += 5
+	}
+	if containsBusinessTerm(text, commercialEvidenceTerms) {
+		score += 10
+	}
+	if pageLooksLikeTutorial(page) {
+		score -= 100
+	}
+	if pageLooksEditorial(page) &&
+		!(role == BusinessPageProof && pageHasCaseStudyEvidence(page)) {
+		score -= 100
+	}
+	return score
+}
+
+func pageBusinessText(page Page) string {
+	return strings.Join([]string{
+		page.Title,
+		page.Description,
+		strings.Join(page.H1, " "),
+		strings.Join(page.H2, " "),
+		strings.Join(page.H3, " "),
+		page.MainText,
+	}, " ")
+}
+
+func pageLooksLikeErrorShell(page Page) bool {
+	text := pageBusinessText(page)
+	return len(strings.Fields(text)) <= 80 && containsErrorShellSignal(text)
+}
+
+func pageLooksLikeTutorial(page Page) bool {
+	text := pageBusinessText(page)
+	return containsBusinessTerm(text, tutorialPageTerms) &&
+		(containsBusinessTerm(text, tutorialActionTerms) ||
+			containsBusinessTerm(text, contentPageTerms))
+}
+
+func pageLooksEditorial(page Page) bool {
+	if strings.TrimSpace(page.Author) != "" || pageHasSchemaType(page, articleSchemaTypes) {
+		return true
+	}
+	text := pageBusinessText(page)
+	return containsBusinessTerm(text, editorialTemplateTerms) ||
+		containsBusinessTerm(text, personalReviewTerms)
+}
+
+func pageHasCaseStudyEvidence(page Page) bool {
+	text := pageBusinessText(page)
+	return containsBusinessTerm(text, caseStudyTerms) &&
+		containsBusinessTerm(text, commercialOutcomeTerms)
+}
+
+func pageHasSchemaType(page Page, wanted map[string]struct{}) bool {
+	for _, raw := range page.StructuredData {
+		var value any
+		if json.Unmarshal(raw, &value) == nil && structuredValueHasType(value, wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func structuredValueHasType(value any, wanted map[string]struct{}) bool {
+	switch node := value.(type) {
+	case []any:
+		for _, child := range node {
+			if structuredValueHasType(child, wanted) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, schemaType := range structuredStrings(node["@type"]) {
+			if _, exists := wanted[strings.ToLower(schemaType)]; exists {
+				return true
+			}
+		}
+		for _, child := range node {
+			if structuredValueHasType(child, wanted) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func classifyBusinessPage(pageURL *url.URL, text string) BusinessPageRole {
@@ -137,16 +269,28 @@ func classifyBusinessPage(pageURL *url.URL, text string) BusinessPageRole {
 	if cleanPath == "" {
 		return BusinessPageHomepage
 	}
-	if normalizedPath := strings.ToLower(cleanPath); normalizedPath == "plan" || normalizedPath == "plans" {
-		return BusinessPagePricing
+	if !strings.Contains(cleanPath, "/") && looksLikeLocalePathSegment(cleanPath) {
+		return BusinessPageHomepage
 	}
 	if isUtilityBusinessPath(cleanPath) {
 		return BusinessPageUtility
+	}
+	if isContentBusinessPath(cleanPath) {
+		return BusinessPageContent
 	}
 	if role := businessRoleFromSignal(cleanPath); role != BusinessPageOther {
 		return role
 	}
 	return businessRoleFromSignal(text)
+}
+
+func isContentBusinessPath(cleanPath string) bool {
+	for _, segment := range strings.Split(strings.ToLower(strings.Trim(cleanPath, "/")), "/") {
+		if containsBusinessTerm(segment, contentPageTerms) {
+			return true
+		}
+	}
+	return false
 }
 
 func isUtilityBusinessPath(cleanPath string) bool {
@@ -163,7 +307,9 @@ func isUtilityBusinessPath(cleanPath string) bool {
 	switch segments[0] {
 	case "help", "support", "customer-service", "customer-support", "customer-care",
 		"faq", "faqs", "returns", "refunds", "shipping", "delivery", "orders",
-		"order-status", "track-order", "accessibility":
+		"order-status", "track-order", "accessibility", "login", "signin", "signup",
+		"register", "account", "cart", "checkout", "privacy", "terms", "cookies",
+		"cookie-policy", "legal", "dmca":
 		return true
 	default:
 		return false
@@ -250,7 +396,7 @@ var offeringPageTerms = []string{
 	"product", "products", "service", "services", "solution", "solutions",
 	"platform", "feature", "features", "capability", "capabilities",
 	"category", "categories", "collection", "collections", "catalog", "shop",
-	"store", "menu",
+	"store", "menu", "download", "downloads",
 	"产品", "服务", "解决方案", "功能", "平台",
 	"producto", "productos", "servicio", "servicios", "soluciones",
 	"produit", "produits", "service", "services", "solutions", "fonctionnalités",
@@ -306,7 +452,7 @@ var contentPageTerms = []string{
 var utilityPageTerms = []string{
 	"login", "signin", "sign in", "signup", "sign up", "register", "cart",
 	"checkout", "account", "privacy", "terms", "cookie", "cookies", "tag",
-	"author", "feed", "search",
+	"author", "feed", "search", "legal", "dmca",
 	"登录", "注册", "购物车", "结账", "账户", "隐私", "条款", "搜索",
 	"iniciar sesión", "registrarse", "carrito", "privacidad", "términos",
 	"connexion", "inscription", "panier", "confidentialité", "conditions",
@@ -314,4 +460,48 @@ var utilityPageTerms = []string{
 	"entrar", "cadastro", "carrinho", "privacidade", "termos",
 	"ログイン", "登録", "カート", "プライバシー", "利用規約",
 	"로그인", "가입", "장바구니", "개인정보", "이용약관",
+}
+
+var articleSchemaTypes = map[string]struct{}{
+	"article": {}, "blogposting": {}, "newsarticle": {}, "review": {},
+}
+
+var tutorialPageTerms = []string{
+	"how to", "step by step", "step-by-step", "installation guide", "setup guide",
+	"instructions", "tutorial", "troubleshooting", "getting started",
+	"操作指南", "安装指南", "分步指南", "教程", "故障排查",
+}
+
+var tutorialActionTerms = []string{
+	"step 1", "step 2", "download and install", "how do i", "follow these steps",
+	"第 1 步", "第一步", "第二步", "下载并安装",
+}
+
+var editorialTemplateTerms = []string{
+	"recent posts", "related posts", "leave a comment", "comments", "published by",
+	"written by", "reading time", "share this article",
+	"近期文章", "相关文章", "发表评论", "阅读时间",
+}
+
+var personalReviewTerms = []string{
+	"my review", "my experience", "why i switched", "why i chose", "i tried",
+	"i tested", "my story", "我的体验", "我的评价", "我为什么选择",
+}
+
+var caseStudyTerms = []string{
+	"case study", "customer story", "customer success", "success story",
+	"client story", "客户案例", "客户故事", "成功案例",
+}
+
+var commercialOutcomeTerms = []string{
+	"increased", "reduced", "improved", "saved", "grew", "growth", "faster",
+	"revenue", "conversion", "productivity", "efficiency", "return on investment",
+	"roi", "提升", "降低", "节省", "增长", "效率", "收入", "转化率",
+}
+
+var commercialEvidenceTerms = []string{
+	"product", "service", "software", "platform", "solution", "application", "app",
+	"subscription", "pricing", "package", "customer", "client", "book a demo",
+	"get a quote", "buy now", "sign up", "产品", "服务", "软件", "平台", "解决方案",
+	"应用", "订阅", "价格", "套餐", "客户", "购买", "预约演示",
 }

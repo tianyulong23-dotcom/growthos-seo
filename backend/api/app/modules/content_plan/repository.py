@@ -32,8 +32,10 @@ from app.modules.content_plan.scheduling import (
     publication_blocked_reason,
 )
 from app.modules.content_plan.recovery import (
+    AUTOMATIC_RETRYABLE_BATCH_ERROR_CODES,
     MANUAL_RETRYABLE_BATCH_ERROR_CODES,
     RECOVERABLE_PREPARATION_ERROR_CODES,
+    USER_RETRYABLE_AUTOMATIC_BATCH_ERROR_CODES,
 )
 from app.modules.keywords.models import Keyword
 from app.modules.projects.models import Project, SiteProfile
@@ -594,9 +596,7 @@ class ContentPlanRepository:
                 str(row[0]): (int(row[1]), int(row[2])) for row in preparation_rows
             }
             item_counts = {str(row[0]): int(row[1]) for row in item_rows}
-            request_counts = {
-                str(row[0]): (int(row[1]), float(row[2])) for row in request_rows
-            }
+            request_counts = {str(row[0]): (int(row[1]), float(row[2])) for row in request_rows}
             return [
                 BatchProgress(
                     batch=batch,
@@ -609,9 +609,7 @@ class ContentPlanRepository:
                 for batch in batches
             ]
 
-    async def get_batch_dispatch_target(
-        self, batch_id: str
-    ) -> BatchDispatchTarget | None:
+    async def get_batch_dispatch_target(self, batch_id: str) -> BatchDispatchTarget | None:
         async with self.sessions() as session:
             row = await session.scalar(
                 select(ContentPlanBatch).where(
@@ -655,7 +653,7 @@ class ContentPlanRepository:
                                 | (
                                     (ContentPlanBatch.status == "needs_attention")
                                     & ContentPlanBatch.error_code.in_(
-                                        RECOVERABLE_PREPARATION_ERROR_CODES
+                                        AUTOMATIC_RETRYABLE_BATCH_ERROR_CODES
                                     )
                                 )
                             ),
@@ -742,10 +740,7 @@ class ContentPlanRepository:
                         ),
                         (
                             ContentPlanPreparation.is_current.is_(True)
-                            | (
-                                ContentPlanItem.pending_preparation_id
-                                == ContentPlanPreparation.id
-                            )
+                            | (ContentPlanItem.pending_preparation_id == ContentPlanPreparation.id)
                         ),
                         (
                             ContentPlanPreparation.state.in_(active_states)
@@ -784,9 +779,7 @@ class ContentPlanRepository:
     ) -> list[ContentPlanCandidate]:
         async with self.sessions() as session:
             batch = await session.scalar(
-                select(ContentPlanBatch)
-                .where(ContentPlanBatch.id == batch_id)
-                .with_for_update()
+                select(ContentPlanBatch).where(ContentPlanBatch.id == batch_id).with_for_update()
             )
             if batch is None:
                 raise ValueError("content plan batch does not exist")
@@ -905,9 +898,7 @@ class ContentPlanRepository:
                     )
                 ).all()
             )
-            last_source_rank = (
-                candidates[-1].source_rank if candidates else after_source_rank
-            )
+            last_source_rank = candidates[-1].source_rank if candidates else after_source_rank
             remaining = await session.scalar(
                 select(ContentPlanCandidate.id)
                 .where(
@@ -918,9 +909,7 @@ class ContentPlanRepository:
             )
             return CandidateWindow(candidates, last_source_rank, remaining is None)
 
-    async def get_retained_candidates(
-        self, batch_id: str
-    ) -> list[ContentPlanCandidate]:
+    async def get_retained_candidates(self, batch_id: str) -> list[ContentPlanCandidate]:
         async with self.sessions() as session:
             return list(
                 (
@@ -978,9 +967,7 @@ class ContentPlanRepository:
             raise ValueError("candidate decisions must have unique IDs")
         async with self.sessions() as session:
             batch = await session.scalar(
-                select(ContentPlanBatch)
-                .where(ContentPlanBatch.id == batch_id)
-                .with_for_update()
+                select(ContentPlanBatch).where(ContentPlanBatch.id == batch_id).with_for_update()
             )
             if batch is None:
                 raise ValueError("content plan batch does not exist")
@@ -1004,9 +991,7 @@ class ContentPlanRepository:
                 row.candidate_window = window_number
                 row.decision = str(value["decision"])
                 row.decision_reason = value.get("decision_reason")
-                row.representative_candidate_id = value.get(
-                    "representative_candidate_id"
-                )
+                row.representative_candidate_id = value.get("representative_candidate_id")
                 row.ai_decision_version = ai_decision_version
             batch.candidate_window_number = window_number
             batch.candidate_cursor_source_rank = last_source_rank
@@ -1075,9 +1060,7 @@ class ContentPlanRepository:
             replacement.selected_plan_order = plan_order
             await session.commit()
 
-    async def get_selected_candidates(
-        self, batch_id: str
-    ) -> list[ContentPlanCandidate]:
+    async def get_selected_candidates(self, batch_id: str) -> list[ContentPlanCandidate]:
         async with self.sessions() as session:
             return list(
                 (
@@ -1156,9 +1139,7 @@ class ContentPlanRepository:
         rows = [ContentPlanCandidate(batch_id=batch_id, **value) for value in values]
         async with self.sessions() as session:
             batch = await session.scalar(
-                select(ContentPlanBatch)
-                .where(ContentPlanBatch.id == batch_id)
-                .with_for_update()
+                select(ContentPlanBatch).where(ContentPlanBatch.id == batch_id).with_for_update()
             )
             if batch is None:
                 raise ValueError("content plan batch does not exist")
@@ -1208,9 +1189,7 @@ class ContentPlanRepository:
             await session.refresh(row)
             return row
 
-    async def supersede_preparation(
-        self, old_preparation_id: str, new_preparation_id: str
-    ) -> None:
+    async def supersede_preparation(self, old_preparation_id: str, new_preparation_id: str) -> None:
         async with self.sessions() as session:
             old = await session.get(ContentPlanPreparation, old_preparation_id)
             if old is None:
@@ -1264,6 +1243,133 @@ class ContentPlanRepository:
             await session.refresh(row)
             return row
 
+    async def replace_preparation_seed(
+        self,
+        *,
+        preparation_id: str,
+        old_preparation_id: str,
+        replacement_candidate_id: str,
+        source_round: str,
+        workflow_id: str,
+        state: str = "expanding",
+    ) -> ContentPlanPreparation:
+        async with self.sessions() as session:
+            batch_id = await session.scalar(
+                select(ContentPlanPreparation.batch_id).where(
+                    ContentPlanPreparation.id == old_preparation_id
+                )
+            )
+            if batch_id is None:
+                raise ValueError("current content plan preparation does not exist")
+            batch = await session.scalar(
+                select(ContentPlanBatch)
+                .where(ContentPlanBatch.id == batch_id)
+                .with_for_update()
+            )
+            if batch is None:
+                raise ValueError("content plan batch does not exist")
+            old = await session.scalar(
+                select(ContentPlanPreparation)
+                .where(ContentPlanPreparation.id == old_preparation_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if old is None:
+                raise ValueError("current content plan preparation does not exist")
+
+            existing = await session.scalar(
+                select(ContentPlanPreparation).where(
+                    ContentPlanPreparation.workflow_id == workflow_id
+                )
+            )
+            if existing is not None:
+                if (
+                    existing.batch_id != old.batch_id
+                    or existing.candidate_id != replacement_candidate_id
+                    or old.superseded_by_id != existing.id
+                ):
+                    raise ValueError("replacement workflow is bound to different data")
+                return existing
+            if not old.is_current:
+                raise ValueError("current content plan preparation does not exist")
+            if replacement_candidate_id == old.candidate_id:
+                raise ValueError("replacement candidate must differ from current seed")
+
+            candidate_ids = {replacement_candidate_id}
+            if old.candidate_id is not None:
+                candidate_ids.add(old.candidate_id)
+            candidates = list(
+                (
+                    await session.scalars(
+                        select(ContentPlanCandidate)
+                        .where(
+                            ContentPlanCandidate.batch_id == old.batch_id,
+                            ContentPlanCandidate.id.in_(candidate_ids),
+                        )
+                        .order_by(ContentPlanCandidate.id)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            candidates_by_id = {candidate.id: candidate for candidate in candidates}
+            replacement = candidates_by_id.get(replacement_candidate_id)
+            if replacement is None or replacement.decision != "kept":
+                raise ValueError("replacement candidate is unavailable")
+            if replacement.selected_plan_order not in {None, old.plan_order}:
+                raise ValueError("replacement candidate is assigned to another plan")
+
+            occupied = await session.scalar(
+                select(ContentPlanCandidate)
+                .where(
+                    ContentPlanCandidate.batch_id == old.batch_id,
+                    ContentPlanCandidate.selected_plan_order == old.plan_order,
+                )
+                .with_for_update()
+            )
+            if occupied is not None and occupied.id not in {
+                old.candidate_id,
+                replacement_candidate_id,
+            }:
+                raise ValueError("plan order is assigned to another candidate")
+            if occupied is not None and occupied.id != replacement_candidate_id:
+                occupied.selected_plan_order = None
+                await session.flush()
+            replacement.selected_plan_order = old.plan_order
+
+            if old.candidate_id is not None:
+                old_candidate = candidates_by_id.get(old.candidate_id)
+                if old_candidate is not None:
+                    old_candidate.selected_plan_order = None
+                    old_candidate.decision = "dropped"
+                    old_candidate.decision_reason = (
+                        f"preparation_{old.error_code or 'invalid'}"
+                    )
+                    old_candidate.representative_candidate_id = None
+
+            old.is_current = False
+            old.state = "superseded"
+            row = ContentPlanPreparation(
+                id=preparation_id,
+                batch_id=old.batch_id,
+                candidate_id=replacement.id,
+                plan_order=old.plan_order,
+                seed_keyword_id=replacement.keyword_id,
+                seed_keyword=replacement.keyword,
+                normalized_seed_keyword=replacement.normalized_keyword,
+                source_round=source_round,
+                preparation_version=old.preparation_version + 1,
+                package_version=1,
+                state=state,
+                workflow_id=workflow_id,
+            )
+            session.add(row)
+            await session.flush()
+            old.superseded_by_id = row.id
+            batch.selected_count = await self._count_retained(session, batch.id)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
     async def set_preparation_state(
         self,
         preparation_id: str,
@@ -1281,9 +1387,151 @@ class ContentPlanRepository:
             row.error_detail = error_detail
             await session.commit()
 
-    async def get_current_preparations(
-        self, batch_id: str
-    ) -> list[ContentPlanPreparation]:
+    async def replace_failed_primary_keyword(
+        self, preparation_id: str, *, max_secondaries: int = 5
+    ) -> ContentPlanPreparationKeyword | None:
+        if max_secondaries < 0:
+            raise ValueError("max_secondaries must be non-negative")
+        async with self.sessions() as session:
+            preparation = await session.scalar(
+                select(ContentPlanPreparation)
+                .where(ContentPlanPreparation.id == preparation_id)
+                .with_for_update()
+            )
+            if preparation is None:
+                raise ValueError("content plan preparation does not exist")
+            batch = await session.scalar(
+                select(ContentPlanBatch)
+                .where(ContentPlanBatch.id == preparation.batch_id)
+                .with_for_update()
+            )
+            if batch is None:
+                raise ValueError("content plan batch does not exist")
+            rows = list(
+                (
+                    await session.scalars(
+                        select(ContentPlanPreparationKeyword)
+                        .where(ContentPlanPreparationKeyword.preparation_id == preparation_id)
+                        .order_by(
+                            ContentPlanPreparationKeyword.provider_position.asc().nulls_last(),
+                            ContentPlanPreparationKeyword.id,
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            current_primary = next((row for row in rows if row.selected_role == "primary"), None)
+            if current_primary is None:
+                raise ValueError("keyword package has no primary keyword")
+            current_primary.exclusion_reason = "serp_primary_failed"
+
+            reserved = {
+                value
+                for value in await session.scalars(
+                    select(ContentPlanPreparationKeyword.normalized_keyword)
+                    .join(
+                        ContentPlanPreparation,
+                        ContentPlanPreparation.id == ContentPlanPreparationKeyword.preparation_id,
+                    )
+                    .where(
+                        ContentPlanPreparation.batch_id == batch.id,
+                        ContentPlanPreparation.is_current.is_(True),
+                        ContentPlanPreparation.id != preparation.id,
+                        ContentPlanPreparationKeyword.selected_role == "primary",
+                    )
+                )
+            }
+            reserved.update(await self._occupied_normalized_keywords(session, batch.project_id))
+            candidates = [
+                row
+                for row in rows
+                if row.id != current_primary.id
+                and row.exclusion_reason != "serp_primary_failed"
+                and row.relevance == "same_topic"
+                and row.keyword_type == "informational"
+                and row.primary_fit in {"strong", "acceptable"}
+                and row.coverage_status == "uncovered"
+                and row.normalized_keyword not in reserved
+            ]
+            candidates.sort(
+                key=lambda row: (
+                    0 if row.primary_fit == "strong" else 1,
+                    -(row.search_volume if row.search_volume is not None else -1),
+                    row.provider_position if row.provider_position is not None else 2**31,
+                    row.normalized_keyword,
+                    row.id,
+                )
+            )
+            if not candidates:
+                await session.commit()
+                return None
+            replacement = candidates[0]
+
+            related_ids = set(
+                await session.scalars(
+                    select(ContentPlanPreparationRelation.secondary_candidate_id).where(
+                        ContentPlanPreparationRelation.preparation_id == preparation.id,
+                        ContentPlanPreparationRelation.primary_candidate_id == replacement.id,
+                    )
+                )
+            )
+            secondaries = [
+                row
+                for row in rows
+                if row.id in related_ids
+                and row.id != replacement.id
+                and row.exclusion_reason != "serp_primary_failed"
+            ]
+            secondaries.sort(
+                key=lambda row: (
+                    0 if row.keyword_type == "informational" else 1,
+                    -(row.search_volume if row.search_volume is not None else -1),
+                    row.provider_position if row.provider_position is not None else 2**31,
+                    row.normalized_keyword,
+                    row.id,
+                )
+            )
+            if not secondaries:
+                secondaries = [
+                    row
+                    for row in rows
+                    if row.id not in {current_primary.id, replacement.id}
+                    and row.exclusion_reason != "serp_primary_failed"
+                    and row.relevance == "same_topic"
+                ]
+                secondaries.sort(
+                    key=lambda row: (
+                        0 if row.keyword_type == "informational" else 1,
+                        -(row.search_volume if row.search_volume is not None else -1),
+                        row.provider_position if row.provider_position is not None else 2**31,
+                        row.normalized_keyword,
+                        row.id,
+                    )
+                )
+            secondaries = secondaries[:max_secondaries]
+
+            for row in rows:
+                row.selected_role = "excluded"
+                row.package_position = None
+            await session.flush()
+            replacement.selected_role = "primary"
+            replacement.package_position = 1
+            replacement.exclusion_reason = None
+            for position, row in enumerate(secondaries, start=2):
+                row.selected_role = "secondary"
+                row.package_position = position
+                row.exclusion_reason = None
+            preparation.selected_primary_candidate_id = replacement.id
+            preparation.package_version += 1
+            preparation.state = "pack_ready"
+            preparation.error_code = None
+            preparation.error_detail = None
+            preparation.last_completed_stage = "keyword_package"
+            await session.commit()
+            await session.refresh(replacement)
+            return replacement
+
+    async def get_current_preparations(self, batch_id: str) -> list[ContentPlanPreparation]:
         async with self.sessions() as session:
             return list(
                 (
@@ -1317,8 +1565,7 @@ class ContentPlanRepository:
                 (
                     await session.scalars(
                         select(ContentPlanPreparationKeyword).where(
-                            ContentPlanPreparationKeyword.preparation_id
-                            == preparation_id
+                            ContentPlanPreparationKeyword.preparation_id == preparation_id
                         )
                     )
                 ).all()
@@ -1382,10 +1629,7 @@ class ContentPlanRepository:
                 (
                     await session.scalars(
                         select(ContentPlanPreparationKeyword)
-                        .where(
-                            ContentPlanPreparationKeyword.preparation_id
-                            == preparation_id
-                        )
+                        .where(ContentPlanPreparationKeyword.preparation_id == preparation_id)
                         .with_for_update()
                     )
                 ).all()
@@ -1417,9 +1661,7 @@ class ContentPlanRepository:
                     setattr(row, field_name, value.get(field_name))
             session.add_all(
                 [
-                    ContentPlanPreparationRelation(
-                        preparation_id=preparation_id, **value
-                    )
+                    ContentPlanPreparationRelation(preparation_id=preparation_id, **value)
                     for value in relation_values
                 ]
             )
@@ -1444,9 +1686,7 @@ class ContentPlanRepository:
     ) -> ContentPlanBatch:
         async with self.sessions() as session:
             batch = await session.scalar(
-                select(ContentPlanBatch)
-                .where(ContentPlanBatch.id == batch_id)
-                .with_for_update()
+                select(ContentPlanBatch).where(ContentPlanBatch.id == batch_id).with_for_update()
             )
             if batch is None:
                 raise ValueError("content plan batch does not exist")
@@ -1571,16 +1811,12 @@ class ContentPlanRepository:
                 preparation.state = "preview_failed" if error_code else "preview_ready"
                 preparation.error_code = error_code
                 preparation.error_detail = error_detail
-                preparation.last_completed_stage = (
-                    "serp_preview" if error_code else "preview"
-                )
+                preparation.last_completed_stage = "serp_preview" if error_code else "preview"
             await session.commit()
             await session.refresh(row)
             return row
 
-    async def create_automatic_plan_items(
-        self, batch_id: str
-    ) -> list[ContentPlanItem]:
+    async def create_automatic_plan_items(self, batch_id: str) -> list[ContentPlanItem]:
         normalized_seeds: list[str] = []
         project_id: str | None = None
         try:
@@ -1646,9 +1882,7 @@ class ContentPlanRepository:
                         await session.scalars(
                             select(ContentPlanPreparationKeyword)
                             .where(
-                                ContentPlanPreparationKeyword.preparation_id.in_(
-                                    preparation_ids
-                                ),
+                                ContentPlanPreparationKeyword.preparation_id.in_(preparation_ids),
                                 ContentPlanPreparationKeyword.selected_role.in_(
                                     ("primary", "secondary")
                                 ),
@@ -1660,9 +1894,9 @@ class ContentPlanRepository:
                         )
                     ).all()
                 )
-                keywords_by_preparation: dict[
-                    str, list[ContentPlanPreparationKeyword]
-                ] = {row.id: [] for row in preparations}
+                keywords_by_preparation: dict[str, list[ContentPlanPreparationKeyword]] = {
+                    row.id: [] for row in preparations
+                }
                 for keyword in keyword_rows:
                     keywords_by_preparation[keyword.preparation_id].append(keyword)
                 snapshot_rows = list(
@@ -1700,9 +1934,7 @@ class ContentPlanRepository:
                             select(ContentPlanItem)
                             .where(
                                 ContentPlanItem.project_id == batch.project_id,
-                                ContentPlanItem.normalized_seed_keyword.in_(
-                                    normalized_seeds
-                                ),
+                                ContentPlanItem.normalized_seed_keyword.in_(normalized_seeds),
                                 ContentPlanItem.status != "cancelled",
                             )
                             .order_by(ContentPlanItem.created_at, ContentPlanItem.id)
@@ -1717,9 +1949,7 @@ class ContentPlanRepository:
                 for preparation in preparations:
                     package = keywords_by_preparation[preparation.id]
                     primary = [row for row in package if row.selected_role == "primary"]
-                    secondaries = [
-                        row for row in package if row.selected_role == "secondary"
-                    ]
+                    secondaries = [row for row in package if row.selected_role == "secondary"]
                     if len(primary) != 1 or len(secondaries) > 5:
                         raise ValueError(
                             "automatic keyword package must contain one primary and up to five secondaries"
@@ -1808,9 +2038,7 @@ class ContentPlanRepository:
                     raise PlanItemConflictError(conflict.id) from exc
             raise
 
-    async def create_manual_plan_item(
-        self, preparation_id: str
-    ) -> ContentPlanItem:
+    async def create_manual_plan_item(self, preparation_id: str) -> ContentPlanItem:
         async with self.sessions() as session:
             preparation = await session.scalar(
                 select(ContentPlanPreparation)
@@ -1834,17 +2062,14 @@ class ContentPlanRepository:
             if existing is not None:
                 return existing
             await session.scalar(
-                select(Project)
-                .where(Project.id == batch.project_id)
-                .with_for_update()
+                select(Project).where(Project.id == batch.project_id).with_for_update()
             )
             package = list(
                 (
                     await session.scalars(
                         select(ContentPlanPreparationKeyword)
                         .where(
-                            ContentPlanPreparationKeyword.preparation_id
-                            == preparation.id,
+                            ContentPlanPreparationKeyword.preparation_id == preparation.id,
                             ContentPlanPreparationKeyword.selected_role.in_(
                                 ("primary", "secondary")
                             ),
@@ -1856,9 +2081,7 @@ class ContentPlanRepository:
             primary = [row for row in package if row.selected_role == "primary"]
             secondaries = [row for row in package if row.selected_role == "secondary"]
             snapshot = (
-                await session.get(
-                    ContentPlanSerpSnapshot, preparation.current_serp_snapshot_id
-                )
+                await session.get(ContentPlanSerpSnapshot, preparation.current_serp_snapshot_id)
                 if preparation.current_serp_snapshot_id
                 else None
             )
@@ -1874,9 +2097,7 @@ class ContentPlanRepository:
                 or snapshot.primary_keyword != primary[0].raw_keyword
             ):
                 raise ValueError("manual_preparation_incomplete")
-            if [row.package_position for row in package] != list(
-                range(1, len(package) + 1)
-            ):
+            if [row.package_position for row in package] != list(range(1, len(package) + 1)):
                 raise ValueError("keyword_package_positions_invalid")
 
             conflict = await self._find_keyword_conflict_in_session(
@@ -1956,18 +2177,14 @@ class ContentPlanRepository:
                     )
                 ).all()
             )
-            snapshot = await session.get(
-                ContentPlanSerpSnapshot, item.current_serp_snapshot_id
-            )
+            snapshot = await session.get(ContentPlanSerpSnapshot, item.current_serp_snapshot_id)
             pending = (
                 await session.get(ContentPlanPreparation, item.pending_preparation_id)
                 if item.pending_preparation_id is not None
                 else None
             )
             article = (
-                await session.get(Article, item.article_id)
-                if item.article_id is not None
-                else None
+                await session.get(Article, item.article_id) if item.article_id is not None else None
             )
             return PlanItemBundle(item, keywords, snapshot, pending, article)
 
@@ -2057,16 +2274,12 @@ class ContentPlanRepository:
                 if pending_ids
                 else {}
             )
-            article_ids = {
-                item.article_id for item in items if item.article_id is not None
-            }
+            article_ids = {item.article_id for item in items if item.article_id is not None}
             articles = (
                 {
                     row.id: row
                     for row in (
-                        await session.scalars(
-                            select(Article).where(Article.id.in_(article_ids))
-                        )
+                        await session.scalars(select(Article).where(Article.id.in_(article_ids)))
                     ).all()
                 }
                 if article_ids
@@ -2098,17 +2311,42 @@ class ContentPlanRepository:
             )
             if batch is None:
                 return None
-            if (
-                batch.status != "needs_attention"
-                or batch.error_code not in MANUAL_RETRYABLE_BATCH_ERROR_CODES
-            ):
+            retryable_error_codes = (
+                USER_RETRYABLE_AUTOMATIC_BATCH_ERROR_CODES
+                if batch.source == "automatic"
+                else MANUAL_RETRYABLE_BATCH_ERROR_CODES
+            )
+            if batch.status != "needs_attention" or batch.error_code not in retryable_error_codes:
                 raise ValueError("content_plan_batch_not_retryable")
+            retry_error_code = batch.error_code
             batch.status = "queued"
             batch.error_code = None
             batch.error_detail = None
             batch.finished_at = None
             preparation_id = None
-            if batch.source == "manual":
+            if batch.source == "automatic" and retry_error_code == "classification_failed":
+                preparations = list(
+                    (
+                        await session.scalars(
+                            select(ContentPlanPreparation)
+                            .where(
+                                ContentPlanPreparation.batch_id == batch.id,
+                                ContentPlanPreparation.is_current.is_(True),
+                                ContentPlanPreparation.plan_item_id.is_(None),
+                                ContentPlanPreparation.state == "classification_failed",
+                            )
+                            .with_for_update()
+                        )
+                    ).all()
+                )
+                if not preparations:
+                    raise ValueError("classification_failed_preparation_missing")
+                for preparation in preparations:
+                    preparation.state = "expanded"
+                    preparation.package_version += 1
+                    preparation.error_code = None
+                    preparation.error_detail = None
+            elif batch.source == "manual":
                 preparation = await session.scalar(
                     select(ContentPlanPreparation)
                     .where(
@@ -2154,9 +2392,7 @@ class ContentPlanRepository:
         secondary_keyword_types: dict[str, str] | None = None,
     ) -> tuple[PlanItemBundle, bool]:
         async with self.sessions() as session:
-            item = await self._locked_scoped_item(
-                session, organization_id, project_id, item_id
-            )
+            item = await self._locked_scoped_item(session, organization_id, project_id, item_id)
             self._validate_item_editable(item, expected_version)
             settings = await session.get(ContentPlanSettings, project_id)
             if settings is None:
@@ -2174,9 +2410,7 @@ class ContentPlanRepository:
                     )
                 ).all()
             )
-            primary = next(
-                (row for row in current_keywords if row.role == "primary"), None
-            )
+            primary = next((row for row in current_keywords if row.role == "primary"), None)
             if primary is None:
                 raise ValueError("plan_input_incomplete")
             if secondary_keywords is not None:
@@ -2215,18 +2449,12 @@ class ContentPlanRepository:
                                 if value in existing
                                 else (secondary_keyword_types or {}).get(value, "unknown")
                             ),
-                            source=(
-                                existing[value].source if value in existing else "user"
-                            ),
+                            source=(existing[value].source if value in existing else "user"),
                             search_volume=(
-                                existing[value].search_volume
-                                if value in existing
-                                else None
+                                existing[value].search_volume if value in existing else None
                             ),
                             keyword_difficulty=(
-                                existing[value].keyword_difficulty
-                                if value in existing
-                                else None
+                                existing[value].keyword_difficulty if value in existing else None
                             ),
                             position=index,
                         )
@@ -2287,9 +2515,7 @@ class ContentPlanRepository:
         primary_keyword: str | None,
     ) -> ContentPlanPreparation:
         async with self.sessions() as session:
-            item = await self._locked_scoped_item(
-                session, organization_id, project_id, item_id
-            )
+            item = await self._locked_scoped_item(session, organization_id, project_id, item_id)
             self._validate_item_editable(item, expected_version)
             pending = (
                 await session.get(ContentPlanPreparation, item.pending_preparation_id)
@@ -2312,16 +2538,12 @@ class ContentPlanRepository:
                 plan_item_id=item.id,
                 plan_order=item.plan_order or 1,
                 seed_keyword=seed_keyword or item.seed_keyword,
-                normalized_seed_keyword=normalize_keyword(
-                    seed_keyword or item.seed_keyword
-                ),
+                normalized_seed_keyword=normalize_keyword(seed_keyword or item.seed_keyword),
                 source_round="edit",
                 preparation_version=next_version,
                 is_current=False,
                 state="expanding" if seed_keyword is not None else "expanded",
-                workflow_id=(
-                    f"content-plan:{item.batch_id}:edit:{item.id}:{next_version}"
-                ),
+                workflow_id=(f"content-plan:{item.batch_id}:edit:{item.id}:{next_version}"),
             )
             session.add(preparation)
             await session.flush()
@@ -2335,8 +2557,7 @@ class ContentPlanRepository:
                 values.extend(
                     (row.keyword, row.normalized_keyword, row.source)
                     for row in current_keywords
-                    if row.role == "secondary"
-                    and row.normalized_keyword != normalized_primary
+                    if row.role == "secondary" and row.normalized_keyword != normalized_primary
                 )
                 session.add_all(
                     [
@@ -2355,9 +2576,7 @@ class ContentPlanRepository:
                             coverage_status="unknown",
                             selected_role="excluded",
                         )
-                        for index, (keyword, normalized, source) in enumerate(
-                            values
-                        )
+                        for index, (keyword, normalized, source) in enumerate(values)
                     ]
                 )
             item.pending_preparation_id = preparation.id
@@ -2368,9 +2587,7 @@ class ContentPlanRepository:
             await session.refresh(preparation)
             return preparation
 
-    async def complete_plan_item_repreparation(
-        self, preparation_id: str
-    ) -> ContentPlanItem:
+    async def complete_plan_item_repreparation(self, preparation_id: str) -> ContentPlanItem:
         async with self.sessions() as session:
             preparation = await session.scalar(
                 select(ContentPlanPreparation)
@@ -2399,8 +2616,7 @@ class ContentPlanRepository:
                     await session.scalars(
                         select(ContentPlanPreparationKeyword)
                         .where(
-                            ContentPlanPreparationKeyword.preparation_id
-                            == preparation.id,
+                            ContentPlanPreparationKeyword.preparation_id == preparation.id,
                             ContentPlanPreparationKeyword.selected_role.in_(
                                 ("primary", "secondary")
                             ),
@@ -2411,9 +2627,7 @@ class ContentPlanRepository:
             )
             primary = [row for row in package if row.selected_role == "primary"]
             snapshot = (
-                await session.get(
-                    ContentPlanSerpSnapshot, preparation.current_serp_snapshot_id
-                )
+                await session.get(ContentPlanSerpSnapshot, preparation.current_serp_snapshot_id)
                 if preparation.current_serp_snapshot_id
                 else None
             )
@@ -2439,9 +2653,7 @@ class ContentPlanRepository:
             if conflict is not None:
                 raise PlanItemConflictError(conflict)
 
-            old = await session.get(
-                ContentPlanPreparation, item.current_preparation_id
-            )
+            old = await session.get(ContentPlanPreparation, item.current_preparation_id)
             if old is not None:
                 old.is_current = False
                 old.state = "superseded"
@@ -2458,9 +2670,7 @@ class ContentPlanRepository:
             if not item.direction_user_edited:
                 item.writing_direction = snapshot.provisional_direction
             await session.execute(
-                delete(ContentPlanItemKeyword).where(
-                    ContentPlanItemKeyword.plan_item_id == item.id
-                )
+                delete(ContentPlanItemKeyword).where(ContentPlanItemKeyword.plan_item_id == item.id)
             )
             session.add_all(
                 [
@@ -2567,14 +2777,10 @@ class ContentPlanRepository:
         expected_version: int,
     ) -> ContentPlanItem:
         async with self.sessions() as session:
-            item = await self._locked_scoped_item(
-                session, organization_id, project_id, item_id
-            )
+            item = await self._locked_scoped_item(session, organization_id, project_id, item_id)
             self._validate_item_editable(item, expected_version)
             if item.pending_preparation_id is not None:
-                pending = await session.get(
-                    ContentPlanPreparation, item.pending_preparation_id
-                )
+                pending = await session.get(ContentPlanPreparation, item.pending_preparation_id)
                 if pending is not None:
                     pending.state = "cancelled"
                     pending.is_current = False
@@ -2594,9 +2800,7 @@ class ContentPlanRepository:
                 (
                     await session.scalars(
                         select(ContentPlanPreparationKeyword)
-                        .where(
-                            ContentPlanPreparationKeyword.preparation_id == preparation_id
-                        )
+                        .where(ContentPlanPreparationKeyword.preparation_id == preparation_id)
                         .order_by(
                             ContentPlanPreparationKeyword.package_position.asc().nulls_last(),
                             ContentPlanPreparationKeyword.provider_position.asc().nulls_last(),
@@ -2699,18 +2903,14 @@ class ContentPlanRepository:
                     )
                 ).all()
             )
-            snapshot = await session.get(
-                ContentPlanSerpSnapshot, item.current_serp_snapshot_id
-            )
+            snapshot = await session.get(ContentPlanSerpSnapshot, item.current_serp_snapshot_id)
             pending = (
                 await session.get(ContentPlanPreparation, item.pending_preparation_id)
                 if item.pending_preparation_id is not None
                 else None
             )
             article = (
-                await session.get(Article, item.article_id)
-                if item.article_id is not None
-                else None
+                await session.get(Article, item.article_id) if item.article_id is not None else None
             )
             return PlanItemBundle(item, keywords, snapshot, pending, article)
 
@@ -2725,6 +2925,7 @@ class ContentPlanRepository:
         endpoint: str,
         request_hash: str,
         round_number: int,
+        legacy_request_key: str | None = None,
     ) -> ContentPlanExternalRequest:
         async with self.sessions() as session:
             existing = await session.scalar(
@@ -2736,6 +2937,18 @@ class ContentPlanRepository:
                 if existing.request_hash != request_hash:
                     raise ValueError("request_key 已绑定不同请求内容")
                 return existing
+            if legacy_request_key is not None:
+                legacy = await session.scalar(
+                    select(ContentPlanExternalRequest).where(
+                        ContentPlanExternalRequest.request_key == legacy_request_key,
+                        ContentPlanExternalRequest.batch_id == batch_id,
+                        ContentPlanExternalRequest.preparation_id == preparation_id,
+                    )
+                )
+                if legacy is not None:
+                    if legacy.request_hash != request_hash:
+                        raise ValueError("request_key 已绑定不同请求内容")
+                    return legacy
             row = ContentPlanExternalRequest(
                 batch_id=batch_id,
                 preparation_id=preparation_id,
@@ -2768,9 +2981,7 @@ class ContentPlanRepository:
                 update(ContentPlanExternalRequest)
                 .where(
                     ContentPlanExternalRequest.request_key == request_key,
-                    ContentPlanExternalRequest.status.in_(
-                        ("prepared", "retryable_failed")
-                    ),
+                    ContentPlanExternalRequest.status.in_(("prepared", "retryable_failed")),
                     ContentPlanExternalRequest.attempt_count < max_attempts,
                 )
                 .values(
@@ -2785,15 +2996,111 @@ class ContentPlanRepository:
             await session.commit()
             return row
 
-    async def get_external_request(
-        self, request_key: str
-    ) -> ContentPlanExternalRequest | None:
+    async def get_external_request(self, request_key: str) -> ContentPlanExternalRequest | None:
         async with self.sessions() as session:
             return await session.scalar(
                 select(ContentPlanExternalRequest).where(
                     ContentPlanExternalRequest.request_key == request_key
                 )
             )
+
+    async def get_completed_external_requests(
+        self,
+        batch_id: str,
+        endpoint: str,
+    ) -> list[ContentPlanExternalRequest]:
+        async with self.sessions() as session:
+            return list(
+                (
+                    await session.scalars(
+                        select(ContentPlanExternalRequest)
+                        .where(
+                            ContentPlanExternalRequest.batch_id == batch_id,
+                            ContentPlanExternalRequest.endpoint == endpoint,
+                            ContentPlanExternalRequest.status == "completed",
+                        )
+                        .order_by(ContentPlanExternalRequest.id.desc())
+                    )
+                ).all()
+            )
+
+    async def record_external_request_submission(
+        self,
+        request_key: str,
+        *,
+        claim_token: str,
+        provider_request_ids: list[str],
+        cost_usd: float,
+        response_metadata: dict[str, Any],
+    ) -> ContentPlanExternalRequest | None:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                update(ContentPlanExternalRequest)
+                .where(
+                    ContentPlanExternalRequest.request_key == request_key,
+                    ContentPlanExternalRequest.status == "submitted",
+                    ContentPlanExternalRequest.claim_token == claim_token,
+                )
+                .values(
+                    provider_request_ids=provider_request_ids,
+                    cost_usd=cost_usd,
+                    response_metadata_json=response_metadata,
+                )
+                .returning(ContentPlanExternalRequest)
+            )
+            await session.commit()
+            return row
+
+    async def take_over_submitted_external_request(
+        self,
+        request_key: str,
+        *,
+        claim_token: str,
+        lease_until: datetime,
+    ) -> ContentPlanExternalRequest | None:
+        now = datetime.now(UTC)
+        async with self.sessions() as session:
+            row = await session.scalar(
+                update(ContentPlanExternalRequest)
+                .where(
+                    ContentPlanExternalRequest.request_key == request_key,
+                    ContentPlanExternalRequest.status == "submitted",
+                    ContentPlanExternalRequest.lease_expires_at <= now,
+                )
+                .values(
+                    claim_token=claim_token,
+                    lease_expires_at=lease_until,
+                )
+                .returning(ContentPlanExternalRequest)
+            )
+            await session.commit()
+            return row
+
+    async def claim_external_request_reconciliation(
+        self,
+        request_key: str,
+        *,
+        claim_token: str,
+        lease_until: datetime,
+    ) -> ContentPlanExternalRequest | None:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                update(ContentPlanExternalRequest)
+                .where(
+                    ContentPlanExternalRequest.request_key == request_key,
+                    ContentPlanExternalRequest.endpoint.like("%/task_post"),
+                    ContentPlanExternalRequest.status.in_(("uncertain", "retryable_failed")),
+                )
+                .values(
+                    status="submitted",
+                    claim_token=claim_token,
+                    lease_expires_at=lease_until,
+                    finished_at=None,
+                )
+                .returning(ContentPlanExternalRequest)
+            )
+            await session.commit()
+            return row
 
     async def fail_external_request(
         self,
@@ -2910,9 +3217,7 @@ class ContentPlanRepository:
         self._validate_timezone(timezone)
         if cadence == "weekly_2_3":
             if cadence_anchor_week is None or cadence_anchor_week.isoweekday() != 1:
-                raise ValueError(
-                    "cadence_anchor_week must be a Monday for weekly_2_3"
-                )
+                raise ValueError("cadence_anchor_week must be a Monday for weekly_2_3")
         elif cadence_anchor_week is not None:
             raise ValueError("cadence_anchor_week is only valid for weekly_2_3")
         async with self.sessions() as session:
@@ -3140,11 +3445,13 @@ class ContentPlanRepository:
                     )
             if cadence_changed and movable:
                 slots = allocate_slots(
-                    count=len(movable), cadence=settings.cadence,
+                    count=len(movable),
+                    cadence=settings.cadence,
                     timezone_name=settings.timezone,
                     publish_time=settings.default_publish_local_time,
                     anchor_week=settings.cadence_anchor_week,
-                    occupied_dates=occupied, now=now,
+                    occupied_dates=occupied,
+                    now=now,
                 )
                 for row, slot in zip(movable, slots, strict=True):
                     self._apply_slot(row, slot)
@@ -3166,11 +3473,13 @@ class ContentPlanRepository:
                         occupied.add(slot.publish_local_date)
                 if expired:
                     slots = allocate_slots(
-                        count=len(expired), cadence=settings.cadence,
+                        count=len(expired),
+                        cadence=settings.cadence,
                         timezone_name=settings.timezone,
                         publish_time=settings.default_publish_local_time,
                         anchor_week=settings.cadence_anchor_week,
-                        occupied_dates=occupied, now=now,
+                        occupied_dates=occupied,
+                        now=now,
                     )
                     for row, slot in zip(expired, slots, strict=True):
                         self._apply_slot(row, slot)
@@ -3276,9 +3585,7 @@ class ContentPlanRepository:
             ).all()
         )
         for item_id, seed, primary in item_rows:
-            if normalized_keywords.intersection(
-                {seed, normalize_keyword(primary)}
-            ):
+            if normalized_keywords.intersection({seed, normalize_keyword(primary)}):
                 return str(item_id)
         article_rows = list(
             (
@@ -3317,9 +3624,7 @@ class ContentPlanRepository:
         return item
 
     @staticmethod
-    def _validate_item_editable(
-        item: ContentPlanItem, expected_version: int
-    ) -> None:
+    def _validate_item_editable(item: ContentPlanItem, expected_version: int) -> None:
         if item.version != expected_version:
             raise ValueError(f"stale_version:{item.version}")
         if item.status not in {"unscheduled", "scheduled", "failed"}:

@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import {
   Sheet,
@@ -252,10 +253,11 @@ export function ProjectWorkspace() {
         ))}
 
         {!archived && (
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={() => setOpen(true)}
-            className="flex min-h-64 flex-col items-center justify-center rounded-4xl border border-dashed bg-card p-8 text-center text-sm transition hover:border-primary/40 hover:bg-primary/[0.025]"
+            className="h-auto min-h-64 w-full flex-col rounded-4xl border-dashed bg-card p-8 text-center whitespace-normal hover:border-primary/40 hover:bg-primary/[0.025]"
           >
             <span className="flex size-11 items-center justify-center rounded-full bg-muted">
               <Plus className="size-5" />
@@ -264,7 +266,7 @@ export function ProjectWorkspace() {
             <span className="mt-1 text-muted-foreground">
               原型支持创建、切换、归档和恢复状态
             </span>
-          </button>
+          </Button>
         )}
       </div>
 
@@ -277,30 +279,30 @@ export function ProjectWorkspace() {
             </SheetDescription>
           </SheetHeader>
           <div className="space-y-4 px-6">
-            <label className="block space-y-2 text-sm">
+            <Label className="block space-y-2 text-sm">
               <span className="font-medium">项目名称</span>
               <Input
                 value={name}
                 onChange={(event) => setName(event.target.value)}
                 placeholder="例如 ElephTV"
               />
-            </label>
-            <label className="block space-y-2 text-sm">
+            </Label>
+            <Label className="block space-y-2 text-sm">
               <span className="font-medium">网站域名</span>
               <Input
                 value={domain}
                 onChange={(event) => setDomain(event.target.value)}
                 placeholder="example.com"
               />
-            </label>
-            <label className="block space-y-2 text-sm">
+            </Label>
+            <Label className="block space-y-2 text-sm">
               <span className="font-medium">目标市场</span>
               <Input defaultValue="美国 · 英语" />
-            </label>
-            <label className="block space-y-2 text-sm">
+            </Label>
+            <Label className="block space-y-2 text-sm">
               <span className="font-medium">核心关键词</span>
               <Input defaultValue="free streaming, smart TV" />
-            </label>
+            </Label>
           </div>
           <SheetFooter>
             <Button disabled={!domain.trim()} onClick={createProject}>

@@ -84,6 +84,9 @@ def resolve_seed_decisions(
         if action == "keep" and reference is not None:
             raise ValueError("seed_decision_contract_invalid: kept reference")
         if action == "drop":
+            if reference is None:
+                decisions_by_id[candidate_id] = dict(value)
+                continue
             if reference not in all_candidates or reference == candidate_id:
                 raise ValueError("seed_decision_contract_invalid: reference")
             union(candidate_id, str(reference))
@@ -100,9 +103,19 @@ def resolve_seed_decisions(
 
     resolved = []
     for candidate in candidates:
+        value = decisions_by_id[candidate.candidate_id]
+        if value["action"] == "drop" and value.get("same_topic_as") is None:
+            resolved.append(
+                ResolvedSeedDecision(
+                    candidate_id=candidate.candidate_id,
+                    action="drop",
+                    representative_candidate_id=None,
+                    reason=str(value.get("reason")) if value.get("reason") else None,
+                )
+            )
+            continue
         representative = representative_by_id[candidate.candidate_id]
         keep = representative == candidate.candidate_id and representative not in retained_ids
-        value = decisions_by_id[candidate.candidate_id]
         resolved.append(
             ResolvedSeedDecision(
                 candidate_id=candidate.candidate_id,

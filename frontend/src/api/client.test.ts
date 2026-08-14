@@ -21,11 +21,8 @@ describe("apiRequest", () => {
   })
 
   it("resolves platform-relative asset URLs against the API origin", () => {
-    const configuredBase = (
-      import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000"
-    ).replace(/\/+$/, "")
     expect(resolveApiUrl("/api/v1/projects/project-1/favicon?v=run-1")).toBe(
-      `${configuredBase}/api/v1/projects/project-1/favicon?v=run-1`
+      "/api/v1/projects/project-1/favicon?v=run-1"
     )
     expect(resolveApiUrl("https://example.com/favicon.ico")).toBe(
       "https://example.com/favicon.ico"
@@ -62,6 +59,38 @@ describe("apiRequest", () => {
       retryable: false,
       conflictId: "item-a",
       currentVersion: 5,
+    })
+  })
+
+  it("formats FastAPI validation details with their field paths", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            detail: [
+              {
+                type: "value_error",
+                loc: ["body", "metadata", "canonical_url"],
+                msg: "Value error, canonical_url must be an absolute HTTP(S) URL",
+                input: "javascript:alert(1)",
+              },
+            ],
+          },
+          { status: 422 }
+        )
+      )
+    )
+
+    const error = await apiRequest("/validation-error").catch(
+      (reason: unknown) => reason
+    )
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({
+      status: 422,
+      message:
+        "metadata.canonical_url: Value error, canonical_url must be an absolute HTTP(S) URL",
     })
   })
 })

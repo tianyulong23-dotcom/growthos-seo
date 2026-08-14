@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Download, FilePlus2, Link2, LoaderCircle, Plus } from "lucide-react"
+import { FilePlus2, Link2, LoaderCircle, Plus } from "lucide-react"
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router"
 
 import type { NavigationItem } from "@/app/module-contract"
@@ -10,7 +10,6 @@ import {
   listAuditRuns,
   type AuditRun,
 } from "@/api/audits"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -27,6 +26,7 @@ import { CreateArticleDialog } from "@/features/content/create-article-dialog"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
 import { AIModelSettings } from "@/features/settings/ai-model-settings"
 import { DataForSEOSettings } from "@/features/settings/data-source-settings"
+import { GSCOAuthSettings } from "@/features/settings/gsc-oauth-settings"
 import { ServiceConnectionsSettings } from "@/features/settings/service-connections-settings"
 import { modules } from "@/data/mock-data"
 import type { AuditSettings } from "@/features/audit/audit-settings"
@@ -35,6 +35,7 @@ import {
   rememberAuditRun,
 } from "@/features/audit/audit-session-cache"
 import { useAuditRunPolling } from "@/features/audit/use-audit-run-polling"
+import { PerformanceWorkspace } from "@/features/performance/performance-workspace"
 import { useProjects } from "@/features/projects/project-context"
 import type { BusinessProfileInput, Project } from "@/features/projects/types"
 
@@ -106,51 +107,6 @@ function ContentContent({
   }
 
   return <ContentLibrary projectId={projectId} onOpenArticle={onOpenArticle} />
-}
-
-function PerformanceContent({ view }: { view: string }) {
-  return (
-    <div className="space-y-6">
-      <div className="grid gap-px overflow-hidden rounded-md border bg-border sm:grid-cols-2 xl:grid-cols-4">
-        {[
-          [view === "search" ? "自然点击" : "内容点击", "12,648", "+18.4%"],
-          ["转化", "486", "+9.2%"],
-          ["转化率", "3.84%", "+0.3%"],
-          ["预估价值", "¥86,420", "+14.8%"],
-        ].map(([label, value, change]) => (
-          <div key={label} className="bg-card p-4">
-            <div className="text-sm text-muted-foreground">{label}</div>
-            <div className="mt-2 text-2xl font-semibold">{value}</div>
-            <div className="mt-1 text-xs text-emerald-600">{change}</div>
-          </div>
-        ))}
-      </div>
-      <Card>
-        <CardHeader>
-          <CardTitle>{view === "search" ? "渠道表现" : "内容贡献"}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          {[
-            ["Google 自然搜索", 68, "8,598"],
-            ["Bing 自然搜索", 21, "2,656"],
-            ["AI 搜索引用", 7, "885"],
-            ["其他搜索引擎", 4, "509"],
-          ].map(([label, value, clicks]) => (
-            <div
-              key={label}
-              className="grid gap-2 sm:grid-cols-[180px_1fr_70px] sm:items-center"
-            >
-              <span className="text-sm">{label}</span>
-              <Progress value={Number(value)} />
-              <span className="text-right text-sm text-muted-foreground tabular-nums">
-                {clicks}
-              </span>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-    </div>
-  )
 }
 
 function SettingsContent({
@@ -242,6 +198,10 @@ function PlatformSettingsContent({
     return <DataForSEOSettings projectId={projectId} />
   }
 
+  if (view === "google-oauth") {
+    return <GSCOAuthSettings projectId={projectId} />
+  }
+
   return <AIModelSettings projectId={projectId} />
 }
 
@@ -310,6 +270,7 @@ function ModuleBody({
           key={project.id}
           projectId={project.id}
           view={view}
+          savedCompetitorDomain={project.competitorDomain}
         />
       </React.Suspense>
     )
@@ -336,7 +297,15 @@ function ModuleBody({
         <OutreachWorkspace view={view} />
       </React.Suspense>
     )
-  if (moduleId === "performance") return <PerformanceContent view={view} />
+  if (moduleId === "performance")
+    return (
+      <PerformanceWorkspace
+        key={project.id}
+        view={view}
+        projectId={project.id}
+        onOpenArticle={onOpenArticle}
+      />
+    )
   if (moduleId === "settings")
     return (
       <SettingsContent
@@ -786,7 +755,7 @@ function LegacyModulePage() {
 
   function openArticle(articleId: string) {
     navigate(
-      `/projects/${project.id}/content/library?articleId=${encodeURIComponent(articleId)}`
+      `/projects/${project.id}/content/articles/${encodeURIComponent(articleId)}/edit`
     )
   }
 
@@ -799,8 +768,6 @@ function LegacyModulePage() {
       <FilePlus2 />
     ) : moduleConfig.id === "backlinks" ? (
       <Link2 />
-    ) : moduleConfig.id === "performance" ? (
-      <Download />
     ) : (
       <Plus />
     )
@@ -939,7 +906,9 @@ function LegacyModulePage() {
       </div>
       {moduleConfig.id === "content" && activeView === "library" && (
         <CreateArticleDialog
+          key={`${project.id}:${project.language}`}
           projectId={project.id}
+          projectLanguage={project.language}
           open={createArticleOpen}
           onOpenChange={setCreateArticleOpen}
           onCreated={(article) => openArticle(article.id)}

@@ -107,7 +107,7 @@ class SQLAlchemyKeywordCoverageQuery:
                 coverage_response(
                     request_id=item.request_id,
                     keyword=normalized,
-                    status="covered" if article_id is not None else "unknown",
+                    status="covered" if article_id is not None else "uncovered",
                     relation_id=article_id,
                 )
             )

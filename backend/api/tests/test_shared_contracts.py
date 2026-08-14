@@ -173,6 +173,8 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
                     ("keywords", "keywords"),
                     ("content", "content"),
                     ("content-plan", "content"),
+                    ("content-assets", "content"),
+                    ("performance", "platform"),
                 ),
             ),
             ModuleOpenApi("backlinks", backlinks, frozenset({"/health"})),
@@ -186,8 +188,8 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
     assert "/health" in aggregate["paths"]
     assert aggregate["paths"]["/health"]["get"]["operationId"] == "platformHealthV1"
     assert len(backlinks["paths"]) == 38
-    assert len(aggregate["paths"]) == 120
-    assert operation_count(aggregate) == 143
+    assert len(aggregate["paths"]) == 194
+    assert operation_count(aggregate) == 222
     modules = [
         operation["x-growthos-module"]
         for path, path_item in aggregate["paths"].items()
@@ -195,11 +197,11 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
         for method, operation in path_item.items()
         if method in {"get", "post", "put", "patch", "delete"}
     ]
-    assert modules.count("platform") == 39
+    assert modules.count("platform") == 48
     assert modules.count("audit") == 18
-    assert modules.count("agent") == 13
+    assert modules.count("agent") == 14
     assert modules.count("keywords") == 15
-    assert modules.count("content") == 18
+    assert modules.count("content") == 87
     assert modules.count("backlinks") == 37
     assert all(
         "application/problem+json" in operation["responses"]["503"]["content"]
@@ -217,6 +219,20 @@ def test_builds_real_platform_audit_and_backlinks_public_contract() -> None:
     assert len(operation_ids) == len(set(operation_ids))
     assert "list_projects_api_v1_projects_get" in operation_ids
     assert "create_audit_run_api_v1_projects__project_id__audit_runs_post" in operation_ids
+    autosave_path = aggregate["paths"][
+        "/api/v1/projects/{project_id}/articles/{article_id}/autosave"
+    ]["put"]
+    conflict_schema = autosave_path["responses"]["409"]["content"]["application/json"]["schema"]
+    assert conflict_schema == {"$ref": "#/components/schemas/ContentProblemResponse"}
+    problem_error = aggregate["components"]["schemas"]["ContentProblemError"]
+    assert {
+        "server_review_version",
+        "server_version_number",
+        "client_review_version",
+        "client_version_number",
+        "accepted_sequence",
+        "recoverable_autosave",
+    } <= set(problem_error["properties"])
     assert load_json(aggregate_path) == aggregate
 
 
@@ -228,9 +244,7 @@ def test_accepts_the_repository_event_and_temporal_registries() -> None:
     assert validate_temporal_registry(temporal) == []
     assert events["crossModuleCommands"] == ["crawling.evidence.requested.v1"]
     assert events["crossModuleEvents"] == ["crawling.evidence.recorded.v1"]
-    assert {
-        event["name"] for event in events["events"]
-    } >= {
+    assert {event["name"] for event in events["events"]} >= {
         "backlinks.gmail-incremental-sync.requested.v1",
         "backlinks.placement-monitoring.requested.v1",
         "backlinks.placement-monitoring.lifecycle.v1",

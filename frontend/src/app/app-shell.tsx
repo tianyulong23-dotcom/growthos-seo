@@ -2,26 +2,24 @@ import * as React from "react"
 import {
   Bell,
   CheckCircle2,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  LayoutGrid,
   ListTodo,
   LogOut,
   Moon,
-  Plus,
   Search,
   Settings,
   SlidersHorizontal,
   Sun,
 } from "lucide-react"
-import { Link, Outlet, useLocation, useNavigate, useParams } from "react-router"
+import { Link, Outlet, useLocation, useParams } from "react-router"
 
 import { AgentDock, MobileAgentSheet } from "@/components/agent/agent-dock"
 import { useTheme } from "@/components/theme-provider"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,9 +47,7 @@ import {
 } from "@/components/ui/sidebar"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { modules } from "@/data/mock-data"
-import { CreateProjectDialog } from "@/features/projects/create-project-dialog"
 import { BusinessProfileOnboardingController } from "@/features/projects/business-profile-onboarding"
-import { ProjectFavicon } from "@/features/projects/project-favicon"
 import { useProjects } from "@/features/projects/project-context"
 
 function getModulePath(projectId: string, moduleId: string) {
@@ -64,24 +60,12 @@ function getModulePath(projectId: string, moduleId: string) {
 
 function AppSidebar() {
   const location = useLocation()
-  const navigate = useNavigate()
   const { projects, getProject } = useProjects()
-  const [createOpen, setCreateOpen] = React.useState(false)
   const { isMobile, setOpenMobile, state, toggleSidebar } = useSidebar()
   const { projectId = projects[0]?.id ?? "" } = useParams()
   const project = getProject(projectId)
   const currentProjectId = project.id || projectId
   const activeModule = location.pathname.split("/")[3] ?? "audit"
-
-  function switchProject(nextProjectId: string) {
-    const suffix = location.pathname
-      .replace(`/projects/${projectId}`, "")
-      .replace(/^\/+/, "")
-    navigate(`/projects/${nextProjectId}/${suffix || "audit/overview"}`)
-    if (isMobile) {
-      setOpenMobile(false)
-    }
-  }
 
   const closeMobileSidebar = () => {
     if (isMobile) {
@@ -95,62 +79,11 @@ function AppSidebar() {
         <SidebarHeader className="h-16 min-h-16 shrink-0 justify-center border-b border-sidebar-border p-2">
           <SidebarMenu>
             <SidebarMenuItem>
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  render={
-                    <SidebarMenuButton
-                      size="lg"
-                      tooltip={`SEO · ${project.domain}`}
-                      className="h-12 transition-[width,padding] data-open:bg-sidebar-accent data-open:text-sidebar-accent-foreground"
-                    />
-                  }
-                >
-                  <ProjectFavicon project={project} />
-                  <span className="grid min-w-0 flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden">
-                    <span className="truncate font-semibold">SEO</span>
-                    <span className="truncate text-xs text-muted-foreground">
-                      {project.domain}
-                    </span>
-                  </span>
-                  <ChevronDown className="ml-auto size-4 text-muted-foreground group-data-[collapsible=icon]:hidden" />
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  className="w-64"
-                  side={isMobile ? "bottom" : "right"}
-                  align="start"
-                  sideOffset={4}
-                >
-                  <DropdownMenuGroup>
-                    <DropdownMenuLabel>切换项目</DropdownMenuLabel>
-                    {projects.map((item) => (
-                      <DropdownMenuItem
-                        key={item.id}
-                        onClick={() => switchProject(item.id)}
-                      >
-                        <ProjectFavicon project={item} className="size-7" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate">{item.name}</span>
-                          <span className="block truncate text-xs font-normal text-muted-foreground">
-                            {item.domain}
-                          </span>
-                        </span>
-                        {item.id === project.id && (
-                          <CheckCircle2 className="size-4 text-primary" />
-                        )}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuGroup>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => navigate("/projects")}>
-                    <LayoutGrid />
-                    所有项目
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setCreateOpen(true)}>
-                    <Plus />
-                    新建项目
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <div className="flex h-12 items-center gap-2 px-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
+                <span className="flex size-8 shrink-0 items-center justify-center font-serif text-2xl leading-none font-semibold text-violet-600 italic">
+                  S
+                </span>
+              </div>
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarHeader>
@@ -236,7 +169,6 @@ function AppSidebar() {
           </SidebarMenu>
         </SidebarFooter>
       </Sidebar>
-      <CreateProjectDialog open={createOpen} onOpenChange={setCreateOpen} />
     </>
   )
 }
@@ -310,12 +242,15 @@ function HeaderActions() {
           <DropdownMenuGroup>
             <DropdownMenuLabel className="flex items-center justify-between">
               通知
-              <button
-                className="text-xs font-normal text-primary"
+              <Button
+                type="button"
+                variant="link"
+                size="xs"
+                className="h-auto px-0 text-xs font-normal"
                 onClick={() => setNotifications(0)}
               >
                 全部已读
-              </button>
+              </Button>
             </DropdownMenuLabel>
             <DropdownMenuItem className="items-start">
               <span className="mt-1 size-2 rounded-full bg-destructive" />
@@ -352,8 +287,11 @@ function HeaderActions() {
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
-            <button
-              className="ml-1 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="ml-1 rounded-full"
               aria-label="账户菜单"
             />
           }
@@ -394,7 +332,7 @@ export function AppShell() {
       <BusinessProfileOnboardingController />
       <SidebarProvider
         defaultOpen={false}
-        style={{ "--sidebar-width": "14rem" } as React.CSSProperties}
+        style={{ "--sidebar-width": "180px" } as React.CSSProperties}
       >
         <AppSidebar />
         <AgentDock />
@@ -408,8 +346,8 @@ export function AppShell() {
             <MobileAgentSheet />
             <div className="relative hidden max-w-md flex-1 md:block">
               <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-              <input
-                className="h-9 w-full rounded-md border-0 bg-muted/60 pr-14 pl-9 text-sm outline-none focus:ring-2 focus:ring-ring/40"
+              <Input
+                className="border-0 bg-muted/60 pr-14 pl-9 focus-visible:ring-ring/40"
                 placeholder="搜索当前项目..."
               />
               <kbd className="absolute top-1/2 right-2 -translate-y-1/2 rounded border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">

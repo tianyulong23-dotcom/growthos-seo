@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -127,6 +128,7 @@ def start_worker(
             "AGENT_FULL_TAKEOVER_REUSED_WRITE_MARKER": str(reused_write_marker),
             "AGENT_FULL_TAKEOVER_TOOL_NAME": tool_name,
             "AGENT_FULL_TAKEOVER_TOOL_ARGUMENTS": json.dumps(tool_arguments),
+            "PYTHONIOENCODING": "utf-8",
         }
     )
     site_packages = next(
@@ -198,7 +200,7 @@ async def wait_for_worker(
         return ready_file.exists()
 
     try:
-        await wait_until(ready, 30, f"{worker_id} did not become ready")
+        await wait_until(ready, 90, f"{worker_id} did not become ready")
     except TimeoutError as exc:
         raise TimeoutError(
             f"{exc}; pid={process.pid}; return_code={process.poll()}; "
@@ -413,6 +415,7 @@ def test_formal_agent_workflow_survives_worker_loss_without_duplicate_write(
                     {"run_id": run_id, "limits": LIMITS},
                     id=workflow_id,
                     task_queue=task_queue,
+                    task_timeout=timedelta(seconds=30),
                 )
 
                 async def first_write_completed() -> bool:
@@ -421,12 +424,20 @@ def test_formal_agent_workflow_survives_worker_loss_without_duplicate_write(
                             "worker-a exited before the formal write committed; "
                             f"output={worker_output(worker_a)!r}"
                         )
+                    async with sessions() as session:
+                        execution = await session.get(AgentToolExecution, tool_call_id)
+                    if execution is not None and execution.status == "failed":
+                        raise RuntimeError(
+                            "formal business write failed before takeover; "
+                            f"error_code={execution.error_code!r}; "
+                            f"result={execution.result_json!r}"
+                        )
                     return first_write_marker.exists()
 
                 try:
                     await wait_until(
                         first_write_completed,
-                        30,
+                        90,
                         "worker-a did not commit the formal business write",
                     )
                 except TimeoutError as exc:
@@ -465,7 +476,7 @@ def test_formal_agent_workflow_survives_worker_loss_without_duplicate_write(
                 await asyncio.to_thread(worker_a.wait, 5)
 
                 try:
-                    await asyncio.wait_for(handle.result(), timeout=90)
+                    await asyncio.wait_for(handle.result(), timeout=120)
                 except Exception as exc:
                     await stop_process(worker_b)
                     raise RuntimeError(

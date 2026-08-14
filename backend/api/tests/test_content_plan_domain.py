@@ -53,6 +53,26 @@ def test_seed_decisions_cannot_delete_or_reorder_retained_seeds() -> None:
     assert resolved[0].representative_candidate_id == "kept-1"
 
 
+def test_seed_decisions_allow_direct_drop_without_a_representative() -> None:
+    candidates = [
+        SeedCandidate("c-1", "movie apps", 1),
+        SeedCandidate("c-2", "unrelated brand navigation", 2),
+    ]
+
+    resolved = resolve_seed_decisions(
+        candidates,
+        retained=[],
+        decisions=[
+            {"keyword_id": "c-1", "action": "keep", "same_topic_as": None},
+            {"keyword_id": "c-2", "action": "drop", "same_topic_as": None},
+        ],
+    )
+
+    assert resolved[0].action == "keep"
+    assert resolved[1].action == "drop"
+    assert resolved[1].representative_candidate_id is None
+
+
 @pytest.mark.parametrize(
     "decisions",
     [

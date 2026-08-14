@@ -257,6 +257,7 @@ async def create_pool(settings: KeywordWorkerSettings) -> asyncpg.Pool:
         max_size=8,
         command_timeout=60,
         init=_configure_connection,
+        server_settings={"search_path": "public, platform, crawling, audit"},
     )
 
 
@@ -325,9 +326,9 @@ class KeywordRepository:
                     run.profile_version,
                     COALESCE(run.competitor_domain, project.competitor_domain)
                         AS competitor_domain,
-                    run.target_domain AS domain,
-                    run.country,
-                    run.language
+                    project.domain,
+                    project.country,
+                    project.language
                 FROM keyword_build_runs AS run
                 JOIN projects AS project ON project.id = run.project_id
                 WHERE run.id = $1
@@ -2641,8 +2642,16 @@ class KeywordRepository:
                     """
                     SELECT
                         base_url,
+                        api_protocol,
                         pgp_sym_decrypt(api_key_encrypted, $2)::text AS api_key,
                         model,
+                        COALESCE(NULLIF(keyword_model, ''), model) AS keyword_model,
+                        COALESCE(NULLIF(business_model, ''), model) AS business_model,
+                        reasoning_effort,
+                        COALESCE(NULLIF(keyword_reasoning_effort, ''), reasoning_effort)
+                            AS keyword_reasoning_effort,
+                        COALESCE(NULLIF(business_reasoning_effort, ''), reasoning_effort)
+                            AS business_reasoning_effort,
                         request_timeout_seconds,
                         max_retries
                     FROM ai_provider_settings
@@ -2651,27 +2660,66 @@ class KeywordRepository:
                     organization_id,
                     encryption_key,
                 )
+        elif self.settings.allow_plaintext_settings:
+            async with self.pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    """
+                    SELECT
+                        base_url,
+                        api_protocol,
+                        api_key_encrypted,
+                        model,
+                        COALESCE(NULLIF(keyword_model, ''), model) AS keyword_model,
+                        COALESCE(NULLIF(business_model, ''), model) AS business_model,
+                        reasoning_effort,
+                        COALESCE(NULLIF(keyword_reasoning_effort, ''), reasoning_effort)
+                            AS keyword_reasoning_effort,
+                        COALESCE(NULLIF(business_reasoning_effort, ''), reasoning_effort)
+                            AS business_reasoning_effort,
+                        request_timeout_seconds,
+                        max_retries
+                    FROM ai_provider_settings
+                    WHERE organization_id = $1
+                    """,
+                    organization_id,
+                )
+        if row is not None:
+            api_key = row.get("api_key", row.get("api_key_encrypted", b""))
+            if isinstance(api_key, bytes):
+                prefix = b"plaintext:v1:"
+                if not api_key.startswith(prefix):
+                    row = None
+                else:
+                    api_key = api_key.removeprefix(prefix).decode("utf-8")
         if row is not None:
             return AIProviderConfig(
                 base_url=str(row["base_url"]).rstrip("/"),
-                api_key=str(row["api_key"]),
+                api_protocol=str(row["api_protocol"]),
+                api_key=str(api_key),
                 model=str(row["model"]),
+                keyword_model=str(row["keyword_model"]),
+                business_model=str(row["business_model"]),
+                reasoning_effort=str(row["reasoning_effort"]),
+                keyword_reasoning_effort=str(row["keyword_reasoning_effort"]),
+                business_reasoning_effort=str(row["business_reasoning_effort"]),
                 timeout_seconds=int(row["request_timeout_seconds"]),
                 max_retries=int(row["max_retries"]),
-                initial_filter_model=self.settings.keyword_initial_filter_ai_model,
-                topic_dedup_model=self.settings.keyword_topic_dedup_ai_model,
             )
         return AIProviderConfig(
             base_url=self.settings.business_profile_ai_base_url.rstrip("/"),
+            api_protocol=self.settings.business_profile_ai_api_protocol,
             api_key=self.settings.business_profile_ai_api_key,
             model=self.settings.business_profile_ai_model,
+            keyword_model=self.settings.business_profile_ai_model,
+            business_model=self.settings.business_profile_ai_model,
+            reasoning_effort="medium",
+            keyword_reasoning_effort="medium",
+            business_reasoning_effort="medium",
             timeout_seconds=parse_duration_seconds(
                 self.settings.business_profile_ai_timeout,
                 default=90,
             ),
             max_retries=max(self.settings.business_profile_ai_max_retries, 0),
-            initial_filter_model=self.settings.keyword_initial_filter_ai_model,
-            topic_dedup_model=self.settings.keyword_topic_dedup_ai_model,
         )
 
     async def load_dataforseo_config(
@@ -2696,10 +2744,30 @@ class KeywordRepository:
                     organization_id,
                     encryption_key,
                 )
+        elif self.settings.allow_plaintext_settings:
+            async with self.pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    """
+                    SELECT
+                        login,
+                        password_encrypted
+                    FROM dataforseo_provider_settings
+                    WHERE organization_id = $1
+                    """,
+                    organization_id,
+                )
+        if row is not None:
+            password = row.get("password", row.get("password_encrypted", b""))
+            if isinstance(password, bytes):
+                prefix = b"plaintext:v1:"
+                if not password.startswith(prefix):
+                    row = None
+                else:
+                    password = password.removeprefix(prefix).decode("utf-8")
         if row is not None:
             return DataForSEOProviderConfig(
                 login=str(row["login"]),
-                password=str(row["password"]),
+                password=str(password),
             )
         return DataForSEOProviderConfig(
             login=self.settings.dataforseo_login,
@@ -2708,36 +2776,85 @@ class KeywordRepository:
 
     async def load_gsc_config(self, context: CompetitorAnalysisContext) -> GSCProviderConfig:
         encryption_key = self.settings.ai_settings_encryption_key.strip()
-        if not encryption_key:
-            raise RuntimeError("服务器尚未配置设置加密密钥")
         async with self.pool.acquire() as connection:
             row = await connection.fetchrow(
                 """
                 SELECT
                     site_url,
-                    pgp_sym_decrypt(refresh_token_encrypted, $2)::text AS refresh_token,
+                    refresh_token_encrypted,
                     requires_reconnect
                 FROM gsc_connections
                 WHERE project_id = $1
-                    AND organization_id = $3
+                    AND organization_id = $2
                 """,
                 context.project_id,
-                encryption_key,
                 context.organization_id,
             )
-        if row is None or not str(row["site_url"] or "").strip():
-            raise RuntimeError("自动发现竞争对手前必须连接 Google Search Console 并选择 property")
-        if bool(row["requires_reconnect"]):
-            raise RuntimeError("Search Console 授权已失效，请重新连接")
+            if row is None or not str(row["site_url"] or "").strip():
+                raise RuntimeError(
+                    "自动发现竞争对手前必须连接 Google Search Console 并选择 property"
+                )
+            if bool(row["requires_reconnect"]):
+                raise RuntimeError("Search Console 授权已失效，请重新连接")
+            refresh_token_encrypted = bytes(row["refresh_token_encrypted"])
+            prefix = b"plaintext:v1:"
+            if refresh_token_encrypted.startswith(prefix):
+                if not self.settings.allow_plaintext_settings:
+                    raise RuntimeError("服务器尚未配置设置加密密钥")
+                refresh_token = refresh_token_encrypted.removeprefix(prefix).decode("utf-8")
+            elif encryption_key:
+                refresh_token = await connection.fetchval(
+                    """
+                    SELECT pgp_sym_decrypt(refresh_token_encrypted, $2)::text
+                    FROM gsc_connections
+                    WHERE project_id = $1
+                        AND organization_id = $3
+                    """,
+                    context.project_id,
+                    encryption_key,
+                    context.organization_id,
+                )
+            else:
+                raise RuntimeError("服务器尚未配置设置加密密钥")
+            oauth_row = await connection.fetchrow(
+                """
+                SELECT client_id, client_secret_encrypted
+                FROM gsc_oauth_provider_settings
+                WHERE organization_id = $1
+                """,
+                context.organization_id,
+            )
+            if oauth_row is None:
+                client_id = self.settings.google_gsc_client_id
+                client_secret = self.settings.google_gsc_client_secret
+            else:
+                client_id = str(oauth_row["client_id"] or "")
+                client_secret_encrypted = bytes(oauth_row["client_secret_encrypted"])
+                if client_secret_encrypted.startswith(prefix):
+                    if not self.settings.allow_plaintext_settings:
+                        raise RuntimeError("服务器尚未配置设置加密密钥")
+                    client_secret = client_secret_encrypted.removeprefix(prefix).decode("utf-8")
+                elif encryption_key:
+                    client_secret = await connection.fetchval(
+                        """
+                        SELECT pgp_sym_decrypt(client_secret_encrypted, $2)::text
+                        FROM gsc_oauth_provider_settings
+                        WHERE organization_id = $1
+                        """,
+                        context.organization_id,
+                        encryption_key,
+                    )
+                else:
+                    raise RuntimeError("服务器尚未配置设置加密密钥")
         site_url = str(row["site_url"])
         if not gsc_site_matches_domain(site_url, context.domain):
             raise RuntimeError("所选 Search Console property 与当前项目域名不匹配")
         return GSCProviderConfig(
             project_id=context.project_id,
             site_url=site_url,
-            refresh_token=str(row["refresh_token"]),
-            client_id=self.settings.google_gsc_client_id,
-            client_secret=self.settings.google_gsc_client_secret,
+            refresh_token=str(refresh_token),
+            client_id=str(client_id),
+            client_secret=str(client_secret),
         )
 
     async def mark_gsc_reconnect_required(self, project_id: str) -> None:

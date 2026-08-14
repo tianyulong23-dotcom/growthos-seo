@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import html
 import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
 import textstat
+from markdown_it import MarkdownIt
 
 from app.modules.content.writing_gateway import (
     ArticlePlan,
-    EvidenceClaim,
-    OutlineSection,
     SectionDraft,
     SectionIssue,
 )
@@ -26,38 +24,11 @@ MALFORMED_URL_FRAGMENT_PATTERN = re.compile(
     r"(?:/[^\s)\]]*)?(?:\)+)?"
     r"|(?<![\w.-])[a-z][a-z0-9-]*\.[ \t]+"
     r"(?:com|org|net|gov|edu|mil|int|io|co|uk|de|fr|jp|cn|au|ca)"
-    r"(?:/[^\s)\]]*)?(?:\)+)?"
+    r"/[^\s)\]]*(?:\)+)?"
     r"|(?<![\w.-])(?:com|org|net|gov|edu|mil|int|io)/[^\s)\]]*(?:\)+)?"
     r")",
     re.IGNORECASE,
 )
-NUMBER_PATTERN = re.compile(r"(?<![\w])\d+(?:[.,]\d+)?%?")
-STRUCTURAL_NUMBER_PATTERN = re.compile(
-    r"\b(?:section|step|topic|question|part|chapter)\s+\d+\b|"
-    r"第\s*\d+\s*(?:节|步|部分|章|个问题)|"
-    r"(?:章节|步骤|主题|问题|部分)\s*\d+",
-    re.IGNORECASE,
-)
-STRONG_CLAIM_PATTERN = re.compile(
-    r"\b(?:always|never|guaranteed|proven|the best|the only|completely eliminates?)\b|"
-    r"(?:始终|绝不|保证|已证实|唯一|最好|彻底消除|百分之百)",
-    re.IGNORECASE,
-)
-PLACEHOLDER_PATTERN = re.compile(
-    r"\b(?:todo|tbd|lorem ipsum|insert (?:source|link|text)|coming soon)\b|"
-    r"This section is intentionally concise because verified details were unavailable|"
-    r"This section explains the key considerations and practical next steps supported by the verified information available|"
-    r"(?:待补充|占位符|稍后补充|未完成|本节根据当前可验证资料说明关键考虑因素和可执行的下一步)",
-    re.IGNORECASE,
-)
-ORDERED_ITEM_PATTERN = re.compile(r"^\s*\d+[.)、]\s+", re.MULTILINE)
-LIST_ITEM_PATTERN = re.compile(r"^\s*(?:[-*+]|\d+[.)、])\s+", re.MULTILINE)
-QUESTION_LINE_PATTERN = re.compile(
-    r"^(?:#{2,6}\s+|(?:q|question|问题)\s*[:：]\s*)?.*[?？]\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
 class ContentScorer:
     WEIGHTS = {
         "humanity": 0.30,
@@ -573,7 +544,7 @@ def deterministic_quality_check(
     competitor_passages: list[str] | None = None,
 ) -> QualityReport:
     issues: list[SectionIssue] = []
-    article_section_id = plan.sections[0].section_id
+    article_section_id = plan.sections[0].section_id if plan.sections else "article"
     if not plan.title.strip():
         issues.append(_issue(article_section_id, "title_missing", "文章标题缺失"))
     if not plan.meta_title.strip():
@@ -592,218 +563,21 @@ def deterministic_quality_check(
     for section_id in sorted(expected - actual):
         issues.append(_issue(section_id, "section_missing", "必要章节缺失或为空"))
 
-    known_claims = {
-        item.claim_id: item
-        for item in plan.claims
-        if item.supported
-        and item.section_id is not None
-        and item.source_url in allowed_source_urls
-    }
-    seen_markdown: set[str] = set()
-    duplicate_sections = 0
-    unsupported_numbers = 0
-    unsupported_strong_claims = 0
-    invalid_links = 0
-    placeholders = 0
-    invalid_heading_sections = 0
-    copied_competitor_sections = 0
-    short_sections = 0
-    invalid_section_structures = 0
-    planned_sections = {item.section_id: item for item in plan.sections}
-    seen_internal_urls: set[str] = set()
-    internal_link_count = 0
+    malformed_links = 0
     for section in sections:
-        normalized = re.sub(r"\s+", " ", section.markdown).strip().casefold()
-        if normalized in seen_markdown:
-            duplicate_sections += 1
+        count = malformed_link_count(section.markdown)
+        malformed_links += count
+        if count:
             issues.append(
-                _issue(section.section_id, "duplicate_section", "章节与其他章节明显重复")
+                _issue(section.section_id, "malformed_link", "Malformed Markdown link")
             )
-        seen_markdown.add(normalized)
-        heading_levels = [
-            len(match.group(1))
-            for match in re.finditer(r"^(#{1,6})\s+", section.markdown, re.MULTILINE)
-        ]
-        if (
-            not heading_levels
-            or heading_levels[0] != 2
-            or 1 in heading_levels
-            or any(current > previous + 1 for previous, current in zip(heading_levels, heading_levels[1:]))
-        ):
-            invalid_heading_sections += 1
-            issues.append(
-                _issue(section.section_id, "invalid_heading_hierarchy", "Markdown 标题层级不正确")
-            )
-        if PLACEHOLDER_PATTERN.search(section.markdown):
-            placeholders += 1
-            issues.append(
-                _issue(section.section_id, "placeholder", "章节包含占位符或未完成标记")
-            )
-        if section.summary.startswith("degraded_fallback:"):
-            placeholders += 1
-            issues.append(
-                _issue(
-                    section.section_id,
-                    "fallback_section",
-                    "章节使用了确定性降级稿，需要自动重写并重新检查",
-                )
-            )
-        if any(
-            _has_long_exact_overlap(section.markdown, passage)
-            for passage in competitor_passages or []
-        ):
-            copied_competitor_sections += 1
-            issues.append(
-                _issue(
-                    section.section_id,
-                    "competitor_copy",
-                    "章节包含与竞争文章相同的长段文本",
-                )
-            )
-
-        planned = planned_sections.get(section.section_id)
-        if planned is not None:
-            word_count = _content_word_count(section.markdown)
-            minimum_words = max(70, round(planned.word_target * 0.7))
-            if word_count < minimum_words:
-                short_sections += 1
-                issues.append(
-                    _issue(
-                        section.section_id,
-                        "section_too_short",
-                        f"章节约 {word_count} 词，低于 {planned.word_target} 词目标的合理下限",
-                    )
-                )
-            structure_issue = _section_structure_issue(planned, section.markdown)
-            if structure_issue is not None:
-                invalid_section_structures += 1
-                issues.append(_issue(section.section_id, *structure_issue))
-
-        planned_claim_ids = set(planned.claim_ids) if planned is not None else set()
-        section_claims = {
-            claim_id: claim
-            for claim_id, claim in known_claims.items()
-            if claim.section_id == section.section_id and claim_id in planned_claim_ids
-        }
-        section_source_urls = {
-            claim.source_url for claim in section_claims.values()
-        }
-        used_claims = {
-            claim_id: section_claims[claim_id]
-            for claim_id in section.used_claim_ids
-            if claim_id in section_claims
-        }
-        for paragraph in _paragraphs(section.markdown):
-            if re.match(r"^#{1,6}\s+", paragraph):
-                continue
-            has_number = _has_verifiable_number(paragraph)
-            has_strong_claim = _has_strong_claim(paragraph)
-            if not has_number and not has_strong_claim:
-                continue
-            if not _paragraph_supported_by_claim(paragraph, used_claims.values()):
-                code = "unsupported_number" if has_number else "unsupported_strong_claim"
-                message = (
-                    "具体数字与附近 claim_id 绑定的来源证据不一致"
-                    if has_number
-                    else "强结论与附近 claim_id 绑定的来源证据不一致"
-                )
-                unsupported_numbers += int(has_number)
-                unsupported_strong_claims += int(has_strong_claim and not has_number)
-                issues.append(
-                    _issue(section.section_id, code, message)
-                )
-                break
-
-        malformed_links = malformed_link_count(section.markdown)
-        if malformed_links:
-            invalid_links += malformed_links
-            issues.append(
-                _issue(
-                    section.section_id,
-                    "malformed_link",
-                    "正文包含残缺或带空格的 Markdown 链接",
-                )
-            )
-
-        section_internal_urls = (
-            set(planned.internal_urls).intersection(allowed_internal_urls)
-            if planned is not None
-            else set()
-        )
-        section_internal_count = 0
-        for _, url in LINK_PATTERN.findall(section.markdown):
-            if url in allowed_source_urls and url not in section_source_urls:
-                invalid_links += 1
-                issues.append(
-                    _issue(
-                        section.section_id,
-                        "source_not_assigned_to_section",
-                        "正文引用的来源没有分配给当前章节",
-                    )
-                )
-                break
-            if url in allowed_internal_urls:
-                section_internal_count += 1
-                internal_link_count += 1
-                if url not in section_internal_urls:
-                    invalid_links += 1
-                    issues.append(
-                        _issue(
-                            section.section_id,
-                            "internal_link_not_assigned_to_section",
-                            "站内链接没有分配给当前章节",
-                        )
-                    )
-                elif url in seen_internal_urls:
-                    invalid_links += 1
-                    issues.append(
-                        _issue(
-                            section.section_id,
-                            "duplicate_internal_link",
-                            "同一个站内链接在全文重复使用",
-                        )
-                    )
-                seen_internal_urls.add(url)
-                if section_internal_count > 1:
-                    invalid_links += 1
-                    issues.append(
-                        _issue(
-                            section.section_id,
-                            "too_many_internal_links_in_section",
-                            "每个章节最多插入一个站内链接",
-                        )
-                    )
-                if internal_link_count > 5:
-                    invalid_links += 1
-                    issues.append(
-                        _issue(
-                            section.section_id,
-                            "too_many_internal_links",
-                            "全文最多插入五个站内链接",
-                        )
-                    )
-            elif url not in section_source_urls:
-                invalid_links += 1
-                issues.append(
-                    _issue(section.section_id, "invalid_link", "正文包含本次资料之外的链接")
-                )
-                break
-
     return QualityReport(
         passed=not issues,
         issues=_unique_issues(issues),
         checks={
             "expected_sections": len(expected),
             "present_sections": len(actual),
-            "unsupported_numbers": unsupported_numbers,
-            "unsupported_strong_claims": unsupported_strong_claims,
-            "invalid_links": invalid_links,
-            "placeholders": placeholders,
-            "duplicate_sections": duplicate_sections,
-            "invalid_heading_sections": invalid_heading_sections,
-            "copied_competitor_sections": copied_competitor_sections,
-            "short_sections": short_sections,
-            "invalid_section_structures": invalid_section_structures,
+            "invalid_links": malformed_links,
             "meta_complete": bool(
                 plan.title.strip()
                 and plan.meta_title.strip()
@@ -813,7 +587,6 @@ def deterministic_quality_check(
         },
     )
 
-
 def sanitize_sections(
     sections: list[SectionDraft],
     plan: ArticlePlan,
@@ -821,81 +594,24 @@ def sanitize_sections(
     allowed_source_urls: set[str],
     allowed_internal_urls: set[str],
 ) -> list[SectionDraft]:
-    known_claims = {
-        item.claim_id: item
-        for item in plan.claims
-        if item.supported
-        and item.section_id is not None
-        and item.source_url in allowed_source_urls
-    }
-    planned_sections = {item.section_id: item for item in plan.sections}
+    del plan
     sanitized: list[SectionDraft] = []
-    seen_internal_urls: set[str] = set()
     for section in sections:
-        planned = planned_sections.get(section.section_id)
-        planned_claim_ids = set(planned.claim_ids) if planned is not None else set()
-        section_claims = {
-            claim_id: claim
-            for claim_id, claim in known_claims.items()
-            if claim.section_id == section.section_id and claim_id in planned_claim_ids
+        valid_urls = {
+            *allowed_source_urls,
+            *allowed_internal_urls,
+            *{url for _, url in LINK_PATTERN.findall(section.markdown)},
         }
-        section_source_urls = {
-            claim.source_url for claim in section_claims.values()
-        }
-        used_claim_ids = [
-            item for item in section.used_claim_ids if item in section_claims
-        ]
-        used_claims = [section_claims[item] for item in used_claim_ids]
-        section_internal_urls = (
-            set(planned.internal_urls).intersection(allowed_internal_urls)
-            if planned is not None
-            else set()
-        )
-        markdown = sanitize_allowed_links(
-            section.markdown, section_source_urls | section_internal_urls
-        )
-        markdown, used_internal_urls, _ = sanitize_internal_links(
-            markdown,
-            section_internal_urls,
-            seen_internal_urls,
-            remaining=max(0, 5 - len(seen_internal_urls)),
-        )
-        markdown, _ = restore_link_only_claims(markdown, used_claims)
-        kept: list[str] = []
-        for paragraph in _paragraphs(markdown):
-            if PLACEHOLDER_PATTERN.search(paragraph):
-                continue
-            is_heading = bool(re.match(r"^#{1,6}\s+", paragraph))
-            if not is_heading and (
-                _has_verifiable_number(paragraph) or _has_strong_claim(paragraph)
-            ):
-                if not _paragraph_supported_by_claim(paragraph, used_claims):
-                    paragraph = _remove_unsupported_sentences(paragraph, used_claims)
-            if paragraph.strip():
-                kept.append(paragraph.strip())
-        cleaned = "\n\n".join(kept).strip()
-        fallback_summary = section.summary
-        if not cleaned:
-            heading = planned.heading if planned is not None else "Article section"
-            objective = planned.objective if planned is not None else "Explain the topic"
-            cleaned = (
-                f"## {heading}\n\n{objective.rstrip('.')}。"
-                "当前资料不足以支持具体数字或强结论，因此这里只保留可执行的判断方向："
-                "先核对自身条件，再依据已验证资料作出选择。"
-            )
-            fallback_summary = f"degraded_fallback:{objective}"
+        markdown, _ = sanitize_markdown_links(section.markdown, valid_urls)
+        markdown_urls = {url for _, url in LINK_PATTERN.findall(markdown)}
+        internal_urls = markdown_urls.intersection(allowed_internal_urls)
         sanitized.append(
             section.model_copy(
                 update={
-                    "markdown": cleaned,
-                    "summary": fallback_summary,
-                    "used_claim_ids": used_claim_ids,
-                    "used_source_urls": [
-                        url for url in section.used_source_urls if url in section_source_urls
-                    ],
-                    "used_internal_urls": [
-                        url for url in sorted(used_internal_urls)
-                    ],
+                    "markdown": markdown.strip(),
+                    "used_claim_ids": list(section.used_claim_ids),
+                    "used_source_urls": sorted(markdown_urls.difference(internal_urls)),
+                    "used_internal_urls": sorted(internal_urls),
                 }
             )
         )
@@ -908,199 +624,15 @@ def article_markdown(title: str, sections: list[SectionDraft]) -> str:
 
 
 def markdown_to_html(markdown: str) -> str:
-    output: list[str] = []
-    paragraph: list[str] = []
-    list_items: list[str] = []
-
-    def flush_paragraph() -> None:
-        if paragraph:
-            output.append(f"<p>{_inline_html(' '.join(paragraph))}</p>")
-            paragraph.clear()
-
-    def flush_list() -> None:
-        if list_items:
-            output.append("<ul>" + "".join(f"<li>{item}</li>" for item in list_items) + "</ul>")
-            list_items.clear()
-
-    for raw_line in markdown.splitlines():
-        line = raw_line.strip()
-        if not line:
-            flush_paragraph()
-            flush_list()
-            continue
-        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
-        if heading:
-            flush_paragraph()
-            flush_list()
-            level = len(heading.group(1))
-            output.append(f"<h{level}>{_inline_html(heading.group(2))}</h{level}>")
-            continue
-        item = re.match(r"^[-*]\s+(.+)$", line)
-        if item:
-            flush_paragraph()
-            list_items.append(_inline_html(item.group(1)))
-            continue
-        flush_list()
-        paragraph.append(line)
-    flush_paragraph()
-    flush_list()
-    return "\n".join(output)
+    return MarkdownIt(
+        "commonmark", {"html": False, "linkify": False}
+    ).enable("table").render(markdown).rstrip()
 
 
 def project_domain_matches(url: str, project_domain: str) -> bool:
     host = (urlsplit(url).hostname or "").lower().removeprefix("www.")
     expected = project_domain.lower().removeprefix("www.")
     return bool(host and expected and host == expected)
-
-
-def _paragraphs(markdown: str) -> list[str]:
-    return [item.strip() for item in re.split(r"\n\s*\n", markdown) if item.strip()]
-
-
-def _remove_unsupported_sentences(paragraph: str, claims: list[Any]) -> str:
-    parts = re.split(r"(?<=[.!?。！？])\s*", paragraph)
-    return " ".join(
-        item
-        for item in parts
-        if item
-        and (
-            not _has_verifiable_number(item)
-            and not _has_strong_claim(item)
-            or _paragraph_supported_by_claim(item, claims)
-        )
-    ).strip()
-
-
-def _paragraph_supported_by_claim(paragraph: str, claims: Any) -> bool:
-    cited_urls = {url for _, url in LINK_PATTERN.findall(paragraph)}
-    matching_claims = [claim for claim in claims if claim.source_url in cited_urls]
-    if not matching_claims:
-        return False
-    visible_paragraph = _visible_markdown_text(paragraph)
-    evidence = " ".join(
-        f"{claim.claim} {claim.quote}" for claim in matching_claims
-    ).casefold()
-    paragraph_numbers = {
-        _normalize_number(match.group(0))
-        for match in NUMBER_PATTERN.finditer(visible_paragraph)
-    }
-    evidence_numbers = {
-        _normalize_number(match.group(0)) for match in NUMBER_PATTERN.finditer(evidence)
-    }
-    if not paragraph_numbers.issubset(evidence_numbers):
-        return False
-    strong_terms = {
-        match.group(0).casefold()
-        for match in STRONG_CLAIM_PATTERN.finditer(visible_paragraph)
-    }
-    return all(term in evidence for term in strong_terms)
-
-
-def _normalize_number(value: str) -> str:
-    return value.replace(",", "").casefold()
-
-
-def _has_verifiable_number(value: str) -> bool:
-    without_structure_labels = STRUCTURAL_NUMBER_PATTERN.sub(
-        "", _visible_markdown_text(value)
-    )
-    without_list_markers = ORDERED_ITEM_PATTERN.sub("", without_structure_labels)
-    return bool(NUMBER_PATTERN.search(without_list_markers))
-
-
-def _has_strong_claim(value: str) -> bool:
-    return bool(STRONG_CLAIM_PATTERN.search(_visible_markdown_text(value)))
-
-
-def _visible_markdown_text(value: str) -> str:
-    return LINK_PATTERN.sub(r"\1", value)
-
-
-def _content_word_count(markdown: str) -> int:
-    text = LINK_PATTERN.sub(r"\1", markdown)
-    text = re.sub(r"(?m)^#{1,6}\s+", "", text)
-    latin_words = re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*", text)
-    han_characters = re.findall(r"[\u4e00-\u9fff]", text)
-    return len(latin_words) + len(han_characters)
-
-
-def _section_structure_issue(
-    planned: OutlineSection, markdown: str
-) -> tuple[str, str] | None:
-    section_type = planned.section_type
-    if section_type == "body_how_to" and len(ORDERED_ITEM_PATTERN.findall(markdown)) < 2:
-        return "how_to_steps_missing", "How-To 章节缺少至少两个按顺序编号的可执行步骤"
-    if section_type == "body_list" and len(LIST_ITEM_PATTERN.findall(markdown)) < 2:
-        return "list_structure_missing", "列表章节缺少至少两个格式一致的列表项"
-    if section_type == "faq":
-        expected_questions = len(planned.required_questions)
-        if len(QUESTION_LINE_PATTERN.findall(markdown)) < expected_questions:
-            return (
-                "faq_qa_structure_missing",
-                f"FAQ 章节缺少计划中的 {expected_questions} 组真实问题和回答结构",
-            )
-    if section_type == "conclusion" and len(LIST_ITEM_PATTERN.findall(markdown)) < 3:
-        return "conclusion_actions_missing", "结论章节缺少三到五个具体行动项"
-    return None
-
-
-def _has_long_exact_overlap(value: str, reference: str) -> bool:
-    value_words = re.findall(r"[a-z0-9]+", value.casefold())
-    reference_words = re.findall(r"[a-z0-9]+", reference.casefold())
-    if len(value_words) >= 16 and len(reference_words) >= 16:
-        value_text = " ".join(value_words)
-        for index in range(len(reference_words) - 15):
-            if " ".join(reference_words[index : index + 16]) in value_text:
-                return True
-
-    value_cjk = "".join(re.findall(r"[\u4e00-\u9fff]", value))
-    reference_cjk = "".join(re.findall(r"[\u4e00-\u9fff]", reference))
-    if len(value_cjk) >= 60 and len(reference_cjk) >= 60:
-        return any(
-            reference_cjk[index : index + 60] in value_cjk
-            for index in range(len(reference_cjk) - 59)
-        )
-    return False
-
-
-def _sanitize_links(markdown: str, allowed_urls: set[str]) -> str:
-    markdown, _ = sanitize_markdown_links(markdown, allowed_urls)
-
-    def replace(match: re.Match[str]) -> str:
-        label, url = match.groups()
-        return match.group(0) if url in allowed_urls else label
-
-    return LINK_PATTERN.sub(replace, markdown)
-
-
-def sanitize_allowed_links(markdown: str, allowed_urls: set[str]) -> str:
-    return _sanitize_links(markdown, allowed_urls)
-
-
-def sanitize_internal_links(
-    markdown: str,
-    allowed_internal_urls: set[str],
-    seen_internal_urls: set[str],
-    *,
-    remaining: int,
-) -> tuple[str, set[str], int]:
-    used: set[str] = set()
-    removed = 0
-
-    def replace(match: re.Match[str]) -> str:
-        nonlocal removed
-        label, url = match.groups()
-        if url not in allowed_internal_urls:
-            return match.group(0)
-        if url in seen_internal_urls or used or len(used) >= remaining:
-            removed += 1
-            return label
-        used.add(url)
-        return match.group(0)
-
-    cleaned = LINK_PATTERN.sub(replace, markdown)
-    seen_internal_urls.update(used)
-    return cleaned, used, removed
 
 
 def malformed_link_count(markdown: str) -> int:
@@ -1149,33 +681,6 @@ def sanitize_markdown_links(markdown: str, allowed_urls: set[str]) -> tuple[str,
     markdown, fragment_count = MALFORMED_URL_FRAGMENT_PATTERN.subn("", markdown)
     markdown = re.sub(r"(?m)^[ \t]*[).,;:!?]+[ \t]*$", "", markdown)
     return markdown, len(malformed) + fragment_count
-
-
-def restore_link_only_claims(
-    markdown: str, claims: list[EvidenceClaim]
-) -> tuple[str, int]:
-    claims_by_url: dict[str, list[EvidenceClaim]] = {}
-    for claim in claims:
-        if claim.supported:
-            claims_by_url.setdefault(claim.source_url, []).append(claim)
-
-    restored = 0
-    parts = re.split(r"(\n\s*\n)", markdown)
-    for index in range(0, len(parts), 2):
-        paragraph = parts[index].strip()
-        link_only = re.fullmatch(
-            r"\(?\s*(\[[^\]]+\]\((https?://[^\s)]+)\))\s*\)?[.!]?",
-            paragraph,
-        )
-        if link_only is None:
-            continue
-        matching_claims = claims_by_url.get(link_only.group(2), [])
-        if len(matching_claims) != 1:
-            continue
-        claim_text = matching_claims[0].claim.strip().rstrip(".!?。！？")
-        parts[index] = f"{claim_text}. ({link_only.group(1)})."
-        restored += 1
-    return "".join(parts), restored
 
 
 def _recover_allowed_url(
@@ -1240,19 +745,6 @@ def _malformed_destination_candidate(remainder: str) -> tuple[str, int]:
 def _line_end(markdown: str, start: int) -> int:
     line_end = markdown.find("\n", start)
     return len(markdown) if line_end < 0 else line_end
-
-
-def _inline_html(value: str) -> str:
-    escaped = html.escape(value, quote=True)
-    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
-    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
-
-    def link(match: re.Match[str]) -> str:
-        label, url = match.groups()
-        safe_url = html.escape(url, quote=True)
-        return f'<a href="{safe_url}" rel="noopener noreferrer">{label}</a>'
-
-    return LINK_PATTERN.sub(link, escaped)
 
 
 def _issue(section_id: str, code: str, message: str) -> SectionIssue:

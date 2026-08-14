@@ -593,6 +593,7 @@ async def test_automatic_batch_rejects_second_active_batch(repository) -> None:
         ("needs_attention", "expansion_charged_failed", False),
         ("needs_attention", "expansion_failed", True),
         ("needs_attention", "content_plan_scheduling_failed", True),
+        ("needs_attention", "classification_failed", False),
     ],
 )
 async def test_automatic_batch_recovery_filters_paid_request_outcomes(
@@ -620,6 +621,12 @@ async def test_automatic_batch_recovery_filters_paid_request_outcomes(
     [
         ("content_plan_technical_retry_exhausted", True),
         ("content_plan_scheduling_failed", True),
+        ("serp_request_outcome_unknown", True),
+        ("serp_primary_candidates_exhausted", True),
+        ("ai_request_outcome_unknown", True),
+        ("ai_request_retry_exhausted", True),
+        ("pack_shortage", True),
+        ("seed_decision_contract_invalid", True),
         ("external_request_outcome_unknown", False),
         ("expansion_charged_failed", False),
     ],
@@ -653,6 +660,79 @@ async def test_manual_batch_retry_preserves_paid_request_safety(
     assert reopened.status == "queued"
     assert reopened.error_code is None
     assert reopened.error_detail is None
+
+
+async def test_automatic_classification_retry_reopens_only_failed_preparation(
+    repository,
+) -> None:
+    repo, sessions, project_id = repository
+    batch = await create_batch(repo, project_id, source="automatic")
+    failed = await repo.create_preparation(
+        preparation_id=f"preparation-{uuid4().hex}",
+        batch_id=batch.id,
+        candidate_id=None,
+        plan_order=1,
+        seed_keyword="failed classification",
+        normalized_seed_keyword="failed classification",
+        source_round="initial",
+        workflow_id=f"content-plan:{uuid4().hex}",
+        state="classification_failed",
+    )
+    ready = await repo.create_preparation(
+        preparation_id=f"preparation-{uuid4().hex}",
+        batch_id=batch.id,
+        candidate_id=None,
+        plan_order=2,
+        seed_keyword="completed package",
+        normalized_seed_keyword="completed package",
+        source_round="initial",
+        workflow_id=f"content-plan:{uuid4().hex}",
+        state="pack_ready",
+    )
+    async with sessions() as session:
+        stored_batch = await session.get(ContentPlanBatch, batch.id)
+        stored_failed = await session.get(ContentPlanPreparation, failed.id)
+        assert stored_batch is not None and stored_failed is not None
+        stored_batch.status = "needs_attention"
+        stored_batch.stage = "d3_failed"
+        stored_batch.error_code = "classification_failed"
+        stored_batch.error_detail = "classification_contract_invalid: ids"
+        stored_failed.error_code = "classification_failed"
+        stored_failed.error_detail = "classification_contract_invalid: ids"
+        await session.commit()
+
+    target = await repo.prepare_batch_retry_scoped(
+        "content-plan-test-org", project_id, batch.id
+    )
+
+    assert target is not None
+    assert target.batch.status == "queued"
+    assert target.preparation_id is None
+    failed_bundle = await repo.get_preparation_bundle(failed.id)
+    ready_bundle = await repo.get_preparation_bundle(ready.id)
+    assert failed_bundle is not None and ready_bundle is not None
+    assert failed_bundle.preparation.state == "expanded"
+    assert failed_bundle.preparation.package_version == failed.package_version + 1
+    assert failed_bundle.preparation.error_code is None
+    assert failed_bundle.preparation.error_detail is None
+    assert ready_bundle.preparation.state == "pack_ready"
+    assert ready_bundle.preparation.package_version == ready.package_version
+
+
+async def test_manual_batch_cannot_retry_automatic_pack_shortage(repository) -> None:
+    repo, sessions, project_id = repository
+    batch = await create_batch(repo, project_id, source="manual")
+    async with sessions() as session:
+        row = await session.get(ContentPlanBatch, batch.id)
+        assert row is not None
+        row.status = "needs_attention"
+        row.error_code = "pack_shortage"
+        await session.commit()
+
+    with pytest.raises(ValueError, match="content_plan_batch_not_retryable"):
+        await repo.prepare_batch_retry_scoped(
+            "content-plan-test-org", project_id, batch.id
+        )
 
 
 @pytest.mark.parametrize(
@@ -1087,6 +1167,253 @@ async def test_repository_replaces_an_assigned_seed_without_order_conflict(
     assert [(row.id, row.selected_plan_order) for row in selected] == [
         ("candidate-replacement", 1)
     ]
+
+
+async def test_repository_replacement_is_atomic_and_replay_safe_after_order_changes(
+    repository,
+) -> None:
+    repo, sessions, project_id = repository
+    batch = await create_batch(repo, project_id, source="automatic")
+    await repo.save_candidates(
+        batch.id,
+        [
+            {
+                "id": "candidate-old-atomic",
+                "keyword_id": None,
+                "keyword": "old atomic seed",
+                "normalized_keyword": "old atomic seed",
+                "source_rank": 1,
+                "priority_score_snapshot": 10,
+                "coverage_status_snapshot": "uncovered",
+                "decision": "kept",
+            },
+            {
+                "id": "candidate-replacement-atomic",
+                "keyword_id": None,
+                "keyword": "replacement atomic seed",
+                "normalized_keyword": "replacement atomic seed",
+                "source_rank": 2,
+                "priority_score_snapshot": 9,
+                "coverage_status_snapshot": "uncovered",
+                "decision": "kept",
+                "selected_plan_order": 1,
+            },
+        ],
+    )
+    old = await repo.create_preparation(
+        preparation_id=f"preparation-{uuid4().hex}",
+        batch_id=batch.id,
+        candidate_id="candidate-old-atomic",
+        plan_order=1,
+        seed_keyword="old atomic seed",
+        normalized_seed_keyword="old atomic seed",
+        source_round="initial",
+        workflow_id=f"content-plan:{batch.id}:prepare:22:1",
+        state="invalid",
+    )
+    colliding_history = await repo.create_preparation(
+        preparation_id=f"preparation-{uuid4().hex}",
+        batch_id=batch.id,
+        candidate_id=None,
+        plan_order=2,
+        seed_keyword="unrelated history",
+        normalized_seed_keyword="unrelated history",
+        source_round="refill_1",
+        workflow_id=f"content-plan:{batch.id}:prepare:1:2",
+        state="superseded",
+    )
+    replacement_workflow_id = f"content-plan:{batch.id}:replace:{old.id}"
+
+    replacement = await repo.replace_preparation_seed(
+        preparation_id=f"preparation-{uuid4().hex}",
+        old_preparation_id=old.id,
+        replacement_candidate_id="candidate-replacement-atomic",
+        source_round="refill_2",
+        workflow_id=replacement_workflow_id,
+    )
+    replay = await repo.replace_preparation_seed(
+        preparation_id=f"preparation-{uuid4().hex}",
+        old_preparation_id=old.id,
+        replacement_candidate_id="candidate-replacement-atomic",
+        source_round="refill_2",
+        workflow_id=replacement_workflow_id,
+    )
+
+    assert replay.id == replacement.id
+    assert replacement.workflow_id == replacement_workflow_id
+    assert replacement.preparation_version == old.preparation_version + 1
+    assert replacement.plan_order == 1
+    assert replacement.seed_keyword == "replacement atomic seed"
+    selected = await repo.get_selected_candidates(batch.id)
+    assert [(row.id, row.selected_plan_order) for row in selected] == [
+        ("candidate-replacement-atomic", 1)
+    ]
+    async with sessions() as session:
+        preparations = list(
+            (
+                await session.scalars(
+                    select(ContentPlanPreparation).where(
+                        ContentPlanPreparation.batch_id == batch.id
+                    )
+                )
+            ).all()
+        )
+        stored_old_candidate = await session.get(
+            ContentPlanCandidate, "candidate-old-atomic"
+        )
+    assert len(preparations) == 3
+    assert colliding_history.id in {row.id for row in preparations}
+    assert stored_old_candidate is not None
+    assert stored_old_candidate.decision == "dropped"
+    assert stored_old_candidate.selected_plan_order is None
+
+
+async def test_repository_replacement_rolls_back_candidate_swap_when_insert_fails(
+    repository,
+) -> None:
+    repo, sessions, project_id = repository
+    batch = await create_batch(repo, project_id, source="automatic")
+    await repo.save_candidates(
+        batch.id,
+        [
+            {
+                "id": "candidate-old-rollback",
+                "keyword_id": None,
+                "keyword": "old rollback seed",
+                "normalized_keyword": "old rollback seed",
+                "source_rank": 1,
+                "priority_score_snapshot": 10,
+                "coverage_status_snapshot": "uncovered",
+                "decision": "kept",
+                "selected_plan_order": 1,
+            },
+            {
+                "id": "candidate-replacement-rollback",
+                "keyword_id": None,
+                "keyword": "replacement rollback seed",
+                "normalized_keyword": "replacement rollback seed",
+                "source_rank": 2,
+                "priority_score_snapshot": 9,
+                "coverage_status_snapshot": "uncovered",
+                "decision": "kept",
+            },
+        ],
+    )
+    old = await repo.create_preparation(
+        preparation_id=f"preparation-{uuid4().hex}",
+        batch_id=batch.id,
+        candidate_id="candidate-old-rollback",
+        plan_order=1,
+        seed_keyword="old rollback seed",
+        normalized_seed_keyword="old rollback seed",
+        source_round="initial",
+        workflow_id=f"content-plan:{batch.id}:prepare:1:1",
+        state="invalid",
+    )
+    duplicate_id = f"preparation-{uuid4().hex}"
+    other_batch = await create_batch(repo, project_id, source="manual")
+    await repo.create_preparation(
+        preparation_id=duplicate_id,
+        batch_id=other_batch.id,
+        candidate_id=None,
+        plan_order=1,
+        seed_keyword="existing preparation",
+        normalized_seed_keyword="existing preparation",
+        source_round="manual",
+        workflow_id=f"content-plan:{other_batch.id}:prepare:1:1",
+    )
+
+    with pytest.raises(IntegrityError):
+        await repo.replace_preparation_seed(
+            preparation_id=duplicate_id,
+            old_preparation_id=old.id,
+            replacement_candidate_id="candidate-replacement-rollback",
+            source_round="refill_2",
+            workflow_id=f"content-plan:{batch.id}:replace:{old.id}",
+        )
+
+    current = await repo.get_current_preparations(batch.id)
+    selected = await repo.get_selected_candidates(batch.id)
+    assert [row.id for row in current] == [old.id]
+    assert current[0].state == "invalid"
+    assert [(row.id, row.selected_plan_order) for row in selected] == [
+        ("candidate-old-rollback", 1)
+    ]
+    async with sessions() as session:
+        old_candidate = await session.get(ContentPlanCandidate, "candidate-old-rollback")
+        replacement_candidate = await session.get(
+            ContentPlanCandidate, "candidate-replacement-rollback"
+        )
+    assert old_candidate is not None and old_candidate.decision == "kept"
+    assert replacement_candidate is not None
+    assert replacement_candidate.selected_plan_order is None
+
+
+async def test_related_request_legacy_key_is_reused_only_for_same_preparation(
+    repository,
+) -> None:
+    repo, _sessions, project_id = repository
+    batch = await create_batch(repo, project_id, source="automatic")
+    first = await repo.create_preparation(
+        preparation_id=f"preparation-{uuid4().hex}",
+        batch_id=batch.id,
+        candidate_id=None,
+        plan_order=1,
+        seed_keyword="first request seed",
+        normalized_seed_keyword="first request seed",
+        source_round="initial",
+        workflow_id=f"content-plan:{batch.id}:prepare:1:1",
+    )
+    second = await repo.create_preparation(
+        preparation_id=f"preparation-{uuid4().hex}",
+        batch_id=batch.id,
+        candidate_id=None,
+        plan_order=2,
+        seed_keyword="second request seed",
+        normalized_seed_keyword="second request seed",
+        source_round="initial",
+        workflow_id=f"content-plan:{batch.id}:prepare:2:1",
+    )
+    legacy_key = f"related:{batch.id}:0:1:1"
+    legacy = await repo.prepare_external_request(
+        batch_id=batch.id,
+        preparation_id=first.id,
+        plan_item_id=None,
+        request_key=legacy_key,
+        provider="dataforseo",
+        endpoint="related_keywords/live",
+        request_hash="first-hash",
+        round_number=0,
+    )
+
+    reused = await repo.prepare_external_request(
+        batch_id=batch.id,
+        preparation_id=first.id,
+        plan_item_id=None,
+        request_key=f"related:{batch.id}:0:{first.id}:1",
+        legacy_request_key=legacy_key,
+        provider="dataforseo",
+        endpoint="related_keywords/live",
+        request_hash="first-hash",
+        round_number=0,
+    )
+    separate = await repo.prepare_external_request(
+        batch_id=batch.id,
+        preparation_id=second.id,
+        plan_item_id=None,
+        request_key=f"related:{batch.id}:0:{second.id}:1",
+        legacy_request_key=legacy_key,
+        provider="dataforseo",
+        endpoint="related_keywords/live",
+        request_hash="second-hash",
+        round_number=0,
+    )
+
+    assert reused.id == legacy.id
+    assert reused.request_key == legacy_key
+    assert separate.id != legacy.id
+    assert separate.preparation_id == second.id
+    assert separate.request_key == f"related:{batch.id}:0:{second.id}:1"
 
 
 async def test_snapshot_completion_blocks_a_concurrent_candidate_insert(

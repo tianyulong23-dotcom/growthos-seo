@@ -250,6 +250,34 @@ func TestNormalizePostgresURLAcceptsSQLAlchemyDriverName(t *testing.T) {
 	}
 }
 
+func TestDecodePlaintextAIAPIKey(t *testing.T) {
+	got, plaintext, err := decodePlaintextAIAPIKey([]byte("plaintext:v1:test-api-key"))
+	if err != nil {
+		t.Fatalf("decodePlaintextAIAPIKey() returned an error: %v", err)
+	}
+	if !plaintext || got != "test-api-key" {
+		t.Fatalf("decodePlaintextAIAPIKey() = %q, %t", got, plaintext)
+	}
+}
+
+func TestDecodePlaintextAIAPIKeyLeavesEncryptedValueForDecryption(t *testing.T) {
+	got, plaintext, err := decodePlaintextAIAPIKey([]byte{0x01, 0x02, 0x03})
+	if err != nil {
+		t.Fatalf("decodePlaintextAIAPIKey() returned an error: %v", err)
+	}
+	if plaintext || got != "" {
+		t.Fatalf("decodePlaintextAIAPIKey() = %q, %t", got, plaintext)
+	}
+}
+
+func TestDecodePlaintextAIAPIKeyRejectsInvalidUTF8(t *testing.T) {
+	stored := append(append([]byte(nil), plaintextAISettingsPrefix...), 0xff)
+	_, plaintext, err := decodePlaintextAIAPIKey(stored)
+	if !plaintext || err == nil {
+		t.Fatalf("decodePlaintextAIAPIKey() plaintext = %t, error = %v", plaintext, err)
+	}
+}
+
 func readGzip(t *testing.T, data []byte) []byte {
 	t.Helper()
 	reader, err := gzip.NewReader(bytes.NewReader(data))

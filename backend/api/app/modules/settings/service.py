@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,6 +16,8 @@ from app.modules.settings.models import AIProviderSetting
 from app.modules.agent.providers import ProviderConfig, ProviderError, build_provider
 from app.modules.settings.provider_privacy import data_retention_mode
 from app.modules.settings.schemas import (
+    AIAPIProtocol,
+    AIReasoningEffort,
     AIProviderSettingsResponse,
     DEFAULT_AI_MAX_RETRIES,
     DEFAULT_AI_REQUEST_TIMEOUT_SECONDS,
@@ -51,10 +53,41 @@ class AIProviderSettingsRecord:
     base_url: str
     api_key: str = field(repr=False)
     provider: AIProviderName = "openai"
+    api_protocol: AIAPIProtocol = "chat_completions"
     model: str = ""
+    business_model: str | None = None
+    keyword_model: str | None = None
+    content_model: str | None = None
+    agent_model: str | None = None
+    reasoning_effort: AIReasoningEffort = "medium"
+    business_reasoning_effort: AIReasoningEffort | None = None
+    keyword_reasoning_effort: AIReasoningEffort | None = None
+    content_reasoning_effort: AIReasoningEffort | None = None
+    agent_reasoning_effort: AIReasoningEffort | None = None
     request_timeout_seconds: int = DEFAULT_AI_REQUEST_TIMEOUT_SECONDS
     max_retries: int = DEFAULT_AI_MAX_RETRIES
     updated_at: datetime | None = None
+
+    def for_task(
+        self, task: Literal["business", "keyword", "content", "agent"]
+    ) -> AIProviderSettingsRecord:
+        model_override = {
+            "business": self.business_model,
+            "keyword": self.keyword_model,
+            "content": self.content_model,
+            "agent": self.agent_model,
+        }[task]
+        effort_override = {
+            "business": self.business_reasoning_effort,
+            "keyword": self.keyword_reasoning_effort,
+            "content": self.content_reasoning_effort,
+            "agent": self.agent_reasoning_effort,
+        }[task]
+        return replace(
+            self,
+            model=model_override or self.model,
+            reasoning_effort=effort_override or self.reasoning_effort,
+        )
 
 
 class AISettingsRepository(Protocol):
@@ -104,8 +137,18 @@ class SQLAlchemyAISettingsRepository:
                     select(
                         AIProviderSetting.base_url,
                         AIProviderSetting.provider,
+                        AIProviderSetting.api_protocol,
                         AIProviderSetting.api_key_encrypted,
                         AIProviderSetting.model,
+                        AIProviderSetting.business_model,
+                        AIProviderSetting.keyword_model,
+                        AIProviderSetting.content_model,
+                        AIProviderSetting.agent_model,
+                        AIProviderSetting.reasoning_effort,
+                        AIProviderSetting.business_reasoning_effort,
+                        AIProviderSetting.keyword_reasoning_effort,
+                        AIProviderSetting.content_reasoning_effort,
+                        AIProviderSetting.agent_reasoning_effort,
                         AIProviderSetting.request_timeout_seconds,
                         AIProviderSetting.max_retries,
                         AIProviderSetting.updated_at,
@@ -132,9 +175,19 @@ class SQLAlchemyAISettingsRepository:
                 raise AISettingsEncryptionUnavailableError
             return AIProviderSettingsRecord(
                 provider=row.provider,
+                api_protocol=row.api_protocol,
                 base_url=row.base_url,
                 api_key=api_key,
                 model=row.model,
+                business_model=row.business_model,
+                keyword_model=row.keyword_model,
+                content_model=row.content_model,
+                agent_model=row.agent_model,
+                reasoning_effort=row.reasoning_effort,
+                business_reasoning_effort=row.business_reasoning_effort,
+                keyword_reasoning_effort=row.keyword_reasoning_effort,
+                content_reasoning_effort=row.content_reasoning_effort,
+                agent_reasoning_effort=row.agent_reasoning_effort,
                 request_timeout_seconds=row.request_timeout_seconds,
                 max_retries=row.max_retries,
                 updated_at=row.updated_at,
@@ -162,26 +215,56 @@ class SQLAlchemyAISettingsRepository:
                     INSERT INTO ai_provider_settings (
                         organization_id,
                         provider,
+                        api_protocol,
                         base_url,
                         api_key_encrypted,
                         model,
+                        business_model,
+                        keyword_model,
+                        content_model,
+                        agent_model,
+                        reasoning_effort,
+                        business_reasoning_effort,
+                        keyword_reasoning_effort,
+                        content_reasoning_effort,
+                        agent_reasoning_effort,
                         request_timeout_seconds,
                         max_retries
                     )
                     VALUES (
                         :organization_id,
                         :provider,
+                        :api_protocol,
                         :base_url,
                         {api_key_expression},
                         :model,
+                        :business_model,
+                        :keyword_model,
+                        :content_model,
+                        :agent_model,
+                        :reasoning_effort,
+                        :business_reasoning_effort,
+                        :keyword_reasoning_effort,
+                        :content_reasoning_effort,
+                        :agent_reasoning_effort,
                         :request_timeout_seconds,
                         :max_retries
                     )
                     ON CONFLICT (organization_id) DO UPDATE SET
                         base_url = EXCLUDED.base_url,
                         provider = EXCLUDED.provider,
+                        api_protocol = EXCLUDED.api_protocol,
                         api_key_encrypted = EXCLUDED.api_key_encrypted,
                         model = EXCLUDED.model,
+                        business_model = EXCLUDED.business_model,
+                        keyword_model = EXCLUDED.keyword_model,
+                        content_model = EXCLUDED.content_model,
+                        agent_model = EXCLUDED.agent_model,
+                        reasoning_effort = EXCLUDED.reasoning_effort,
+                        business_reasoning_effort = EXCLUDED.business_reasoning_effort,
+                        keyword_reasoning_effort = EXCLUDED.keyword_reasoning_effort,
+                        content_reasoning_effort = EXCLUDED.content_reasoning_effort,
+                        agent_reasoning_effort = EXCLUDED.agent_reasoning_effort,
                         request_timeout_seconds = EXCLUDED.request_timeout_seconds,
                         max_retries = EXCLUDED.max_retries,
                         updated_at = now()
@@ -190,11 +273,21 @@ class SQLAlchemyAISettingsRepository:
                 {
                     "organization_id": organization_id,
                     "provider": record.provider,
+                    "api_protocol": record.api_protocol,
                     "base_url": record.base_url,
                     "api_key": record.api_key,
                     "encryption_key": encryption_key,
                     "api_key_plaintext": self._PLAINTEXT_PREFIX + record.api_key.encode("utf-8"),
                     "model": record.model,
+                    "business_model": record.business_model,
+                    "keyword_model": record.keyword_model,
+                    "content_model": record.content_model,
+                    "agent_model": record.agent_model,
+                    "reasoning_effort": record.reasoning_effort,
+                    "business_reasoning_effort": record.business_reasoning_effort,
+                    "keyword_reasoning_effort": record.keyword_reasoning_effort,
+                    "content_reasoning_effort": record.content_reasoning_effort,
+                    "agent_reasoning_effort": record.agent_reasoning_effort,
                     "request_timeout_seconds": record.request_timeout_seconds,
                     "max_retries": record.max_retries,
                 },
@@ -210,9 +303,11 @@ class AIConnectionTester(Protocol):
     async def test(
         self,
         provider: AIProviderName,
+        api_protocol: AIAPIProtocol,
         base_url: str,
         api_key: str,
         model: str,
+        reasoning_effort: AIReasoningEffort,
         request_timeout_seconds: int,
     ) -> None: ...
 
@@ -221,19 +316,23 @@ class ProviderConnectionTester:
     async def test(
         self,
         provider: AIProviderName,
+        api_protocol: AIAPIProtocol,
         base_url: str,
         api_key: str,
         model: str,
+        reasoning_effort: AIReasoningEffort,
         request_timeout_seconds: int,
     ) -> None:
         try:
             await build_provider(ProviderConfig(
                 provider=provider,
+                api_protocol=api_protocol,
                 base_url=base_url,
                 api_key=api_key,
                 model=model,
                 timeout_seconds=request_timeout_seconds,
                 max_retries=0,
+                reasoning_effort=reasoning_effort,
             )).test_connection()
         except ProviderError as exc:
             raise AIProviderConnectionError(str(exc)) from exc
@@ -298,9 +397,19 @@ class AISettingsService:
             self.settings.default_organization_id,
             AIProviderSettingsRecord(
                 provider=request.provider,
+                api_protocol=request.api_protocol,
                 base_url=request.base_url,
                 api_key=api_key,
                 model=request.model,
+                business_model=request.business_model,
+                keyword_model=request.keyword_model,
+                content_model=request.content_model,
+                agent_model=request.agent_model,
+                reasoning_effort=request.reasoning_effort,
+                business_reasoning_effort=request.business_reasoning_effort,
+                keyword_reasoning_effort=request.keyword_reasoning_effort,
+                content_reasoning_effort=request.content_reasoning_effort,
+                agent_reasoning_effort=request.agent_reasoning_effort,
                 request_timeout_seconds=request.request_timeout_seconds,
                 max_retries=request.max_retries,
             ),
@@ -328,17 +437,44 @@ class AISettingsService:
         if not api_key:
             raise AIProviderNotConfiguredError("请填写 API 密钥")
         register_sensitive_values((api_key,))
-        await self.connection_tester.test(
-            request.provider,
-            request.base_url,
-            api_key,
-            request.model,
-            request.request_timeout_seconds,
-        )
+        model_efforts = dict.fromkeys((
+            (request.model, request.reasoning_effort),
+            (
+                request.business_model,
+                request.business_reasoning_effort or request.reasoning_effort,
+            ),
+            (
+                request.keyword_model,
+                request.keyword_reasoning_effort or request.reasoning_effort,
+            ),
+            (
+                request.content_model,
+                request.content_reasoning_effort or request.reasoning_effort,
+            ),
+            (
+                request.agent_model,
+                request.agent_reasoning_effort or request.reasoning_effort,
+            ),
+        ))
+        configured_model_efforts = [
+            (model, effort)
+            for model, effort in model_efforts
+            if model is not None
+        ]
+        for model, effort in configured_model_efforts:
+            await self.connection_tester.test(
+                request.provider,
+                request.api_protocol,
+                request.base_url,
+                api_key,
+                model,
+                effort,
+                request.request_timeout_seconds,
+            )
         return TestAIProviderSettingsResponse(
             success=True,
             model=request.model,
-            message="连接成功，模型响应格式正常",
+            message=f"连接成功，已验证 {len(configured_model_efforts)} 个模型配置",
         )
 
     async def _ensure_project(self, project_id: str) -> None:
@@ -369,6 +505,7 @@ class AISettingsService:
             return stored, "database"
         environment = AIProviderSettingsRecord(
             provider=self.settings.business_profile_ai_provider,
+            api_protocol=self.settings.business_profile_ai_api_protocol,
             base_url=(self.settings.business_profile_ai_base_url or "").strip().rstrip("/"),
             api_key=(self.settings.business_profile_ai_api_key or "").strip(),
             model=self.settings.business_profile_ai_model.strip(),
@@ -390,7 +527,10 @@ class AISettingsService:
         return encryption_key or None
 
     def _allow_plaintext_storage(self) -> bool:
-        return self.settings.app_env != "production"
+        return (
+            self.settings.ai_settings_allow_plaintext
+            or self.settings.app_env != "production"
+        )
 
 
 def settings_response(
@@ -400,8 +540,18 @@ def settings_response(
     if record is None:
         return AIProviderSettingsResponse(
             provider="openai",
+            api_protocol="chat_completions",
             base_url="",
             model="",
+            business_model=None,
+            keyword_model=None,
+            content_model=None,
+            agent_model=None,
+            reasoning_effort="medium",
+            business_reasoning_effort=None,
+            keyword_reasoning_effort=None,
+            content_reasoning_effort=None,
+            agent_reasoning_effort=None,
             request_timeout_seconds=DEFAULT_AI_REQUEST_TIMEOUT_SECONDS,
             max_retries=DEFAULT_AI_MAX_RETRIES,
             configured=False,
@@ -411,8 +561,18 @@ def settings_response(
         )
     return AIProviderSettingsResponse(
         provider=record.provider,
+        api_protocol=record.api_protocol,
         base_url=record.base_url,
         model=record.model,
+        business_model=record.business_model,
+        keyword_model=record.keyword_model,
+        content_model=record.content_model,
+        agent_model=record.agent_model,
+        reasoning_effort=record.reasoning_effort,
+        business_reasoning_effort=record.business_reasoning_effort,
+        keyword_reasoning_effort=record.keyword_reasoning_effort,
+        content_reasoning_effort=record.content_reasoning_effort,
+        agent_reasoning_effort=record.agent_reasoning_effort,
         request_timeout_seconds=record.request_timeout_seconds,
         max_retries=record.max_retries,
         configured=bool(record.base_url and record.api_key and record.model),

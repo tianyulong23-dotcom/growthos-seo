@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"encoding/json"
 	"net/url"
 	"testing"
 )
@@ -34,6 +35,15 @@ func TestCandidateRoleUsesAnchorTextForGenericURLs(t *testing.T) {
 	}
 }
 
+func TestCandidateRoleTreatsDownloadPageAsOffering(t *testing.T) {
+	downloadURL, _ := url.Parse("https://example.com/download")
+	candidate := Candidate{URL: downloadURL, AnchorText: "Download the app"}
+
+	if role := CandidateBusinessRole(candidate); role != BusinessPageOffering {
+		t.Fatalf("role = %q, want %q", role, BusinessPageOffering)
+	}
+}
+
 func TestPricingRoleDoesNotTreatCompoundPlanPathsAsPricing(t *testing.T) {
 	trainingPlanURL, _ := url.Parse("https://example.com/training-plan")
 
@@ -42,15 +52,12 @@ func TestPricingRoleDoesNotTreatCompoundPlanPathsAsPricing(t *testing.T) {
 	}
 }
 
-func TestPricingRoleRecognizesTopLevelPlanPaths(t *testing.T) {
-	for _, rawURL := range []string{
-		"https://example.com/plan",
-		"https://example.com/plans",
-	} {
-		pageURL, _ := url.Parse(rawURL)
-		if role := CandidateBusinessRole(Candidate{URL: pageURL}); role != BusinessPagePricing {
-			t.Fatalf("%s role = %q, want %q", rawURL, role, BusinessPagePricing)
-		}
+func TestPricingRoleDoesNotSpecialCaseStandalonePlanLabel(t *testing.T) {
+	brandedPlanURL, _ := url.Parse("https://example.com/acmes-plan")
+	candidate := Candidate{URL: brandedPlanURL, AnchorText: "Plan", InNavigation: true}
+
+	if role := CandidateBusinessRole(candidate); role != BusinessPageOther {
+		t.Fatalf("role = %q, want %q", role, BusinessPageOther)
 	}
 }
 
@@ -64,6 +71,15 @@ func TestPricingRoleRecognizesExplicitPlanLanguage(t *testing.T) {
 		if role := CandidateBusinessRole(candidate); role != BusinessPagePricing {
 			t.Fatalf("%q role = %q, want %q", anchorText, role, BusinessPagePricing)
 		}
+	}
+}
+
+func TestContentPathOutranksGenericCategorySignal(t *testing.T) {
+	pageURL, _ := url.Parse("https://example.com/category/blog")
+	candidate := Candidate{URL: pageURL, AnchorText: "Blog"}
+
+	if role := CandidateBusinessRole(candidate); role != BusinessPageContent {
+		t.Fatalf("role = %q, want %q", role, BusinessPageContent)
 	}
 }
 
@@ -118,6 +134,9 @@ func TestBusinessRoleTreatsHelpAndSupportPathsAsUtility(t *testing.T) {
 		"https://example.com/customer-service",
 		"https://example.com/returns",
 		"https://example.com/accessibility",
+		"https://example.com/privacy-policy",
+		"https://example.com/terms-of-service",
+		"https://example.com/dmca",
 	} {
 		pageURL, _ := url.Parse(rawURL)
 		if role := CandidateBusinessRole(Candidate{URL: pageURL}); role != BusinessPageUtility {
@@ -126,32 +145,216 @@ func TestBusinessRoleTreatsHelpAndSupportPathsAsUtility(t *testing.T) {
 	}
 }
 
-func TestBusinessProfileCandidateSelectionSkipsUtilityPages(t *testing.T) {
+func TestSiteUnderstandingCandidateSelectionSkipsUtilityPages(t *testing.T) {
+	homeURL, _ := url.Parse("https://example.com/")
+	privacyURL, _ := url.Parse("https://example.com/privacy-policy")
+	dmcaURL, _ := url.Parse("https://example.com/dmca")
 	aboutURL, _ := url.Parse("https://example.com/about")
-	productURL, _ := url.Parse("https://example.com/products")
-	helpURL, _ := url.Parse("https://example.com/help")
+	productsURL, _ := url.Parse("https://example.com/products")
 	candidates := map[string]Candidate{}
 	for _, candidate := range []Candidate{
-		{URL: aboutURL, InNavigation: true, Score: 60},
-		{URL: productURL, InNavigation: true, Score: 60},
-		{URL: helpURL, InNavigation: true, Score: 100},
+		{URL: homeURL, Depth: 0},
+		{URL: privacyURL, Depth: 1},
+		{URL: dmcaURL, Depth: 1},
+		{URL: aboutURL, Depth: 1},
+		{URL: productsURL, Depth: 1},
 	} {
 		addCandidate(candidates, candidate)
 	}
 
-	selected := bestUnderstandingCandidates(
+	selected := pendingSiteUnderstandingCandidates(
 		candidates,
-		map[string]struct{}{},
-		map[BusinessPageRole]int{},
-		3,
+		map[string]struct{}{homeURL.String(): {}},
+		nil,
+		4,
 	)
 	if len(selected) != 2 {
 		t.Fatalf("selected %d candidates, want 2", len(selected))
 	}
-	for _, candidate := range selected {
-		if role := CandidateBusinessRole(candidate); role == BusinessPageUtility {
-			t.Fatalf("selected utility page %s", candidate.URL)
+	if selected[0].URL.String() != aboutURL.String() ||
+		selected[1].URL.String() != productsURL.String() {
+		t.Fatalf("selected URLs = %#v", selected)
+	}
+}
+
+func TestSiteUnderstandingCandidateSelectionUsesDistinctBusinessRoles(t *testing.T) {
+	aboutURL, _ := url.Parse("https://example.com/about")
+	productsURL, _ := url.Parse("https://example.com/products")
+	productDetailURL, _ := url.Parse("https://example.com/products/widget")
+	pricingURL, _ := url.Parse("https://example.com/pricing")
+	customersURL, _ := url.Parse("https://example.com/customers")
+	blogURL, _ := url.Parse("https://example.com/blog")
+	partnerURL, _ := url.Parse("https://example.com/partners")
+	candidates := map[string]Candidate{}
+	for _, candidate := range []Candidate{
+		{URL: blogURL, Depth: 1},
+		{URL: partnerURL, Depth: 1},
+		{URL: productDetailURL, Depth: 1},
+		{URL: customersURL, Depth: 1},
+		{URL: pricingURL, Depth: 1},
+		{URL: productsURL, Depth: 1},
+		{URL: aboutURL, Depth: 1},
+	} {
+		addCandidate(candidates, candidate)
+	}
+
+	selected := pendingSiteUnderstandingCandidates(
+		candidates,
+		map[string]struct{}{},
+		nil,
+		7,
+	)
+	if len(selected) != 7 {
+		t.Fatalf("selected %d candidates, want 7", len(selected))
+	}
+	want := []string{
+		aboutURL.String(),
+		productsURL.String(),
+		pricingURL.String(),
+		customersURL.String(),
+		productDetailURL.String(),
+		partnerURL.String(),
+		blogURL.String(),
+	}
+	for index, candidate := range selected {
+		if candidate.URL.String() != want[index] {
+			t.Fatalf("selected[%d] = %q, want %q", index, candidate.URL, want[index])
 		}
+	}
+}
+
+func TestSiteUnderstandingProtectsPricingFromSecondOffering(t *testing.T) {
+	productsURL, _ := url.Parse("https://example.com/products")
+	productDetailURL, _ := url.Parse("https://example.com/products/widget")
+	pricingURL, _ := url.Parse("https://example.com/pricing")
+	candidates := []Candidate{
+		{URL: productDetailURL, Depth: 1, DiscoveryOrder: 1},
+		{URL: productsURL, Depth: 1, DiscoveryOrder: 2},
+		{URL: pricingURL, Depth: 1, DiscoveryOrder: 3},
+	}
+
+	selected := selectSiteUnderstandingCandidates(candidates, nil, 2)
+	if len(selected) != 2 {
+		t.Fatalf("selected %d candidates, want 2", len(selected))
+	}
+	if selected[0].URL.String() != productsURL.String() ||
+		selected[1].URL.String() != pricingURL.String() {
+		t.Fatalf("selected URLs = %#v", selected)
+	}
+}
+
+func TestSiteUnderstandingFetchesUnclassifiedPagesWithinDepthTwo(t *testing.T) {
+	overviewURL, _ := url.Parse("https://example.com/overview")
+	partnersURL, _ := url.Parse("https://example.com/partners")
+	bodyURL, _ := url.Parse("https://example.com/misc")
+	deepURL, _ := url.Parse("https://example.com/catalog/item/details")
+	candidates := []Candidate{
+		{URL: partnersURL, Depth: 1, DiscoveryOrder: 2, InNavigation: true},
+		{URL: bodyURL, Depth: 2, DiscoveryOrder: 1},
+		{URL: overviewURL, Depth: 1, DiscoveryOrder: 1, InNavigation: true},
+		{URL: deepURL, Depth: 3, DiscoveryOrder: 3},
+	}
+
+	selected := selectSiteUnderstandingCandidates(candidates, nil, 4)
+	if len(selected) != 3 {
+		t.Fatalf("selected %d candidates, want 3", len(selected))
+	}
+	want := []string{overviewURL.String(), partnersURL.String(), bodyURL.String()}
+	for index, candidate := range selected {
+		if candidate.URL.String() != want[index] {
+			t.Fatalf("selected[%d] = %q, want %q", index, candidate.URL, want[index])
+		}
+	}
+}
+
+func TestSiteUnderstandingKeepsOnlyCoreRolesAfterReadingPage(t *testing.T) {
+	pricingPage := Page{
+		FinalURL:   "https://example.com/billing-options",
+		Title:      "Compare pricing packages",
+		MainText:   "Choose the package that fits your team.",
+		Depth:      1,
+		StatusCode: 200,
+	}
+	unknownPage := Page{
+		FinalURL:   "https://example.com/partners",
+		Title:      "Partner network",
+		MainText:   "Learn about our partner network.",
+		Depth:      1,
+		StatusCode: 200,
+	}
+
+	if !siteUnderstandingPageEligible(pricingPage, nil) {
+		t.Fatal("pricing page was not retained after its body was read")
+	}
+	if siteUnderstandingPageEligible(unknownPage, nil) {
+		t.Fatal("unclassified page consumed the final page budget")
+	}
+}
+
+func TestSiteUnderstandingRejectsEditorialReviewAfterReadingPage(t *testing.T) {
+	page := Page{
+		FinalURL:    "https://example.com/customers/my-switching-story",
+		Title:       "Why I switched providers after ten years",
+		Description: "My personal review of the service.",
+		H1:          []string{"Why I switched providers"},
+		Author:      "Example Author",
+		MainText: "I tried the service for a month. In this review I explain my " +
+			"experience and what I liked about it.",
+		StructuredData: []json.RawMessage{json.RawMessage(`{
+			"@context": "https://schema.org",
+			"@type": "Article"
+		}`)},
+		StatusCode: 200,
+	}
+
+	if siteUnderstandingPageEligible(page, nil) {
+		t.Fatal("personal editorial review was retained as business proof")
+	}
+}
+
+func TestSiteUnderstandingKeepsEvidenceRichCustomerCaseStudy(t *testing.T) {
+	page := Page{
+		FinalURL:    "https://example.com/customers/northwind",
+		Title:       "Northwind customer case study",
+		Description: "See how Northwind reduced processing time by 40%.",
+		H1:          []string{"Northwind customer success story"},
+		MainText: "This customer case study explains how Northwind used the platform " +
+			"to reduce processing time by 40% and serve its clients faster.",
+		StructuredData: []json.RawMessage{json.RawMessage(`{
+			"@context": "https://schema.org",
+			"@type": "Article"
+		}`)},
+		StatusCode: 200,
+	}
+
+	if !siteUnderstandingPageEligible(page, nil) {
+		t.Fatal("evidence-rich customer case study was rejected")
+	}
+}
+
+func TestSiteUnderstandingDistinguishesDownloadProductFromTutorial(t *testing.T) {
+	tutorial := Page{
+		FinalURL:    "https://example.com/download-app-step-by-step-guide",
+		Title:       "Download the app: step-by-step installation guide",
+		Description: "Follow these instructions to install the app on your TV.",
+		H1:          []string{"How to download and install the app"},
+		MainText:    "Step 1 open the downloader. Step 2 enter the code. Step 3 install the app.",
+		StatusCode:  200,
+	}
+	product := Page{
+		FinalURL:    "https://example.com/download",
+		Title:       "Acme desktop app",
+		Description: "Download the Acme app for secure team collaboration.",
+		H1:          []string{"Acme for desktop"},
+		MainText:    "The Acme desktop app provides secure collaboration, file sharing, and team workspaces.",
+		StatusCode:  200,
+	}
+
+	if siteUnderstandingPageEligible(tutorial, nil) {
+		t.Fatal("installation tutorial was retained as a core offering page")
+	}
+	if !siteUnderstandingPageEligible(product, nil) {
+		t.Fatal("commercial download page was rejected")
 	}
 }
 
@@ -167,161 +370,91 @@ func TestBusinessRoleDoesNotTreatCommercialSupportTextAsUtility(t *testing.T) {
 	}
 }
 
-func TestSiteUnderstandingSelectionPrefersMissingBusinessRole(t *testing.T) {
-	aboutURL, _ := url.Parse("https://example.com/about")
-	productOneURL, _ := url.Parse("https://example.com/products/one")
-	productTwoURL, _ := url.Parse("https://example.com/products/two")
+func TestSiteUnderstandingCandidateSelectionStopsAtDepthTwo(t *testing.T) {
+	depthTwoURL, _ := url.Parse("https://example.com/products/widget")
+	depthThreeURL, _ := url.Parse("https://example.com/pricing/enterprise/details")
 	candidates := map[string]Candidate{}
 	for _, candidate := range []Candidate{
-		{URL: aboutURL, Depth: 1, InNavigation: true},
-		{URL: productOneURL, Depth: 1, InNavigation: true},
-		{URL: productTwoURL, Depth: 1, InNavigation: true},
+		{URL: depthTwoURL, Depth: 2},
+		{URL: depthThreeURL, Depth: 3},
 	} {
 		addCandidate(candidates, candidate)
 	}
-	pages := []Page{{
-		URL:      "https://example.com/products",
-		FinalURL: "https://example.com/products",
-		Title:    "Products",
-		H1:       []string{"Products"},
-	}}
 
 	selected, ok := bestCandidate(
 		candidates,
 		map[string]struct{}{},
 		TaskSiteUnderstanding,
-		pages,
+		nil,
 	)
 	if !ok {
 		t.Fatal("bestCandidate() returned no candidate")
 	}
-	if selected.URL.String() != "https://example.com/about" {
-		t.Fatalf("selected URL = %q, want about page", selected.URL)
+	if selected.URL.String() != depthTwoURL.String() {
+		t.Fatalf("selected URL = %q, want depth-two page", selected.URL)
+	}
+
+	processed := map[string]struct{}{depthTwoURL.String(): {}}
+	if _, ok := bestCandidate(candidates, processed, TaskSiteUnderstanding, nil); ok {
+		t.Fatal("bestCandidate() selected a page deeper than two levels")
 	}
 }
 
-func TestSiteUnderstandingRequiresThreeDistinctPageRoles(t *testing.T) {
-	task := Task{
-		TargetURL: "https://example.com",
-		Country:   "US",
-		Language:  "en",
-	}
-	pages := []Page{
-		{
-			URL:         "https://example.com/",
-			FinalURL:    "https://example.com/",
-			Title:       "Acme Store",
-			Description: "Acme sells operations equipment.",
-		},
-		{
-			URL:      "https://example.com/products/one",
-			FinalURL: "https://example.com/products/one",
-			Title:    "Product One",
-			H1:       []string{"Product One"},
-		},
-		{
-			URL:      "https://example.com/products/two",
-			FinalURL: "https://example.com/products/two",
-			Title:    "Product Two",
-			H1:       []string{"Product Two"},
-		},
+func TestSiteUnderstandingRecognizesPricingFromExplicitBodyEvidence(t *testing.T) {
+	page := Page{
+		FinalURL:   "https://example.com/access-options",
+		Title:      "Access options",
+		H1:         []string{"Choose the right access"},
+		MainText:   "Compare our monthly subscription plans and choose the package that fits your team.",
+		StatusCode: 200,
 	}
 
-	if siteUnderstandingComplete(task, pages) {
-		t.Fatal("site understanding completed with duplicate offering roles")
+	if role := PageBusinessRole(page); role != BusinessPagePricing {
+		t.Fatalf("role = %q, want %q", role, BusinessPagePricing)
+	}
+	if !siteUnderstandingPageEligible(page, nil) {
+		t.Fatal("pricing page identified from explicit body evidence was rejected")
 	}
 }
 
-func TestSiteUnderstandingDoesNotCountNonBusinessRolesAsThirdRole(t *testing.T) {
-	task := Task{
-		TargetURL: "https://example.com",
-		Country:   "US",
-		Language:  "en",
-	}
-	basePages := []Page{
-		{
-			URL:         "https://example.com/",
-			FinalURL:    "https://example.com/",
-			Title:       "Acme",
-			Description: "Acme is a software platform for operations teams.",
-		},
-		{
-			URL:         "https://example.com/products/workflows",
-			FinalURL:    "https://example.com/products/workflows",
-			Title:       "Workflow Automation",
-			Description: "Automate recurring work.",
-			H1:          []string{"Workflow Automation"},
-		},
+func TestSiteUnderstandingRejectsRenderedErrorShell(t *testing.T) {
+	page := Page{
+		FinalURL:   "https://example.com/",
+		Title:      "Unsupported client",
+		MainText:   "Unsupported client. Please use a supported browser.",
+		StatusCode: 200,
+		Rendered:   true,
 	}
 
-	tests := []Page{
-		{
-			URL:      "https://example.com/blog",
-			FinalURL: "https://example.com/blog",
-			Title:    "Blog",
-		},
-		{
-			URL:      "https://example.com/login",
-			FinalURL: "https://example.com/login",
-			Title:    "Log in",
-		},
-		{
-			URL:      "https://example.com/careers",
-			FinalURL: "https://example.com/careers",
-			Title:    "Careers",
-		},
-		{
-			URL:      "https://example.com/help",
-			FinalURL: "https://example.com/help",
-			Title:    "Help",
-		},
-		{
-			URL:      "https://example.com/support",
-			FinalURL: "https://example.com/support",
-			Title:    "Customer support",
-		},
-	}
-
-	for _, thirdPage := range tests {
-		pages := append(append([]Page{}, basePages...), thirdPage)
-		if siteUnderstandingComplete(task, pages) {
-			t.Fatalf(
-				"site understanding completed when third role was %q",
-				PageBusinessRole(thirdPage),
-			)
-		}
+	if siteUnderstandingPageEligible(page, nil) {
+		t.Fatal("rendered browser error shell was retained as business evidence")
 	}
 }
 
-func TestSiteUnderstandingCountsAThirdBusinessRole(t *testing.T) {
-	task := Task{
-		TargetURL: "https://example.com",
-		Country:   "US",
-		Language:  "en",
+func TestSiteUnderstandingRejectsNearDuplicateOfferingPage(t *testing.T) {
+	first := Page{
+		FinalURL:    "https://example.com/collections/team-tools",
+		Title:       "Team tools collection",
+		Description: "Browse collaboration tools for modern teams.",
+		H1:          []string{"Tools for modern teams"},
+		MainText:    "Browse collaboration tools for modern teams, including shared workspaces and project coordination.",
+		WordCount:   12,
+		StatusCode:  200,
 	}
-	pages := []Page{
-		{
-			URL:         "https://example.com/",
-			FinalURL:    "https://example.com/",
-			Title:       "Acme",
-			Description: "Acme is a software platform for operations teams.",
-		},
-		{
-			URL:         "https://example.com/products/workflows",
-			FinalURL:    "https://example.com/products/workflows",
-			Title:       "Workflow Automation",
-			Description: "Automate recurring work.",
-			H1:          []string{"Workflow Automation"},
-		},
-		{
-			URL:         "https://example.com/about",
-			FinalURL:    "https://example.com/about",
-			Title:       "About Acme",
-			Description: "Learn about Acme.",
-		},
+	second := Page{
+		FinalURL:    "https://example.com/collections/business-tools",
+		Title:       "Business tools collection",
+		Description: "Browse collaboration tools for modern teams.",
+		H1:          []string{"Tools for modern teams"},
+		MainText:    "Browse collaboration tools for modern teams, including shared workspaces and project coordination.",
+		WordCount:   12,
+		StatusCode:  200,
 	}
 
-	if !siteUnderstandingComplete(task, pages) {
-		t.Fatal("site understanding did not complete with a third business role")
+	if !siteUnderstandingPageEligible(first, nil) {
+		t.Fatal("first offering page was rejected")
+	}
+	if siteUnderstandingPageEligible(second, []Page{first}) {
+		t.Fatal("near-duplicate offering page consumed a second offering slot")
 	}
 }

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,10 +26,13 @@ from app.modules.agent.models import (
     AgentResearchRecord,
     AgentRun,
     AgentRunStep,
+    AgentSystemTrigger,
+    AgentTimelineEvent,
     AgentToolExecution,
     AgentWorkflowDispatch,
 )
 from app.modules.agent.security import sanitize_agent_data, sanitize_text
+from app.modules.onboarding.models import OnboardingRun
 from app.modules.projects.models import Project
 
 ACTIVE_RUN_STATUSES = {"queued", "running", "executing", "verifying"}
@@ -164,7 +168,8 @@ def _completion_tool_evidence(execution: AgentToolExecution) -> dict[str, Any]:
         "id", "run_id", "status", "verified", "already_completed", "operation_id",
         "requested_count", "completed_count", "failed_count", "record_ids", "completion",
         "total", "page", "page_size", "next_page", "url", "changes", "audit",
-        "top_issues", "facts", "applied", "conclusion",
+        "top_issues", "facts", "applied", "conclusion", "article_id", "article_ids",
+        "articles", "primary_keyword", "title", "stage", "progress", "batch_id",
     }
     bounded_data = dict(long_term_data)
     bounded_data.update({key: data[key] for key in completion_keys if key in data})
@@ -184,6 +189,51 @@ def _completion_tool_evidence(execution: AgentToolExecution) -> dict[str, Any]:
         "error_code": execution.error_code or result.get("error_code"),
         "data": bounded_data,
     }
+
+
+def _completion_display_events(
+    steps: list[AgentRunStep], executions: list[AgentToolExecution]
+) -> list[dict[str, Any]]:
+    execution_by_id = {item.tool_call_id: item for item in executions}
+    referenced: set[str] = set()
+    events: list[dict[str, Any]] = []
+    for step in steps:
+        if step.step_type != "model" or step.name != "chat.completions":
+            continue
+        output = dict(step.output_json) if isinstance(step.output_json, dict) else {}
+        progress_text = sanitize_text(str(output.get("progress_text", ""))).strip()
+        if progress_text:
+            events.append({"type": "text", "text": progress_text})
+        calls = output.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            tool_call_id = str(call.get("tool_call_id") or "")
+            execution = execution_by_id.get(tool_call_id)
+            if execution is None or tool_call_id in referenced:
+                continue
+            referenced.add(tool_call_id)
+            events.append({
+                "type": "tool",
+                "tool_call_id": execution.tool_call_id,
+                "tool": execution.tool_name,
+                "execution_status": execution.status,
+            })
+
+    # A workflow can stop after registering a call but before its model step is
+    # closed. Keep that durable call visible instead of losing it from history.
+    for execution in executions:
+        if execution.tool_call_id in referenced:
+            continue
+        events.append({
+            "type": "tool",
+            "tool_call_id": execution.tool_call_id,
+            "tool": execution.tool_name,
+            "execution_status": execution.status,
+        })
+    return events
 
 
 def _message_path(
@@ -232,6 +282,86 @@ def _conversation_title(messages: list[AgentMessage]) -> str:
 
 def _estimate_context_tokens(value: Any) -> int:
     return estimate_json_tokens(value)
+
+
+DOWNSTREAM_BILLING_TOOLS = {
+    "keyword_external_requests": "start_keyword_library",
+    "content_plan_external_requests": "start_content_plan",
+    "article_run_steps": "start_articles",
+}
+
+
+def _downstream_billing_entries(
+    steps: list[Any],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    entries: dict[tuple[str, str], dict[str, Any]] = {}
+    for step in steps:
+        output = step.output_json if isinstance(step.output_json, dict) else {}
+        data = output.get("data")
+        data = data if isinstance(data, dict) else output
+        billing = data.get("billing")
+        if not isinstance(billing, dict):
+            continue
+        source = str(billing.get("source") or "").strip()
+        reference_id = str(billing.get("reference_id") or "").strip()
+        reported_cost = billing.get("reported_cost_usd")
+        if (
+            not source
+            or not reference_id
+            or isinstance(reported_cost, bool)
+            or not isinstance(reported_cost, (int, float))
+        ):
+            continue
+        cost = float(reported_cost)
+        if not math.isfinite(cost) or cost < 0:
+            continue
+        key = (source, reference_id)
+        previous = entries.get(key, {})
+        entries[key] = {
+            "reported_cost_usd": max(
+                float(previous.get("reported_cost_usd") or 0), cost
+            ),
+            "complete": bool(previous.get("complete"))
+            or billing.get("complete") is True,
+        }
+    return entries
+
+
+def _downstream_billing_cost(steps: list[Any]) -> float:
+    return round(sum(
+        float(entry["reported_cost_usd"])
+        for entry in _downstream_billing_entries(steps).values()
+    ), 8)
+
+
+def _unsettled_reservation_cost(
+    reservations: list[Any],
+    billing_entries: dict[tuple[str, str], dict[str, Any]],
+) -> float:
+    settled_by_tool: dict[str, int] = {}
+    for (source, _reference_id), entry in billing_entries.items():
+        tool_name = DOWNSTREAM_BILLING_TOOLS.get(source)
+        if tool_name and entry.get("complete") is True:
+            settled_by_tool[tool_name] = settled_by_tool.get(tool_name, 0) + 1
+
+    unsettled = 0.0
+    for reservation in sorted(reservations, key=lambda item: item.sequence):
+        input_json = (
+            reservation.input_json
+            if isinstance(reservation.input_json, dict)
+            else {}
+        )
+        tool_name = str(input_json.get("tool_name") or "")
+        if settled_by_tool.get(tool_name, 0) > 0:
+            settled_by_tool[tool_name] -= 1
+            continue
+        reserve = input_json.get("reserve_usd")
+        if isinstance(reserve, bool) or not isinstance(reserve, (int, float)):
+            continue
+        reserve_value = float(reserve)
+        if math.isfinite(reserve_value):
+            unsettled += max(reserve_value, 0.0)
+    return round(unsettled, 8)
 
 
 def _bounded_memory_context(
@@ -606,6 +736,137 @@ class AgentRepository:
         return active[after_sequence:]
 
     @retry_database_read
+    async def timeline_events(
+        self,
+        organization_id: str,
+        project_id: str,
+        conversation_id: str,
+    ) -> list[AgentTimelineEvent]:
+        async with self.sessions() as session:
+            return list(
+                (
+                    await session.scalars(
+                        select(AgentTimelineEvent)
+                        .where(
+                            AgentTimelineEvent.organization_id == organization_id,
+                            AgentTimelineEvent.project_id == project_id,
+                            or_(
+                                AgentTimelineEvent.conversation_id.is_(None),
+                                AgentTimelineEvent.conversation_id == conversation_id,
+                            ),
+                        )
+                        .order_by(AgentTimelineEvent.sequence)
+                    )
+                ).all()
+            )
+
+    async def record_timeline_event(
+        self,
+        organization_id: str,
+        project_id: str,
+        *,
+        event_key: str,
+        kind: str,
+        status: str,
+        title: str,
+        content: str | None = None,
+        conversation_id: str | None = None,
+        action: dict | None = None,
+        metadata: dict | None = None,
+    ) -> AgentTimelineEvent:
+        async with self.sessions() as session:
+            project = await session.scalar(
+                select(Project)
+                .where(
+                    Project.id == project_id,
+                    Project.organization_id == organization_id,
+                )
+                .with_for_update()
+            )
+            if project is None:
+                raise LookupError("project_not_found")
+            if conversation_id is not None:
+                conversation_exists = await session.scalar(
+                    select(AgentConversation.id).where(
+                        AgentConversation.id == conversation_id,
+                        AgentConversation.organization_id == organization_id,
+                        AgentConversation.project_id == project_id,
+                    )
+                )
+                if conversation_exists is None:
+                    raise LookupError("conversation_not_found")
+
+            existing = await session.scalar(
+                select(AgentTimelineEvent).where(
+                    AgentTimelineEvent.organization_id == organization_id,
+                    AgentTimelineEvent.project_id == project_id,
+                    AgentTimelineEvent.event_key == event_key,
+                )
+            )
+            normalized_title = sanitize_text(title.strip())[:500]
+            normalized_content = sanitize_text((content or "").strip())[:20_000] or None
+            normalized_action = sanitize_agent_data(action or {})
+            normalized_metadata = sanitize_agent_data(metadata or {})
+            if existing is not None:
+                if (
+                    existing.kind != kind
+                    or existing.title != normalized_title
+                    or existing.conversation_id != conversation_id
+                ):
+                    raise RuntimeError("idempotency_conflict")
+                payload_changed = (
+                    existing.content != normalized_content
+                    or existing.action_json != normalized_action
+                    or existing.metadata_json != normalized_metadata
+                )
+                if existing.status != status:
+                    if (
+                        existing.status not in {"running", "waiting"}
+                        or status in {"running", "waiting"}
+                    ):
+                        raise RuntimeError("invalid_status_transition")
+                    existing.status = status
+                elif existing.status not in {"running", "waiting"}:
+                    if payload_changed:
+                        raise RuntimeError("idempotency_conflict")
+                    return existing
+                existing.content = normalized_content
+                existing.action_json = normalized_action
+                existing.metadata_json = normalized_metadata
+                existing.updated_at = datetime.now(UTC)
+                await session.commit()
+                await session.refresh(existing)
+                return existing
+
+            sequence = int(
+                await session.scalar(
+                    select(func.max(AgentTimelineEvent.sequence)).where(
+                        AgentTimelineEvent.organization_id == organization_id,
+                        AgentTimelineEvent.project_id == project_id,
+                    )
+                )
+                or 0
+            ) + 1
+            event = AgentTimelineEvent(
+                id=str(uuid4()),
+                organization_id=organization_id,
+                project_id=project_id,
+                conversation_id=conversation_id,
+                event_key=event_key,
+                sequence=sequence,
+                kind=kind,
+                status=status,
+                title=normalized_title,
+                content=normalized_content,
+                action_json=normalized_action,
+                metadata_json=normalized_metadata,
+            )
+            session.add(event)
+            await session.commit()
+            await session.refresh(event)
+            return event
+
+    @retry_database_read
     async def conversation_event_for_request(
         self, conversation_id: str, client_request_id: str
     ) -> AgentConversationEvent | None:
@@ -795,6 +1056,298 @@ class AgentRepository:
             conversation.active_message_id = message.id
             if conversation.title == "新对话":
                 conversation.title = content.strip()[:80]
+            conversation.updated_at = datetime.now(UTC)
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise RuntimeError("active_run") from exc
+            await session.refresh(message)
+            await session.refresh(run)
+            return message, run
+
+    async def enqueue_system_trigger(
+        self,
+        organization_id: str,
+        project_id: str,
+        trigger: str,
+        trigger_version: str,
+        content: str,
+        trusted_write_tools: tuple[str, ...],
+    ) -> AgentSystemTrigger:
+        async with self.sessions() as session:
+            onboarding = await session.scalar(
+                select(OnboardingRun)
+                .where(
+                    OnboardingRun.organization_id == organization_id,
+                    OnboardingRun.project_id == project_id,
+                )
+            )
+            if onboarding is None or onboarding.agent_conversation_id is None:
+                raise LookupError("onboarding_conversation_not_found")
+            normalized_content = sanitize_text(content.strip())[:20_000]
+            normalized_tools = list(
+                dict.fromkeys(
+                    sanitize_text(name.strip())[:200]
+                    for name in trusted_write_tools
+                    if name.strip()
+                )
+            )
+            await session.execute(
+                pg_insert(AgentSystemTrigger)
+                .values(
+                    id=str(uuid4()),
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    trigger=sanitize_text(trigger.strip())[:200],
+                    trigger_version=sanitize_text(trigger_version.strip())[:200],
+                    content=normalized_content,
+                    trusted_write_tools_json=normalized_tools,
+                    status="pending",
+                )
+                .on_conflict_do_nothing(
+                    constraint="uq_agent_system_triggers_identity"
+                )
+            )
+            record = await session.scalar(
+                select(AgentSystemTrigger).where(
+                    AgentSystemTrigger.organization_id == organization_id,
+                    AgentSystemTrigger.project_id == project_id,
+                    AgentSystemTrigger.trigger == trigger,
+                    AgentSystemTrigger.trigger_version == trigger_version,
+                )
+            )
+            if record is None:
+                raise RuntimeError("system_trigger_not_persisted")
+            if (
+                record.content != normalized_content
+                or list(record.trusted_write_tools_json) != normalized_tools
+            ):
+                raise RuntimeError("idempotency_conflict")
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def materialize_pending_system_triggers(
+        self,
+        limits: dict,
+        limit: int = 20,
+    ) -> list[AgentRun]:
+        async with self.sessions() as session:
+            triggers = list(
+                (
+                    await session.scalars(
+                        select(AgentSystemTrigger)
+                        .where(AgentSystemTrigger.status == "pending")
+                        .order_by(
+                            AgentSystemTrigger.created_at,
+                            AgentSystemTrigger.id,
+                        )
+                        .limit(max(1, min(limit, 100)))
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            materialized: list[AgentRun] = []
+            busy_conversations: set[str] = set()
+            now = datetime.now(UTC)
+            for trigger in triggers:
+                onboarding = await session.scalar(
+                    select(OnboardingRun).where(
+                        OnboardingRun.organization_id == trigger.organization_id,
+                        OnboardingRun.project_id == trigger.project_id,
+                    )
+                )
+                if onboarding is None or onboarding.agent_conversation_id is None:
+                    continue
+                conversation_id = onboarding.agent_conversation_id
+                if conversation_id in busy_conversations:
+                    continue
+                conversation = await session.scalar(
+                    select(AgentConversation)
+                    .where(
+                        AgentConversation.id == conversation_id,
+                        AgentConversation.organization_id == trigger.organization_id,
+                        AgentConversation.project_id == trigger.project_id,
+                        AgentConversation.archived_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if conversation is None:
+                    continue
+                active = await session.scalar(
+                    select(AgentRun.id).where(
+                        AgentRun.conversation_id == conversation.id,
+                        AgentRun.status.in_(ACTIVE_RUN_STATUSES),
+                    )
+                )
+                if active is not None:
+                    busy_conversations.add(conversation.id)
+                    continue
+
+                message_id, run_id = str(uuid4()), str(uuid4())
+                metadata = sanitize_agent_data(
+                    {
+                        "hidden_from_user": True,
+                        "trusted_system_trigger": True,
+                        "system_trigger": trigger.trigger,
+                        "trusted_write_tools": list(
+                            trigger.trusted_write_tools_json
+                        ),
+                    }
+                )
+                message = AgentMessage(
+                    id=message_id,
+                    conversation_id=conversation.id,
+                    run_id=run_id,
+                    parent_message_id=conversation.active_message_id,
+                    role="user",
+                    content=trigger.content,
+                    metadata_json=metadata,
+                    client_request_id=(
+                        f"system:{trigger.trigger}:{trigger.trigger_version}"
+                    )[:100],
+                )
+                run = AgentRun(
+                    id=run_id,
+                    conversation_id=conversation.id,
+                    user_message_id=message_id,
+                    workflow_id=f"agent:{run_id}",
+                    status="queued",
+                    limits_json=limits,
+                )
+                dispatch = AgentWorkflowDispatch(
+                    run_id=run_id,
+                    workflow_id=run.workflow_id,
+                    task_payload={"run_id": run_id, "limits": limits},
+                    status="pending",
+                )
+                session.add_all([message, run, dispatch])
+                await session.flush()
+                conversation.active_message_id = message.id
+                conversation.updated_at = now
+                trigger.status = "dispatched"
+                trigger.message_id = message.id
+                trigger.run_id = run.id
+                trigger.dispatched_at = now
+                trigger.updated_at = now
+                busy_conversations.add(conversation.id)
+                materialized.append(run)
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise RuntimeError("system_trigger_materialization_conflict") from exc
+            return materialized
+
+    async def retry_system_trigger_run(
+        self,
+        organization_id: str,
+        project_id: str,
+        source_run_id: str,
+        limits: dict,
+    ) -> tuple[AgentMessage, AgentRun]:
+        async with self.sessions() as session:
+            source_run = await session.scalar(
+                select(AgentRun)
+                .join(
+                    AgentConversation,
+                    AgentConversation.id == AgentRun.conversation_id,
+                )
+                .where(
+                    AgentRun.id == source_run_id,
+                    AgentConversation.organization_id == organization_id,
+                    AgentConversation.project_id == project_id,
+                )
+            )
+            if source_run is None:
+                raise LookupError("run_not_found")
+            if source_run.status not in {"failed", "limit_reached"}:
+                raise RuntimeError(f"run_not_retryable:{source_run.status}")
+            source_message = await session.scalar(
+                select(AgentMessage).where(
+                    AgentMessage.id == source_run.user_message_id,
+                    AgentMessage.conversation_id == source_run.conversation_id,
+                )
+            )
+            if source_message is None:
+                raise LookupError("message_not_found")
+            source_metadata = dict(source_message.metadata_json)
+            if (
+                source_metadata.get("hidden_from_user") is not True
+                or source_metadata.get("trusted_system_trigger") is not True
+            ):
+                raise RuntimeError("run_not_system_trigger")
+
+            conversation = await session.scalar(
+                select(AgentConversation)
+                .where(
+                    AgentConversation.id == source_run.conversation_id,
+                    AgentConversation.organization_id == organization_id,
+                    AgentConversation.project_id == project_id,
+                    AgentConversation.archived_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if conversation is None:
+                raise LookupError("conversation_not_found")
+
+            retry_request_id = f"system-retry:{source_run.id}"
+            existing = await session.scalar(
+                select(AgentMessage).where(
+                    AgentMessage.conversation_id == source_run.conversation_id,
+                    AgentMessage.client_request_id == retry_request_id,
+                )
+            )
+            if existing is not None:
+                existing_run = await session.scalar(
+                    select(AgentRun).where(AgentRun.user_message_id == existing.id)
+                )
+                if existing_run is None:
+                    raise RuntimeError("duplicate message has no run")
+                return existing, existing_run
+
+            active = await session.scalar(
+                select(AgentRun.id).where(
+                    AgentRun.conversation_id == conversation.id,
+                    AgentRun.status.in_(ACTIVE_RUN_STATUSES),
+                )
+            )
+            if active is not None:
+                raise RuntimeError("active_run")
+
+            message_id, run_id = str(uuid4()), str(uuid4())
+            metadata = sanitize_agent_data({
+                **source_metadata,
+                "retry_of_run_id": source_run.id,
+            })
+            message = AgentMessage(
+                id=message_id,
+                conversation_id=conversation.id,
+                run_id=run_id,
+                parent_message_id=conversation.active_message_id,
+                role="user",
+                content=source_message.content,
+                metadata_json=metadata,
+                client_request_id=retry_request_id,
+            )
+            run = AgentRun(
+                id=run_id,
+                conversation_id=conversation.id,
+                user_message_id=message_id,
+                workflow_id=f"agent:{run_id}",
+                status="queued",
+                limits_json=limits,
+            )
+            dispatch = AgentWorkflowDispatch(
+                run_id=run_id,
+                workflow_id=run.workflow_id,
+                task_payload={"run_id": run_id, "limits": limits},
+                status="pending",
+            )
+            session.add_all([message, run, dispatch])
+            await session.flush()
+            conversation.active_message_id = message.id
             conversation.updated_at = datetime.now(UTC)
             try:
                 await session.commit()
@@ -1628,6 +2181,7 @@ class AgentRepository:
             "tool_evidence": [
                 _completion_tool_evidence(item) for item in selected_executions
             ],
+            "display_events": _completion_display_events(all_steps, executions),
             "completion_fact_summary": {
                 "distinct_operations": len(all_completion_facts),
                 "incomplete_operations": len(incomplete_facts),
@@ -1654,13 +2208,101 @@ class AgentRepository:
             rows = list((await session.scalars(
                 select(AgentRunStep).where(AgentRunStep.run_id == run_id)
             )).all())
+        direct_tool_cost = sum(
+            float(item.cost or 0) for item in rows if item.step_type == "tool"
+        )
         return {
             "model_calls": sum(item.name == "chat.completions" for item in rows),
             "tool_calls": sum(item.step_type == "tool" for item in rows),
             "total_tokens": sum(item.total_tokens or 0 for item in rows),
             "model_cost": sum(float(item.cost or 0) for item in rows if item.step_type == "model"),
-            "tool_cost": sum(float(item.cost or 0) for item in rows if item.step_type == "tool"),
+            "tool_cost": round(direct_tool_cost + _downstream_billing_cost(rows), 8),
         }
+
+    async def reserve_paid_tool_budget(
+        self,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        reserve_usd: float,
+        limit_usd: float,
+    ) -> dict[str, Any]:
+        reserve = max(float(reserve_usd), 0.0)
+        limit = max(float(limit_usd), 0.0)
+        async with self.sessions() as session:
+            run = await session.scalar(
+                select(AgentRun).where(AgentRun.id == run_id).with_for_update()
+            )
+            if run is None or run.status in TERMINAL_RUN_STATUSES:
+                return {
+                    "allowed": False,
+                    "projected_cost": 0.0,
+                    "limit": limit,
+                }
+            rows = list((await session.scalars(
+                select(AgentRunStep).where(AgentRunStep.run_id == run_id)
+            )).all())
+            reservations = [
+                item for item in rows
+                if item.step_type == "budget"
+                and item.name == "paid_tool_reservation"
+            ]
+            existing = next(
+                (
+                    item for item in reservations
+                    if str(item.input_json.get("tool_call_id") or "") == tool_call_id
+                ),
+                None,
+            )
+            model_cost = sum(
+                float(item.cost or 0)
+                for item in rows
+                if item.step_type == "model"
+            )
+            direct_tool_cost = sum(
+                float(item.cost or 0)
+                for item in rows
+                if item.step_type == "tool"
+            )
+            billing_entries = _downstream_billing_entries(rows)
+            known_tool_cost = direct_tool_cost + sum(
+                float(entry["reported_cost_usd"])
+                for entry in billing_entries.values()
+            )
+            unsettled_reservations = _unsettled_reservation_cost(
+                reservations, billing_entries
+            )
+            projected_cost = (
+                model_cost
+                + known_tool_cost
+                + unsettled_reservations
+                + (0.0 if existing is not None else reserve)
+            )
+            allowed = existing is not None or projected_cost <= limit
+            if allowed and existing is None:
+                run.current_step += 1
+                session.add(AgentRunStep(
+                    id=str(uuid4()),
+                    run_id=run_id,
+                    sequence=run.current_step,
+                    step_type="budget",
+                    name="paid_tool_reservation",
+                    input_json=sanitize_agent_data({
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "reserve_usd": reserve,
+                    }),
+                    output_json={"allowed": True},
+                    status="completed",
+                    duration_ms=0,
+                    finished_at=datetime.now(UTC),
+                ))
+                await session.commit()
+            return {
+                "allowed": allowed,
+                "projected_cost": round(projected_cost, 8),
+                "limit": limit,
+            }
 
     async def save_conversation_summary(
         self,

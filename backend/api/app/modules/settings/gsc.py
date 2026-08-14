@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
@@ -20,9 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 from app.db.session import session_factory
 from app.modules.projects.models import Project
-from app.modules.settings.models import GSCConnection
+from app.modules.agent.security import register_sensitive_values
+from app.modules.settings.models import GSCConnection, GSCOAuthProviderSetting
 from app.modules.settings.schemas import (
     GSCConnectionResponse,
+    GSCOAuthSettingsResponse,
     GSCPerformanceDimensionRow,
     GSCPerformanceExportResponse,
     GSCPerformanceRange,
@@ -32,6 +34,7 @@ from app.modules.settings.schemas import (
     GSCStrikingDistanceRow,
     GSCSiteListResponse,
     GSCSiteResponse,
+    UpdateGSCOAuthSettingsRequest,
 )
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -54,6 +57,8 @@ GSC_COUNTRY_ROW_LIMIT = 25
 GSC_STRIKING_FETCH_LIMIT = 1000
 GSC_STRIKING_ROW_LIMIT = 100
 GSC_EXPORT_ROW_LIMIT = 1000
+GSC_PERFORMANCE_SYNC_ROW_LIMIT = 25000
+PLAINTEXT_SECRET_PREFIX = b"plaintext:v1:"
 
 GSCDateRange = Literal["last_7_days", "last_28_days", "last_3_months"]
 GSCDevice = Literal["DESKTOP", "MOBILE", "TABLET"]
@@ -98,6 +103,120 @@ class GSCGrant:
     requires_reconnect: bool
 
 
+@dataclass(frozen=True)
+class GSCOAuthSettingsRecord:
+    client_id: str
+    client_secret: str = field(repr=False)
+    updated_at: datetime | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.client_id and self.client_secret)
+
+
+@dataclass(frozen=True)
+class GSCPerformanceDataset:
+    site_rows: list[dict[str, Any]]
+    page_rows: list[dict[str, Any]]
+
+
+class GSCOAuthSettingsRepository:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self.sessions = sessions
+
+    async def get(
+        self,
+        organization_id: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> GSCOAuthSettingsRecord | None:
+        async with self.sessions() as session:
+            row = (
+                await session.execute(
+                    select(
+                        GSCOAuthProviderSetting.client_id,
+                        GSCOAuthProviderSetting.client_secret_encrypted,
+                        GSCOAuthProviderSetting.updated_at,
+                    ).where(
+                        GSCOAuthProviderSetting.organization_id == organization_id
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            stored_secret = bytes(row.client_secret_encrypted)
+            if stored_secret.startswith(PLAINTEXT_SECRET_PREFIX):
+                if not allow_plaintext:
+                    raise GSCNotConfiguredError("现有 Google OAuth 设置需要重新加密保存")
+                client_secret = stored_secret.removeprefix(
+                    PLAINTEXT_SECRET_PREFIX
+                ).decode("utf-8")
+            elif encryption_key:
+                client_secret = await session.scalar(
+                    select(
+                        func.pgp_sym_decrypt(
+                            GSCOAuthProviderSetting.client_secret_encrypted,
+                            encryption_key,
+                        )
+                    ).where(
+                        GSCOAuthProviderSetting.organization_id == organization_id
+                    )
+                )
+            else:
+                raise GSCNotConfiguredError("服务器尚未配置设置加密密钥")
+            return GSCOAuthSettingsRecord(
+                client_id=row.client_id,
+                client_secret=str(client_secret or ""),
+                updated_at=row.updated_at,
+            )
+
+    async def upsert(
+        self,
+        organization_id: str,
+        record: GSCOAuthSettingsRecord,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> GSCOAuthSettingsRecord:
+        if not encryption_key and not allow_plaintext:
+            raise GSCNotConfiguredError("服务器尚未配置设置加密密钥")
+        secret_expression = (
+            "pgp_sym_encrypt(:client_secret, :encryption_key, "
+            "'cipher-algo=aes256, compress-algo=1')"
+            if encryption_key
+            else ":client_secret_plaintext"
+        )
+        async with self.sessions() as session:
+            await session.execute(
+                text(
+                    f"""
+                    INSERT INTO gsc_oauth_provider_settings (
+                        organization_id, client_id, client_secret_encrypted
+                    )
+                    VALUES (
+                        :organization_id, :client_id, {secret_expression}
+                    )
+                    ON CONFLICT (organization_id) DO UPDATE SET
+                        client_id = EXCLUDED.client_id,
+                        client_secret_encrypted = EXCLUDED.client_secret_encrypted,
+                        updated_at = now()
+                    """
+                ),
+                {
+                    "organization_id": organization_id,
+                    "client_id": record.client_id,
+                    "client_secret": record.client_secret,
+                    "client_secret_plaintext": PLAINTEXT_SECRET_PREFIX
+                    + record.client_secret.encode("utf-8"),
+                    "encryption_key": encryption_key,
+                },
+            )
+            await session.commit()
+        saved = await self.get(organization_id, encryption_key, allow_plaintext)
+        if saved is None:
+            raise RuntimeError("Google OAuth settings were not saved")
+        return saved
+
+
 class GSCRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self.sessions = sessions
@@ -123,7 +242,12 @@ class GSCRepository:
                 )
             )
 
-    async def get(self, project_id: str, encryption_key: str) -> GSCGrant | None:
+    async def get(
+        self,
+        project_id: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> GSCGrant | None:
         async with self.sessions() as session:
             row = (
                 await session.execute(
@@ -133,27 +257,31 @@ class GSCRepository:
                         GSCConnection.site_url,
                         GSCConnection.google_account_id,
                         GSCConnection.connected_account_email,
-                        func.pgp_sym_decrypt(
-                            GSCConnection.refresh_token_encrypted,
-                            encryption_key,
-                        ).label("refresh_token"),
+                        GSCConnection.refresh_token_encrypted,
                         GSCConnection.scopes,
                         GSCConnection.requires_reconnect,
                     ).where(GSCConnection.project_id == project_id)
                 )
             ).one_or_none()
-        if row is None:
-            return None
-        return GSCGrant(
-            project_id=row.project_id,
-            organization_id=row.organization_id,
-            site_url=row.site_url,
-            google_account_id=row.google_account_id,
-            connected_account_email=row.connected_account_email,
-            refresh_token=row.refresh_token,
-            scopes=row.scopes,
-            requires_reconnect=row.requires_reconnect,
-        )
+            if row is None:
+                return None
+            refresh_token = await self._read_refresh_token(
+                session,
+                project_id,
+                row.refresh_token_encrypted,
+                encryption_key,
+                allow_plaintext,
+            )
+            return GSCGrant(
+                project_id=row.project_id,
+                organization_id=row.organization_id,
+                site_url=row.site_url,
+                google_account_id=row.google_account_id,
+                connected_account_email=row.connected_account_email,
+                refresh_token=refresh_token,
+                scopes=row.scopes,
+                requires_reconnect=row.requires_reconnect,
+            )
 
     async def upsert_grant(
         self,
@@ -164,12 +292,21 @@ class GSCRepository:
         connected_account_email: str | None,
         refresh_token: str | None,
         scopes: str,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> None:
+        if not encryption_key and not allow_plaintext:
+            raise GSCNotConfiguredError("服务器尚未配置设置加密密钥")
+        secret_expression = (
+            "pgp_sym_encrypt(:refresh_token, :encryption_key, "
+            "'cipher-algo=aes256, compress-algo=1')"
+            if encryption_key
+            else ":refresh_token_plaintext"
+        )
         async with self.sessions() as session:
             await session.execute(
                 text(
-                    """
+                    f"""
                     INSERT INTO gsc_connections (
                         project_id, organization_id, google_account_id,
                         connected_account_email, refresh_token_encrypted, scopes
@@ -177,8 +314,7 @@ class GSCRepository:
                     VALUES (
                         :project_id, :organization_id, :google_account_id,
                         :connected_account_email,
-                        pgp_sym_encrypt(:refresh_token, :encryption_key,
-                            'cipher-algo=aes256, compress-algo=1'),
+                        {secret_expression},
                         :scopes
                     )
                     ON CONFLICT (project_id) DO UPDATE SET
@@ -203,12 +339,39 @@ class GSCRepository:
                     "google_account_id": google_account_id,
                     "connected_account_email": connected_account_email,
                     "refresh_token": refresh_token or "",
+                    "refresh_token_plaintext": PLAINTEXT_SECRET_PREFIX
+                    + (refresh_token or "").encode("utf-8"),
                     "refresh_token_present": bool(refresh_token),
                     "scopes": scopes,
                     "encryption_key": encryption_key,
                 },
             )
             await session.commit()
+
+    @staticmethod
+    async def _read_refresh_token(
+        session: AsyncSession,
+        project_id: str,
+        stored_value: bytes,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> str:
+        value = bytes(stored_value)
+        if value.startswith(PLAINTEXT_SECRET_PREFIX):
+            if not allow_plaintext:
+                raise GSCNotConfiguredError("服务器尚未配置设置加密密钥")
+            return value.removeprefix(PLAINTEXT_SECRET_PREFIX).decode("utf-8")
+        if not encryption_key:
+            raise GSCNotConfiguredError("服务器尚未配置设置加密密钥")
+        decrypted = await session.scalar(
+            select(
+                func.pgp_sym_decrypt(
+                    GSCConnection.refresh_token_encrypted,
+                    encryption_key,
+                )
+            ).where(GSCConnection.project_id == project_id)
+        )
+        return str(decrypted or "")
 
     async def select_site(self, project_id: str, site_url: str) -> None:
         async with self.sessions() as session:
@@ -236,22 +399,118 @@ class GSCRepository:
             await session.commit()
 
 
-class GSCService:
-    def __init__(self, settings: Settings, repository: GSCRepository) -> None:
+class GSCOAuthSettingsService:
+    def __init__(
+        self,
+        settings: Settings,
+        repository: GSCOAuthSettingsRepository,
+    ) -> None:
         self.settings = settings
         self.repository = repository
 
+    async def get_platform(self) -> GSCOAuthSettingsResponse:
+        record, source = await self.effective_record()
+        return self._response(record, source)
+
+    async def update_platform(
+        self, request: UpdateGSCOAuthSettingsRequest
+    ) -> GSCOAuthSettingsResponse:
+        current, _ = await self.effective_record()
+        client_secret = request.client_secret or (
+            current.client_secret if current is not None else ""
+        )
+        if not client_secret:
+            raise GSCNotConfiguredError("请填写 OAuth Client Secret")
+        register_sensitive_values((client_secret,))
+        saved = await self.repository.upsert(
+            self.settings.default_organization_id,
+            GSCOAuthSettingsRecord(
+                client_id=request.client_id,
+                client_secret=client_secret,
+            ),
+            self._encryption_key,
+            self._allow_plaintext_storage,
+        )
+        return self._response(saved, "database")
+
+    async def effective_record(
+        self,
+    ) -> tuple[GSCOAuthSettingsRecord | None, str]:
+        stored = await self.repository.get(
+            self.settings.default_organization_id,
+            self._encryption_key,
+            self._allow_plaintext_storage,
+        )
+        if stored is not None:
+            register_sensitive_values((stored.client_secret,))
+            return stored, "database"
+        environment = GSCOAuthSettingsRecord(
+            client_id=(self.settings.google_gsc_client_id or "").strip(),
+            client_secret=(self.settings.google_gsc_client_secret or "").strip(),
+        )
+        if environment.client_id or environment.client_secret:
+            register_sensitive_values((environment.client_secret,))
+            return environment, "environment"
+        return None, "none"
+
+    def _response(
+        self, record: GSCOAuthSettingsRecord | None, source: str
+    ) -> GSCOAuthSettingsResponse:
+        return GSCOAuthSettingsResponse(
+            client_id=record.client_id if record else "",
+            configured=bool(record and record.configured),
+            client_secret_configured=bool(record and record.client_secret),
+            oauth_redirect_uri=self._redirect_uri,
+            source=source,
+            updated_at=record.updated_at if record else None,
+        )
+
+    @property
+    def _encryption_key(self) -> str | None:
+        return str(self.settings.ai_settings_encryption_key or "").strip() or None
+
+    @property
+    def _allow_plaintext_storage(self) -> bool:
+        return self.settings.ai_settings_allow_plaintext or self.settings.app_env != "production"
+
+    @property
+    def _redirect_uri(self) -> str:
+        return self.settings.gsc_public_api_origin.rstrip("/") + "/api/v1/gsc/oauth/callback"
+
+
+class GSCService:
+    def __init__(
+        self,
+        settings: Settings,
+        repository: GSCRepository,
+        oauth_settings_service: GSCOAuthSettingsService | None = None,
+    ) -> None:
+        self.settings = settings
+        self.repository = repository
+        self.oauth_settings_service = oauth_settings_service or GSCOAuthSettingsService(
+            settings,
+            GSCOAuthSettingsRepository(session_factory),
+        )
+
     async def status(self, project_id: str) -> GSCConnectionResponse:
         await self._ensure_project(project_id)
-        oauth_configured = self._oauth_configured
-        if not oauth_configured or not self._encryption_configured:
+        oauth_settings, _ = await self.oauth_settings_service.effective_record()
+        if (
+            oauth_settings is None
+            or not oauth_settings.configured
+            or not self._encryption_configured
+        ):
             return GSCConnectionResponse(
                 oauth_configured=False,
                 oauth_redirect_uri=self._redirect_uri,
                 grant_connected=False,
                 property_connected=False,
             )
-        grant = await self.repository.get(project_id, self._encryption_key)
+        grant = await self.repository.get(
+            project_id,
+            self._encryption_key,
+            self._allow_plaintext_storage,
+        )
         project_domain = await self.repository.project_domain(
             self.settings.default_organization_id, project_id
         )
@@ -274,7 +533,7 @@ class GSCService:
 
     async def authorization_url(self, project_id: str, callback_url: str) -> str:
         await self._ensure_project(project_id)
-        self._require_configuration()
+        oauth_settings = await self._required_oauth_settings()
         callback_path = self._safe_callback_path(callback_url)
         state = self._sign_state(
             {
@@ -282,11 +541,12 @@ class GSCService:
                 "organization_id": self.settings.default_organization_id,
                 "callback_path": callback_path,
                 "exp": int(time.time()) + 600,
-            }
+            },
+            oauth_settings.client_secret,
         )
         query = urlencode(
             {
-                "client_id": self.settings.google_gsc_client_id,
+                "client_id": oauth_settings.client_id,
                 "redirect_uri": self._redirect_uri,
                 "response_type": "code",
                 "scope": " ".join(GSC_SCOPES),
@@ -300,8 +560,8 @@ class GSCService:
     async def handle_callback(
         self, *, code: str | None, state: str, error: str | None = None
     ) -> str:
-        self._require_configuration()
-        payload = self._verify_state(state)
+        oauth_settings = await self._required_oauth_settings()
+        payload = self._verify_state(state, oauth_settings.client_secret)
         if error:
             result = "cancelled" if error == "access_denied" else "failed"
             return self._callback_path_with_result(str(payload["callback_path"]), result)
@@ -311,10 +571,14 @@ class GSCService:
         organization_id = str(payload["organization_id"])
         if not await self.repository.project_exists(organization_id, project_id):
             raise GSCValidationError("Search Console OAuth 项目不存在")
-        token = await asyncio.to_thread(self._exchange_code, code)
+        token = await asyncio.to_thread(self._exchange_code, code, oauth_settings)
         access_token = str(token.get("access_token") or "")
         account_id, email = await asyncio.to_thread(self._userinfo, access_token)
-        current = await self.repository.get(project_id, self._encryption_key)
+        current = await self.repository.get(
+            project_id,
+            self._encryption_key,
+            self._allow_plaintext_storage,
+        )
         refresh_token = str(token.get("refresh_token") or "") or None
         if refresh_token is None and current is None:
             raise GSCValidationError("Google 没有返回 Search Console refresh token，请重新授权")
@@ -326,11 +590,13 @@ class GSCService:
             refresh_token=refresh_token,
             scopes=str(token.get("scope") or " ".join(GSC_SCOPES)),
             encryption_key=self._encryption_key,
+            allow_plaintext=self._allow_plaintext_storage,
         )
         return self._callback_path_with_result(str(payload["callback_path"]), "authorized")
 
-    def failed_callback_path(self, state: str) -> str:
-        payload = self._verify_state(state)
+    async def failed_callback_path(self, state: str) -> str:
+        oauth_settings = await self._required_oauth_settings()
+        payload = self._verify_state(state, oauth_settings.client_secret)
         return self._callback_path_with_result(str(payload["callback_path"]), "failed")
 
     async def list_sites(self, project_id: str) -> GSCSiteListResponse:
@@ -438,6 +704,87 @@ class GSCService:
             striking_distance=build_gsc_striking_distance(gsc_rows(query_pages)),
             countries=gsc_dimension_rows(gsc_rows(countries)),
         )
+
+    async def performance_dataset(
+        self,
+        project_id: str,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> GSCPerformanceDataset:
+        """Return daily site and page rows for the performance monitor sync."""
+        _, access_token, endpoint = await self._performance_context(project_id)
+        site, first_page = await self._fetch_performance(
+            project_id,
+            endpoint,
+            access_token,
+            [
+                gsc_search_payload(
+                    start_date,
+                    end_date,
+                    dimensions=["date"],
+                    filters=[],
+                    row_limit=GSC_DAILY_ROW_LIMIT,
+                ),
+                gsc_search_payload(
+                    start_date,
+                    end_date,
+                    dimensions=["date", "page"],
+                    filters=[],
+                    row_limit=GSC_PERFORMANCE_SYNC_ROW_LIMIT,
+                ),
+            ],
+        )
+        page_rows = gsc_rows(first_page)
+        start_row = GSC_PERFORMANCE_SYNC_ROW_LIMIT
+        while len(gsc_rows(first_page)) == GSC_PERFORMANCE_SYNC_ROW_LIMIT:
+            [first_page] = await self._fetch_performance(
+                project_id,
+                endpoint,
+                access_token,
+                [
+                    gsc_search_payload(
+                        start_date,
+                        end_date,
+                        dimensions=["date", "page"],
+                        filters=[],
+                        row_limit=GSC_PERFORMANCE_SYNC_ROW_LIMIT,
+                        start_row=start_row,
+                    )
+                ],
+            )
+            page_rows.extend(gsc_rows(first_page))
+            start_row += GSC_PERFORMANCE_SYNC_ROW_LIMIT
+        return GSCPerformanceDataset(
+            site_rows=gsc_rows(site),
+            page_rows=page_rows,
+        )
+
+    async def page_queries(
+        self,
+        project_id: str,
+        *,
+        page_url: str,
+        start_date: date,
+        end_date: date,
+        limit: int = 100,
+    ) -> list[GSCPerformanceDimensionRow]:
+        _, access_token, endpoint = await self._performance_context(project_id)
+        [payload] = await self._fetch_performance(
+            project_id,
+            endpoint,
+            access_token,
+            [
+                gsc_search_payload(
+                    start_date,
+                    end_date,
+                    dimensions=["query"],
+                    filters=gsc_dimension_filters(page=page_url),
+                    row_limit=max(1, min(limit, 1000)),
+                )
+            ],
+        )
+        return gsc_dimension_rows(gsc_rows(payload))
 
     async def performance_table(
         self,
@@ -559,8 +906,12 @@ class GSCService:
 
     async def _required_grant(self, project_id: str) -> GSCGrant:
         await self._ensure_project(project_id)
-        self._require_configuration()
-        grant = await self.repository.get(project_id, self._encryption_key)
+        await self._required_oauth_settings()
+        grant = await self.repository.get(
+            project_id,
+            self._encryption_key,
+            self._allow_plaintext_storage,
+        )
         if grant is None:
             raise GSCNotConnectedError("Search Console 尚未连接")
         if grant.requires_reconnect:
@@ -568,18 +919,27 @@ class GSCService:
         return grant
 
     async def _access_token(self, grant: GSCGrant) -> str:
+        oauth_settings = await self._required_oauth_settings()
         try:
-            token = await asyncio.to_thread(self._refresh_access_token, grant.refresh_token)
+            token = await asyncio.to_thread(
+                self._refresh_access_token,
+                grant.refresh_token,
+                oauth_settings,
+            )
         except GSCReconnectRequiredError:
             await self.repository.mark_reconnect(grant.project_id)
             raise
         return token
 
-    def _refresh_access_token(self, refresh_token: str) -> str:
+    def _refresh_access_token(
+        self,
+        refresh_token: str,
+        oauth_settings: GSCOAuthSettingsRecord,
+    ) -> str:
         body = urlencode(
             {
-                "client_id": self.settings.google_gsc_client_id,
-                "client_secret": self.settings.google_gsc_client_secret,
+                "client_id": oauth_settings.client_id,
+                "client_secret": oauth_settings.client_secret,
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
             }
@@ -601,15 +961,19 @@ class GSCService:
             raise GSCReconnectRequiredError("Search Console 没有返回访问令牌")
         return token
 
-    def _exchange_code(self, code: str) -> dict[str, Any]:
+    def _exchange_code(
+        self,
+        code: str,
+        oauth_settings: GSCOAuthSettingsRecord,
+    ) -> dict[str, Any]:
         return _google_json(
             Request(
                 GOOGLE_TOKEN_URL,
                 data=urlencode(
                     {
                         "code": code,
-                        "client_id": self.settings.google_gsc_client_id,
-                        "client_secret": self.settings.google_gsc_client_secret,
+                        "client_id": oauth_settings.client_id,
+                        "client_secret": oauth_settings.client_secret,
                         "redirect_uri": self._redirect_uri,
                         "grant_type": "authorization_code",
                     }
@@ -655,20 +1019,20 @@ class GSCService:
         query.append(("gsc_oauth", result))
         return urlunsplit(("", "", parsed.path, urlencode(query), ""))
 
-    def _sign_state(self, payload: dict[str, Any]) -> str:
+    def _sign_state(self, payload: dict[str, Any], client_secret: str) -> str:
         encoded = _base64url(json.dumps(payload, separators=(",", ":")).encode())
         signature = hmac.new(
-            str(self.settings.google_gsc_client_secret).encode(),
+            client_secret.encode(),
             encoded.encode(),
             hashlib.sha256,
         ).digest()
         return f"{encoded}.{_base64url(signature)}"
 
-    def _verify_state(self, state: str) -> dict[str, Any]:
+    def _verify_state(self, state: str, client_secret: str) -> dict[str, Any]:
         try:
             encoded, signature = state.split(".", 1)
             expected = hmac.new(
-                str(self.settings.google_gsc_client_secret).encode(),
+                client_secret.encode(),
                 encoded.encode(),
                 hashlib.sha256,
             ).digest()
@@ -691,23 +1055,28 @@ class GSCService:
         ):
             raise GSCValidationError("项目不存在")
 
-    def _require_configuration(self) -> None:
-        if not self._oauth_configured:
+    async def _required_oauth_settings(self) -> GSCOAuthSettingsRecord:
+        oauth_settings, _ = await self.oauth_settings_service.effective_record()
+        if oauth_settings is None or not oauth_settings.configured:
             raise GSCNotConfiguredError("服务器尚未配置 Google Search Console OAuth")
         if not self._encryption_configured:
             raise GSCNotConfiguredError("服务器尚未配置设置加密密钥")
-
-    @property
-    def _oauth_configured(self) -> bool:
-        return bool(self.settings.google_gsc_client_id and self.settings.google_gsc_client_secret)
+        return oauth_settings
 
     @property
     def _encryption_configured(self) -> bool:
-        return bool((self.settings.ai_settings_encryption_key or "").strip())
+        return bool(self._encryption_key or self._allow_plaintext_storage)
 
     @property
-    def _encryption_key(self) -> str:
-        return str(self.settings.ai_settings_encryption_key or "").strip()
+    def _encryption_key(self) -> str | None:
+        return str(self.settings.ai_settings_encryption_key or "").strip() or None
+
+    @property
+    def _allow_plaintext_storage(self) -> bool:
+        return (
+            self.settings.ai_settings_allow_plaintext
+            or self.settings.app_env != "production"
+        )
 
     @property
     def _redirect_uri(self) -> str:
@@ -750,6 +1119,7 @@ def gsc_dimension_filters(
     *,
     device: GSCDevice | None = None,
     country: str | None = None,
+    page: str | None = None,
 ) -> list[dict[str, str]]:
     filters: list[dict[str, str]] = []
     if device:
@@ -761,6 +1131,10 @@ def gsc_dimension_filters(
                 "operator": "equals",
                 "expression": country.casefold(),
             }
+        )
+    if page:
+        filters.append(
+            {"dimension": "page", "operator": "equals", "expression": page}
         )
     return filters
 
@@ -928,4 +1302,20 @@ def _google_json(request: Request) -> dict[str, Any]:
 
 
 def build_gsc_service() -> GSCService:
-    return GSCService(get_settings(), GSCRepository(session_factory))
+    settings = get_settings()
+    return GSCService(
+        settings,
+        GSCRepository(session_factory),
+        GSCOAuthSettingsService(
+            settings,
+            GSCOAuthSettingsRepository(session_factory),
+        ),
+    )
+
+
+def build_gsc_oauth_settings_service() -> GSCOAuthSettingsService:
+    settings = get_settings()
+    return GSCOAuthSettingsService(
+        settings,
+        GSCOAuthSettingsRepository(session_factory),
+    )

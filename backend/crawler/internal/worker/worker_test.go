@@ -105,11 +105,13 @@ func TestRunStopsWhenContextIsCancelled(t *testing.T) {
 func TestAIProviderConfigUsesLatestStoredSettings(t *testing.T) {
 	store := &aiSettingsStore{
 		settings: crawler.AIProviderSettings{
-			BaseURL:        "https://stored.example/v1",
-			APIKey:         "stored-key",
-			Model:          "stored-model",
-			RequestTimeout: 75 * time.Second,
-			MaxRetries:     2,
+			Provider:        "openrouter",
+			BaseURL:         "https://stored.example/v1",
+			APIKey:          "stored-key",
+			Model:           "stored-model",
+			ReasoningEffort: "high",
+			RequestTimeout:  75 * time.Second,
+			MaxRetries:      2,
 		},
 		found: true,
 	}
@@ -132,6 +134,8 @@ func TestAIProviderConfigUsesLatestStoredSettings(t *testing.T) {
 	if config.BusinessProfileAIBaseURL != store.settings.BaseURL ||
 		config.BusinessProfileAIAPIKey != store.settings.APIKey ||
 		config.BusinessProfileAIModel != store.settings.Model ||
+		config.BusinessProfileAIProvider != store.settings.Provider ||
+		config.BusinessProfileAIReasoningEffort != store.settings.ReasoningEffort ||
 		config.BusinessProfileAITimeout != store.settings.RequestTimeout ||
 		config.BusinessProfileAIMaxRetries != store.settings.MaxRetries {
 		t.Fatalf("AI provider config = %#v", config)
@@ -369,6 +373,39 @@ func TestSaveFailureIgnoresCancelledActivityContext(t *testing.T) {
 	}
 }
 
+func TestRunTaskPersistsFailureWhenActivityIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := &contextCheckingStore{}
+	activities := &Activities{Store: store}
+	task := crawler.Task{
+		OrganizationID: "org",
+		ProjectID:      "project",
+		RunID:          "run",
+		Type:           crawler.TaskSiteUnderstanding,
+		TargetURL:      "https://example.com",
+		Country:        "US",
+		Language:       "en",
+	}
+
+	result, err := activities.handleRunFailure(ctx, task, context.Canceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("handleRunFailure() error = %v, want context.Canceled", err)
+	}
+	if result.RunID != task.RunID {
+		t.Fatalf("handleRunFailure() result = %#v", result)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.progress) != 1 {
+		t.Fatalf("saved progress count = %d, want 1", len(store.progress))
+	}
+	if store.progress[0].Stage != crawler.StageFailed {
+		t.Fatalf("saved progress stage = %q, want %q", store.progress[0].Stage, crawler.StageFailed)
+	}
+}
+
 func TestFailureMessagePreservesSiteUnderstandingReason(t *testing.T) {
 	message := failureMessage(
 		crawler.Task{Type: crawler.TaskSiteUnderstanding},
@@ -418,8 +455,11 @@ func TestApplySynthesizedProfileCompletesAUsableBusinessProfile(t *testing.T) {
 	}
 }
 
-func TestApplySynthesizedProfileKeepsIncompleteProfilePartial(t *testing.T) {
-	result := crawler.Result{CompletionStatus: crawler.CompletionComplete}
+func TestApplySynthesizedProfileAcceptsPartialBusinessData(t *testing.T) {
+	result := crawler.Result{
+		CompletionStatus: crawler.CompletionPartial,
+		CompletionNote:   "previous note",
+	}
 	profile := crawler.SiteProfile{
 		BusinessName:     "Example",
 		BusinessType:     "Software / SaaS",
@@ -429,11 +469,11 @@ func TestApplySynthesizedProfileKeepsIncompleteProfilePartial(t *testing.T) {
 
 	applySynthesizedProfile(&result, profile)
 
-	if result.CompletionStatus != crawler.CompletionPartial {
+	if result.CompletionStatus != crawler.CompletionComplete {
 		t.Fatalf("completion status = %q", result.CompletionStatus)
 	}
-	if result.CompletionNote == "" {
-		t.Fatal("partial profile did not include a completion note")
+	if result.CompletionNote != "" {
+		t.Fatalf("completion note = %q", result.CompletionNote)
 	}
 }
 

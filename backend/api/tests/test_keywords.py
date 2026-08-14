@@ -392,6 +392,7 @@ async def test_keyword_status_exposes_completed_result_immediately() -> None:
     assert payload["run"]["status"] == "completed"
     assert payload["run"]["profile_source"] == "ai_domain_fallback"
     assert payload["run"]["gap_status"] == "confirmed"
+    assert "total_cost_usd" not in payload["run"]
 
 
 async def test_competitor_analysis_endpoints_expose_five_by_one_hundred_contract() -> None:

@@ -13,6 +13,9 @@ import {
   getAIProviderSettings,
   testAIProviderSettings,
   updateAIProviderSettings,
+  type AIAPIProtocol,
+  type AIProviderName,
+  type AIReasoningEffort,
   type AIProviderSettings,
   type AIProviderSettingsInput,
 } from "@/api/settings"
@@ -28,12 +31,20 @@ import {
   ComboboxList,
 } from "@/components/ui/combobox"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupButton,
   InputGroupInput,
 } from "@/components/ui/input-group"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 type AIModelSettingsProps = {
   projectId: string
@@ -45,8 +56,19 @@ type Feedback = {
 } | null
 
 const emptySettings: AIProviderSettings = {
+  provider: "openai",
+  apiProtocol: "chat_completions",
   baseUrl: "",
   model: "",
+  businessModel: null,
+  keywordModel: null,
+  contentModel: null,
+  agentModel: null,
+  reasoningEffort: "medium",
+  businessReasoningEffort: null,
+  keywordReasoningEffort: null,
+  contentReasoningEffort: null,
+  agentReasoningEffort: null,
   requestTimeoutSeconds: 90,
   maxRetries: 1,
   configured: false,
@@ -55,17 +77,168 @@ const emptySettings: AIProviderSettings = {
   updatedAt: null,
 }
 
-const suggestedModels = ["gpt-5.4-mini", "gpt-5.6-luna", "gpt-5.6-terra"]
+const suggestedModels = [
+  "gpt-5.4-mini",
+  "gpt-5.6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+]
+const providerLabels: Record<AIProviderName, string> = {
+  openai: "OpenAI 兼容接口",
+  openrouter: "OpenRouter",
+  anthropic: "Anthropic",
+}
+const protocolLabels: Record<AIAPIProtocol, string> = {
+  chat_completions: "Chat Completions",
+  responses: "Responses API",
+}
 
 type ModelOption = {
   value: string
   label: string
 }
 
+type TaskModelFieldProps = {
+  id: string
+  label: string
+  description: string
+  value: string
+  defaultModel: string
+  reasoningEffort: AIReasoningEffort | ""
+  defaultReasoningEffort: AIReasoningEffort
+  disabled: boolean
+  onChange: (value: string) => void
+  onReasoningEffortChange: (value: AIReasoningEffort | "") => void
+}
+
+const reasoningEffortLabels: Record<AIReasoningEffort, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+}
+
+function TaskModelField({
+  id,
+  label,
+  description,
+  value,
+  defaultModel,
+  reasoningEffort,
+  defaultReasoningEffort,
+  disabled,
+  onChange,
+  onReasoningEffortChange,
+}: TaskModelFieldProps) {
+  const options = React.useMemo<ModelOption[]>(() => {
+    const values = [
+      value.trim(),
+      defaultModel.trim(),
+      ...suggestedModels,
+    ].filter(Boolean)
+    return [...new Set(values)].map((item) => ({ value: item, label: item }))
+  }, [defaultModel, value])
+  const selected = value.trim()
+    ? { value: value.trim(), label: value.trim() }
+    : null
+
+  return (
+    <div className="block space-y-2 text-sm">
+      <Label htmlFor={id} className="font-medium">
+        {label}
+      </Label>
+      <Combobox
+        items={options}
+        value={selected}
+        inputValue={value}
+        onInputValueChange={onChange}
+        onValueChange={(option) => onChange(option?.value ?? "")}
+        itemToStringLabel={(option) => option.label}
+        itemToStringValue={(option) => option.value}
+        isItemEqualToValue={(option, current) => option.value === current.value}
+        disabled={disabled}
+        autoHighlight
+      >
+        <ComboboxInput
+          id={id}
+          className="w-full"
+          placeholder={`使用默认模型（${defaultModel || "未设置"}）`}
+          autoComplete="off"
+        />
+        <ComboboxContent>
+          <ComboboxEmpty>输入该接口实际提供的模型 ID</ComboboxEmpty>
+          <ComboboxList>
+            <ComboboxCollection>
+              {(option: ModelOption) => (
+                <ComboboxItem key={option.value} value={option}>
+                  {option.label}
+                </ComboboxItem>
+              )}
+            </ComboboxCollection>
+          </ComboboxList>
+        </ComboboxContent>
+      </Combobox>
+      <span className="block text-xs font-normal text-muted-foreground">
+        {description}
+      </span>
+      <div className="space-y-2 pt-1">
+        <Label htmlFor={`${id}-reasoning-effort`} className="font-medium">
+          {label.replace("模型", "")}推理强度
+        </Label>
+        <Select
+          value={reasoningEffort || "inherit"}
+          onValueChange={(next) =>
+            onReasoningEffortChange(
+              next === "inherit" ? "" : (next as AIReasoningEffort)
+            )
+          }
+          disabled={disabled}
+        >
+          <SelectTrigger id={`${id}-reasoning-effort`} className="w-full">
+            <SelectValue>
+              {reasoningEffort
+                ? reasoningEffortLabels[reasoningEffort]
+                : `使用默认（${reasoningEffortLabels[defaultReasoningEffort]}）`}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="inherit">
+              使用默认（{reasoningEffortLabels[defaultReasoningEffort]}）
+            </SelectItem>
+            <SelectItem value="low">低（更快、更省）</SelectItem>
+            <SelectItem value="medium">中（速度和质量平衡）</SelectItem>
+            <SelectItem value="high">高（更慢、成本更高）</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
+
 export function AIModelSettings({ projectId }: AIModelSettingsProps) {
   const [settings, setSettings] = React.useState(emptySettings)
+  const [provider, setProvider] = React.useState<AIProviderName>("openai")
+  const [apiProtocol, setAPIProtocol] =
+    React.useState<AIAPIProtocol>("chat_completions")
   const [baseUrl, setBaseUrl] = React.useState("")
   const [model, setModel] = React.useState("")
+  const [businessModel, setBusinessModel] = React.useState("")
+  const [keywordModel, setKeywordModel] = React.useState("")
+  const [contentModel, setContentModel] = React.useState("")
+  const [agentModel, setAgentModel] = React.useState("")
+  const [reasoningEffort, setReasoningEffort] =
+    React.useState<AIReasoningEffort>("medium")
+  const [businessReasoningEffort, setBusinessReasoningEffort] = React.useState<
+    AIReasoningEffort | ""
+  >("")
+  const [keywordReasoningEffort, setKeywordReasoningEffort] = React.useState<
+    AIReasoningEffort | ""
+  >("")
+  const [contentReasoningEffort, setContentReasoningEffort] = React.useState<
+    AIReasoningEffort | ""
+  >("")
+  const [agentReasoningEffort, setAgentReasoningEffort] = React.useState<
+    AIReasoningEffort | ""
+  >("")
   const [requestTimeoutSeconds, setRequestTimeoutSeconds] = React.useState("90")
   const [maxRetries, setMaxRetries] = React.useState("1")
   const [apiKey, setApiKey] = React.useState("")
@@ -82,8 +255,19 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
       .then((loaded) => {
         if (!active) return
         setSettings(loaded)
+        setProvider(loaded.provider)
+        setAPIProtocol(loaded.apiProtocol)
         setBaseUrl(loaded.baseUrl)
         setModel(loaded.model)
+        setBusinessModel(loaded.businessModel ?? "")
+        setKeywordModel(loaded.keywordModel ?? "")
+        setContentModel(loaded.contentModel ?? "")
+        setAgentModel(loaded.agentModel ?? "")
+        setReasoningEffort(loaded.reasoningEffort)
+        setBusinessReasoningEffort(loaded.businessReasoningEffort ?? "")
+        setKeywordReasoningEffort(loaded.keywordReasoningEffort ?? "")
+        setContentReasoningEffort(loaded.contentReasoningEffort ?? "")
+        setAgentReasoningEffort(loaded.agentReasoningEffort ?? "")
         setRequestTimeoutSeconds(String(loaded.requestTimeoutSeconds))
         setMaxRetries(String(loaded.maxRetries))
         setApiKey("")
@@ -129,8 +313,19 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
 
   function currentInput(): AIProviderSettingsInput {
     return {
+      provider,
+      apiProtocol,
       baseUrl: baseUrl.trim(),
       model: model.trim(),
+      businessModel: businessModel.trim() || null,
+      keywordModel: keywordModel.trim() || null,
+      contentModel: contentModel.trim() || null,
+      agentModel: agentModel.trim() || null,
+      reasoningEffort,
+      businessReasoningEffort: businessReasoningEffort || null,
+      keywordReasoningEffort: keywordReasoningEffort || null,
+      contentReasoningEffort: contentReasoningEffort || null,
+      agentReasoningEffort: agentReasoningEffort || null,
       requestTimeoutSeconds: parsedTimeout,
       maxRetries: parsedRetries,
       ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
@@ -144,8 +339,19 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
     try {
       const saved = await updateAIProviderSettings(projectId, currentInput())
       setSettings(saved)
+      setProvider(saved.provider)
+      setAPIProtocol(saved.apiProtocol)
       setBaseUrl(saved.baseUrl)
       setModel(saved.model)
+      setBusinessModel(saved.businessModel ?? "")
+      setKeywordModel(saved.keywordModel ?? "")
+      setContentModel(saved.contentModel ?? "")
+      setAgentModel(saved.agentModel ?? "")
+      setReasoningEffort(saved.reasoningEffort)
+      setBusinessReasoningEffort(saved.businessReasoningEffort ?? "")
+      setKeywordReasoningEffort(saved.keywordReasoningEffort ?? "")
+      setContentReasoningEffort(saved.contentReasoningEffort ?? "")
+      setAgentReasoningEffort(saved.agentReasoningEffort ?? "")
       setRequestTimeoutSeconds(String(saved.requestTimeoutSeconds))
       setMaxRetries(String(saved.maxRetries))
       setApiKey("")
@@ -202,24 +408,77 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
           </div>
         ) : (
           <div className="grid gap-6">
-            <label className="block space-y-2 text-sm">
-              <span className="font-medium">接口地址</span>
-              <Input
-                type="url"
-                value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
-                placeholder="https://api.example.com/v1"
-                autoComplete="url"
-                disabled={busy}
-                required
-              />
-            </label>
+            <div className="grid gap-6 sm:grid-cols-2">
+              <div className="block space-y-2 text-sm">
+                <Label htmlFor="ai-provider" className="font-medium">
+                  接口类型
+                </Label>
+                <Select
+                  value={provider}
+                  onValueChange={(value) =>
+                    setProvider(value as AIProviderName)
+                  }
+                  disabled={busy}
+                >
+                  <SelectTrigger id="ai-provider" className="w-full">
+                    <SelectValue>{providerLabels[provider]}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="openai">OpenAI 兼容接口</SelectItem>
+                    <SelectItem value="openrouter">OpenRouter</SelectItem>
+                    <SelectItem value="anthropic">Anthropic</SelectItem>
+                  </SelectContent>
+                </Select>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  决定请求协议；OpenAI、DeepSeek 等兼容接口选择第一项。
+                </span>
+              </div>
+
+              <Label className="block space-y-2 text-sm">
+                <span className="font-medium">接口地址</span>
+                <Input
+                  type="url"
+                  value={baseUrl}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  autoComplete="url"
+                  disabled={busy}
+                  required
+                />
+              </Label>
+            </div>
+
+            <div className="block space-y-2 text-sm sm:max-w-[calc(50%-0.75rem)]">
+              <Label htmlFor="ai-api-protocol" className="font-medium">
+                调用协议
+              </Label>
+              <Select
+                value={apiProtocol}
+                onValueChange={(value) =>
+                  setAPIProtocol(value as AIAPIProtocol)
+                }
+                disabled={busy || provider === "anthropic"}
+              >
+                <SelectTrigger id="ai-api-protocol" className="w-full">
+                  <SelectValue>{protocolLabels[apiProtocol]}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="chat_completions">
+                    Chat Completions
+                  </SelectItem>
+                  <SelectItem value="responses">Responses API</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="block text-xs font-normal text-muted-foreground">
+                按模型网关实际支持的请求格式选择，不根据模型名称自动判断。
+              </span>
+            </div>
 
             <div className="grid gap-6 sm:grid-cols-2">
               <div className="block space-y-2 text-sm">
-                <label htmlFor="ai-provider-model" className="font-medium">
+                <Label htmlFor="ai-provider-model" className="font-medium">
                   默认模型
-                </label>
+                </Label>
                 <Combobox
                   items={modelOptions}
                   value={selectedModel}
@@ -262,10 +521,43 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
               </div>
 
               <div className="block space-y-2 text-sm">
+                <Label
+                  htmlFor="ai-provider-reasoning-effort"
+                  className="font-medium"
+                >
+                  默认推理强度
+                </Label>
+                <Select
+                  value={reasoningEffort}
+                  onValueChange={(value) =>
+                    setReasoningEffort(value as AIReasoningEffort)
+                  }
+                  disabled={busy}
+                >
+                  <SelectTrigger
+                    id="ai-provider-reasoning-effort"
+                    className="w-full"
+                  >
+                    <SelectValue>
+                      {reasoningEffortLabels[reasoningEffort]}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="low">低（更快、更省）</SelectItem>
+                    <SelectItem value="medium">中（速度和质量平衡）</SelectItem>
+                    <SelectItem value="high">高（更慢、成本更高）</SelectItem>
+                  </SelectContent>
+                </Select>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  未单独设置的工作会使用此强度。
+                </span>
+              </div>
+
+              <div className="block space-y-2 text-sm">
                 <div className="flex items-center gap-2">
-                  <label htmlFor="ai-provider-api-key" className="font-medium">
+                  <Label htmlFor="ai-provider-api-key" className="font-medium">
                     API 密钥
-                  </label>
+                  </Label>
                   {settings.apiKeyConfigured && (
                     <span className="text-xs font-normal text-muted-foreground">
                       已保存
@@ -301,14 +593,73 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
               </div>
             </div>
 
+            <div className="space-y-4 border-t pt-6">
+              <div>
+                <h3 className="text-sm font-medium">按工作分配模型</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  留空时使用上面的默认模型。
+                </p>
+              </div>
+              <div className="grid gap-6 sm:grid-cols-2">
+                <TaskModelField
+                  id="ai-business-model"
+                  label="业务识别模型"
+                  description="网站业务资料识别和竞品分析"
+                  value={businessModel}
+                  defaultModel={model.trim()}
+                  reasoningEffort={businessReasoningEffort}
+                  defaultReasoningEffort={reasoningEffort}
+                  disabled={busy}
+                  onChange={setBusinessModel}
+                  onReasoningEffortChange={setBusinessReasoningEffort}
+                />
+                <TaskModelField
+                  id="ai-keyword-model"
+                  label="关键词模型"
+                  description="关键词筛选、分类和去重"
+                  value={keywordModel}
+                  defaultModel={model.trim()}
+                  reasoningEffort={keywordReasoningEffort}
+                  defaultReasoningEffort={reasoningEffort}
+                  disabled={busy}
+                  onChange={setKeywordModel}
+                  onReasoningEffortChange={setKeywordReasoningEffort}
+                />
+                <TaskModelField
+                  id="ai-content-model"
+                  label="内容模型"
+                  description="内容计划、研究、写作、检查和编辑器改写"
+                  value={contentModel}
+                  defaultModel={model.trim()}
+                  reasoningEffort={contentReasoningEffort}
+                  defaultReasoningEffort={reasoningEffort}
+                  disabled={busy}
+                  onChange={setContentModel}
+                  onReasoningEffortChange={setContentReasoningEffort}
+                />
+                <TaskModelField
+                  id="ai-agent-model"
+                  label="Agent 模型"
+                  description="SEO Agent 推理、工具调用和结果检查"
+                  value={agentModel}
+                  defaultModel={model.trim()}
+                  reasoningEffort={agentReasoningEffort}
+                  defaultReasoningEffort={reasoningEffort}
+                  disabled={busy}
+                  onChange={setAgentModel}
+                  onReasoningEffortChange={setAgentReasoningEffort}
+                />
+              </div>
+            </div>
+
             <div className="grid gap-6 sm:grid-cols-2">
               <div className="block space-y-2 text-sm">
-                <label
+                <Label
                   htmlFor="ai-provider-request-timeout"
                   className="font-medium"
                 >
                   请求超时
-                </label>
+                </Label>
                 <InputGroup>
                   <InputGroupInput
                     id="ai-provider-request-timeout"
@@ -329,12 +680,12 @@ export function AIModelSettings({ projectId }: AIModelSettingsProps) {
               </div>
 
               <div className="block space-y-2 text-sm">
-                <label
+                <Label
                   htmlFor="ai-provider-max-retries"
                   className="font-medium"
                 >
                   失败重试次数
-                </label>
+                </Label>
                 <Input
                   id="ai-provider-max-retries"
                   type="number"

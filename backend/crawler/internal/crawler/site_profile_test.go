@@ -272,3 +272,58 @@ func TestSiteProfileDoesNotInventBusinessSummary(t *testing.T) {
 		t.Fatalf("business summary = %q, want empty without evidence", profile.BusinessSummary)
 	}
 }
+
+func TestSiteProfileDoesNotUseLocalBusinessAsFinalTypeWhenBusinessSignalsExist(t *testing.T) {
+	profile := BuildSiteProfile(
+		Task{TargetURL: "https://example.com"},
+		[]Page{{
+			URL:         "https://example.com/",
+			FinalURL:    "https://example.com/",
+			Title:       "Acme operations platform",
+			Description: "Acme provides software for operations teams.",
+			H1:          []string{"Operations software for growing teams"},
+			MainText:    "Use the Acme software platform to automate recurring work. Book a demo.",
+			StructuredData: []json.RawMessage{json.RawMessage(`{
+				"@context": "https://schema.org",
+				"@type": "LocalBusiness",
+				"name": "Acme"
+			}`)},
+		}},
+	)
+
+	if profile.BusinessType != "Software / SaaS" {
+		t.Fatalf("business type = %q, want software evidence to outrank LocalBusiness", profile.BusinessType)
+	}
+}
+
+func TestSiteProfileDoesNotTurnPricingOrTutorialTitlesIntoOfferings(t *testing.T) {
+	profile := BuildSiteProfile(
+		Task{TargetURL: "https://example.com"},
+		[]Page{
+			{
+				URL:         "https://example.com/",
+				FinalURL:    "https://example.com/",
+				Title:       "Acme streaming",
+				Description: "Acme provides entertainment streaming.",
+			},
+			{
+				URL:      "https://example.com/pricing",
+				FinalURL: "https://example.com/pricing",
+				Title:    "Choose your subscription package",
+				H1:       []string{"Subscription pricing"},
+				MainText: "Choose monthly or annual billing for your subscription.",
+			},
+			{
+				URL:      "https://example.com/download-guide",
+				FinalURL: "https://example.com/download-guide",
+				Title:    "Download Acme: step-by-step installation guide",
+				H1:       []string{"How to install Acme"},
+				MainText: "Step 1 download the installer. Step 2 follow the setup instructions.",
+			},
+		},
+	)
+
+	if len(profile.ProductsServices) != 0 {
+		t.Fatalf("products/services = %#v, want no page-title fallback", profile.ProductsServices)
+	}
+}

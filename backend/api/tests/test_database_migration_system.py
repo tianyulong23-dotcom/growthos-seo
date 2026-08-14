@@ -1,6 +1,10 @@
+import ast
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
+
+from alembic.script import ScriptDirectory
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -65,6 +69,69 @@ def test_imports_the_frozen_source_alembic_chain_and_adds_one_bridge() -> None:
     assert "ENABLE ROW LEVEL SECURITY" in bridge
     assert "FORCE ROW LEVEL SECURITY" in bridge
     assert "DROP TABLE" not in bridge.upper()
+
+
+def test_alembic_revision_graph_has_unique_ids_and_one_head() -> None:
+    revision_ids: list[str] = []
+    down_revisions: list[str] = []
+    for path in ALEMBIC_VERSIONS.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        values: dict[str, object] = {}
+        for node in tree.body:
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id in {"revision", "down_revision"}
+                and node.value is not None
+            ):
+                values[node.target.id] = ast.literal_eval(node.value)
+        revision = values.get("revision")
+        assert isinstance(revision, str), f"missing revision in {path.name}"
+        revision_ids.append(revision)
+        parents = values.get("down_revision")
+        if isinstance(parents, str):
+            down_revisions.append(parents)
+        elif isinstance(parents, tuple):
+            down_revisions.extend(parents)
+
+    assert len(revision_ids) == len(set(revision_ids))
+    assert set(down_revisions) <= set(revision_ids)
+
+    scripts = ScriptDirectory(str(ALEMBIC_VERSIONS.parent))
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert heads[0] in revision_ids
+
+
+def test_onboarding_timeline_migration_tolerates_missing_legacy_constraint() -> None:
+    migration = (
+        ALEMBIC_VERSIONS / "20260812_0060_onboarding_agent_timeline.py"
+    ).read_text(encoding="utf-8")
+
+    assert migration.count(
+        "DROP CONSTRAINT IF EXISTS ck_agent_timeline_events_status"
+    ) == 2
+    assert "status IN ('running','waiting','completed','failed','cancelled')" in migration
+
+
+def test_publication_migration_backfills_only_provable_wordpress_targets() -> None:
+    path = ALEMBIC_VERSIONS / "20260810_0048_article_preview_publication_orchestration.py"
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    statements = [str(statement) for statement in migration.legacy_wordpress_backfill_statements()]
+    assert len(statements) == 2
+    insert_target, bind_publications = statements
+    assert "FROM wordpress_project_connections" in insert_target
+    assert "JOIN projects" in insert_target
+    assert "connection.verified_at IS NOT NULL" in insert_target
+    assert "'legacy-wordpress-' || md5(connection.project_id)" in insert_target
+    assert "'wordpress-project:' || connection.project_id" in insert_target
+    assert "ON CONFLICT (project_id, adapter_type) DO NOTHING" in insert_target
+    assert "publication.organization_id = target.organization_id" in bind_publications
+    assert "publication.target_id IS NULL" in bind_publications
 
 
 def test_shared_bootstrap_declares_crawling_roles_and_schema() -> None:

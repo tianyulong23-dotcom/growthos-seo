@@ -33,12 +33,49 @@ func TestTaskPageLimit(t *testing.T) {
 			task: Task{Type: TaskTechnicalAudit, MaxPages: 6000},
 			want: 5000,
 		},
+		{
+			name: "content research follows the requested URL limit",
+			task: Task{
+				Type:     TaskContentResearch,
+				URLs:     []string{"https://one.example/a", "https://two.example/b"},
+				MaxPages: 1,
+			},
+			want: 1,
+		},
+		{
+			name: "source verification defaults to all requested URLs",
+			task: Task{
+				Type: TaskSourceVerification,
+				URLs: []string{"https://one.example/a", "https://two.example/b"},
+			},
+			want: 2,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if got := test.task.PageLimit(); got != test.want {
 				t.Fatalf("PageLimit() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDirectURLResearchTasksAreAccepted(t *testing.T) {
+	for _, taskType := range []TaskType{TaskContentResearch, TaskSourceVerification} {
+		t.Run(string(taskType), func(t *testing.T) {
+			task := Task{
+				OrganizationID: "org",
+				ProjectID:      "project",
+				RunID:          "run",
+				Type:           taskType,
+				URLs:           []string{"https://one.example/article"},
+				Country:        "US",
+				Language:       "en",
+				Rendering:      RenderingAuto,
+			}
+			if err := task.Validate(); err != nil {
+				t.Fatalf("Validate() returned an error: %v", err)
 			}
 		})
 	}

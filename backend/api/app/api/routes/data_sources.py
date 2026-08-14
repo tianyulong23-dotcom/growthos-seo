@@ -21,9 +21,11 @@ from app.modules.settings.gsc import (
     GSCNotConnectedError,
     GSCReconnectRequiredError,
     GSCService,
+    GSCOAuthSettingsService,
     GSCUpstreamError,
     GSCValidationError,
     build_gsc_service,
+    build_gsc_oauth_settings_service,
 )
 from app.modules.settings.schemas import (
     DataForSEOSettingsResponse,
@@ -38,10 +40,12 @@ from app.modules.settings.schemas import (
     GSCPerformanceExportResponse,
     GSCPerformanceReportResponse,
     GSCPerformanceTableResponse,
+    GSCOAuthSettingsResponse,
     GSCOAuthStartRequest,
     GSCOAuthStartResponse,
     GSCSelectSiteRequest,
     GSCSiteListResponse,
+    UpdateGSCOAuthSettingsRequest,
 )
 
 router = APIRouter(tags=["settings"])
@@ -64,6 +68,10 @@ def get_dataforseo_settings_service() -> DataForSEOSettingsService:
 
 def get_gsc_service() -> GSCService:
     return build_gsc_service()
+
+
+def get_gsc_oauth_settings_service() -> GSCOAuthSettingsService:
+    return build_gsc_oauth_settings_service()
 
 
 def handle_data_source_error(exc: Exception) -> None:
@@ -148,7 +156,7 @@ async def gsc_oauth_callback(
         callback_path = await service.handle_callback(code=code, state=state_value, error=error)
     except Exception as exc:
         try:
-            callback_path = service.failed_callback_path(state_value)
+            callback_path = await service.failed_callback_path(state_value)
         except GSCValidationError:
             handle_gsc_error(exc)
             raise
@@ -157,6 +165,41 @@ async def gsc_oauth_callback(
         service.settings.gsc_frontend_origin.rstrip("/") + callback_path,
         status_code=status.HTTP_303_SEE_OTHER,
     )
+
+
+@router.get(
+    "/api/v1/platform/settings/gsc-oauth",
+    response_model=GSCOAuthSettingsResponse,
+)
+async def get_platform_gsc_oauth_settings(
+    service: Annotated[
+        GSCOAuthSettingsService,
+        Depends(get_gsc_oauth_settings_service),
+    ],
+) -> GSCOAuthSettingsResponse:
+    try:
+        return await service.get_platform()
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
+
+
+@router.put(
+    "/api/v1/platform/settings/gsc-oauth",
+    response_model=GSCOAuthSettingsResponse,
+)
+async def update_platform_gsc_oauth_settings(
+    request: UpdateGSCOAuthSettingsRequest,
+    service: Annotated[
+        GSCOAuthSettingsService,
+        Depends(get_gsc_oauth_settings_service),
+    ],
+) -> GSCOAuthSettingsResponse:
+    try:
+        return await service.update_platform(request)
+    except Exception as exc:
+        handle_gsc_error(exc)
+        raise
 
 
 @router.get(

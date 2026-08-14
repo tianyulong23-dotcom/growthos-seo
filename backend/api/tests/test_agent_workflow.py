@@ -103,7 +103,7 @@ def test_handled_model_error_stops_without_another_model_round() -> None:
     assert calls[-1][1]["error_code"] == "model_provider_auth_failed"
 
 
-def test_handled_final_judge_error_stops_without_repeating_judge() -> None:
+def test_final_answer_streams_and_finishes_without_separate_judge() -> None:
     workflow = AgentWorkflow()
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -117,24 +117,21 @@ def test_handled_final_judge_error_stops_without_repeating_judge() -> None:
         if name == "agent_check_run":
             return {"allowed": True}
         if name == "agent_model_decide":
-            return {"type": "final", "answer": "检查已经完成", "evidence": []}
-        if name == "agent_judge_final":
             return {
-                "type": "model_error",
-                "error_code": "model_provider_auth_failed",
-                "message": "模型 API 密钥无效或没有权限",
-                "retryable": False,
+                "type": "final", "answer": "检查已经完成", "evidence": [],
+                "message_id": "final-message-1",
             }
         return None
 
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "run-1", "limits": LIMITS}))
 
-    assert sum(name == "agent_model_decide" for name, _ in calls) == 1
-    assert sum(name == "agent_judge_final" for name, _ in calls) == 1
-    assert calls[-1][0] == "agent_finish"
-    assert calls[-1][1]["status"] == "failed"
-    assert calls[-1][1]["error_code"] == "model_provider_auth_failed"
+    names = [name for name, _ in calls]
+    assert "agent_judge_final" not in names
+    assert "agent_stream_final" not in names
+    assert names.index("agent_model_decide") < names.index("agent_finish")
+    assert calls[-1][1]["status"] == "completed"
+    assert calls[-1][1]["message_id"] == "final-message-1"
 
 
 def test_write_tool_executes_directly_without_approval() -> None:
@@ -151,6 +148,7 @@ def test_write_tool_executes_directly_without_approval() -> None:
             "answer": "业务资料已更新。",
             "evidence": [],
             "research": None,
+            "message_id": "final-message-1",
         },
     ])
 
@@ -165,14 +163,6 @@ def test_write_tool_executes_directly_without_approval() -> None:
             return {"allowed": True}
         if name == "agent_model_decide":
             return next(decisions)
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
-        if name == "agent_stream_final":
-            return {
-                "answer": payload["answer"],
-                "message_id": "final-message-1",
-                "streamed": True,
-            }
         if name == "agent_execute_tool":
             return {
                 "tool": payload["tool"], "ok": True, "summary": "已完成",
@@ -199,7 +189,10 @@ def test_retry_reuses_the_same_tool_call_id() -> None:
     tool_call_ids: list[str] = []
     decisions = iter([
         {"type": "tool_call", "tool": "get_latest_audit", "arguments": {}},
-        {"type": "final", "answer": "完成", "evidence": []},
+        {
+            "type": "final", "answer": "完成", "evidence": [],
+            "message_id": "final-message-1",
+        },
     ])
 
     async def call(
@@ -212,8 +205,6 @@ def test_retry_reuses_the_same_tool_call_id() -> None:
             return {"allowed": True}
         if name == "agent_model_decide":
             return next(decisions)
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         if name == "agent_execute_tool":
             tool_call_ids.append(payload["tool_call_id"])
             return {
@@ -256,7 +247,10 @@ def test_read_tools_in_one_model_response_execute_in_parallel() -> None:
                 },
             ],
         },
-        {"type": "final", "answer": "完成", "evidence": []},
+        {
+            "type": "final", "answer": "完成", "evidence": [],
+            "message_id": "final-message-1",
+        },
     ])
 
     async def call(
@@ -283,8 +277,6 @@ def test_read_tools_in_one_model_response_execute_in_parallel() -> None:
                 "tool": kwargs["tool"], "ok": True, "summary": "读取完成",
                 "data": {}, "error_code": None, "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -332,8 +324,6 @@ def test_parallel_read_failure_does_not_discard_other_read_result() -> None:
                 "error_code": None if succeeded else "invalid_tool_arguments",
                 "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -362,6 +352,97 @@ def test_write_tools_stay_serial_and_keep_model_order() -> None:
         ["get_project_profile", "get_latest_audit"],
         ["update_business_profile"],
         ["get_project_profile"],
+    ]
+
+
+def test_initial_discovery_write_tools_are_scheduled_together() -> None:
+    calls = [
+        {"tool": "start_technical_audit", "arguments": {"max_pages": 100}},
+        {"tool": "start_keyword_library", "arguments": {}},
+        {"tool": "start_content_plan", "arguments": {}},
+    ]
+
+    scheduled, skipped = AgentWorkflow._calls_until_replan(calls)
+    groups = AgentWorkflow._execution_groups(scheduled)
+
+    assert [call["tool"] for call in scheduled] == [
+        "start_technical_audit",
+        "start_keyword_library",
+    ]
+    assert [call["tool"] for call in skipped] == ["start_content_plan"]
+    assert [[call["tool"] for _, call in group] for group in groups] == [[
+        "start_technical_audit",
+        "start_keyword_library",
+    ]]
+
+
+def test_initial_discovery_write_tools_execute_in_parallel() -> None:
+    workflow = AgentWorkflow()
+    running: set[str] = set()
+    completed: list[tuple[str, bool]] = []
+    overlap_seen = False
+    decisions = iter([
+        {
+            "type": "tool_calls",
+            "tool_calls": [
+                {
+                    "tool_call_id": "audit-call",
+                    "tool": "start_technical_audit",
+                    "arguments": {"max_pages": 100},
+                },
+                {
+                    "tool_call_id": "keyword-call",
+                    "tool": "start_keyword_library",
+                    "arguments": {},
+                },
+            ],
+        },
+        {
+            "type": "final",
+            "answer": "两项任务已启动。",
+            "evidence": [],
+            "message_id": "final-message-1",
+        },
+    ])
+
+    async def call(
+        name: str,
+        payload: dict[str, Any],
+        limits: dict[str, Any],
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal overlap_seen
+        if name == "agent_check_run":
+            return {"allowed": True}
+        if name == "agent_model_decide":
+            return next(decisions)
+        if name == "agent_execute_tool":
+            tool = str(kwargs["tool"])
+            running.add(tool)
+            await asyncio.sleep(0)
+            overlap_seen = overlap_seen or len(running) == 2
+            await asyncio.sleep(0)
+            running.remove(tool)
+            succeeded = tool == "start_keyword_library"
+            completed.append((tool, succeeded))
+            return {
+                "tool": tool,
+                "ok": succeeded,
+                "summary": "已启动" if succeeded else "启动失败",
+                "data": {"verified": True} if succeeded else {},
+                "error_code": None if succeeded else "audit_start_failed",
+                "retryable": False,
+                "cost": 0.0,
+            }
+        return None
+
+    workflow._call = call  # type: ignore[method-assign]
+    asyncio.run(workflow.run({"run_id": "run-1", "limits": LIMITS}))
+
+    assert overlap_seen is True
+    assert sorted(completed) == [
+        ("start_keyword_library", True),
+        ("start_technical_audit", False),
     ]
 
 
@@ -432,6 +513,33 @@ def test_tool_timeout_uses_modifies_data_metadata(
     assert captured["retry_policy"].maximum_attempts == 0
 
 
+def test_model_activity_stays_within_one_temporal_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def execute_activity(
+        name: str, payload: dict[str, Any], **kwargs: Any
+    ) -> dict[str, Any]:
+        captured["name"] = name
+        captured["payload"] = payload
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(agent_workflows.workflow, "execute_activity", execute_activity)
+
+    asyncio.run(AgentWorkflow()._call(
+        "agent_model_decide",
+        {"run_id": "run-1"},
+        {**LIMITS, "model_timeout_seconds": 120},
+    ))
+
+    assert captured["start_to_close_timeout"].total_seconds() == 120
+    assert captured["retry_policy"].maximum_attempts == 1
+    assert captured["payload"]["request_timeout_seconds"] == 105
+    assert captured["payload"]["max_retries"] == 0
+
+
 def test_state_changing_tool_discards_later_calls_and_replans() -> None:
     workflow = AgentWorkflow()
     executed: list[str] = []
@@ -473,8 +581,6 @@ def test_state_changing_tool_discards_later_calls_and_replans() -> None:
                 "data": {"verified": True}, "error_code": None,
                 "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -533,8 +639,6 @@ def test_failed_state_changing_tool_still_discards_stale_later_calls() -> None:
                 "data": {}, "error_code": "agent_state_conflict",
                 "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "已如实说明失败"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -571,8 +675,6 @@ def test_identical_tool_results_trigger_replan_feedback() -> None:
                 "data": {"run_id": None}, "error_code": None,
                 "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -730,8 +832,6 @@ def test_identical_non_retryable_failure_is_not_executed_again() -> None:
                 "data": {}, "error_code": "audit_not_found",
                 "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "已如实说明"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -773,8 +873,6 @@ def test_non_retryable_failure_with_changed_arguments_is_executed() -> None:
                 "data": {}, "error_code": "audit_not_found",
                 "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "已如实说明"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -812,8 +910,6 @@ def test_final_only_remains_enabled_on_last_round() -> None:
                 "tool": kwargs["tool"], "ok": True, "summary": "完成",
                 "data": {}, "error_code": None, "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -842,8 +938,6 @@ def test_final_only_remains_enabled_on_last_round() -> None:
         if name == "agent_model_decide":
             final_payloads.append(payload)
             return {"type": "final", "answer": "如实收尾", "evidence": []}
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     final_workflow._call = final_call  # type: ignore[method-assign]
@@ -868,7 +962,10 @@ def test_tool_batch_is_not_stopped_by_a_separate_call_count_limit() -> None:
                 {"tool": "get_latest_audit", "arguments": {}},
             ],
         },
-        {"type": "final", "answer": "完成", "evidence": []},
+        {
+            "type": "final", "answer": "完成", "evidence": [],
+            "message_id": "final-message-1",
+        },
     ])
 
     async def call(
@@ -886,14 +983,6 @@ def test_tool_batch_is_not_stopped_by_a_separate_call_count_limit() -> None:
             return {
                 "tool": kwargs["tool"], "ok": True, "summary": "完成",
                 "data": {}, "error_code": None, "retryable": False, "cost": 0.0,
-            }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
-        if name == "agent_stream_final":
-            return {
-                "answer": payload["answer"],
-                "message_id": "final-message-1",
-                "streamed": True,
             }
         if name == "agent_finish":
             finishes.append(payload)
@@ -976,8 +1065,6 @@ def test_last_execution_round_forces_final_response_without_new_tool() -> None:
                 "tool": kwargs["tool"], "ok": True, "summary": "完成", "data": {},
                 "error_code": None, "retryable": False, "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -1009,14 +1096,9 @@ def test_last_allowed_model_response_is_checked_and_finished() -> None:
                 "reason": "model rounds reached",
             }
         if name == "agent_model_decide":
-            return {"type": "final", "answer": "done", "evidence": []}
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "goal completed"}
-        if name == "agent_stream_final":
             return {
-                "answer": payload["answer"],
+                "type": "final", "answer": "done", "evidence": [],
                 "message_id": "final-message-1",
-                "streamed": True,
             }
         if name == "agent_finish":
             finishes.append(payload)
@@ -1093,8 +1175,6 @@ def test_project_memory_runs_as_a_state_changing_tool_and_replans() -> None:
                 "retryable": False,
                 "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
@@ -1154,128 +1234,12 @@ def test_project_memory_tool_failure_is_returned_to_the_next_model_round() -> No
                 "retryable": False,
                 "cost": 0.0,
             }
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标已完成"}
         return None
 
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "run-1", "limits": LIMITS}))
 
     assert "tool_results" not in model_payloads[1]
-
-
-@pytest.mark.parametrize("judge_status", ["partial", "failed", "blocked"])
-def test_last_round_judge_prevents_false_completed_status(judge_status: str) -> None:
-    workflow = AgentWorkflow()
-    finishes: list[dict[str, Any]] = []
-
-    async def call(
-        name: str,
-        payload: dict[str, Any],
-        limits: dict[str, Any],
-        **kwargs: Any,
-    ) -> Any:
-        if name == "agent_check_run":
-            return {"allowed": True}
-        if name == "agent_model_decide":
-            return {"type": "final", "answer": "全部完成", "evidence": []}
-        if name == "agent_judge_final":
-            return {"status": judge_status, "reason": "缺少成功证据"}
-        if name == "agent_finish":
-            finishes.append(payload)
-        return None
-
-    workflow._call = call  # type: ignore[method-assign]
-    asyncio.run(workflow.run({"run_id": "run-1", "limits": LIMITS}))
-
-    assert finishes[-1]["status"] == "failed"
-    assert finishes[-1]["error_code"] == f"agent_final_check_{judge_status}"
-    assert finishes[-1]["judge"]["status"] == judge_status
-
-
-def test_failed_judge_feedback_can_trigger_more_tools_and_then_complete() -> None:
-    workflow = AgentWorkflow()
-    model_payloads: list[dict[str, Any]] = []
-    finishes: list[dict[str, Any]] = []
-    decisions = iter([
-        {"type": "final", "answer": "健康分是 86。", "evidence": []},
-        {"type": "tool_call", "tool": "get_latest_audit", "arguments": {}},
-        {
-            "type": "final",
-            "answer": "健康分是 86，三个问题分别影响 5、4、3 页。",
-            "evidence": [],
-        },
-    ])
-    judge_results = iter([
-        {
-            "status": "partial",
-            "reason": "缺少三个问题的影响页数",
-            "criteria": [{
-                "requirement": "列出三个问题的影响页数",
-                "status": "partial",
-                "evidence": "当前只返回健康分",
-            }],
-            "remaining_work": ["读取并回答三个问题的影响页数"],
-        },
-        {
-            "status": "completed",
-            "reason": "目标已完整回答",
-            "criteria": [{
-                "requirement": "列出三个问题的影响页数",
-                "status": "completed",
-                "evidence": "已返回5、4、3页",
-            }],
-            "remaining_work": [],
-        },
-    ])
-
-    async def call(
-        name: str,
-        payload: dict[str, Any],
-        limits: dict[str, Any],
-        **kwargs: Any,
-    ) -> Any:
-        if name == "agent_check_run":
-            return {"allowed": True}
-        if name == "agent_model_decide":
-            model_payloads.append(payload)
-            return next(decisions)
-        if name == "agent_judge_final":
-            return next(judge_results)
-        if name == "agent_stream_final":
-            return {
-                "answer": payload["answer"],
-                "message_id": "final-message-1",
-                "streamed": True,
-            }
-        if name == "agent_execute_tool":
-            return {
-                "tool": kwargs["tool"], "ok": True, "summary": "读取完成",
-                "data": {"top_issues": {"items": []}}, "error_code": None,
-                "retryable": False, "cost": 0.0,
-            }
-        if name == "agent_finish":
-            finishes.append(payload)
-        return None
-
-    workflow._call = call  # type: ignore[method-assign]
-    asyncio.run(workflow.run({"run_id": "run-1", "limits": LIMITS}))
-
-    assert model_payloads[0]["judge_feedback"] is None
-    assert model_payloads[1]["judge_feedback"] == {
-        "status": "partial",
-        "reason": "缺少三个问题的影响页数",
-        "criteria": [{
-            "requirement": "列出三个问题的影响页数",
-            "status": "partial",
-            "evidence": "当前只返回健康分",
-        }],
-        "remaining_work": ["读取并回答三个问题的影响页数"],
-        "previous_answer": "健康分是 86。",
-    }
-    assert model_payloads[2]["judge_feedback"] == model_payloads[1]["judge_feedback"]
-    assert finishes[-1]["status"] == "completed"
-    assert finishes[-1]["judge"]["status"] == "completed"
 
 
 def test_model_returned_tool_is_not_executed_after_cancellation() -> None:
@@ -1335,7 +1299,7 @@ def test_temporal_cancellation_never_becomes_a_failure_or_next_step(
     assert calls == ["agent_set_status", "agent_check_run", "agent_model_decide"]
 
 
-def test_completed_answer_is_bounded_judged_delivered_and_persisted_unchanged() -> None:
+def test_completed_answer_is_bounded_delivered_and_persisted_unchanged() -> None:
     workflow = AgentWorkflow()
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -1349,14 +1313,9 @@ def test_completed_answer_is_bounded_judged_delivered_and_persisted_unchanged() 
         if name == "agent_check_run":
             return {"allowed": True}
         if name == "agent_model_decide":
-            return {"type": "final", "answer": "123456", "evidence": []}
-        if name == "agent_judge_final":
-            return {"status": "completed", "reason": "目标完成"}
-        if name == "agent_stream_final":
             return {
-                "answer": payload["answer"],
+                "type": "final", "answer": "1234", "evidence": [],
                 "message_id": "message-final",
-                "streamed": True,
             }
         return None
 
@@ -1367,58 +1326,9 @@ def test_completed_answer_is_bounded_judged_delivered_and_persisted_unchanged() 
     }))
 
     names = [name for name, _ in calls]
-    judge_index = names.index("agent_judge_final")
-    stream_index = names.index("agent_stream_final")
     finish_index = names.index("agent_finish")
-    assert judge_index < stream_index < finish_index
-    assert calls[judge_index][1]["answer"] == "1234"
-    assert calls[stream_index][1]["answer"] == "1234"
+    assert "agent_judge_final" not in names
+    assert "agent_stream_final" not in names
+    assert names.index("agent_model_decide") < finish_index
     assert calls[finish_index][1]["answer"] == "1234"
     assert calls[finish_index][1]["message_id"] == "message-final"
-
-
-def test_failed_judge_never_starts_final_response_stream() -> None:
-    workflow = AgentWorkflow()
-    calls: list[str] = []
-
-    async def call(
-        name: str,
-        payload: dict[str, Any],
-        limits: dict[str, Any],
-        **kwargs: Any,
-    ) -> Any:
-        calls.append(name)
-        if name == "agent_check_run":
-            return {"allowed": True}
-        if name == "agent_model_decide":
-            return {"type": "final", "answer": "草稿", "evidence": []}
-        if name == "agent_judge_final":
-            return {"status": "failed", "reason": "缺少证据"}
-        return None
-
-    workflow._call = call  # type: ignore[method-assign]
-    asyncio.run(workflow.run({
-        "run_id": "run-1", "limits": {**LIMITS, "model_rounds": 1},
-    }))
-
-    assert "agent_stream_final" not in calls
-    assert calls[-1] == "agent_finish"
-
-
-def test_stream_activity_uses_configured_model_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workflow = AgentWorkflow()
-    captured: dict[str, Any] = {}
-
-    async def execute_activity(name: str, payload: dict[str, Any], **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return {}
-
-    monkeypatch.setattr(agent_workflows.workflow, "execute_activity", execute_activity)
-    asyncio.run(workflow._call(
-        "agent_stream_final", {"run_id": "run-1"},
-        {**LIMITS, "model_timeout_seconds": 123},
-    ))
-
-    assert captured["start_to_close_timeout"].total_seconds() == 123

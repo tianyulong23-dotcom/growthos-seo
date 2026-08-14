@@ -35,11 +35,21 @@ type ResultStore interface {
 }
 
 type AIProviderSettings struct {
-	BaseURL        string
-	APIKey         string
-	Model          string
-	RequestTimeout time.Duration
-	MaxRetries     int
+	Provider        string
+	BaseURL         string
+	APIKey          string
+	Model           string
+	ReasoningEffort string
+	RequestTimeout  time.Duration
+	MaxRetries      int
+}
+
+type AIProfileInvocationStore interface {
+	SaveAIProfileInvocation(context.Context, Task, AIProfileInvocation) error
+}
+
+type AIProfileInvocationRepository interface {
+	SaveAIProfileInvocation(context.Context, Task, AIProfileInvocation) error
 }
 
 type AIProviderSettingsStore interface {
@@ -363,6 +373,18 @@ func (s *ProductionStore) LoadAIProviderSettings(
 		)
 	}
 	return repository.LoadAIProviderSettings(ctx, organizationID)
+}
+
+func (s *ProductionStore) SaveAIProfileInvocation(
+	ctx context.Context,
+	task Task,
+	invocation AIProfileInvocation,
+) error {
+	repository, ok := s.repository.(AIProfileInvocationRepository)
+	if !ok {
+		return errors.New("crawler repository does not support AI profile invocation storage")
+	}
+	return repository.SaveAIProfileInvocation(ctx, task, invocation)
 }
 
 func (s *ProductionStore) SaveCheckpoint(

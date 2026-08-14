@@ -11,6 +11,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.modules.content.dataforseo import OrganicResult, SERPResult
+from app.modules.agent.providers.errors import ProviderError
 from app.modules.content_plan.batch_service import ContentPlanBatchService
 from app.modules.content_plan.d4_service import ContentPlanD4Service
 from app.modules.content_plan.domain import (
@@ -31,8 +32,10 @@ from app.modules.content_plan.service import (
     ExpansionResult,
     ExpansionRow,
     ExpansionSeed,
+    TopicClassificationInput,
 )
 from app.modules.keywords.models import Keyword, KeywordBuildRun
+from app.modules.keywords.coverage import SQLAlchemyKeywordCoverageQuery
 from app.modules.keywords.schemas import (
     KeywordCoverageBatchRequest,
     KeywordCoverageBatchResponse,
@@ -285,6 +288,107 @@ class InformationalClassificationGateway:
         )
 
 
+class BulkClassificationGateway(InformationalClassificationGateway):
+    def __init__(
+        self,
+        *,
+        incomplete_topic_index: int | None = None,
+        contradictory_topic_indexes: frozenset[int] = frozenset({0, 1, 2, 3}),
+    ) -> None:
+        super().__init__()
+        self.bulk_calls: list[list[TopicClassificationInput]] = []
+        self.incomplete_topic_index = incomplete_topic_index
+        self.contradictory_topic_indexes = contradictory_topic_indexes
+
+    async def classify_topics(
+        self,
+        topics: Sequence[TopicClassificationInput],
+        *,
+        business_context: BusinessContext,
+        country: str,
+        language: str,
+    ) -> AICallResult:
+        self.bulk_calls.append(list(topics))
+        output = []
+        for topic_index, topic in enumerate(topics):
+            if topic_index == self.incomplete_topic_index:
+                continue
+            unrelated_id = topic.candidates[-1].candidate_id
+            has_contradiction = topic_index in self.contradictory_topic_indexes
+            for candidate_index, candidate in enumerate(topic.candidates):
+                output.append(
+                    {
+                        "topic_id": topic.topic_id,
+                        "candidate_id": candidate.candidate_id,
+                        "relevance": (
+                            "unrelated"
+                            if has_contradiction
+                            and candidate.candidate_id == unrelated_id
+                            else "same_topic"
+                        ),
+                        "keyword_type": (
+                            "unknown"
+                            if has_contradiction
+                            and candidate.candidate_id == unrelated_id
+                            else "informational"
+                        ),
+                        "primary_fit": (
+                            "ineligible"
+                            if has_contradiction
+                            and candidate.candidate_id == unrelated_id
+                            else "strong" if candidate_index == 0 else "acceptable"
+                        ),
+                        "secondary_candidate_ids": (
+                            [unrelated_id, unrelated_id]
+                            if candidate_index == 0
+                            else []
+                        ),
+                        "reason_code": (
+                            "unrelated_business"
+                            if has_contradiction
+                            and candidate.candidate_id == unrelated_id
+                            else "answers_definition"
+                        ),
+                    }
+                )
+        return ai_result(output, request_id=f"classification-bulk-{len(self.bulk_calls)}")
+
+
+class SharedPrimaryClassificationGateway(InformationalClassificationGateway):
+    async def classify(
+        self,
+        seed_keyword: str,
+        candidates: Sequence[CandidateClassification],
+        *,
+        business_context: BusinessContext,
+        country: str,
+        language: str,
+        validation_error: str | None = None,
+    ) -> AICallResult:
+        self.calls.append(validation_error)
+        self.context_calls.append((business_context, country, language))
+        return ai_result(
+            [
+                ClassificationDecision(
+                    candidate_id=candidate.candidate_id,
+                    relevance="same_topic",
+                    keyword_type="informational",
+                    primary_fit=(
+                        "strong"
+                        if candidate.keyword == "shared primary keyword"
+                        else "acceptable"
+                        if candidate.keyword.endswith(" alternate")
+                        else "ineligible"
+                    ),
+                    secondary_candidate_ids=(),
+                    reason_code="answers_definition",
+                )
+                for candidate in candidates
+            ],
+            request_id=f"classification-shared-{len(self.calls)}",
+        )
+
+
 class UncoveredQuery:
     def __init__(self, *, unknown_keyword: str | None = None) -> None:
         self.unknown_keyword = unknown_keyword
@@ -338,6 +442,61 @@ class ScriptedExpansionGateway:
             )
             for index, seed in enumerate(seeds)
         ]
+
+
+class SharedPrimaryExpansionGateway(ScriptedExpansionGateway):
+    async def expand(
+        self,
+        seeds: Sequence[ExpansionSeed],
+        *,
+        country: str,
+        language: str,
+    ) -> list[ExpansionResult]:
+        self.calls.append([seed.keyword for seed in seeds])
+        return [
+            ExpansionResult(
+                preparation_id=seed.preparation_id,
+                status="completed",
+                rows=(
+                    ExpansionRow(
+                        keyword="shared primary keyword",
+                        provider_position=1,
+                        search_volume=1_000,
+                    ),
+                    ExpansionRow(
+                        keyword=f"{seed.keyword} alternate",
+                        provider_position=2,
+                        search_volume=100,
+                    ),
+                ),
+                provider_request_id=f"provider-{index}",
+                cost_usd=0.00012,
+            )
+            for index, seed in enumerate(seeds)
+        ]
+
+
+class OneUnknownExpansionGateway(ScriptedExpansionGateway):
+    async def expand(
+        self,
+        seeds: Sequence[ExpansionSeed],
+        *,
+        country: str,
+        language: str,
+    ) -> list[ExpansionResult]:
+        results = await super().expand(
+            seeds,
+            country=country,
+            language=language,
+        )
+        if len(self.calls) == 1:
+            results[0] = ExpansionResult(
+                preparation_id=seeds[0].preparation_id,
+                status="uncertain",
+                error_code="external_request_outcome_unknown",
+                error_detail="provider outcome unknown",
+            )
+        return results
 
 
 class SuccessfulSerpGateway:
@@ -508,6 +667,42 @@ class InvalidClassificationGateway(InformationalClassificationGateway):
         return ai_result([], request_id=f"classification-invalid-{len(self.calls)}")
 
 
+class InvalidSecondaryReferenceClassificationGateway(InformationalClassificationGateway):
+    async def classify(
+        self,
+        seed_keyword: str,
+        candidates: Sequence[CandidateClassification],
+        *,
+        business_context: BusinessContext,
+        country: str,
+        language: str,
+        validation_error: str | None = None,
+    ) -> AICallResult:
+        result = await super().classify(
+            seed_keyword,
+            candidates,
+            business_context=business_context,
+            country=country,
+            language=language,
+            validation_error=validation_error,
+        )
+        decisions = list(result.output)
+        first = decisions[0]
+        decisions[0] = ClassificationDecision(
+            candidate_id=first.candidate_id,
+            relevance=first.relevance,
+            keyword_type=first.keyword_type,
+            primary_fit=first.primary_fit,
+            secondary_candidate_ids=(
+                first.candidate_id,
+                "missing-candidate-id",
+                *first.secondary_candidate_ids,
+            ),
+            reason_code=first.reason_code,
+        )
+        return ai_result(decisions, request_id=f"classification-invalid-ref-{len(self.calls)}")
+
+
 class InvalidFallbackGateway:
     def __init__(self) -> None:
         self.calls: list[str | None] = []
@@ -565,6 +760,69 @@ class PreferAiClassificationGateway(InformationalClassificationGateway):
                 for candidate in candidates
             ],
             request_id=f"classification-{len(self.calls)}",
+        )
+
+
+class UnknownFallbackClassificationGateway(InformationalClassificationGateway):
+    async def classify(
+        self,
+        seed_keyword: str,
+        candidates: Sequence[CandidateClassification],
+        *,
+        business_context: BusinessContext,
+        country: str,
+        language: str,
+        validation_error: str | None = None,
+    ) -> AICallResult:
+        if any(candidate.source == "ai" for candidate in candidates):
+            self.calls.append(validation_error)
+            self.context_calls.append((business_context, country, language))
+            raise ProviderError(
+                "response outcome unknown",
+                code="model_provider_timeout",
+                retryable=True,
+            )
+        return await super().classify(
+            seed_keyword,
+            candidates,
+            business_context=business_context,
+            country=country,
+            language=language,
+            validation_error=validation_error,
+        )
+
+
+class OneUnknownClassificationGateway(InformationalClassificationGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def classify(
+        self,
+        seed_keyword: str,
+        candidates: Sequence[CandidateClassification],
+        *,
+        business_context: BusinessContext,
+        country: str,
+        language: str,
+        validation_error: str | None = None,
+    ) -> AICallResult:
+        if not self.failed:
+            self.failed = True
+            self.calls.append(validation_error)
+            self.context_calls.append((business_context, country, language))
+            raise ProviderError(
+                "response outcome unknown",
+                code="model_provider_timeout",
+                retryable=True,
+            )
+        return await super().classify(
+            seed_keyword,
+            candidates,
+            business_context=business_context,
+            country=country,
+            language=language,
+            validation_error=validation_error,
         )
 
 
@@ -657,11 +915,12 @@ async def test_d3_produces_30_packs_and_replay_does_not_repay(d3_database) -> No
     expansion = ScriptedExpansionGateway()
     seed = KeepAllSeedGateway(repair_first=True)
     classification = InformationalClassificationGateway(repair_first=True)
-    d3 = service(
+    d3 = ContentPlanD3Service(
         repository,
-        expansion=expansion,
-        seed=seed,
-        classification=classification,
+        seed_gateway=seed,
+        expansion_gateway=expansion,
+        classification_gateway=classification,
+        coverage_query=SQLAlchemyKeywordCoverageQuery(sessions),
     )
 
     first = await d3.run(batch.id)
@@ -717,6 +976,157 @@ async def test_d3_produces_30_packs_and_replay_does_not_repay(d3_database) -> No
         <= row.response_metadata_json.keys()
         for row in ai_requests
     )
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
+async def test_d3_bulk_classifies_30_topics_and_cleans_unrelated_secondaries(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 30)
+    batch = await create_automatic_batch(repository, project_id)
+    classification = BulkClassificationGateway()
+
+    result = await service(
+        repository,
+        expansion=ScriptedExpansionGateway(),
+        classification=classification,
+    ).run(batch.id)
+
+    assert result.status == "pack_ready"
+    assert result.pack_ready_count == 30
+    assert len(classification.bulk_calls) == 1
+    assert len(classification.bulk_calls[0]) == 30
+    assert classification.calls == []
+    preparations = await repository.get_current_preparations(batch.id)
+    assert all(row.state == "pack_ready" for row in preparations)
+    unrelated_topic_count = 0
+    for preparation in preparations:
+        bundle = await repository.get_preparation_bundle(preparation.id)
+        assert bundle is not None
+        unrelated_ids = {
+            row.id for row in bundle.keywords if row.relevance == "unrelated"
+        }
+        assert {
+            row.classifier_version for row in bundle.keywords
+        } == {"content-plan-classifier-bulk-v1"}
+        unrelated_topic_count += bool(unrelated_ids)
+        assert not any(
+            relation.secondary_candidate_id in unrelated_ids
+            for relation in bundle.relations
+        )
+    assert unrelated_topic_count == 4
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
+async def test_d3_bulk_classification_repairs_only_the_incomplete_topic(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 30)
+    batch = await create_automatic_batch(repository, project_id)
+    classification = BulkClassificationGateway(incomplete_topic_index=16)
+
+    result = await service(
+        repository,
+        expansion=ScriptedExpansionGateway(),
+        classification=classification,
+    ).run(batch.id)
+
+    assert result.status == "pack_ready"
+    assert result.pack_ready_count == 30
+    assert len(classification.bulk_calls) == 1
+    assert len(classification.calls) == 1
+    assert classification.calls[0] is None
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
+async def test_d3_replays_completed_bulk_classification_after_local_failure(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 30)
+    batch = await create_automatic_batch(repository, project_id)
+    classification = BulkClassificationGateway()
+    original_save = repository.save_keyword_package
+    save_count = 0
+
+    async def fail_after_four_packages(*args, **kwargs):
+        nonlocal save_count
+        save_count += 1
+        if save_count == 5:
+            raise RuntimeError("crash after bulk classification")
+        return await original_save(*args, **kwargs)
+
+    repository.save_keyword_package = fail_after_four_packages
+    d3 = service(
+        repository,
+        expansion=ScriptedExpansionGateway(),
+        classification=classification,
+    )
+
+    with pytest.raises(RuntimeError, match="crash after bulk classification"):
+        await d3.run(batch.id)
+    result = await d3.run(batch.id)
+
+    assert result.status == "pack_ready"
+    assert result.pack_ready_count == 30
+    assert len(classification.bulk_calls) == 1
+    bulk_requests = []
+    async with sessions() as session:
+        bulk_requests = list(
+            (
+                await session.scalars(
+                    select(ContentPlanExternalRequest).where(
+                        ContentPlanExternalRequest.batch_id == batch.id,
+                        ContentPlanExternalRequest.endpoint
+                        == "content_plan/classification_bulk",
+                    )
+                )
+            ).all()
+        )
+    assert len(bulk_requests) == 1
+    assert bulk_requests[0].status == "completed"
+    assert bulk_requests[0].attempt_count == 1
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
+async def test_d3_selects_unique_primary_keywords_before_serp(d3_database) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 30)
+    batch = await create_automatic_batch(repository, project_id)
+    serp = SuccessfulSerpGateway()
+    preview = SuccessfulPreviewGateway()
+
+    result = await service(
+        repository,
+        expansion=SharedPrimaryExpansionGateway(),
+        classification=SharedPrimaryClassificationGateway(),
+    ).run(batch.id)
+
+    assert result.status == "pack_ready"
+    preparations = await repository.get_current_preparations(batch.id)
+    primary_keywords = []
+    for preparation in preparations:
+        bundle = await repository.get_preparation_bundle(preparation.id)
+        assert bundle is not None
+        primary_keywords.extend(
+            row.normalized_keyword
+            for row in bundle.keywords
+            if row.selected_role == "primary"
+        )
+    assert len(primary_keywords) == 30
+    assert len(set(primary_keywords)) == 30
+    assert primary_keywords.count("shared primary keyword") == 1
+    assert sum(keyword.endswith(" alternate") for keyword in primary_keywords) == 29
+    preview_result = await ContentPlanD4Service(
+        repository,
+        serp_gateway=serp,
+        preview_gateway=preview,
+    ).build_previews(batch.id)
+    assert preview_result.status == "preview_ready"
+    assert len(serp.calls) == 30
+    assert len(set(serp.calls)) == 30
     await assert_no_formal_plan_items(sessions, batch.id)
 
 
@@ -849,6 +1259,189 @@ async def test_d3_refills_only_the_missing_groups_in_two_rounds(d3_database) -> 
             ).all()
         )
     assert sum(row.source_round == "refill_1" for row in history) == 3
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
+async def test_d3_replenishes_a_serp_exhausted_plan_order_until_pack_ready(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 60)
+    batch = await create_automatic_batch(repository, project_id)
+    initial_expansion = ScriptedExpansionGateway()
+    d3 = service(repository, expansion=initial_expansion)
+    initial = await d3.run(batch.id)
+    assert initial.status == "pack_ready"
+
+    preparations = await repository.get_current_preparations(batch.id)
+    ready_ids = {row.id for row in preparations[:29]}
+    exhausted = preparations[29]
+    original_primary_keywords = set()
+    for preparation in preparations:
+        bundle = await repository.get_preparation_bundle(preparation.id)
+        assert bundle is not None
+        original_primary_keywords.update(
+            row.normalized_keyword
+            for row in bundle.keywords
+            if row.selected_role == "primary"
+        )
+    for preparation in preparations[:29]:
+        await repository.set_preparation_state(preparation.id, state="preview_ready")
+    await repository.set_preparation_state(
+        exhausted.id,
+        state="invalid",
+        error_code="serp_primary_candidates_exhausted",
+        error_detail="all package candidates failed",
+    )
+
+    refill_expansion = ScriptedExpansionGateway(empty_counts=[1, 0])
+    refill = service(repository, expansion=refill_expansion)
+    result = await refill.replenish_serp_exhausted_packages(batch.id)
+
+    assert result.status == "pack_ready"
+    assert result.pack_ready_count == 30
+    assert [len(call) for call in refill_expansion.calls] == [1, 1]
+    current = await repository.get_current_preparations(batch.id)
+    assert len(current) == 30
+    assert {row.id for row in current if row.state == "preview_ready"} == ready_ids
+    replacement = next(row for row in current if row.plan_order == exhausted.plan_order)
+    assert replacement.id != exhausted.id
+    assert replacement.state == "pack_ready"
+    assert replacement.source_round == "refill_2"
+    assert replacement.preparation_version == exhausted.preparation_version + 2
+
+    replacement_bundle = await repository.get_preparation_bundle(replacement.id)
+    assert replacement_bundle is not None
+    replacement_primary = {
+        row.normalized_keyword
+        for row in replacement_bundle.keywords
+        if row.selected_role == "primary"
+    }
+    assert len(replacement_primary) == 1
+    assert replacement_primary.isdisjoint(original_primary_keywords)
+    async with sessions() as session:
+        history = list(
+            (
+                await session.scalars(
+                    select(ContentPlanPreparation).where(
+                        ContentPlanPreparation.batch_id == batch.id,
+                        ContentPlanPreparation.plan_order == exhausted.plan_order,
+                    )
+                )
+            ).all()
+        )
+    assert len(history) == 3
+    assert sum(row.state == "superseded" for row in history) == 2
+    assert sum(row.is_current for row in history) == 1
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
+async def test_d3_resumes_candidate_swap_committed_before_replacement_creation(
+    d3_database,
+) -> None:
+    repository, _sessions, project_id = d3_database
+    await add_keywords(_sessions, project_id, 60)
+    batch = await create_automatic_batch(repository, project_id)
+    initial = await service(
+        repository, expansion=ScriptedExpansionGateway()
+    ).run(batch.id)
+    assert initial.status == "pack_ready"
+
+    preparations = await repository.get_current_preparations(batch.id)
+    exhausted = preparations[-1]
+    available = [
+        candidate
+        for candidate in await repository.get_retained_candidates(batch.id)
+        if candidate.selected_plan_order is None
+    ]
+    staged = available[0]
+    await repository.set_preparation_state(
+        exhausted.id,
+        state="invalid",
+        error_code="serp_primary_candidates_exhausted",
+        error_detail="all package candidates failed",
+    )
+    await repository.replace_seed_for_plan_order(
+        batch.id,
+        plan_order=exhausted.plan_order,
+        replacement_candidate_id=staged.id,
+    )
+
+    expansion = ScriptedExpansionGateway()
+    result = await service(
+        repository, expansion=expansion
+    ).replenish_serp_exhausted_packages(batch.id)
+
+    assert result.status == "pack_ready"
+    assert [len(call) for call in expansion.calls] == [1]
+    current = await repository.get_current_preparations(batch.id)
+    replacement = next(row for row in current if row.plan_order == exhausted.plan_order)
+    assert replacement.candidate_id == staged.id
+    assert replacement.seed_keyword == staged.keyword
+    assert replacement.workflow_id == f"content-plan:{batch.id}:replace:{exhausted.id}"
+
+
+async def test_d3_replaces_unknown_paid_seed_without_repeating_its_request(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 60)
+    batch = await create_automatic_batch(repository, project_id)
+    expansion = OneUnknownExpansionGateway()
+
+    result = await service(repository, expansion=expansion).run(batch.id)
+
+    assert result.status == "pack_ready"
+    assert result.pack_ready_count == 30
+    assert [len(call) for call in expansion.calls] == [30, 1]
+    async with sessions() as session:
+        uncertain_requests = list(
+            (
+                await session.scalars(
+                    select(ContentPlanExternalRequest).where(
+                        ContentPlanExternalRequest.batch_id == batch.id,
+                        ContentPlanExternalRequest.status == "uncertain",
+                    )
+                )
+            ).all()
+        )
+    assert len(uncertain_requests) == 1
+    assert uncertain_requests[0].attempt_count == 1
+
+
+async def test_d3_isolates_unknown_classification_and_continues_the_batch(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 60)
+    batch = await create_automatic_batch(repository, project_id)
+    expansion = ScriptedExpansionGateway()
+    classification = OneUnknownClassificationGateway()
+
+    result = await service(
+        repository,
+        expansion=expansion,
+        classification=classification,
+    ).run(batch.id)
+
+    assert result.status == "pack_ready"
+    assert result.pack_ready_count == 30
+    assert [len(call) for call in expansion.calls] == [30, 1]
+    assert len(classification.calls) == 31
+    async with sessions() as session:
+        uncertain = list(
+            (
+                await session.scalars(
+                    select(ContentPlanExternalRequest).where(
+                        ContentPlanExternalRequest.batch_id == batch.id,
+                        ContentPlanExternalRequest.endpoint == "content_plan/classification",
+                        ContentPlanExternalRequest.status == "uncertain",
+                    )
+                )
+            ).all()
+        )
+    assert len(uncertain) == 1
+    assert uncertain[0].attempt_count == 1
     await assert_no_formal_plan_items(sessions, batch.id)
 
 
@@ -1052,7 +1645,7 @@ async def test_d3_replays_completed_ai_response_without_calling_model_again(
     assert result.status == "pack_ready"
     assert len(seed.calls) == 1
     seed_request = await repository.get_external_request(
-        f"ai:seed:content-plan-seed-v2:{batch.id}:1:1"
+        f"ai:seed:content-plan-seed-v3:{batch.id}:1:1"
     )
     assert seed_request is not None
     assert seed_request.status == "completed"
@@ -1076,7 +1669,7 @@ async def test_d3_unknown_ai_outcome_is_not_submitted_again(d3_database) -> None
     assert first.status == replay.status == "needs_attention"
     assert first.error_code == replay.error_code == "ai_request_outcome_unknown"
     assert len(seed.calls) == 1
-    request = await repository.get_external_request(f"ai:seed:content-plan-seed-v2:{batch.id}:1:1")
+    request = await repository.get_external_request(f"ai:seed:content-plan-seed-v3:{batch.id}:1:1")
     assert request is not None
     assert request.status == "uncertain"
     assert request.attempt_count == 1
@@ -1096,7 +1689,7 @@ async def test_d3_retryable_request_stops_after_three_submissions(d3_database) -
     assert [len(call) for call in expansion.calls] == [30, 1, 1]
     failed_preparation = (await repository.get_current_preparations(batch.id))[0]
     request = await repository.get_external_request(
-        f"related:{batch.id}:0:{failed_preparation.plan_order}:"
+        f"related:{batch.id}:0:{failed_preparation.id}:"
         f"{failed_preparation.preparation_version}"
     )
     assert request is not None
@@ -1117,9 +1710,14 @@ async def test_d3_charged_failure_is_not_submitted_again(d3_database) -> None:
 
     assert first.status == replay.status == "needs_attention"
     assert [len(call) for call in expansion.calls] == [30]
+    failed_preparation = (await repository.get_current_preparations(batch.id))[0]
     requests = [
         row
-        for row in (await repository.get_external_request(f"related:{batch.id}:0:1:1"),)
+        for row in (
+            await repository.get_external_request(
+                f"related:{batch.id}:0:{failed_preparation.id}:1"
+            ),
+        )
         if row is not None
     ]
     assert len(requests) == 1
@@ -1173,6 +1771,48 @@ async def test_d3_classification_contract_stops_after_one_structural_repair(
     await assert_no_formal_plan_items(sessions, batch.id)
 
 
+async def test_d3_reports_exhausted_pool_after_final_library_refills(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 33)
+    batch = await create_automatic_batch(repository, project_id)
+
+    result = await service(
+        repository,
+        expansion=ScriptedExpansionGateway(empty_counts=[1, 1, 1, 1]),
+        fallback=RepairingFallbackGateway(),
+        coverage=CoveredFallbackQuery(),
+        classification=PreferAiClassificationGateway(),
+    ).run(batch.id)
+
+    assert result.status == "needs_attention"
+    assert result.error_code == "candidate_pool_exhausted"
+    assert result.pack_ready_count == 29
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
+async def test_d3_discards_invalid_secondary_references_from_valid_classification(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 30)
+    batch = await create_automatic_batch(repository, project_id)
+    classification = InvalidSecondaryReferenceClassificationGateway()
+
+    result = await service(
+        repository,
+        expansion=ScriptedExpansionGateway(),
+        classification=classification,
+    ).run(batch.id)
+
+    assert result.status == "pack_ready"
+    assert result.pack_ready_count == 30
+    assert len(classification.calls) == 30
+    assert all(error is None for error in classification.calls)
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
 async def test_d3_fallback_contract_stops_after_one_structural_repair(
     d3_database,
 ) -> None:
@@ -1194,26 +1834,96 @@ async def test_d3_fallback_contract_stops_after_one_structural_repair(
     await assert_no_formal_plan_items(sessions, batch.id)
 
 
-async def test_d3_covered_ai_fallback_keyword_cannot_complete_the_pack(
+async def test_d3_replaces_unusable_fallback_and_library_seeds_until_pack_ready(
     d3_database,
 ) -> None:
     repository, sessions, project_id = d3_database
     await add_keywords(sessions, project_id, 60)
     batch = await create_automatic_batch(repository, project_id)
-
-    result = await service(
+    expansion = ScriptedExpansionGateway(empty_counts=[1, 1, 1, 1, 0])
+    d3 = service(
         repository,
-        expansion=ScriptedExpansionGateway(empty_counts=[1, 1, 1]),
+        expansion=expansion,
         fallback=RepairingFallbackGateway(),
         coverage=CoveredFallbackQuery(),
         classification=PreferAiClassificationGateway(),
-    ).run(batch.id)
+    )
 
-    assert result.status == "needs_attention"
-    assert result.error_code == "pack_shortage"
+    result = await d3.run(batch.id)
+    replay = await d3.run(batch.id)
+
+    assert result.status == replay.status == "pack_ready"
+    assert result.pack_ready_count == replay.pack_ready_count == 30
+    assert [len(call) for call in expansion.calls] == [30, 1, 1, 1, 1]
     preparations = await repository.get_current_preparations(batch.id)
-    fallback_rows = [row for row in preparations if row.source_round == "ai_fallback"]
-    assert len(fallback_rows) == 1
-    assert fallback_rows[0].state == "invalid"
-    assert fallback_rows[0].error_code == "primary_keyword_unavailable"
+    assert len(preparations) == 30
+    assert all(row.state == "pack_ready" for row in preparations)
+    async with sessions() as session:
+        history = list(
+            (
+                await session.scalars(
+                    select(ContentPlanPreparation).where(
+                        ContentPlanPreparation.batch_id == batch.id,
+                        ContentPlanPreparation.error_code == "primary_keyword_unavailable",
+                    )
+                )
+            ).all()
+        )
+    failed_candidate_ids = {
+        row.candidate_id for row in history if row.candidate_id is not None
+    }
+    retained = await repository.get_retained_candidates(batch.id)
+    assert failed_candidate_ids
+    assert failed_candidate_ids.isdisjoint({row.id for row in retained})
+    serp = SuccessfulSerpGateway()
+    preview_result = await ContentPlanD4Service(
+        repository,
+        serp_gateway=serp,
+        preview_gateway=SuccessfulPreviewGateway(),
+    ).build_previews(batch.id)
+    assert preview_result.status == "preview_ready"
+    assert len(serp.calls) == 30
+    assert len(set(serp.calls)) == 30
+    await assert_no_formal_plan_items(sessions, batch.id)
+
+
+async def test_d3_replaces_unknown_ai_fallback_with_unused_library_seed(
+    d3_database,
+) -> None:
+    repository, sessions, project_id = d3_database
+    await add_keywords(sessions, project_id, 60)
+    batch = await create_automatic_batch(repository, project_id)
+    expansion = ScriptedExpansionGateway(empty_counts=[1, 1, 1])
+    classification = UnknownFallbackClassificationGateway()
+    d3 = service(
+        repository,
+        expansion=expansion,
+        fallback=RepairingFallbackGateway(),
+        classification=classification,
+    )
+
+    first = await d3.run(batch.id)
+    replay = await d3.run(batch.id)
+
+    assert first.status == replay.status == "pack_ready"
+    assert first.pack_ready_count == replay.pack_ready_count == 30
+    assert [len(call) for call in expansion.calls] == [30, 1, 1, 1]
+    assert len(classification.calls) == 31
+    preparations = await repository.get_current_preparations(batch.id)
+    assert len(preparations) == 30
+    assert all(row.state == "pack_ready" for row in preparations)
+    async with sessions() as session:
+        uncertain = list(
+            (
+                await session.scalars(
+                    select(ContentPlanExternalRequest).where(
+                        ContentPlanExternalRequest.batch_id == batch.id,
+                        ContentPlanExternalRequest.endpoint == "content_plan/classification",
+                        ContentPlanExternalRequest.status == "uncertain",
+                    )
+                )
+            ).all()
+        )
+    assert len(uncertain) == 1
+    assert uncertain[0].attempt_count == 1
     await assert_no_formal_plan_items(sessions, batch.id)

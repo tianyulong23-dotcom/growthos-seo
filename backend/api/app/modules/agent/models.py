@@ -1,6 +1,16 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -98,6 +108,128 @@ class AgentConversationEvent(Base):
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AgentTimelineEvent(Base):
+    __tablename__ = "agent_timeline_events"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('message','task','action')",
+            name="ck_agent_timeline_events_kind",
+        ),
+        CheckConstraint(
+            "status IN ('running','waiting','completed','failed','cancelled')",
+            name="ck_agent_timeline_events_status",
+        ),
+        CheckConstraint(
+            "sequence > 0",
+            name="ck_agent_timeline_events_sequence",
+        ),
+        CheckConstraint(
+            "char_length(event_key) BETWEEN 1 AND 200",
+            name="ck_agent_timeline_events_event_key",
+        ),
+        CheckConstraint(
+            "char_length(title) BETWEEN 1 AND 500",
+            name="ck_agent_timeline_events_title",
+        ),
+        CheckConstraint(
+            "content IS NULL OR char_length(content) <= 20000",
+            name="ck_agent_timeline_events_content",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "project_id",
+            "event_key",
+            name="uq_agent_timeline_events_project_key",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "project_id",
+            "sequence",
+            name="uq_agent_timeline_events_project_sequence",
+        ),
+        Index(
+            "ix_agent_timeline_events_project_sequence",
+            "organization_id",
+            "project_id",
+            "sequence",
+        ),
+        Index("ix_agent_timeline_events_conversation", "conversation_id"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_conversations.id", ondelete="CASCADE")
+    )
+    event_key: Mapped[str] = mapped_column(Text, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text)
+    action_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentSystemTrigger(Base):
+    __tablename__ = "agent_system_triggers"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','dispatched')",
+            name="ck_agent_system_triggers_status",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "project_id",
+            "trigger",
+            "trigger_version",
+            name="uq_agent_system_triggers_identity",
+        ),
+        Index(
+            "ix_agent_system_triggers_pending",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    trigger: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger_version: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    trusted_write_tools_json: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending", server_default="pending"
+    )
+    message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="SET NULL")
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL")
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 

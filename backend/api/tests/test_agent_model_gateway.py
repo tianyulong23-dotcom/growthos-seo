@@ -21,6 +21,10 @@ from app.modules.agent.model_gateway import (
     estimate_request_tokens,
     tool_catalog,
 )
+from app.modules.agent.providers.base import ProviderConfig, ProviderRequest
+from app.modules.agent.providers.events import ProviderStreamEvent
+from app.modules.agent.providers import openai as openai_provider
+from app.modules.agent.providers.openai import OpenAIProvider
 from app.modules.settings.service import AIProviderSettingsRecord
 
 
@@ -38,6 +42,335 @@ class FakeSettingsService:
         return self.record
 
 
+class FakeHTTPResponse:
+    def __init__(self, body: bytes = b"", lines: list[bytes] | None = None) -> None:
+        self.body = body
+        self.lines = iter(lines or [])
+
+    def __enter__(self) -> "FakeHTTPResponse":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        return None
+
+    def read(self, _limit: int = -1) -> bytes:
+        return self.body
+
+    def readline(self) -> bytes:
+        return next(self.lines, b"")
+
+
+def responses_provider() -> OpenAIProvider:
+    return OpenAIProvider(ProviderConfig(
+        provider="openai",
+        base_url="https://models.example/v1",
+        api_key="secret",
+        model="test-model",
+        timeout_seconds=10,
+        max_retries=0,
+        reasoning_effort="medium",
+        api_protocol="responses",
+    ))
+
+
+def test_responses_provider_serializes_input_tools_and_format() -> None:
+    provider = responses_provider()
+    payload = provider.serialize(ProviderRequest(
+        messages=[
+            {"role": "system", "content": "Be precise."},
+            {"role": "user", "content": "Start the work."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "start_keyword_library",
+                        "arguments": '{"limit":30}',
+                    },
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "started"},
+        ],
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "start_keyword_library",
+                "description": "Start keywords",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer"}},
+                },
+                "strict": True,
+            },
+        }],
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "decision",
+                "strict": True,
+                "schema": {"type": "object"},
+            },
+        },
+        max_output_tokens=4000,
+    ), stream=True)
+
+    assert payload == {
+        "model": "test-model",
+        "input": [
+            {"role": "system", "content": "Be precise."},
+            {"role": "user", "content": "Start the work."},
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "start_keyword_library",
+                "arguments": '{"limit":30}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "started",
+            },
+        ],
+        "reasoning": {"effort": "medium"},
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "decision",
+                "strict": True,
+                "schema": {"type": "object"},
+            }
+        },
+        "tools": [{
+            "type": "function",
+            "name": "start_keyword_library",
+            "description": "Start keywords",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer"}},
+            },
+            "strict": True,
+        }],
+        "tool_choice": "auto",
+        "parallel_tool_calls": True,
+        "max_output_tokens": 4000,
+        "stream": True,
+    }
+
+
+def test_responses_provider_completes_text_and_parallel_tool_calls(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+    response = {
+        "id": "resp-1",
+        "model": "test-model-2026-08-13",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "任务已开始。"}],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call-audit",
+                "name": "start_technical_audit",
+                "arguments": '{"max_pages":100}',
+            },
+            {
+                "type": "function_call",
+                "call_id": "call-keywords",
+                "name": "start_keyword_library",
+                "arguments": "{}",
+            },
+        ],
+        "usage": {
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "total_tokens": 150,
+            "input_tokens_details": {"cached_tokens": 20},
+            "output_tokens_details": {"reasoning_tokens": 10},
+        },
+    }
+
+    def urlopen(request: Any, timeout: int) -> FakeHTTPResponse:
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["payload"] = json.loads(request.data)
+        return FakeHTTPResponse(json.dumps(response).encode())
+
+    monkeypatch.setattr(openai_provider, "urlopen", urlopen)
+    result = asyncio.run(responses_provider().complete(ProviderRequest(
+        messages=[{"role": "user", "content": "开始"}],
+        tools=[],
+    )))
+
+    assert captured["url"] == "https://models.example/v1/responses"
+    assert captured["timeout"] == 10
+    assert "input" in captured["payload"]
+    assert "messages" not in captured["payload"]
+    assert result.response_id == "resp-1"
+    assert result.response_model == "test-model-2026-08-13"
+    assert result.message == {
+        "role": "assistant",
+        "content": "任务已开始。",
+        "tool_calls": [
+            {
+                "id": "call-audit",
+                "type": "function",
+                "function": {
+                    "name": "start_technical_audit",
+                    "arguments": '{"max_pages":100}',
+                },
+            },
+            {
+                "id": "call-keywords",
+                "type": "function",
+                "function": {"name": "start_keyword_library", "arguments": "{}"},
+            },
+        ],
+    }
+    assert result.usage.as_dict() == {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "cached_input_tokens": 20,
+        "cache_write_tokens": None,
+        "reasoning_tokens": 10,
+        "cost": None,
+        "cost_currency": None,
+    }
+
+
+def test_responses_provider_streams_text_and_parallel_tool_calls(
+    monkeypatch: Any,
+) -> None:
+    events = [
+        {"type": "response.output_text.delta", "delta": "审核和关键词库"},
+        {"type": "response.output_text.delta", "delta": "已开始。"},
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {
+                "type": "function_call",
+                "call_id": "call-audit",
+                "name": "start_technical_audit",
+                "arguments": "",
+            },
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 2,
+            "item": {
+                "type": "function_call",
+                "call_id": "call-keywords",
+                "name": "start_keyword_library",
+                "arguments": "",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 1,
+            "delta": '{"max_pages":',
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 2,
+            "delta": "{}",
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 1,
+            "delta": "100}",
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp-stream-1",
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 80,
+                    "output_tokens": 20,
+                    "total_tokens": 100,
+                },
+            },
+        },
+    ]
+    lines = [
+        f"data: {json.dumps(event)}\n\n".encode()
+        for event in events
+    ]
+    captured: dict[str, Any] = {}
+
+    def urlopen(request: Any, timeout: int) -> FakeHTTPResponse:
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data)
+        return FakeHTTPResponse(lines=lines)
+
+    monkeypatch.setattr(openai_provider, "urlopen", urlopen)
+
+    async def collect() -> list[ProviderStreamEvent]:
+        return [event async for event in responses_provider().stream(
+            ProviderRequest(messages=[{"role": "user", "content": "开始"}])
+        )]
+
+    streamed = asyncio.run(collect())
+    assert captured["url"] == "https://models.example/v1/responses"
+    assert captured["payload"]["stream"] is True
+    assert [event.kind for event in streamed] == [
+        "start",
+        "text_start",
+        "text_delta",
+        "text_delta",
+        "toolcall_start",
+        "toolcall_delta",
+        "toolcall_start",
+        "toolcall_delta",
+        "toolcall_delta",
+        "toolcall_delta",
+        "toolcall_delta",
+        "text_end",
+        "toolcall_end",
+        "toolcall_end",
+        "done",
+    ]
+    calls: dict[int, dict[str, str]] = {}
+    for event in streamed:
+        if event.kind != "toolcall_delta" or event.index is None:
+            continue
+        call = calls.setdefault(event.index, {"id": "", "name": "", "arguments": ""})
+        call["id"] += event.id_delta
+        call["name"] += event.name_delta
+        call["arguments"] += event.arguments_delta
+    assert calls == {
+        1: {
+            "id": "call-audit",
+            "name": "start_technical_audit",
+            "arguments": '{"max_pages":100}',
+        },
+        2: {
+            "id": "call-keywords",
+            "name": "start_keyword_library",
+            "arguments": "{}",
+        },
+    }
+    assert streamed[-1].response_id == "resp-stream-1"
+    assert streamed[-1].stop_reason == "completed"
+    assert streamed[-1].usage == {
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "total_tokens": 100,
+        "cached_input_tokens": None,
+        "cache_write_tokens": None,
+        "reasoning_tokens": None,
+        "cost": None,
+        "cost_currency": None,
+    }
+
+
 def test_tool_catalog_never_exposes_trusted_server_context() -> None:
     catalog = tool_catalog()
 
@@ -47,15 +380,88 @@ def test_tool_catalog_never_exposes_trusted_server_context() -> None:
     assert "start_technical_audit" in catalog
 
 
-def test_system_prompt_describes_complete_final_response_schema() -> None:
-    assert '"label":"证据名称","url":"https://..."' in SYSTEM_PROMPT
-    assert '"topic":"研究主题"' in SYSTEM_PROMPT
-    assert '"input_scope":{}' in SYSTEM_PROMPT
-    assert '"conclusion":"一句话结论"' in SYSTEM_PROMPT
-    final_schema = SYSTEM_PROMPT.split("When the task is finished", 1)[1].split(
-        "For final responses", 1
-    )[0]
-    assert "memory_updates" not in final_schema
+def test_trusted_internal_event_is_sent_to_the_model_as_system_context() -> None:
+    messages, _tools = ModelGateway.build_decision_request(
+        [
+            {"role": "user", "content": "ordinary request"},
+            {
+                "role": "user",
+                "content": "start the approved work",
+                "metadata": {
+                    "trusted_system_trigger": True,
+                    "system_trigger": "business_profile_confirmed",
+                    "trusted_write_tools": [
+                        "start_technical_audit",
+                        "start_keyword_library",
+                    ],
+                },
+            },
+        ],
+        [],
+    )
+
+    assert messages[1] == {"role": "user", "content": "ordinary request"}
+    assert messages[2]["role"] == "system"
+    assert "trigger=business_profile_confirmed" in messages[2]["content"]
+    assert (
+        'authorized_write_tools=["start_technical_audit","start_keyword_library"]'
+        in messages[2]["content"]
+    )
+    assert "operation=\nstart the approved work" in messages[2]["content"]
+
+
+def test_system_prompt_requires_plain_markdown_final_answers() -> None:
+    final_instruction = SYSTEM_PROMPT.split("When the task is finished", 1)[1]
+
+    assert "answer directly in plain prose and Markdown" in final_instruction
+    assert "Do not wrap the answer in\nJSON" in final_instruction
+    assert "exactly one JSON object" not in final_instruction
+
+
+def test_system_prompt_defines_aris_identity_and_working_style() -> None:
+    assert "You are Aris, the SEO lead inside this product" in SYSTEM_PROMPT
+    assert "business that needs to grow" in SYSTEM_PROMPT
+    assert "Talk like a calm, perceptive operating partner" in SYSTEM_PROMPT
+    assert "warm like a partner" in SYSTEM_PROMPT
+    assert "Introduce yourself as Aris" in SYSTEM_PROMPT
+    assert "routine praise" in SYSTEM_PROMPT
+    assert "say so plainly, explain why" in SYSTEM_PROMPT
+    assert "distinguish what is confirmed" in SYSTEM_PROMPT
+
+
+def test_system_prompt_requires_compact_markdown_answer_structure() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+
+    assert "Write in plain prose and Markdown" in prompt
+    assert "The first sentence must give the conclusion" in prompt
+    assert "Start the details after a blank line" in prompt
+    assert "two or more parallel facts" in prompt
+    assert "one or two sentences" in prompt
+    assert "Do not force structure onto a one-line answer" in prompt
+
+
+def test_system_prompt_keeps_aris_cost_and_progress_claims_grounded() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+
+    assert "check the supplied project data and research_log" in prompt
+    assert "Reuse current evidence when it fully answers the same question" in prompt
+    assert "if it may be stale, say so and offer a refresh" in prompt
+    assert "do not fan out redundant calls" in prompt
+    assert "Prefer doing available work" in prompt
+    assert "If a tool returns no data or a task fails" in prompt
+    assert "supported by supplied runtime data" in prompt
+    assert "Never invent task progress" in prompt
+    assert "completion times" in prompt
+
+
+def test_system_prompt_defines_new_project_initiative_at_sam_granularity() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+
+    assert "call get_project_profile before asking for business facts" in prompt
+    assert "form a concise initial understanding" in prompt
+    assert "separating confirmed facts from inferred assumptions" in prompt
+    assert "Ask at most one question" in prompt
+    assert "materially changes the next strategy decision" in prompt
 
 
 def test_system_prompt_defines_project_memory_replacement_and_research_reuse() -> None:
@@ -86,6 +492,36 @@ def test_system_prompt_requires_available_multi_tool_work_to_finish() -> None:
     assert "only when the user needs more issues" in SYSTEM_PROMPT
 
 
+def test_system_prompt_requests_parallel_initial_discovery_writes() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+
+    assert "explicitly compatible writes in parallel" in prompt
+    assert (
+        "when start_technical_audit and start_keyword_library are both authorized "
+        "and both still need to start, return both calls in the same response"
+    ) in prompt
+    assert "Do not batch calls when a later call needs a result" in prompt
+
+
+def test_system_prompt_uses_project_level_article_status_discovery() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+
+    assert "article generation status" in prompt
+    assert "get_article_generation_status" in prompt
+    assert "keyword or title" in prompt
+    assert "with that text in search" in prompt
+    assert "initial or most recent generated articles" in prompt
+
+
+def test_system_prompt_separates_direct_and_planned_article_generation() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+
+    assert "call create_article directly" in prompt
+    assert "do not create a temporary content plan" in prompt
+    assert "Call start_articles only" in prompt
+    assert "already synchronized data" in prompt
+
+
 def test_system_prompt_does_not_treat_read_requests_as_write_permission() -> None:
     assert "latest request explicitly asks" in SYSTEM_PROMPT
     assert "Reading, checking, analysing" in SYSTEM_PROMPT
@@ -109,7 +545,7 @@ def test_gateway_records_usage_without_putting_key_in_messages(monkeypatch: Any)
             messages=messages, options=options,
         )
         return {
-            "choices": [{"message": {"content": '{"type":"final","answer":"完成"}'}}],
+            "choices": [{"message": {"content": "完成"}}],
             "usage": {
                 "prompt_tokens": 12,
                 "completion_tokens": 4,
@@ -134,8 +570,121 @@ def test_gateway_records_usage_without_putting_key_in_messages(monkeypatch: Any)
     assert "super-secret-key" not in json.dumps(captured["messages"], ensure_ascii=False)
     assert captured["options"]["tool_choice"] == "auto"
     assert captured["options"]["parallel_tool_calls"] is True
+    assert captured["options"]["response_format"] is None
     assert captured["options"]["tools"][0]["type"] == "function"
     assert "parameters" in captured["options"]["tools"][0]["function"]
+
+
+def test_gateway_applies_output_token_limit_to_count_and_completion(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+    gateway = ModelGateway()
+    monkeypatch.setattr(model_gateway, "build_ai_settings_service", FakeSettingsService)
+
+    class Provider:
+        async def count_tokens(self, request: Any) -> Any:
+            captured["count_max_output_tokens"] = request.max_output_tokens
+            return type("Count", (), {"tokens": 42})()
+
+        async def stream(self, request: Any) -> Any:
+            captured["stream_max_output_tokens"] = request.max_output_tokens
+            yield ProviderStreamEvent(kind="text_delta", delta="完成")
+            yield ProviderStreamEvent(kind="done")
+
+    monkeypatch.setattr(gateway, "_provider", lambda _record: Provider())
+
+    def request(*_args: Any, **options: Any) -> dict[str, Any]:
+        captured["complete_max_output_tokens"] = options.get("max_output_tokens")
+        return {"choices": [{"message": {"content": "完成"}}]}
+
+    monkeypatch.setattr(gateway, "_request", request)
+
+    count = asyncio.run(gateway.decision_request_tokens(
+        [{"role": "user", "content": "检查"}], [], max_output_tokens=4_000
+    ))
+    asyncio.run(gateway.decide(
+        [{"role": "user", "content": "检查"}], [], max_output_tokens=4_000
+    ))
+    asyncio.run(gateway.decide_stream(
+        [{"role": "user", "content": "检查"}], [],
+        lambda _update: asyncio.sleep(0),
+        max_output_tokens=4_000,
+    ))
+
+    assert count == 42
+    assert captured == {
+        "count_max_output_tokens": 4_000,
+        "complete_max_output_tokens": 4_000,
+        "stream_max_output_tokens": 4_000,
+    }
+
+
+def test_gateway_uses_agent_model_override(monkeypatch: Any) -> None:
+    captured: dict[str, str] = {}
+    gateway = ModelGateway()
+    service = FakeSettingsService()
+    service.record = AIProviderSettingsRecord(
+        base_url="https://models.example/v1",
+        api_key="secret",
+        model="default-model",
+        agent_model="agent-model",
+        request_timeout_seconds=10,
+        max_retries=0,
+    )
+    monkeypatch.setattr(model_gateway, "build_ai_settings_service", lambda: service)
+
+    def request(
+        _base_url: str,
+        _api_key: str,
+        model: str,
+        _timeout: int,
+        _messages: list[dict[str, Any]],
+        **_options: Any,
+    ) -> dict[str, Any]:
+        captured["model"] = model
+        return {"choices": [{"message": {"content": "完成"}}]}
+
+    monkeypatch.setattr(gateway, "_request", request)
+
+    result = asyncio.run(gateway.decide([{"role": "user", "content": "检查"}], []))
+
+    assert captured["model"] == "agent-model"
+    assert result.model == "agent-model"
+
+
+def test_gateway_caps_provider_timeout_and_retries_for_activity_budget(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, int] = {}
+    gateway = ModelGateway(request_timeout_seconds=105, max_retries=0)
+    service = FakeSettingsService()
+    service.record = AIProviderSettingsRecord(
+        **{
+            **service.record.__dict__,
+            "request_timeout_seconds": 180,
+            "max_retries": 2,
+        }
+    )
+    monkeypatch.setattr(model_gateway, "build_ai_settings_service", lambda: service)
+
+    def request(
+        _base_url: str,
+        _api_key: str,
+        _model: str,
+        timeout: int,
+        _messages: list[dict[str, Any]],
+        **_options: Any,
+    ) -> dict[str, Any]:
+        captured["timeout"] = timeout
+        return {"choices": [{"message": {"content": "完成"}}]}
+
+    monkeypatch.setattr(gateway, "_request", request)
+
+    result = asyncio.run(gateway.decide([{"role": "user", "content": "检查"}], []))
+
+    assert result.decision.type == "final"
+    assert captured["timeout"] == 105
 
 
 @pytest.mark.parametrize("status_code", [429, 500, 502, 503, 504])
@@ -161,7 +710,7 @@ def test_gateway_retries_only_retryable_http_statuses(
                 retryable=True,
                 status_code=status_code,
             )
-        return {"choices": [{"message": {"content": '{"type":"final","answer":"完成"}'}}]}
+        return {"choices": [{"message": {"content": "完成"}}]}
 
     monkeypatch.setattr(gateway, "_request", request)
     monkeypatch.setattr(model_gateway.random, "uniform", lambda *_: 0.0)
@@ -319,7 +868,6 @@ def test_request_budget_covers_project_context_feedback_and_tool_schema() -> Non
         [{"role": "user", "content": "short request"}],
         [],
         project_context={"memory": [{"value": "x" * 20_000}]},
-        judge_feedback={"reason": "y" * 2_000},
         execution_feedback={"reason": "z" * 2_000},
     )
 
@@ -659,53 +1207,31 @@ def test_gateway_places_execution_feedback_after_tool_results(monkeypatch: Any) 
     }
 
 
-def test_gateway_corrects_invalid_protocol_once(monkeypatch: Any) -> None:
+def test_gateway_accepts_plain_markdown_in_one_model_call(monkeypatch: Any) -> None:
     gateway = ModelGateway()
     monkeypatch.setattr(model_gateway, "build_ai_settings_service", FakeSettingsService)
-    requests: list[list[dict[str, str]]] = []
+    requests: list[dict[str, Any]] = []
 
     def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        messages = args[-1]
-        requests.append(messages)
-        if len(requests) == 1:
-            return {
-                "choices": [{
-                    "message": {
-                        "content": json.dumps({
-                            "type": "final",
-                            "answer": "项目名称是示例",
-                            "evidence": [{
-                                "source": "platform_data",
-                                "field": "project.name",
-                                "value": "示例",
-                            }],
-                        }, ensure_ascii=False),
-                    }
-                }],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-            }
+        requests.append({"messages": args[-1], "options": kwargs})
         return {
-            "choices": [{
-                "message": {
-                    "content": '{"type":"final","answer":"项目名称是示例"}'
-                }
-            }],
-            "usage": {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24},
+            "choices": [{"message": {"content": "项目名称是示例。\n\n资料来自当前项目。"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 9, "total_tokens": 19},
         }
 
     monkeypatch.setattr(gateway, "_request", request)
     result = asyncio.run(gateway.decide([{"role": "user", "content": "项目叫什么？"}], []))
 
     assert result.decision.type == "final"
-    assert result.usage["input_tokens"] == 30
+    assert result.decision.answer == "项目名称是示例。\n\n资料来自当前项目。"
+    assert result.usage["input_tokens"] == 10
     assert result.usage["output_tokens"] == 9
-    assert result.usage["total_tokens"] == 39
-    assert len(requests) == 2
-    assert "FORMAT CORRECTION" in requests[1][-1]["content"]
-    assert requests[1][-2]["role"] == "assistant"
+    assert result.usage["total_tokens"] == 19
+    assert len(requests) == 1
+    assert requests[0]["options"]["response_format"] is None
 
 
-def test_gateway_rejects_invalid_json_after_one_correction(monkeypatch: Any) -> None:
+def test_gateway_rejects_empty_final_answer_without_a_second_call(monkeypatch: Any) -> None:
     gateway = ModelGateway()
     monkeypatch.setattr(model_gateway, "build_ai_settings_service", FakeSettingsService)
     calls = 0
@@ -713,13 +1239,13 @@ def test_gateway_rejects_invalid_json_after_one_correction(monkeypatch: Any) -> 
     def request(*_: Any, **__: Any) -> dict[str, Any]:
         nonlocal calls
         calls += 1
-        return {"choices": [{"message": {"content": "not-json"}}]}
+        return {"choices": [{"message": {"content": ""}}]}
 
     monkeypatch.setattr(gateway, "_request", request)
 
     with pytest.raises(AgentModelOutputError):
         asyncio.run(gateway.decide([{"role": "user", "content": "执行操作"}], []))
-    assert calls == 2
+    assert calls == 1
 
 
 def test_gateway_summarizes_tool_history_as_unverified_context(
@@ -957,181 +1483,222 @@ def test_latest_audit_compaction_keeps_bounded_top_issue_evidence() -> None:
     }
 
 
-def test_judge_receives_latest_audit_top_issue_counts(monkeypatch: Any) -> None:
-    captured: dict[str, Any] = {}
-    request_payload: dict[str, Any] = {}
-    responses = iter([
-        {"status": "completed", "reason": "证据完整"},
-        {
-            "status": "completed",
-            "reason": "证据完整",
-            "criteria": [{
-                "requirement": "列出最严重的三个问题和影响页数",
-                "status": "completed",
-                "evidence": "工具返回三个问题及影响页数 5、4、3",
-            }],
-            "remaining_work": [],
-        },
-    ])
-    gateway = ModelGateway()
-    monkeypatch.setattr(model_gateway, "build_ai_settings_service", FakeSettingsService)
-
-    def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        captured["messages"] = args[-1]
-        if not request_payload:
-            request_payload.update(json.loads(args[-1][1]["content"]))
-        return {
-            "choices": [{"message": {"content": json.dumps(
-                next(responses), ensure_ascii=False
-            )}}]
-        }
-
-    monkeypatch.setattr(gateway, "_request", request)
-    asyncio.run(gateway.judge(
-        "列出最严重的三个问题和影响页数",
-        "三个问题分别影响 5、4、3 页",
-        {"tool_evidence": [{
-                "tool": "get_latest_audit",
-                "ok": True,
-                "data": {
-                    "audit": {"health_score": 86},
-                    "top_issues": {"items": [
-                        {"title": "A", "severity": "error", "affected_count": 5},
-                        {"title": "B", "severity": "error", "affected_count": 4},
-                        {"title": "C", "severity": "warning", "affected_count": 3},
-                    ]},
+def test_article_status_compaction_keeps_titles_and_generation_progress() -> None:
+    compacted = compact_tool_result({
+        "tool": "get_article_generation_status",
+        "ok": True,
+        "summary": "读取完成",
+        "data": {
+            "articles": [
+                {
+                    "article_id": "article-1",
+                    "title": "First article",
+                    "run_id": "run-1",
+                    "status": "completed_with_warnings",
+                    "stage": "completed",
+                    "progress": 100,
+                    "warnings": ["review_recommended"],
+                    "error_code": None,
+                    "error_detail": None,
+                    "ignored": "x" * 2_000,
                 },
-            }],
-            "retry_summary": {"failed_tool_attempts": 1},
-            "verification_results": [{"tool": "get_latest_audit", "verified": True}],
-            "project_state": {"audit_health": 86},
-            "unfinished": [],
+                {
+                    "article_id": "article-2",
+                    "title": "Second article",
+                    "run_id": "run-2",
+                    "status": "completed",
+                    "stage": "completed",
+                    "progress": 100,
+                    "warnings": [],
+                    "error_code": None,
+                    "error_detail": None,
+                },
+            ]
         },
-    ))
+    })
 
-    evidence = request_payload["execution_evidence"]
-    issues = evidence["tool_evidence"][0]["data"]["top_issues"]["items"]
-    assert [item["affected_count"] for item in issues] == [5, 4, 3]
-    assert evidence["retry_summary"]["failed_tool_attempts"] == 1
-    assert evidence["verification_results"][0]["verified"] is True
-    assert evidence["project_state"]["audit_health"] == 86
-    assert "internally inconsistent" in captured["messages"][-1]["content"]
-
-
-def test_judge_redacts_secrets_from_complete_execution_evidence(
-    monkeypatch: Any,
-) -> None:
-    captured: dict[str, Any] = {}
-    secret = "sk-judge-sensitive-value"
-    gateway = ModelGateway()
-    monkeypatch.setattr(
-        model_gateway, "build_ai_settings_service", lambda: FakeSettingsService(secret)
-    )
-
-    def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        captured["messages"] = args[-1]
-        return {
-            "choices": [{"message": {"content": json.dumps({
-                "status": "blocked",
-                "reason": "存在未完成操作",
-                "criteria": [{
-                    "requirement": "检查任务",
-                    "status": "blocked",
-                    "evidence": "任务仍有未完成操作",
-                }],
-                "remaining_work": ["完成剩余操作"],
-            }, ensure_ascii=False)}}]
-        }
-
-    monkeypatch.setattr(gateway, "_request", request)
-    asyncio.run(gateway.judge(
-        "检查任务",
-        f"结果包含 {secret}",
+    assert compacted["data"]["articles"] == [
         {
-            "run_steps": [{"name": "tool", "authorization": f"Bearer {secret}"}],
-            "tool_evidence": [{"data": {"apiKey": secret}}],
-            "unfinished": [{"error": secret}],
+            "article_id": "article-1",
+            "title": "First article",
+            "run_id": "run-1",
+            "status": "completed_with_warnings",
+            "stage": "completed",
+            "progress": 100,
+            "warnings": ["review_recommended"],
+            "error_code": None,
+            "error_detail": None,
         },
-    ))
+        {
+            "article_id": "article-2",
+            "title": "Second article",
+            "run_id": "run-2",
+            "status": "completed",
+            "stage": "completed",
+            "progress": 100,
+            "warnings": [],
+            "error_code": None,
+            "error_detail": None,
+        },
+    ]
 
-    encoded = json.dumps(captured["messages"], ensure_ascii=False)
-    assert secret not in encoded
-    assert "[REDACTED]" in encoded
 
-
-def test_judge_rejects_completed_status_with_unfinished_criterion(
-    monkeypatch: Any,
-) -> None:
-    gateway = ModelGateway()
-    monkeypatch.setattr(model_gateway, "build_ai_settings_service", FakeSettingsService)
-
-    def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {
-            "choices": [{"message": {"content": json.dumps({
+def test_keyword_library_status_compaction_keeps_completion_and_counts() -> None:
+    compacted = compact_tool_result({
+        "tool": "get_keyword_library_status",
+        "ok": True,
+        "summary": "读取完成",
+        "data": {
+            "run": {
+                "run_id": "keyword-run-1",
+                "kind": "initial",
+                "round_number": 1,
                 "status": "completed",
-                "reason": "任务完成",
-                "criteria": [{
-                    "requirement": "保存100个关键词",
-                    "status": "partial",
-                    "evidence": "只保存60个",
-                }],
-                "remaining_work": [],
-            }, ensure_ascii=False)}}]
-        }
+                "stage": "completed",
+                "message": "关键词库已完成",
+                "progress": 100,
+                "discovered_count": 512,
+                "selected_count": 440,
+                "keyword_count": 440,
+                "result_version": 2,
+                "profile_source": "project_profile",
+                "gap_status": "completed",
+                "gap_message": "覆盖分析已完成",
+                "gap_count": 12,
+                "partial_failures": [],
+                "error_code": None,
+                "recovery_count": 0,
+                "elapsed_seconds": 123.4,
+            },
+            "total_keywords": 440,
+            "active_keywords": 440,
+            "pending_metrics_count": 0,
+            "result_version": 2,
+        },
+    })
 
-    monkeypatch.setattr(gateway, "_request", request)
+    data = compacted["data"]
+    assert data["total_keywords"] == 440
+    assert data["active_keywords"] == 440
+    assert data["pending_metrics_count"] == 0
+    assert data["result_version"] == 2
+    assert data["run"] == {
+        "run_id": "keyword-run-1",
+        "kind": "initial",
+        "round_number": 1,
+        "status": "completed",
+        "stage": "completed",
+        "message": "关键词库已完成",
+        "progress": 100,
+        "discovered_count": 512,
+        "selected_count": 440,
+        "keyword_count": 440,
+        "result_version": 2,
+        "profile_source": "project_profile",
+        "gap_status": "completed",
+        "gap_message": "覆盖分析已完成",
+        "gap_count": 12,
+        "partial_failures": [],
+        "error_code": None,
+        "recovery_count": 0,
+        "elapsed_seconds": 123.4,
+    }
 
-    with pytest.raises(AgentModelOutputError, match="无效的最终检查结果"):
-        asyncio.run(gateway.judge(
-            "保存100个关键词",
-            "已经保存100个关键词",
-            {"completion_facts": [{
-                "requested_count": 100,
-                "completed_count": 60,
-                "failed_count": 40,
-                "verified": True,
-            }]},
-        ))
+
+def test_content_plan_status_compaction_keeps_completion_and_counts() -> None:
+    compacted = compact_tool_result({
+        "tool": "get_content_plan_status",
+        "ok": True,
+        "summary": "读取完成",
+        "data": {
+            "batch_id": "content-plan-batch-1",
+            "project_id": "project-1",
+            "source": "automatic",
+            "target_count": 30,
+            "status": "completed",
+            "stage": "completed",
+            "candidate_snapshot_count": 440,
+            "selected_count": 30,
+            "valid_pack_count": 30,
+            "preparation_count": 30,
+            "preview_ready_count": 30,
+            "plan_item_count": 30,
+            "external_request_count": 30,
+            "total_cost_usd": 0.42,
+            "retryable": False,
+            "error_code": None,
+            "error_detail": None,
+            "created_at": "2026-08-13T09:00:00Z",
+            "updated_at": "2026-08-13T09:10:00Z",
+            "finished_at": "2026-08-13T09:10:00Z",
+        },
+    })
+
+    assert compacted["data"] == {
+        "batch_id": "content-plan-batch-1",
+        "project_id": "project-1",
+        "source": "automatic",
+        "target_count": 30,
+        "status": "completed",
+        "stage": "completed",
+        "candidate_snapshot_count": 440,
+        "selected_count": 30,
+        "valid_pack_count": 30,
+        "preparation_count": 30,
+        "preview_ready_count": 30,
+        "plan_item_count": 30,
+        "external_request_count": 30,
+        "total_cost_usd": 0.42,
+        "retryable": False,
+        "error_code": None,
+        "error_detail": None,
+        "created_at": "2026-08-13T09:00:00Z",
+        "updated_at": "2026-08-13T09:10:00Z",
+        "finished_at": "2026-08-13T09:10:00Z",
+    }
 
 
-def test_judge_prompt_distinguishes_started_async_work_from_finished_work(
-    monkeypatch: Any,
-) -> None:
-    captured: dict[str, Any] = {}
-    gateway = ModelGateway()
-    monkeypatch.setattr(model_gateway, "build_ai_settings_service", FakeSettingsService)
+def test_project_profile_compaction_keeps_bounded_understanding_evidence() -> None:
+    compacted = compact_tool_result({
+        "tool_call_id": "call-1",
+        "tool": "get_project_profile",
+        "ok": True,
+        "summary": "读取完成",
+        "data": {
+            "understanding_status": "running",
+            "understanding_stage": "profile_generation",
+            "understanding_message": "正在识别核心业务" + "x" * 2_000,
+            "understanding_progress": 72,
+            "site_profile": {
+                "business_name": "Example",
+                "confidence": 0.87,
+                "evidence": [
+                    {
+                        "field": f"field-{index}",
+                        "value": "v" * 800,
+                        "source_url": f"https://example.com/{index}" + "u" * 1_200,
+                        "quote": "q" * 1_500,
+                        "ignored": "not-for-model",
+                    }
+                    for index in range(20)
+                ],
+            },
+        },
+    })
 
-    def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        captured["messages"] = args[-1]
-        return {
-            "choices": [{"message": {"content": json.dumps({
-                "status": "partial",
-                "reason": "审计已经启动，但结果尚未产出",
-                "criteria": [{
-                    "requirement": "完成审计并分析结果",
-                    "status": "partial",
-                    "evidence": "审计状态仍为 queued",
-                }],
-                "remaining_work": ["等待审计完成并读取结果"],
-            }, ensure_ascii=False)}}]
-        }
-
-    monkeypatch.setattr(gateway, "_request", request)
-    result = asyncio.run(gateway.judge(
-        "完成网站审计并分析结果",
-        "审计已完成",
-        {"completion_facts": [{
-            "operation_id": "audit-1",
-            "verified": True,
-            "status": "queued",
-        }]},
-    ))
-
-    prompt = captured["messages"][0]["content"]
-    assert "proves that an asynchronous operation started" in prompt
-    assert "only asks to start the operation" in prompt
-    assert "must not satisfy a criterion that asks to finish" in prompt
-    assert result.decision.status == "partial"
+    data = compacted["data"]
+    assert data["understanding_status"] == "running"
+    assert data["understanding_stage"] == "profile_generation"
+    assert data["understanding_progress"] == 72
+    assert len(data["understanding_message"]) == 1_000
+    assert data["site_profile"]["confidence"] == 0.87
+    assert len(data["site_profile"]["evidence"]) == 12
+    assert set(data["site_profile"]["evidence"][0]) == {
+        "field", "value", "source_url", "quote",
+    }
+    assert len(data["site_profile"]["evidence"][0]["value"]) == 500
+    assert len(data["site_profile"]["evidence"][0]["source_url"]) == 1_000
+    assert len(data["site_profile"]["evidence"][0]["quote"]) == 1_000
 
 
 def test_compact_tool_result_preserves_business_completion_facts() -> None:
@@ -1160,6 +1727,102 @@ def test_compact_tool_result_preserves_business_completion_facts() -> None:
     }
 
 
+def test_keyword_and_competitor_results_keep_decision_fields() -> None:
+    keyword = compact_tool_result({
+        "tool": "list_keywords",
+        "ok": True,
+        "data": {
+            "total": 1,
+            "page": 1,
+            "page_size": 10,
+            "items": [{
+                "id": "keyword-1",
+                "keyword": "AI SEO",
+                "intent": "commercial",
+                "search_volume": 900,
+                "keyword_difficulty": 31,
+                "priority_score": 88.5,
+                "sources": ["gsc", "competitor_gap"],
+                "metrics_status": "fresh",
+                "priority_details": {"large": "omitted"},
+            }],
+        },
+    })
+    competitor = compact_tool_result({
+        "tool": "get_keyword_competitors",
+        "ok": True,
+        "data": {"items": [{
+            "id": "competitor-1",
+            "domain": "example.com",
+            "domain_type": "direct_product_competitor",
+            "is_seo_competitor": True,
+            "is_business_competitor": True,
+            "why_they_matter": "Overlaps on product-led queries",
+            "visibility": 14.2,
+            "organic_keywords": 800,
+            "organic_traffic": 1200,
+            "status": "completed",
+            "serp_evidence": [{"large": "omitted"}],
+        }]},
+    })
+
+    assert keyword["data"]["items"][0]["priority_score"] == 88.5
+    assert "priority_details" not in keyword["data"]["items"][0]
+    assert competitor["data"]["items"][0]["domain"] == "example.com"
+    assert "serp_evidence" not in competitor["data"]["items"][0]
+
+
+def test_performance_and_direct_article_results_keep_actionable_data() -> None:
+    overview = compact_tool_result({
+        "tool": "get_search_performance",
+        "ok": True,
+        "data": {
+            "gsc_connected": True,
+            "date_range": 28,
+            "range_start": "2026-07-16",
+            "range_end": "2026-08-12",
+            "metrics": {"clicks": 120, "impressions": 4000},
+            "change": {"clicks": 0.2},
+            "sync": {"status": "completed", "data_through": "2026-08-12"},
+            "growing_articles": [{
+                "article_id": "article-1",
+                "title": "AI SEO",
+                "primary_keyword": "AI SEO",
+                "metrics": {"clicks": 40},
+                "change": {"clicks": 0.5},
+                "document": {"large": "omitted"},
+            }],
+        },
+    })
+    created = compact_tool_result({
+        "tool": "create_article",
+        "ok": True,
+        "data": {
+            "article_id": "article-1",
+            "run_id": "run-1",
+            "primary_keyword": "AI SEO",
+            "title": None,
+            "status": "queued",
+            "stage": "queued",
+            "progress": 0,
+            "internal": "omitted",
+        },
+    })
+
+    assert overview["data"]["gsc_connected"] is True
+    assert overview["data"]["growing_articles"][0]["metrics"]["clicks"] == 40
+    assert "document" not in overview["data"]["growing_articles"][0]
+    assert created["data"] == {
+        "article_id": "article-1",
+        "run_id": "run-1",
+        "primary_keyword": "AI SEO",
+        "title": None,
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+    }
+
+
 def test_streaming_sanitizer_redacts_secret_split_across_provider_chunks() -> None:
     secret = "secret-value"
     sanitizer = StreamingTextSanitizer((secret,))
@@ -1170,6 +1833,13 @@ def test_streaming_sanitizer_redacts_secret_split_across_provider_chunks() -> No
 
     assert secret not in output
     assert "[REDACTED]" in output
+
+
+def test_streaming_sanitizer_emits_ordinary_short_text_immediately() -> None:
+    sanitizer = StreamingTextSanitizer(("super-secret-key",))
+
+    assert sanitizer.feed("结论明确。") == "结论明确。"
+    assert sanitizer.flush() == ""
 
 
 def test_decision_stream_rebuilds_interleaved_split_tool_calls(
@@ -1323,7 +1993,7 @@ def test_decision_stream_retries_temporary_failure_before_visible_output(
                 error_code="model_provider_unavailable",
                 retryable=True,
             )
-        return ({"content": '{"type":"final","answer":"完成"}'}, {})
+        return ({"content": "完成"}, {})
 
     async def sleep(delay: float) -> None:
         sleeps.append(delay)
@@ -1385,7 +2055,7 @@ def test_decision_stream_does_not_retry_temporary_failure_after_visible_output(
     assert updates[-1] == {"kind": "stream_end", "attempt": 0, "status": "error"}
 
 
-def test_decision_stream_protocol_correction_uses_second_message_attempt(
+def test_decision_stream_emits_plain_markdown_in_one_model_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gateway = ModelGateway()
@@ -1403,12 +2073,9 @@ def test_decision_stream_protocol_correction_uses_second_message_attempt(
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         nonlocal attempts
         attempts += 1
-        content = (
-            '{"type":"final","answer":"完成","evidence":[{"bad":true}]}'
-            if attempts == 1
-            else '{"type":"final","answer":"完成"}'
-        )
-        await on_update({"kind": "text_delta", "delta": content})
+        content = "结论明确。\n\n- 第一项\n- 第二项"
+        await on_update({"kind": "text_delta", "delta": "结论明确。\n\n"})
+        await on_update({"kind": "text_delta", "delta": "- 第一项\n- 第二项"})
         return ({"content": content}, {})
 
     monkeypatch.setattr(
@@ -1423,14 +2090,18 @@ def test_decision_stream_protocol_correction_uses_second_message_attempt(
     ))
 
     assert result.decision.type == "final"
-    assert attempts == 2
+    assert result.decision.answer == "结论明确。\n\n- 第一项\n- 第二项"
+    assert attempts == 1
     assert [
         (update["attempt"], update["status"])
         for update in updates if update["kind"] == "stream_end"
-    ] == [(0, "invalid"), (1, "completed")]
+    ] == [(0, "completed")]
     assert [
         update["attempt"] for update in updates if update["kind"] == "stream_start"
-    ] == [0, 1]
+    ] == [0]
+    assert "".join(
+        update["delta"] for update in updates if update["kind"] == "text_delta"
+    ) == result.decision.answer
 
 
 @pytest.mark.parametrize(
@@ -1482,11 +2153,7 @@ def test_decide_redacts_provider_secret_from_final_answer(
         return {
             "choices": [{
                 "message": {
-                    "content": json.dumps({
-                        "type": "final",
-                        "answer": "密钥是 super-secret-key",
-                        "evidence": [],
-                    }, ensure_ascii=False),
+                    "content": "密钥是 super-secret-key",
                 }
             }]
         }

@@ -87,6 +87,24 @@ class SiteProfileResponse(BaseModel):
     ai_content_rules: str = ""
     confirmed_at: datetime | None = None
 
+    @field_validator(
+        "products_services",
+        "target_audiences",
+        "value_propositions",
+        "use_cases",
+        "target_markets",
+        "languages",
+        "content_topics",
+        "conversion_actions",
+        "key_pages",
+        "evidence",
+        "user_overridden_fields",
+        mode="before",
+    )
+    @classmethod
+    def normalize_legacy_null_lists(cls, value: object) -> object:
+        return [] if value is None else value
+
 
 class BusinessProfileRunResponse(BaseModel):
     run_id: str

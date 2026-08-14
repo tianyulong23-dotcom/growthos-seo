@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+from app.core.authoritative_platform_context import (
+    LocalDevelopmentPlatformContextResolver,
+)
 from app.core.backlinks_gateway import RejectingPlatformContextResolver
 from app.core.config import Settings
 from app.main import create_platform_context_resolver
@@ -30,6 +33,34 @@ def test_platform_access_token_schema_locks_membership_dimensions() -> None:
 def test_default_configuration_keeps_platform_context_fail_closed() -> None:
     settings = Settings(
         _env_file=None,
+        platform_auth_signing_key=None,
+        platform_context_signing_key=None,
+    )
+
+    resolver = create_platform_context_resolver(settings)
+
+    assert isinstance(resolver, RejectingPlatformContextResolver)
+
+
+def test_explicit_nonproduction_configuration_uses_local_context() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        platform_local_development_auth_enabled=True,
+        platform_auth_signing_key=None,
+        platform_context_signing_key=None,
+    )
+
+    resolver = create_platform_context_resolver(settings)
+
+    assert isinstance(resolver, LocalDevelopmentPlatformContextResolver)
+
+
+def test_production_ignores_local_development_auth_switch() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        platform_local_development_auth_enabled=True,
         platform_auth_signing_key=None,
         platform_context_signing_key=None,
     )

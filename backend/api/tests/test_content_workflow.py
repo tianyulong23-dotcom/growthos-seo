@@ -11,7 +11,14 @@ from app.modules.content.activities import (
     costed_usage,
     degraded_stage_result,
 )
-from app.modules.content.workflows import ArticleGenerationWorkflow, retry_delay
+from app.modules.content.models import Article
+from app.modules.content.repository import ContentRepository
+from app.modules.content.workflows import (
+    MAX_FINISH_ATTEMPTS,
+    MAX_STAGE_RECOVERY_ATTEMPTS,
+    ArticleGenerationWorkflow,
+    retry_delay,
+)
 
 
 EXPECTED_STAGES = [
@@ -24,13 +31,71 @@ EXPECTED_STAGES = [
 ]
 EXPECTED_QUALITY_STAGES = [
     ("checking_1", 88),
-    ("revising_1", 92),
-    ("checking_2", 93),
-    ("revising_2", 94),
-    ("checking_3", 95),
-    ("revising_3", 96),
-    ("checking_4", 97),
 ]
+EXPECTED_VISUAL_STAGES = [
+    ("visual_resolving", 55),
+    ("visual_assembling", 96),
+    ("visual_checking", 98),
+]
+
+
+def assert_generation_stage_dependencies(stages: list[str]) -> None:
+    expected = {
+        *[step_key for step_key, _progress in EXPECTED_STAGES],
+        *[step_key for step_key, _progress in EXPECTED_QUALITY_STAGES],
+        *[step_key for step_key, _progress in EXPECTED_VISUAL_STAGES],
+    }
+    assert len(stages) == len(expected)
+    assert set(stages) == expected
+    assert stages[:4] == [
+        "preparing",
+        "collecting",
+        "competitor_research",
+        "planning",
+    ]
+    assert stages.index("planning") < stages.index("writing")
+    assert stages.index("planning") < stages.index("visual_resolving")
+    assert stages.index("writing") < stages.index("editing") < stages.index("checking_1")
+    assert stages.index("checking_1") < stages.index("visual_assembling")
+    assert stages.index("visual_resolving") < stages.index("visual_assembling")
+    assert stages.index("visual_assembling") < stages.index("visual_checking")
+
+
+def test_apply_article_snapshot_fills_missing_historical_metadata() -> None:
+    article = Article(
+        id="article-1",
+        organization_id="org-1",
+        project_id="project-1",
+        primary_keyword="solar battery payback",
+        publication_status="publish_ready",
+        secondary_keywords_json=[],
+        indexing="index/follow",
+        seo_field_states_json={},
+    )
+    metadata = {
+        "title": "Solar battery payback",
+        "slug": "solar-battery-payback",
+        "meta_title": "Solar battery payback",
+        "meta_description": "A practical guide.",
+        "secondary_keywords": [],
+        "canonical_url": None,
+        "indexing": "index/follow",
+        "field_states": {},
+        "publication_status": "publish_ready",
+    }
+
+    ContentRepository._apply_article_snapshot(
+        article,
+        {"type": "doc", "schema_version": 2, "content": []},
+        metadata,
+        "# Solar battery payback\n",
+        "<h1>Solar battery payback</h1>",
+        "content-hash",
+        1,
+        1,
+    )
+
+    assert article.focus_keyword == "solar battery payback"
 
 
 def test_costed_usage_estimates_only_tokens_without_provider_cost(
@@ -130,10 +195,18 @@ def test_fake_activities_move_queued_run_to_completed() -> None:
         for name, payload in calls
         if name == "content_execute_stage"
     ]
-    assert stage_calls == [*EXPECTED_STAGES, EXPECTED_QUALITY_STAGES[0]]
+    assert_generation_stage_dependencies([step_key for step_key, _progress in stage_calls])
+    assert dict(stage_calls) == dict(
+        [*EXPECTED_STAGES, *EXPECTED_QUALITY_STAGES, *EXPECTED_VISUAL_STAGES]
+    )
     assert calls[-1] == (
         "content_finish_run",
-        {"run_id": "run-1", "status": "completed", "warnings": []},
+        {
+            "run_id": "run-1",
+            "status": "completed",
+            "warnings": [],
+            "final_step_key": "visual_checking",
+        },
     )
 
 
@@ -175,6 +248,7 @@ def test_warning_completes_run_with_warnings() -> None:
                     "message": "检查服务暂不可用，已保存完整稿",
                 }
             ],
+            "final_step_key": "visual_checking",
         }
     ]
 
@@ -222,16 +296,9 @@ def test_all_research_sources_failing_still_completes_the_full_workflow() -> Non
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "run-1"}))
 
-    assert stages == [
-        "preparing",
-        "collecting",
-        "competitor_research",
-        "planning",
-        "writing",
-        "editing",
-        "checking_1",
-    ]
+    assert_generation_stage_dependencies(stages)
     assert finishes[0]["status"] == "completed_with_warnings"
+    assert finishes[0]["final_step_key"] == "visual_checking"
     assert {warning["code"] for warning in finishes[0]["warnings"]} == {
         "dataforseo_unavailable",
         "research_unavailable",
@@ -328,7 +395,60 @@ def test_semantic_checker_unavailable_does_not_trigger_article_revision() -> Non
     assert [item["code"] for item in finish["warnings"]] == ["checking_degraded"]
 
 
-def test_explicit_repairable_section_issue_still_runs_targeted_revision() -> None:
+def test_fallback_sections_fail_retryably_instead_of_being_finalized() -> None:
+    workflow = ArticleGenerationWorkflow()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        calls.append((name, dict(payload)))
+        if name == "content_begin_run":
+            return {"status": "running"}
+        if name == "content_execute_stage":
+            if payload["stage_kind"] == "checking":
+                return {
+                    "status": "completed",
+                    "result": {
+                        "passed": False,
+                        "issue_count": 4,
+                        "check_status": "completed",
+                        "repairable": True,
+                        "repair_scope": ["section-1"],
+                        "blocking_issue_codes": ["fallback_section"],
+                    },
+                }
+            if payload["stage_kind"] == "revising":
+                return {"status": "completed", "result": {"revised_sections": 1}}
+            return {"status": "completed", "result": {}}
+        if name == "content_fail_run":
+            return {"status": "failed"}
+        if name == "content_finish_run":
+            raise AssertionError("fallback sections must not be finalized")
+        raise AssertionError(name)
+
+    workflow._call = call  # type: ignore[method-assign]
+    asyncio.run(workflow.run({"run_id": "run-fallback-sections"}))
+
+    quality_stages = [
+        payload["step_key"]
+        for name, payload in calls
+        if name == "content_execute_stage"
+        and payload["stage_kind"] in {"checking", "revising"}
+    ]
+    assert quality_stages == ["checking_1"]
+    assert calls[-1] == (
+        "content_fail_run",
+        {
+            "run_id": "run-fallback-sections",
+            "error_code": "article_quality_blocked",
+            "error_detail": "generated article contains fallback sections",
+            "failed_stage": "checking",
+            "retryable": True,
+        },
+    )
+    assert not any(name == "content_finish_run" for name, _payload in calls)
+
+
+def test_nonblocking_repairable_issue_is_saved_as_a_warning_without_revision() -> None:
     workflow = ArticleGenerationWorkflow()
     quality_stages: list[str] = []
 
@@ -366,10 +486,10 @@ def test_explicit_repairable_section_issue_still_runs_targeted_revision() -> Non
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "run-repairable"}))
 
-    assert quality_stages == ["checking_1", "revising_1", "checking_2"]
+    assert quality_stages == ["checking_1"]
 
 
-def test_first_repair_is_followed_by_a_full_recheck_and_stops_on_pass() -> None:
+def test_quality_check_runs_once_after_full_article_editing() -> None:
     workflow = ArticleGenerationWorkflow()
     quality_calls: list[dict[str, Any]] = []
     finish: dict[str, Any] = {}
@@ -405,27 +525,12 @@ def test_first_repair_is_followed_by_a_full_recheck_and_stops_on_pass() -> None:
             "repair_iteration": 0,
             "input_step_key": "editing",
         },
-        {
-            "run_id": "run-first-repair",
-            "step_key": "revising_1",
-            "stage_kind": "revising",
-            "progress": 92,
-            "repair_iteration": 1,
-            "input_step_key": "checking_1",
-        },
-        {
-            "run_id": "run-first-repair",
-            "step_key": "checking_2",
-            "stage_kind": "checking",
-            "progress": 93,
-            "repair_iteration": 1,
-            "input_step_key": "revising_1",
-        },
     ]
-    assert finish["status"] == "completed"
+    assert finish["status"] == "completed_with_warnings"
+    assert finish["warnings"][-1]["code"] == "quality_issues_remaining"
 
 
-def test_resolved_check_and_revision_warnings_do_not_leak_to_final_result() -> None:
+def test_single_check_preserves_generation_and_check_warnings() -> None:
     workflow = ArticleGenerationWorkflow()
     finish: dict[str, Any] = {}
 
@@ -464,11 +569,13 @@ def test_resolved_check_and_revision_warnings_do_not_leak_to_final_result() -> N
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "run-resolved-warning"}))
 
-    assert finish == {
-        "run_id": "run-resolved-warning",
-        "status": "completed",
-        "warnings": [],
-    }
+    assert finish["run_id"] == "run-resolved-warning"
+    assert finish["status"] == "completed_with_warnings"
+    assert [item["code"] for item in finish["warnings"]] == [
+        "writing_degraded",
+        "checking_degraded",
+        "quality_issues_remaining",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -571,7 +678,7 @@ def test_activity_error_invokes_stage_recovery_and_workflow_continues() -> None:
     assert ("content_execute_stage", "editing") in calls
 
 
-def test_three_repairs_run_four_full_checks_before_warning_delivery() -> None:
+def test_failed_nonblocking_check_does_not_start_a_revision_loop() -> None:
     workflow = ArticleGenerationWorkflow()
     quality_calls: list[tuple[str, str | None, int]] = []
     finish: dict[str, Any] = {}
@@ -603,20 +710,12 @@ def test_three_repairs_run_four_full_checks_before_warning_delivery() -> None:
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "run-three-repairs"}))
 
-    assert quality_calls == [
-        ("checking_1", "editing", 0),
-        ("revising_1", "checking_1", 1),
-        ("checking_2", "revising_1", 1),
-        ("revising_2", "checking_2", 2),
-        ("checking_3", "revising_2", 2),
-        ("revising_3", "checking_3", 3),
-        ("checking_4", "revising_3", 3),
-    ]
+    assert quality_calls == [("checking_1", "editing", 0)]
     assert finish["status"] == "completed_with_warnings"
     assert finish["warnings"][-1]["code"] == "quality_issues_remaining"
 
 
-def test_unchanged_repairable_issue_fingerprint_stops_after_one_revision() -> None:
+def test_repairable_issue_fingerprint_does_not_trigger_revision() -> None:
     workflow = ArticleGenerationWorkflow()
     quality_stages: list[str] = []
     finish: dict[str, Any] = {}
@@ -650,12 +749,53 @@ def test_unchanged_repairable_issue_fingerprint_stops_after_one_revision() -> No
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "run-converged"}))
 
-    assert quality_stages == ["checking_1", "revising_1", "checking_2"]
+    assert quality_stages == ["checking_1"]
     assert finish["status"] == "completed_with_warnings"
-    assert finish["warnings"][-1]["code"] == "quality_revision_converged"
+    assert finish["warnings"][-1]["code"] == "quality_issues_remaining"
+    assert finish["final_step_key"] == "visual_checking"
 
 
-def test_converged_revision_preserves_separate_evidence_gap_warning() -> None:
+def test_failed_check_is_not_repeated_for_comparison() -> None:
+    workflow = ArticleGenerationWorkflow()
+    finish: dict[str, Any] = {}
+    checking_calls = 0
+
+    async def call(name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal finish, checking_calls
+        if name == "content_begin_run":
+            return {"status": "running"}
+        if name == "content_execute_stage":
+            if payload["stage_kind"] == "checking":
+                checking_calls += 1
+                issue_count = 2 if checking_calls == 1 else 3
+                return {
+                    "status": "completed",
+                    "result": {
+                        "passed": False,
+                        "issue_count": issue_count,
+                        "repairable": True,
+                        "repairable_issue_count": issue_count,
+                        "repairable_issue_fingerprint": [
+                            f"prose:section-1:issue-{index}"
+                            for index in range(issue_count)
+                        ],
+                    },
+                }
+            if payload["stage_kind"] == "revising":
+                return {"status": "completed", "result": {"revised_sections": 1}}
+            return {"status": "completed", "result": {}}
+        finish = dict(payload)
+        return None
+
+    workflow._call = call  # type: ignore[method-assign]
+    asyncio.run(workflow.run({"run_id": "run-worse-revision"}))
+
+    assert checking_calls == 1
+    assert finish["final_step_key"] == "visual_checking"
+    assert finish["warnings"][-1]["code"] == "quality_issues_remaining"
+
+
+def test_single_check_preserves_separate_evidence_gap_warning() -> None:
     workflow = ArticleGenerationWorkflow()
     finish: dict[str, Any] = {}
 
@@ -688,7 +828,7 @@ def test_converged_revision_preserves_separate_evidence_gap_warning() -> None:
     asyncio.run(workflow.run({"run_id": "run-converged-with-evidence-gap"}))
 
     assert [item["code"] for item in finish["warnings"][-2:]] == [
-        "quality_revision_converged",
+        "quality_issues_remaining",
         "quality_evidence_gaps",
     ]
 
@@ -741,10 +881,7 @@ def test_budget_warning_does_not_stop_remaining_quality_stages() -> None:
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "run-1"}))
 
-    assert stages == [
-        *[step_key for step_key, _progress in EXPECTED_STAGES],
-        *[step_key for step_key, _progress in EXPECTED_QUALITY_STAGES],
-    ]
+    assert_generation_stage_dependencies(stages)
     assert finish == {
         "run_id": "run-1",
         "status": "completed_with_warnings",
@@ -755,9 +892,10 @@ def test_budget_warning_does_not_stop_remaining_quality_stages() -> None:
             },
             {
                 "code": "quality_issues_remaining",
-                "message": "文章已完整生成并完成三轮自动修订，仍有部分质量问题未解决",
+                "message": "The complete article was saved with deterministic quality warnings.",
             },
         ],
+        "final_step_key": "visual_checking",
     }
 
 
@@ -788,6 +926,33 @@ def test_busy_step_waits_and_reuses_result_after_worker_restart() -> None:
     assert sleeps == [5]
 
 
+def test_busy_step_waits_for_the_existing_database_lease() -> None:
+    workflow = ArticleGenerationWorkflow()
+    stage_attempts: dict[str, int] = {}
+    sleeps: list[float] = []
+
+    async def call(name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if name == "content_begin_run":
+            return {"status": "running"}
+        if name == "content_execute_stage":
+            step_key = payload["step_key"]
+            stage_attempts[step_key] = stage_attempts.get(step_key, 0) + 1
+            if step_key == "planning" and stage_attempts[step_key] == 1:
+                return {"status": "busy", "retry_after_seconds": 361}
+            return {"status": "completed", "warning": None, "result": {}}
+        return None
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    workflow._call = call  # type: ignore[method-assign]
+    workflow._sleep = sleep  # type: ignore[method-assign]
+    asyncio.run(workflow.run({"run_id": "run-1"}))
+
+    assert stage_attempts["planning"] == 2
+    assert sleeps == [361]
+
+
 def test_retry_delay_increases_and_caps_without_limiting_attempts() -> None:
     assert [retry_delay(attempt) for attempt in range(7)] == [
         5.0,
@@ -797,6 +962,142 @@ def test_retry_delay_increases_and_caps_without_limiting_attempts() -> None:
         60.0,
         60.0,
         60.0,
+    ]
+
+
+def test_stage_recovery_exhaustion_marks_run_failed() -> None:
+    workflow = ArticleGenerationWorkflow()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def activity_error(name: str) -> ActivityError:
+        return ActivityError(
+            "activity failed",
+            scheduled_event_id=1,
+            started_event_id=2,
+            identity="worker",
+            activity_type=name,
+            activity_id="1",
+            retry_state=None,
+        )
+
+    async def call(name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        calls.append((name, payload))
+        if name == "content_begin_run":
+            return {"status": "running"}
+        if name in {"content_execute_stage", "content_recover_stage"}:
+            raise activity_error(name)
+        if name == "content_fail_run":
+            return {"status": "failed"}
+        raise AssertionError(name)
+
+    async def sleep(_seconds: float) -> None:
+        return None
+
+    workflow._call = call  # type: ignore[method-assign]
+    workflow._sleep = sleep  # type: ignore[method-assign]
+    asyncio.run(workflow.run({"run_id": "run-recovery-exhausted"}))
+
+    recovery_calls = [name for name, _payload in calls if name == "content_recover_stage"]
+    assert len(recovery_calls) == MAX_STAGE_RECOVERY_ATTEMPTS
+    assert calls[-1] == (
+        "content_fail_run",
+        {
+            "run_id": "run-recovery-exhausted",
+            "error_code": "article_stage_recovery_exhausted",
+            "error_detail": "preparing could not be recovered after bounded retries",
+            "failed_stage": "preparing",
+            "retryable": True,
+        },
+    )
+
+
+def test_finish_exhaustion_marks_run_failed_instead_of_looping_forever() -> None:
+    workflow = ArticleGenerationWorkflow()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def activity_error(name: str) -> ActivityError:
+        return ActivityError(
+            "activity failed",
+            scheduled_event_id=1,
+            started_event_id=2,
+            identity="worker",
+            activity_type=name,
+            activity_id="1",
+            retry_state=None,
+        )
+
+    async def call(name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        calls.append((name, payload))
+        if name == "content_begin_run":
+            return {"status": "running"}
+        if name == "content_execute_stage":
+            return {
+                "status": "completed",
+                "result": (
+                    {"passed": True, "issue_count": 0}
+                    if payload["stage_kind"] == "checking"
+                    else {}
+                ),
+            }
+        if name == "content_finish_run":
+            raise activity_error(name)
+        if name == "content_fail_run":
+            return {"status": "failed"}
+        raise AssertionError(name)
+
+    async def sleep(_seconds: float) -> None:
+        return None
+
+    workflow._call = call  # type: ignore[method-assign]
+    workflow._sleep = sleep  # type: ignore[method-assign]
+    asyncio.run(workflow.run({"run_id": "run-finish-exhausted"}))
+
+    finish_calls = [name for name, _payload in calls if name == "content_finish_run"]
+    assert len(finish_calls) == MAX_FINISH_ATTEMPTS
+    assert calls[-1] == (
+        "content_fail_run",
+        {
+            "run_id": "run-finish-exhausted",
+            "error_code": "article_finish_exhausted",
+            "error_detail": "generated article could not be finalized after bounded retries",
+            "failed_stage": "finalizing",
+            "retryable": True,
+        },
+    )
+
+
+def test_fail_run_activity_persists_structured_terminal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failures: list[dict[str, Any]] = []
+
+    class FakeRepository:
+        async def fail_run(self, run_id: str, **failure: Any) -> None:
+            failures.append({"run_id": run_id, **failure})
+
+    monkeypatch.setattr(content_activities, "repository", lambda: FakeRepository())
+
+    result = asyncio.run(
+        content_activities.fail_run(
+            {
+                "run_id": "run-failed",
+                "error_code": "article_workflow_closed",
+                "error_detail": "Temporal closed without a database terminal state",
+                "failed_stage": "writing",
+                "retryable": True,
+            }
+        )
+    )
+
+    assert result == {"status": "failed"}
+    assert failures == [
+        {
+            "run_id": "run-failed",
+            "error_code": "article_workflow_closed",
+            "error_detail": "Temporal closed without a database terminal state",
+            "failed_stage": "writing",
+            "retryable": True,
+        }
     ]
 
 
@@ -826,7 +1127,7 @@ def test_recovery_activity_does_not_take_over_an_active_lease(
         )
     )
 
-    assert result == {"status": "busy"}
+    assert result == {"status": "busy", "retry_after_seconds": 1}
     assert recovery_calls == 0
 
 
@@ -1095,7 +1396,7 @@ def test_completed_collecting_step_does_not_repeat_paid_sources(
     assert paid_calls == 0
 
 
-def test_legacy_skip_revision_cannot_hide_failed_quality_check() -> None:
+def test_legacy_skip_revision_flag_does_not_restore_revision_loop() -> None:
     workflow = ArticleGenerationWorkflow()
     stages: list[str] = []
 
@@ -1117,7 +1418,7 @@ def test_legacy_skip_revision_cannot_hide_failed_quality_check() -> None:
     workflow._call = call  # type: ignore[method-assign]
     asyncio.run(workflow.run({"run_id": "legacy-run"}))
 
-    assert "revising_1" in stages
+    assert_generation_stage_dependencies(stages)
 
 
 def test_completed_legacy_check_does_not_replay_skip_revision_flag(

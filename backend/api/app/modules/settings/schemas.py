@@ -1,14 +1,16 @@
 from datetime import date, datetime
 import re
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 DEFAULT_AI_REQUEST_TIMEOUT_SECONDS = 90
 DEFAULT_AI_MAX_RETRIES = 4
 AIProviderName = Literal["openai", "anthropic", "openrouter"]
+AIReasoningEffort = Literal["low", "medium", "high"]
+AIAPIProtocol = Literal["chat_completions", "responses"]
 
 
 def infer_provider(base_url: str) -> AIProviderName:
@@ -41,10 +43,26 @@ def clean_model(value: str) -> str:
     return value
 
 
+def clean_optional_model(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    return clean_model(value)
+
+
 class AIProviderSettingsResponse(BaseModel):
     provider: AIProviderName
+    api_protocol: AIAPIProtocol = "chat_completions"
     base_url: str
     model: str
+    business_model: str | None = None
+    keyword_model: str | None = None
+    content_model: str | None = None
+    agent_model: str | None = None
+    reasoning_effort: AIReasoningEffort = "medium"
+    business_reasoning_effort: AIReasoningEffort | None = None
+    keyword_reasoning_effort: AIReasoningEffort | None = None
+    content_reasoning_effort: AIReasoningEffort | None = None
+    agent_reasoning_effort: AIReasoningEffort | None = None
     request_timeout_seconds: int
     max_retries: int
     configured: bool
@@ -56,8 +74,18 @@ class AIProviderSettingsResponse(BaseModel):
 
 class UpdateAIProviderSettingsRequest(BaseModel):
     provider: AIProviderName = "openai"
+    api_protocol: AIAPIProtocol = "chat_completions"
     base_url: str = Field(min_length=1, max_length=2048)
     model: str = Field(min_length=1, max_length=200)
+    business_model: str | None = Field(default=None, max_length=200)
+    keyword_model: str | None = Field(default=None, max_length=200)
+    content_model: str | None = Field(default=None, max_length=200)
+    agent_model: str | None = Field(default=None, max_length=200)
+    reasoning_effort: AIReasoningEffort = "medium"
+    business_reasoning_effort: AIReasoningEffort | None = None
+    keyword_reasoning_effort: AIReasoningEffort | None = None
+    content_reasoning_effort: AIReasoningEffort | None = None
+    agent_reasoning_effort: AIReasoningEffort | None = None
     api_key: str | None = Field(default=None, max_length=4096)
     request_timeout_seconds: int = Field(
         default=DEFAULT_AI_REQUEST_TIMEOUT_SECONDS,
@@ -68,6 +96,25 @@ class UpdateAIProviderSettingsRequest(BaseModel):
 
     _clean_base_url = field_validator("base_url")(clean_base_url)
     _clean_model = field_validator("model")(clean_model)
+    _clean_task_models = field_validator(
+        "business_model",
+        "keyword_model",
+        "content_model",
+        "agent_model",
+    )(clean_optional_model)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_known_provider(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        base_url = value.get("base_url")
+        if not isinstance(base_url, str):
+            return value
+        inferred = infer_provider(base_url)
+        if not value.get("provider") or inferred != "openai":
+            return {**value, "provider": inferred}
+        return value
 
     @field_validator("api_key")
     @classmethod
@@ -185,6 +232,23 @@ class TestDataForSEOSettingsResponse(BaseModel):
     success: bool
     message: str
     balance: float | None = None
+
+
+class GSCOAuthSettingsResponse(BaseModel):
+    client_id: str
+    configured: bool
+    client_secret_configured: bool
+    oauth_redirect_uri: str
+    source: SettingsSource
+    updated_at: datetime | None = None
+
+
+class UpdateGSCOAuthSettingsRequest(BaseModel):
+    client_id: str = Field(min_length=1, max_length=1024)
+    client_secret: str | None = Field(default=None, max_length=4096)
+
+    _clean_client_id = field_validator("client_id")(clean_required_text)
+    _clean_client_secret = field_validator("client_secret")(clean_optional_secret)
 
 
 class GSCConnectionResponse(BaseModel):

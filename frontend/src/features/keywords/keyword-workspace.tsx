@@ -8,7 +8,6 @@ import {
   Copy,
   Download,
   ExternalLink,
-  History,
   Info,
   LoaderCircle,
   Plus,
@@ -26,19 +25,15 @@ import {
   assignKeywordTags,
   getCompetitorAnalysisStatus,
   getKeywordStatus,
-  listCompetitorAnalysisRuns,
   listKeywordCompetitorOpportunities,
   listKeywordCompetitors,
   listKeywords,
   retryKeywordBuild,
   startCompetitorAnalysis,
-  updateCompetitorOpportunities,
   updateKeywordStatus,
   type KeywordBuildRun,
   type CompetitorAnalysisRun,
-  type CompetitorLocalMarket,
   type CompetitorOpportunityQuery,
-  type CompetitorOpportunityStatus,
   type KeywordCompetitor,
   type KeywordCompetitorOpportunity,
   type KeywordLibraryStatus,
@@ -50,7 +45,14 @@ import {
 import { getGSCConnection } from "@/api/settings"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
@@ -61,6 +63,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group"
+import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import {
   Sheet,
@@ -84,6 +92,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Tooltip,
   TooltipContent,
@@ -98,12 +107,14 @@ import { GSCPerformancePanel } from "@/features/keywords/gsc-performance-panel"
 import { KeywordQueryProvider } from "@/features/keywords/keyword-query-provider"
 
 const PAGE_SIZE = 50
+const COMPETITOR_OPPORTUNITY_PAGE_SIZE = 100
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "waiting"])
 const READABLE_RUN_STATUSES = new Set(["completed", "partial"])
 
 type KeywordWorkspaceProps = {
   projectId: string
   view?: string
+  savedCompetitorDomain?: string | null
 }
 
 type Filters = {
@@ -127,10 +138,15 @@ const DEFAULT_FILTERS: Filters = {
 export function KeywordWorkspace({
   projectId,
   view = "library",
+  savedCompetitorDomain,
 }: KeywordWorkspaceProps) {
   return (
     <KeywordQueryProvider>
-      <KeywordWorkspaceContent projectId={projectId} view={view} />
+      <KeywordWorkspaceContent
+        projectId={projectId}
+        view={view}
+        savedCompetitorDomain={savedCompetitorDomain}
+      />
     </KeywordQueryProvider>
   )
 }
@@ -138,6 +154,7 @@ export function KeywordWorkspace({
 function KeywordWorkspaceContent({
   projectId,
   view = "library",
+  savedCompetitorDomain,
 }: KeywordWorkspaceProps) {
   if (view === "search-performance") {
     return (
@@ -148,12 +165,10 @@ function KeywordWorkspaceContent({
   }
   if (view === "competitor-gap") {
     return (
-      <GSCGuard projectId={projectId} returnView="competitor-gap">
-        <CompetitorOpportunityPanel
-          projectId={projectId}
-          onLibraryChanged={() => undefined}
-        />
-      </GSCGuard>
+      <CompetitorOpportunityPanel
+        projectId={projectId}
+        savedCompetitorDomain={savedCompetitorDomain}
+      />
     )
   }
   return <KeywordLibraryWorkspace projectId={projectId} />
@@ -320,7 +335,11 @@ function KeywordLibraryWorkspace({ projectId }: { projectId: string }) {
         const next = await queryClient.fetchQuery({
           queryKey,
           queryFn: () => listKeywords(projectId, listQuery),
-          staleTime: listRefreshKey > 0 ? 0 : 5 * 60 * 1000,
+          staleTime:
+            listRefreshKey > 0 ||
+            (cached && cached.resultVersion < expectedVersion)
+              ? 0
+              : 5 * 60 * 1000,
         })
         if (cancelled) return
         if (next.resultVersion < expectedVersion) {
@@ -576,7 +595,10 @@ function KeywordLibraryWorkspace({ projectId }: { projectId: string }) {
     )
   }
 
-  const pageCount = Math.max(1, Math.ceil((result?.total ?? 0) / PAGE_SIZE))
+  const pageCount = Math.max(
+    1,
+    Math.ceil((result?.total ?? 0) / COMPETITOR_OPPORTUNITY_PAGE_SIZE)
+  )
   const allPageSelected = Boolean(
     result?.items.length &&
     result.items.every((item) => selectedIds.has(item.id))
@@ -742,7 +764,7 @@ function KeywordLibraryWorkspace({ projectId }: { projectId: string }) {
 
         {showAdvancedFilters && (
           <div className="grid gap-3 border-b bg-muted/20 px-4 py-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
-            <label className="space-y-1.5 text-xs font-medium text-muted-foreground">
+            <Label className="space-y-1.5 text-xs font-medium text-muted-foreground">
               最低月搜索量
               <Input
                 type="number"
@@ -759,8 +781,8 @@ function KeywordLibraryWorkspace({ projectId }: { projectId: string }) {
                 placeholder="不限"
                 className="h-9 bg-background text-sm text-foreground"
               />
-            </label>
-            <label className="space-y-1.5 text-xs font-medium text-muted-foreground">
+            </Label>
+            <Label className="space-y-1.5 text-xs font-medium text-muted-foreground">
               最高关键词难度
               <Input
                 type="number"
@@ -778,7 +800,7 @@ function KeywordLibraryWorkspace({ projectId }: { projectId: string }) {
                 placeholder="不限（0-100）"
                 className="h-9 bg-background text-sm text-foreground"
               />
-            </label>
+            </Label>
             <Button
               variant="ghost"
               size="sm"
@@ -1087,94 +1109,40 @@ type OpportunityResult = Awaited<
 
 function CompetitorOpportunityPanel({
   projectId,
-  onLibraryChanged,
+  savedCompetitorDomain,
 }: {
   projectId: string
-  onLibraryChanged: () => void
+  savedCompetitorDomain?: string | null
 }) {
   const queryClient = useQueryClient()
-  const [historyOpen, setHistoryOpen] = React.useState(false)
-  const [page, setPage] = React.useState(1)
-  const [searchInput, setSearchInput] = React.useState("")
-  const [search, setSearch] = React.useState("")
-  const [competitorDomain, setCompetitorDomain] = React.useState("all")
-  const [intent, setIntent] = React.useState("all")
-  const [opportunityStatus, setOpportunityStatus] = React.useState<
-    CompetitorOpportunityStatus | "all"
-  >("new")
-  const [libraryFilter, setLibraryFilter] = React.useState<
-    "all" | "in" | "out"
-  >("all")
-  const [minVolume, setMinVolume] = React.useState("")
-  const [maxDifficulty, setMaxDifficulty] = React.useState("")
-  const [sort, setSort] =
-    React.useState<NonNullable<CompetitorOpportunityQuery["sort"]>>(
-      "opportunity_score"
-    )
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
   const [starting, setStarting] = React.useState(false)
   const [manualOpen, setManualOpen] = React.useState(false)
   const [manualDomains, setManualDomains] = React.useState([""])
   const [autoOpen, setAutoOpen] = React.useState(false)
-  const [autoScope, setAutoScope] = React.useState<"national" | "local">(
-    "national"
-  )
-  const [localLatitude, setLocalLatitude] = React.useState("")
-  const [localLongitude, setLocalLongitude] = React.useState("")
-  const [localRadius, setLocalRadius] = React.useState("10")
-  const [localZoom, setLocalZoom] = React.useState("12")
-  const [localSearchType, setLocalSearchType] = React.useState<
-    "maps" | "local_finder"
-  >("maps")
-  const [localDevice, setLocalDevice] = React.useState<"desktop" | "mobile">(
-    "desktop"
-  )
-  const [localDepth, setLocalDepth] = React.useState("20")
-  const [localBusinessQuery, setLocalBusinessQuery] = React.useState("")
-  const [localCategories, setLocalCategories] = React.useState("")
-  const [localIncludeQuestions, setLocalIncludeQuestions] =
-    React.useState(false)
-  const [localQuestionsKeyword, setLocalQuestionsKeyword] = React.useState("")
-  const [localQuestionsDepth, setLocalQuestionsDepth] = React.useState("20")
-  const [actionPending, setActionPending] = React.useState("")
   const [error, setError] = React.useState("")
   const [message, setMessage] = React.useState("")
-  const selectionScopeRef = React.useRef("")
 
-  React.useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setSearch(searchInput.trim())
-      setPage(1)
-    }, 300)
-    return () => window.clearTimeout(timer)
-  }, [searchInput])
+  const connectionQuery = useQuery({
+    queryKey: keywordQueryKeys.connection(projectId),
+    queryFn: () => getGSCConnection(projectId),
+    staleTime: 5 * 60 * 1000,
+  })
+  const autoDiscoveryReady = Boolean(
+    connectionQuery.data?.propertyConnected &&
+    !connectionQuery.data.requiresReconnect &&
+    !connectionQuery.error
+  )
 
   const opportunityQuery = React.useMemo<CompetitorOpportunityQuery>(
     () => ({
-      page,
-      pageSize: PAGE_SIZE,
-      search,
-      competitorDomain:
-        competitorDomain === "all" ? undefined : competitorDomain,
-      intent: intent === "all" ? undefined : intent,
-      status: opportunityStatus,
-      inLibrary: libraryFilter === "all" ? undefined : libraryFilter === "in",
-      minVolume: optionalNonNegativeNumber(minVolume),
-      maxDifficulty: optionalBoundedNumber(maxDifficulty, 100),
-      sort,
-      order: sort === "keyword" || sort === "best_rank" ? "asc" : "desc",
+      page: 1,
+      pageSize: COMPETITOR_OPPORTUNITY_PAGE_SIZE,
+      status: "all",
+      sort: "opportunity_score",
+      order: "desc",
     }),
-    [
-      competitorDomain,
-      intent,
-      libraryFilter,
-      maxDifficulty,
-      minVolume,
-      opportunityStatus,
-      page,
-      search,
-      sort,
-    ]
+    []
   )
   const statusQuery = useQuery({
     queryKey: keywordQueryKeys.competitorStatus(projectId),
@@ -1207,19 +1175,11 @@ function CompetitorOpportunityPanel({
     staleTime: 5 * 60 * 1000,
     placeholderData: (previous) => previous,
   })
-  const historyQuery = useQuery({
-    queryKey: keywordQueryKeys.competitorHistory(projectId),
-    queryFn: () => listCompetitorAnalysisRuns(projectId),
-    enabled: historyOpen,
-    staleTime: 30 * 60 * 1000,
-  })
+  const previousRunStatusRef = React.useRef<
+    CompetitorAnalysisRun["status"] | null
+  >(null)
   const competitors = competitorsQuery.data?.items ?? []
   const result = opportunitiesQuery.data ?? null
-  const history = historyQuery.data ?? []
-  const loading =
-    statusQuery.isFetching ||
-    competitorsQuery.isFetching ||
-    opportunitiesQuery.isFetching
   const loadError =
     statusQuery.error || competitorsQuery.error || opportunitiesQuery.error
   const displayError =
@@ -1230,42 +1190,27 @@ function CompetitorOpportunityPanel({
     !["queued", "running"].includes(run.status)
       ? ""
       : message
+  const panelError = manualOpen ? "" : displayError
 
   React.useEffect(() => {
-    if (!result) return
-    const selectionScope = JSON.stringify([
-      competitorDomain,
-      intent,
-      libraryFilter,
-      maxDifficulty,
-      minVolume,
-      opportunityStatus,
-      page,
-      projectId,
-      search,
-      sort,
-    ])
-    const visibleIds = new Set(result.items.map((item) => item.id))
-    const scopeChanged = selectionScopeRef.current !== selectionScope
-    selectionScopeRef.current = selectionScope
-    setSelectedIds((current) =>
-      scopeChanged
-        ? new Set()
-        : new Set([...current].filter((id) => visibleIds.has(id)))
-    )
-  }, [
-    competitorDomain,
-    intent,
-    libraryFilter,
-    maxDifficulty,
-    minVolume,
-    opportunityStatus,
-    page,
-    projectId,
-    result,
-    search,
-    sort,
-  ])
+    const previous = previousRunStatusRef.current
+    const current = run?.status ?? null
+    previousRunStatusRef.current = current
+
+    if (
+      previous &&
+      ["queued", "running"].includes(previous) &&
+      current &&
+      !["queued", "running"].includes(current)
+    ) {
+      void queryClient.invalidateQueries({
+        queryKey: ["keywords", projectId, "competitors"],
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["keywords", projectId, "opportunities"],
+      })
+    }
+  }, [projectId, queryClient, run?.status])
 
   function refreshCompetitorData() {
     void queryClient.invalidateQueries({
@@ -1277,17 +1222,26 @@ function CompetitorOpportunityPanel({
     void queryClient.invalidateQueries({
       queryKey: ["keywords", projectId, "opportunities"],
     })
-    if (historyOpen) {
-      void queryClient.invalidateQueries({
-        queryKey: keywordQueryKeys.competitorHistory(projectId),
-      })
+  }
+
+  async function openAutoDiscovery() {
+    setError("")
+    const refreshed = await connectionQuery.refetch()
+    const ready = Boolean(
+      refreshed.data?.propertyConnected &&
+      !refreshed.data.requiresReconnect &&
+      !refreshed.error
+    )
+    if (!ready) {
+      setAutoOpen(true)
+      return
     }
+    void handleStart({ mode: "auto" })
   }
 
   async function handleStart(input: {
     mode: "manual" | "auto"
     competitorDomains?: string[]
-    localMarket?: CompetitorLocalMarket
   }) {
     setStarting(true)
     setError("")
@@ -1321,275 +1275,125 @@ function CompetitorOpportunityPanel({
     void handleStart({ mode: "manual", competitorDomains: domains })
   }
 
-  function handleAutoStart() {
-    if (autoScope === "national") {
-      void handleStart({ mode: "auto" })
-      return
-    }
-    const latitude = Number(localLatitude)
-    const longitude = Number(localLongitude)
-    const radiusKm = Number(localRadius)
-    const zoom = Number(localZoom)
-    const depth = Number(localDepth)
-    const questionsDepth = Number(localQuestionsDepth)
-    const categories = localCategories
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .slice(0, 10)
-    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
-      setError("纬度必须在 -90 到 90 之间")
-      return
-    }
-    if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
-      setError("经度必须在 -180 到 180 之间")
-      return
-    }
-    if (!Number.isFinite(radiusKm) || radiusKm < 1 || radiusKm > 100000) {
-      setError("搜索半径必须在 1 到 100000 公里之间")
-      return
-    }
-    if (!Number.isInteger(zoom) || zoom < 4 || zoom > 18) {
-      setError("地图缩放必须在 4 到 18 之间")
-      return
-    }
-    if (!Number.isInteger(depth) || depth < 1 || depth > 100) {
-      setError("抓取深度必须在 1 到 100 之间")
-      return
-    }
-    if (
-      localIncludeQuestions &&
-      (!Number.isInteger(questionsDepth) ||
-        questionsDepth < 1 ||
-        questionsDepth > 100)
-    ) {
-      setError("商家问答深度必须在 1 到 100 之间")
-      return
-    }
-    if (categories.some((category) => category.length > 120)) {
-      setError("每个商家分类不能超过 120 个字符")
-      return
-    }
-    void handleStart({
-      mode: "auto",
-      localMarket: {
-        latitude,
-        longitude,
-        radiusKm,
-        zoom,
-        searchType: localSearchType,
-        device: localDevice,
-        depth,
-        businessQuery: localBusinessQuery.trim() || undefined,
-        categories,
-        includeQuestions: localIncludeQuestions,
-        questionsKeyword: localQuestionsKeyword.trim() || undefined,
-        questionsDepth,
-      },
-    })
-  }
-
-  async function handleBatch(action: "accept" | "dismiss" | "restore") {
-    if (!selectedIds.size) return
-    setActionPending(action)
-    setError("")
-    setMessage("")
-    try {
-      const response = await updateCompetitorOpportunities(
-        projectId,
-        [...selectedIds],
-        action
-      )
-      setMessage(
-        action === "accept"
-          ? `已处理 ${response.updated} 个机会，新增 ${response.addedToLibrary} 个关键词`
-          : `已更新 ${response.updated} 个机会`
-      )
-      if (action === "accept") onLibraryChanged()
-      setSelectedIds(new Set())
-      void queryClient.invalidateQueries({
-        queryKey: ["keywords", projectId, "opportunities"],
-      })
-      if (action === "accept") {
-        void queryClient.invalidateQueries({
-          queryKey: ["keywords", projectId, "library-list"],
-        })
-        void queryClient.invalidateQueries({
-          queryKey: keywordQueryKeys.libraryStatus(projectId),
-        })
-      }
-    } catch (requestError) {
-      setError(errorMessage(requestError, "更新机会缺口失败"))
-    } finally {
-      setActionPending("")
-    }
-  }
-
   const items = result?.items ?? []
-  const pageCount = Math.max(1, Math.ceil((result?.total ?? 0) / PAGE_SIZE))
-  const allPageSelected = Boolean(
-    items.length && items.every((item) => selectedIds.has(item.id))
-  )
-  const selectedItems = items.filter((item) => selectedIds.has(item.id))
-  const canAccept = selectedItems.length === selectedIds.size
-  const canDismiss =
-    selectedItems.length === selectedIds.size &&
-    selectedItems.every((item) => item.status === "new")
-  const canRestore =
-    selectedItems.length === selectedIds.size &&
-    selectedItems.every((item) => item.status === "dismissed")
   const active = Boolean(run && ["queued", "running"].includes(run.status))
-
-  return (
-    <Card id="competitor-gap" className="scroll-mt-4 overflow-hidden">
-      <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-semibold">竞争对手机会缺口</h2>
-            {run ? <AnalysisStatusBadge status={run.status} /> : null}
-            {run ? (
-              <span className="text-xs text-muted-foreground">
-                {run.mode === "manual" ? "手动" : "自动"}
-              </span>
-            ) : null}
-            {result?.analyzedAt ? (
-              <span className="text-xs text-muted-foreground">
-                {formatDateTime(result.analyzedAt)}
-              </span>
-            ) : null}
-          </div>
-          {run ? (
-            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              <span>{run.message}</span>
-              <span>
-                {run.completedCompetitors}/{run.discoveredCount} 个竞品
-              </span>
-              <span>{formatNumber(run.uniqueKeywordCount)} 个去重机会</span>
-              <span>${run.totalCostUsd.toFixed(4)}</span>
-            </div>
-          ) : null}
-        </div>
-        <div className="flex items-center gap-2">
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    aria-label="分析历史"
-                    onClick={() => setHistoryOpen((value) => !value)}
-                  />
-                }
-              >
-                <History />
-              </TooltipTrigger>
-              <TooltipContent>分析历史</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    aria-label="刷新竞争分析"
-                    disabled={loading}
-                    onClick={refreshCompetitorData}
-                  />
-                }
-              >
-                <RefreshCw className={loading ? "animate-spin" : ""} />
-              </TooltipTrigger>
-              <TooltipContent>刷新</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={active || starting}
-            onClick={() => {
-              setError("")
-              setManualOpen(true)
-            }}
-          >
-            <Plus />
-            手动添加
-          </Button>
-          <Button
-            size="sm"
-            disabled={active || starting}
-            onClick={() => {
-              setError("")
-              setAutoOpen(true)
-            }}
-          >
-            {starting || active ? (
-              <LoaderCircle className="animate-spin" />
-            ) : (
-              <Radar />
-            )}
-            自动发现
-          </Button>
-        </div>
-      </div>
-
+  const analyzedCompetitors = competitors.filter(
+    (competitor) =>
+      competitor.selectedForGap && competitor.status === "completed"
+  )
+  const savedDomain = savedCompetitorDomain?.trim() ?? ""
+  const savedCompetitorIsInResults = analyzedCompetitors.some(
+    (competitor) =>
+      competitor.domain.toLowerCase() === savedDomain.toLowerCase()
+  )
+  const gapVolume = items.reduce(
+    (total, item) => total + (item.searchVolume ?? 0),
+    0
+  )
+  const highOpportunityCount = items.filter(isHighOpportunity).length
+  const hasAnalyzedResults = Boolean(
+    analyzedCompetitors.length || (result?.total ?? 0) > 0
+  )
+  const analyzedAt = hasAnalyzedResults ? (result?.analyzedAt ?? null) : null
+  const summary = (
+    <CompetitorIntelligenceSummary
+      analyzedCompetitors={analyzedCompetitors.length}
+      opportunityCount={result?.total ?? 0}
+      gapVolume={gapVolume}
+      highOpportunityCount={highOpportunityCount}
+      analyzedAt={analyzedAt}
+      hasAnalyzedResults={hasAnalyzedResults}
+      analyzePending={active || starting || connectionQuery.isFetching}
+      manualPending={active || starting}
+      onAnalyze={() => void openAutoDiscovery()}
+      onManualAdd={() => {
+        setError("")
+        setManualOpen(true)
+      }}
+    />
+  )
+  const dialogs = (
+    <>
       <Dialog open={manualOpen} onOpenChange={setManualOpen}>
-        <DialogContent showCloseButton={!starting}>
+        <DialogContent showCloseButton={!starting} className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>手动添加竞争对手</DialogTitle>
-            <DialogDescription>竞争对手域名</DialogDescription>
+            <DialogDescription>
+              输入最多 5 个域名，不需要连接 GSC。
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
+          <div className="space-y-3">
             {manualDomains.map((domain, index) => (
-              <div key={index} className="flex items-center gap-2">
-                <Input
-                  value={domain}
-                  placeholder="competitor.com"
-                  aria-label={`竞争对手域名 ${index + 1}`}
-                  disabled={starting}
-                  onChange={(event) => {
-                    const value = event.target.value
-                    setManualDomains((current) =>
-                      current.map((item, itemIndex) =>
-                        itemIndex === index ? value : item
-                      )
-                    )
-                    setError("")
-                  }}
-                />
-                {manualDomains.length > 1 ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={`删除竞争对手 ${index + 1}`}
+              <div key={index} className="space-y-1.5">
+                <Label htmlFor={`competitor-domain-${index}`}>
+                  竞争对手域名 {index + 1}
+                </Label>
+                <InputGroup>
+                  <InputGroupInput
+                    id={`competitor-domain-${index}`}
+                    value={domain}
+                    placeholder="competitor.com"
+                    aria-label={`竞争对手域名 ${index + 1}`}
                     disabled={starting}
-                    onClick={() =>
+                    onChange={(event) => {
+                      const value = event.target.value
                       setManualDomains((current) =>
-                        current.filter((_, itemIndex) => itemIndex !== index)
+                        current.map((item, itemIndex) =>
+                          itemIndex === index ? value : item
+                        )
                       )
-                    }
-                  >
-                    <Trash2 />
-                  </Button>
-                ) : null}
+                      setError("")
+                    }}
+                  />
+                  {manualDomains.length > 1 ? (
+                    <InputGroupAddon align="inline-end">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`删除竞争对手 ${index + 1}`}
+                        disabled={starting}
+                        onClick={() =>
+                          setManualDomains((current) =>
+                            current.filter(
+                              (_, itemIndex) => itemIndex !== index
+                            )
+                          )
+                        }
+                      >
+                        <Trash2 />
+                      </Button>
+                    </InputGroupAddon>
+                  ) : null}
+                </InputGroup>
               </div>
             ))}
-            {manualDomains.length < 5 ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={starting}
-                onClick={() => setManualDomains((current) => [...current, ""])}
-              >
-                <Plus />
-                添加域名
-              </Button>
-            ) : null}
+            <div className="flex items-center justify-between gap-3">
+              {manualDomains.length < 5 ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={starting}
+                  onClick={() =>
+                    setManualDomains((current) => [...current, ""])
+                  }
+                >
+                  <Plus />
+                  添加域名
+                </Button>
+              ) : (
+                <span />
+              )}
+              <span className="text-xs text-muted-foreground">
+                {manualDomains.length} / 5
+              </span>
+            </div>
           </div>
           {displayError ? (
-            <p className="text-sm text-destructive">{displayError}</p>
+            <p className="text-sm text-destructive" role="alert">
+              {displayError}
+            </p>
           ) : null}
           <DialogFooter>
             <Button
@@ -1612,581 +1416,485 @@ function CompetitorOpportunityPanel({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={autoOpen} onOpenChange={setAutoOpen}>
-        <DialogContent
-          showCloseButton={!starting}
-          className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
-        >
+      <Dialog open={autoOpen && !autoDiscoveryReady} onOpenChange={setAutoOpen}>
+        <DialogContent>
           <DialogHeader>
-            <DialogTitle>自动发现竞争对手</DialogTitle>
-            <DialogDescription>搜索市场</DialogDescription>
+            <DialogTitle>
+              请先连接当前项目的 Google Search Console，再使用自动发现。
+            </DialogTitle>
           </DialogHeader>
-          <div className="grid grid-cols-2 gap-1 rounded-md border p-1">
-            <Button
-              type="button"
-              size="sm"
-              variant={autoScope === "national" ? "secondary" : "ghost"}
-              onClick={() => setAutoScope("national")}
-            >
-              全国搜索
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={autoScope === "local" ? "secondary" : "ghost"}
-              onClick={() => setAutoScope("local")}
-            >
-              本地搜索
-            </Button>
-          </div>
-          {autoScope === "local" ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <LocalMarketField
-                label="纬度"
-                value={localLatitude}
-                min={-90}
-                max={90}
-                step="any"
-                onChange={setLocalLatitude}
-              />
-              <LocalMarketField
-                label="经度"
-                value={localLongitude}
-                min={-180}
-                max={180}
-                step="any"
-                onChange={setLocalLongitude}
-              />
-              <LocalMarketField
-                label="半径（公里）"
-                value={localRadius}
-                min={1}
-                max={100000}
-                step="any"
-                onChange={setLocalRadius}
-              />
-              <LocalMarketField
-                label="地图缩放"
-                value={localZoom}
-                min={4}
-                max={18}
-                onChange={setLocalZoom}
-              />
-              <label className="space-y-1 text-xs font-medium">
-                <span>搜索类型</span>
-                <Select
-                  value={localSearchType}
-                  onValueChange={(value) =>
-                    setLocalSearchType(value as "maps" | "local_finder")
-                  }
-                >
-                  <SelectTrigger className="w-full" aria-label="搜索类型">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="maps">Google Maps</SelectItem>
-                    <SelectItem value="local_finder">Local Finder</SelectItem>
-                  </SelectContent>
-                </Select>
-              </label>
-              <label className="space-y-1 text-xs font-medium">
-                <span>设备</span>
-                <Select
-                  value={localDevice}
-                  onValueChange={(value) =>
-                    setLocalDevice(value as "desktop" | "mobile")
-                  }
-                >
-                  <SelectTrigger className="w-full" aria-label="设备">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="desktop">桌面</SelectItem>
-                    <SelectItem value="mobile">移动</SelectItem>
-                  </SelectContent>
-                </Select>
-              </label>
-              <LocalMarketField
-                label="抓取深度"
-                value={localDepth}
-                min={1}
-                max={100}
-                onChange={setLocalDepth}
-              />
-              <label className="space-y-1 text-xs font-medium">
-                <span>商家名称筛选</span>
-                <Input
-                  value={localBusinessQuery}
-                  maxLength={200}
-                  onChange={(event) =>
-                    setLocalBusinessQuery(event.target.value)
-                  }
-                />
-              </label>
-              <label className="space-y-1 text-xs font-medium sm:col-span-2">
-                <span>商家分类</span>
-                <Input
-                  value={localCategories}
-                  placeholder="pizza_restaurant, coffee_shop"
-                  onChange={(event) => setLocalCategories(event.target.value)}
-                />
-              </label>
-              <label className="flex items-center gap-2 text-xs font-medium sm:col-span-2">
-                <Checkbox
-                  checked={localIncludeQuestions}
-                  onCheckedChange={(checked) =>
-                    setLocalIncludeQuestions(checked === true)
-                  }
-                />
-                获取 Google 商家问答证据
-              </label>
-              {localIncludeQuestions ? (
-                <>
-                  <label className="space-y-1 text-xs font-medium">
-                    <span>商家问答关键词</span>
-                    <Input
-                      value={localQuestionsKeyword}
-                      maxLength={200}
-                      placeholder={localBusinessQuery || "默认使用商家名称筛选"}
-                      onChange={(event) =>
-                        setLocalQuestionsKeyword(event.target.value)
-                      }
-                    />
-                  </label>
-                  <LocalMarketField
-                    label="商家问答深度"
-                    value={localQuestionsDepth}
-                    min={1}
-                    max={100}
-                    onChange={setLocalQuestionsDepth}
-                  />
-                </>
-              ) : null}
-            </div>
-          ) : null}
-          {displayError ? (
-            <p className="text-sm text-destructive">{displayError}</p>
-          ) : null}
           <DialogFooter>
             <Button
-              type="button"
-              variant="outline"
-              disabled={starting}
-              onClick={() => setAutoOpen(false)}
+              nativeButton={false}
+              render={<a href={gscSettingsHref(projectId, "competitor-gap")} />}
             >
-              取消
-            </Button>
-            <Button type="button" disabled={starting} onClick={handleAutoStart}>
-              {starting ? <LoaderCircle className="animate-spin" /> : <Radar />}
-              开始发现
+              <ExternalLink />
+              前往连接
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {active && run ? (
-        <div className="border-b px-4 py-3">
-          <Progress value={run.progress} />
-        </div>
-      ) : null}
-
-      {run?.mode === "auto" &&
-      run.landscapeSummary &&
-      Object.keys(run.landscapeSummary).length ? (
-        <CompetitiveLandscapeSummary run={run} />
-      ) : null}
-
-      {historyOpen ? (
-        <div className="grid gap-px border-b bg-border sm:grid-cols-2 lg:grid-cols-4">
-          {history.slice(0, 8).map((item) => (
-            <div key={item.runId} className="bg-background px-4 py-3 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <AnalysisStatusBadge status={item.status} />
-                  <span className="text-muted-foreground">
-                    {item.mode === "manual" ? "手动" : "自动"}
-                  </span>
-                </div>
-                <span className="text-muted-foreground">
-                  {formatDateTime(item.createdAt)}
-                </span>
-              </div>
-              <div className="mt-2 tabular-nums">
-                {item.completedCompetitors}/
-                {item.analyzedCompetitorCount ?? item.discoveredCount} 已分析 ·{" "}
-                {formatNumber(item.uniqueKeywordCount)} 机会 · $
-                {item.totalCostUsd.toFixed(4)}
-              </div>
+    </>
+  )
+  if (!active && !hasAnalyzedResults) {
+    return (
+      <div id="competitor-gap" className="scroll-mt-4 space-y-4">
+        {summary}
+        {panelError ? (
+          <Card size="sm" role="alert">
+            <CardContent className="text-destructive">{panelError}</CardContent>
+          </Card>
+        ) : null}
+        <Card size="sm">
+          <CardContent className="flex min-h-80 flex-col items-center justify-center px-6 py-10 text-center">
+            <Radar className="size-8 text-primary" />
+            <h3 className="mt-4 text-lg font-semibold">发现内容机会</h3>
+            <p className="mt-2 max-w-xl text-sm text-muted-foreground">
+              找出竞争对手已有排名、但当前网站尚未覆盖的关键词
+            </p>
+            <div className="mt-7 grid w-full max-w-3xl gap-5 text-left sm:grid-cols-3">
+              <OnboardingFeature
+                icon={<Search />}
+                title="自动发现"
+                description="找到排名关键词相似的竞争对手"
+              />
+              <OnboardingFeature
+                icon={<Radar />}
+                title="差距分析"
+                description="显示竞争对手已有、当前网站缺失的关键词"
+              />
+              <OnboardingFeature
+                icon={<Tag />}
+                title="机会评分"
+                description="按流量潜力与难度排列关键词差距"
+              />
             </div>
-          ))}
-          {historyQuery.isPending ? (
-            <div className="bg-background px-4 py-3 text-xs text-muted-foreground">
-              正在读取分析记录
-            </div>
-          ) : !history.length ? (
-            <div className="bg-background px-4 py-3 text-xs text-muted-foreground">
-              暂无分析记录
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {competitors.length ? (
-        <div className="flex gap-2 overflow-x-auto border-b px-4 py-3">
-          {competitors.map((competitor) => (
-            <button
-              key={competitor.id}
-              type="button"
-              className={`w-56 shrink-0 rounded-md border px-3 py-2 text-left text-xs ${
-                competitorDomain === competitor.domain
-                  ? "border-primary bg-primary/5"
-                  : competitor.selectedForGap !== false
-                    ? "bg-background hover:bg-muted/50"
-                    : "cursor-default bg-muted/25"
-              }`}
-              disabled={competitor.selectedForGap === false}
-              onClick={() => {
-                setCompetitorDomain((value) =>
-                  value === competitor.domain ? "all" : competitor.domain
-                )
-                setPage(1)
-              }}
-            >
-              <span className="flex items-center justify-between gap-2">
-                <span className="truncate font-medium">
-                  {competitor.domain}
-                </span>
-                <Badge variant="outline">
-                  {competitorGapStatusLabel(competitor)}
-                </Badge>
-              </span>
-              {run?.mode === "auto" ? (
-                <span className="mt-2 block space-y-2">
-                  <span className="flex flex-wrap gap-1">
-                    <Badge variant="secondary">
-                      {competitorDomainTypeLabel(competitor.domainType)}
-                    </Badge>
-                    {competitor.isSeoCompetitor ? (
-                      <Badge variant="outline">SEO 竞品</Badge>
-                    ) : null}
-                    {competitor.isBusinessCompetitor ? (
-                      <Badge variant="outline">业务竞品</Badge>
-                    ) : null}
-                    <Badge variant="outline">
-                      {competitorSiteStatusLabel(competitor.siteCheckStatus)}
-                    </Badge>
-                  </span>
-                  {competitorRedirectDescription(competitor) ? (
-                    <span className="block break-all text-muted-foreground">
-                      {competitorRedirectDescription(competitor)}
-                    </span>
-                  ) : null}
-                  {competitorSiteReason(competitor) ? (
-                    <span className="line-clamp-3 block leading-5 text-muted-foreground">
-                      {competitorSiteReason(competitor)}
-                    </span>
-                  ) : null}
-                  {competitor.whyTheyMatter ? (
-                    <span className="line-clamp-3 block leading-5 text-foreground">
-                      {competitor.whyTheyMatter}
-                    </span>
-                  ) : null}
-                  <span className="grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
-                    <span>覆盖词 {competitor.keywordsCount ?? "-"}</span>
-                    <span>
-                      ETV{" "}
-                      {competitor.etv == null
-                        ? "-"
-                        : formatNumber(competitor.etv)}
-                    </span>
-                    <span>
-                      平均排名{" "}
-                      {competitor.avgPosition == null
-                        ? "-"
-                        : competitor.avgPosition.toFixed(1)}
-                    </span>
-                    <span>
-                      中位排名{" "}
-                      {competitor.medianPosition == null
-                        ? "-"
-                        : competitor.medianPosition.toFixed(1)}
-                    </span>
-                    <span>
-                      可见度{" "}
-                      {competitor.visibility == null
-                        ? "-"
-                        : competitor.visibility.toFixed(2)}
-                    </span>
-                    <span>SERP 项 {competitor.relevantSerpItems ?? "-"}</span>
-                    <span>
-                      排名词证据{" "}
-                      {competitor.rankedKeywordsChecked
-                        ? competitor.rankedKeywordsEvidenceCount || "无数据"
-                        : "未验证"}
-                    </span>
-                    <span>
-                      自然词{" "}
-                      {recordMetric(
-                        competitor.domainOverview,
-                        "organic_keywords"
-                      )}
-                    </span>
-                    <span>
-                      自然流量{" "}
-                      {recordMetric(
-                        competitor.domainOverview,
-                        "organic_traffic"
-                      )}
-                    </span>
-                  </span>
-                </span>
-              ) : (
-                <span className="mt-1 block text-muted-foreground">
-                  {competitor.keywordCount} 机会 · $
-                  {competitor.costUsd.toFixed(4)}
-                  {competitor.status === "failed" ? " · 失败" : ""}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-      ) : null}
-
-      <div className="flex flex-col gap-3 border-b px-4 py-3 xl:flex-row xl:items-center">
-        <div className="relative min-w-52 flex-1">
-          <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
-            placeholder="搜索机会关键词"
-            className="pl-9"
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:flex">
-          <KeywordFilter
-            label="意图"
-            value={intent}
-            onChange={(value) => {
-              setIntent(value)
-              setPage(1)
-            }}
-            options={[
-              ["all", "全部意图"],
-              ["informational", "信息型"],
-              ["commercial", "商业型"],
-              ["transactional", "交易型"],
-              ["navigational", "导航型"],
-            ]}
-          />
-          <KeywordFilter
-            label="机会状态"
-            value={opportunityStatus}
-            onChange={(value) => {
-              setOpportunityStatus(value as CompetitorOpportunityStatus | "all")
-              setPage(1)
-            }}
-            options={[
-              ["new", "待处理"],
-              ["accepted", "已接收"],
-              ["dismissed", "已忽略"],
-              ["all", "全部状态"],
-            ]}
-          />
-          <KeywordFilter
-            label="词库状态"
-            value={libraryFilter}
-            onChange={(value) => {
-              setLibraryFilter(value as "all" | "in" | "out")
-              setPage(1)
-            }}
-            options={[
-              ["all", "全部词库状态"],
-              ["out", "未加入词库"],
-              ["in", "已在词库"],
-            ]}
-          />
-          <KeywordFilter
-            label="排序"
-            value={sort}
-            onChange={(value) => {
-              setSort(value as NonNullable<CompetitorOpportunityQuery["sort"]>)
-              setPage(1)
-            }}
-            options={[
-              ["opportunity_score", "机会分"],
-              ["search_volume", "搜索量"],
-              ["difficulty", "难度"],
-              ["best_rank", "最佳排名"],
-              ["competitor_count", "竞品数"],
-              ["keyword", "关键词"],
-            ]}
-          />
-          <Input
-            type="number"
-            min={0}
-            value={minVolume}
-            onChange={(event) => {
-              setMinVolume(event.target.value)
-              setPage(1)
-            }}
-            placeholder="最低搜索量"
-            aria-label="最低搜索量"
-            className="h-8 w-full xl:w-32"
-          />
-          <Input
-            type="number"
-            min={0}
-            max={100}
-            value={maxDifficulty}
-            onChange={(event) => {
-              setMaxDifficulty(event.target.value)
-              setPage(1)
-            }}
-            placeholder="最高难度"
-            aria-label="最高难度"
-            className="h-8 w-full xl:w-28"
-          />
-        </div>
-      </div>
-
-      {selectedIds.size ? (
-        <div className="flex flex-wrap items-center gap-2 border-b bg-muted/25 px-4 py-2">
-          <span className="mr-2 text-sm text-muted-foreground">
-            已选择 {selectedIds.size} 项
-          </span>
-          {canAccept ? (
+            {savedDomain && !savedCompetitorIsInResults ? (
+              <Badge variant="outline" className="mt-7">
+                {savedDomain}
+                <span className="text-muted-foreground">待分析</span>
+              </Badge>
+            ) : null}
             <Button
-              size="sm"
-              disabled={Boolean(actionPending)}
-              onClick={() => void handleBatch("accept")}
+              className="mt-7"
+              disabled={starting || connectionQuery.isFetching}
+              onClick={() => void openAutoDiscovery()}
             >
-              {actionPending === "accept" ? (
+              {starting || connectionQuery.isFetching ? (
                 <LoaderCircle className="animate-spin" />
+              ) : (
+                <Radar />
+              )}
+              分析竞争对手
+            </Button>
+            <p className="mt-2 text-xs text-muted-foreground">
+              大约需要 2 分钟
+            </p>
+          </CardContent>
+        </Card>
+        {dialogs}
+      </div>
+    )
+  }
+
+  if (active && run) {
+    return (
+      <div id="competitor-gap" className="scroll-mt-4 space-y-4">
+        {summary}
+        <Card size="sm">
+          <CardHeader>
+            <CardTitle>
+              分析竞争对手（{run.completedCompetitors}/{run.competitorLimit}）
+            </CardTitle>
+            <CardDescription>
+              {displayMessage || run.message || "正在分析"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Progress value={run.progress} />
+            <p className="mt-2 text-right text-xs text-muted-foreground tabular-nums">
+              {run.progress}%
+            </p>
+          </CardContent>
+        </Card>
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(240px,0.32fr)_minmax(0,1fr)]">
+          <Card size="sm">
+            <CardHeader>
+              <CardTitle>竞争对手</CardTitle>
+              <CardDescription>
+                {analyzedCompetitors.length} 个已分析
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {analyzedCompetitors.length ? (
+                analyzedCompetitors.map((competitor, index) => (
+                  <CompetitorListItem
+                    key={competitor.id}
+                    rank={index + 1}
+                    competitor={competitor}
+                    highOpportunityCount={0}
+                  />
+                ))
+              ) : (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  尚未分析任何竞争对手
+                </p>
+              )}
+            </CardContent>
+          </Card>
+          <OpportunityGapCard
+            items={items}
+            total={result?.total ?? 0}
+            selectedIds={selectedIds}
+            onSelectionChange={setSelectedIds}
+          />
+        </div>
+        {dialogs}
+      </div>
+    )
+  }
+
+  if (hasAnalyzedResults) {
+    return (
+      <div id="competitor-gap" className="scroll-mt-4 space-y-4">
+        {summary}
+        {run?.status === "failed" ? (
+          <Card size="sm" role="alert">
+            <CardContent className="text-destructive">
+              {run.message || "竞争分析失败"}
+            </CardContent>
+          </Card>
+        ) : null}
+        {panelError ? (
+          <Card size="sm" role="alert">
+            <CardContent className="text-destructive">{panelError}</CardContent>
+          </Card>
+        ) : null}
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(240px,0.32fr)_minmax(0,1fr)]">
+          <Card size="sm">
+            <CardHeader>
+              <CardTitle>所有竞争对手</CardTitle>
+              <CardDescription>
+                {analyzedCompetitors.length} 个已分析
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {analyzedCompetitors.map((competitor, index) => (
+                <CompetitorListItem
+                  key={competitor.id}
+                  rank={index + 1}
+                  competitor={competitor}
+                  highOpportunityCount={
+                    items.filter(
+                      (item) =>
+                        isHighOpportunity(item) &&
+                        item.rankings.some(
+                          (ranking) => ranking.domain === competitor.domain
+                        )
+                    ).length
+                  }
+                />
+              ))}
+              {savedDomain && !savedCompetitorIsInResults ? (
+                <div className="flex items-center gap-3 rounded-md border p-3">
+                  <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium tabular-nums">
+                    {analyzedCompetitors.length + 1}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">
+                      {savedDomain}
+                    </p>
+                    <p className="text-xs text-muted-foreground">待分析</p>
+                  </div>
+                </div>
               ) : null}
-              接收并加入词库
-            </Button>
-          ) : null}
-          {canDismiss ? (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={Boolean(actionPending)}
-              onClick={() => void handleBatch("dismiss")}
-            >
-              忽略
-            </Button>
-          ) : null}
-          {canRestore ? (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={Boolean(actionPending)}
-              onClick={() => void handleBatch("restore")}
-            >
-              <RotateCcw />
-              恢复
-            </Button>
-          ) : null}
+            </CardContent>
+          </Card>
+          <OpportunityGapCard
+            items={items}
+            total={result?.total ?? 0}
+            selectedIds={selectedIds}
+            onSelectionChange={setSelectedIds}
+          />
         </div>
-      ) : null}
+        {dialogs}
+      </div>
+    )
+  }
+}
+function CompetitorIntelligenceSummary({
+  analyzedCompetitors,
+  opportunityCount,
+  gapVolume,
+  highOpportunityCount,
+  analyzedAt,
+  hasAnalyzedResults,
+  analyzePending,
+  manualPending,
+  onAnalyze,
+  onManualAdd,
+}: {
+  analyzedCompetitors: number
+  opportunityCount: number
+  gapVolume: number
+  highOpportunityCount: number
+  analyzedAt: string | null
+  hasAnalyzedResults: boolean
+  analyzePending: boolean
+  manualPending: boolean
+  onAnalyze: () => void
+  onManualAdd: () => void
+}) {
+  const metrics = [
+    {
+      label: "竞争对手",
+      value: formatNumber(analyzedCompetitors),
+      unit: "已分析",
+    },
+    {
+      label: "机会关键词",
+      value: formatNumber(opportunityCount),
+      unit: "个关键词",
+    },
+    {
+      label: "缺口搜索量",
+      value: formatNumber(gapVolume),
+      unit: "/月",
+    },
+    {
+      label: "高机会关键词",
+      value: formatNumber(highOpportunityCount),
+      unit: "个关键词",
+    },
+  ]
 
-      {displayError || displayMessage ? (
-        <div
-          className={`border-b px-4 py-2 text-sm ${displayError ? "text-destructive" : "text-foreground"}`}
-          role="status"
-        >
-          {displayError || displayMessage}
-        </div>
-      ) : null}
-
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead className="w-10">
-              <Checkbox
-                aria-label="选择本页机会"
-                checked={allPageSelected}
-                onCheckedChange={(checked) => {
-                  setSelectedIds(
-                    checked ? new Set(items.map((item) => item.id)) : new Set()
-                  )
-                }}
-              />
-            </TableHead>
-            <TableHead className="min-w-56">关键词</TableHead>
-            <TableHead className="text-right">机会分</TableHead>
-            <TableHead className="min-w-48">竞品排名</TableHead>
-            <TableHead className="text-right">搜索量</TableHead>
-            <TableHead className="text-right">难度</TableHead>
-            <TableHead>意图</TableHead>
-            <TableHead>状态</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {loading && !result ? (
-            <TableRow>
-              <TableCell colSpan={8} className="h-32 text-center">
-                <LoaderCircle className="mx-auto size-5 animate-spin text-primary" />
-              </TableCell>
-            </TableRow>
-          ) : items.length ? (
-            items.map((item) => (
-              <OpportunityRow
-                key={item.id}
-                item={item}
-                selected={selectedIds.has(item.id)}
-                onSelectedChange={(selected) => {
-                  setSelectedIds((current) => {
-                    const next = new Set(current)
-                    if (selected) next.add(item.id)
-                    else next.delete(item.id)
-                    return next
-                  })
-                }}
-              />
-            ))
-          ) : (
-            <TableRow>
-              <TableCell
-                colSpan={8}
-                className="h-32 text-center text-sm text-muted-foreground"
+  return (
+    <Card size="sm">
+      <CardHeader className="items-center">
+        <CardTitle>竞争对手情报</CardTitle>
+        <CardDescription>
+          {analyzedAt ? `分析于 ${formatDate(analyzedAt)}` : "尚未进行竞品分析"}
+        </CardDescription>
+        <CardAction>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={manualPending}
+              onClick={onManualAdd}
+            >
+              <Plus />
+              手动添加
+            </Button>
+            {hasAnalyzedResults ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={analyzePending}
+                onClick={onAnalyze}
               >
-                {run ? "当前条件下没有机会关键词" : "尚未运行竞争分析"}
-              </TableCell>
-            </TableRow>
-          )}
-        </TableBody>
-      </Table>
+                {analyzePending ? (
+                  <LoaderCircle className="animate-spin" />
+                ) : (
+                  <RefreshCw />
+                )}
+                重新分析
+              </Button>
+            ) : null}
+          </div>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="grid gap-px overflow-hidden rounded-md border bg-border sm:grid-cols-2 lg:grid-cols-4">
+        {metrics.map((metric) => (
+          <div key={metric.label} className="min-w-0 bg-background p-4">
+            <p className="text-xs text-muted-foreground">{metric.label}</p>
+            <p className="mt-1 flex min-w-0 flex-wrap items-baseline gap-x-1 text-2xl font-semibold tabular-nums">
+              <span data-slot="metric-value">{metric.value}</span>
+              <span className="text-xs font-normal text-muted-foreground">
+                {metric.unit}
+              </span>
+            </p>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  )
+}
 
-      <div className="flex items-center justify-between border-t px-4 py-3 text-sm">
-        <span className="text-muted-foreground">
-          共 {formatNumber(result?.total ?? 0)} 个机会
-          {loading && result ? "，正在更新" : ""}
-        </span>
-        <div className="flex items-center gap-2">
-          <span className="min-w-20 text-center tabular-nums">
-            {page} / {pageCount}
+function OnboardingFeature({
+  icon,
+  title,
+  description,
+}: {
+  icon: React.ReactNode
+  title: string
+  description: string
+}) {
+  return (
+    <div className="flex gap-3">
+      <div className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground [&_svg]:size-4">
+        {icon}
+      </div>
+      <div>
+        <p className="text-sm font-medium">{title}</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          {description}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function CompetitorListItem({
+  rank,
+  competitor,
+  highOpportunityCount,
+}: {
+  rank: number
+  competitor: KeywordCompetitor
+  highOpportunityCount: number
+}) {
+  return (
+    <div
+      className="flex items-start gap-3 rounded-md border p-3 data-[selected=true]:border-primary/40 data-[selected=true]:bg-primary/5"
+      data-selected={competitor.selectedForGap}
+    >
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium tabular-nums">
+        {rank}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <p className="truncate text-sm font-medium">{competitor.domain}</p>
+          {competitor.selectedForGap ? (
+            <Badge variant="secondary">已选择</Badge>
+          ) : null}
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+          <span>
+            月流量 {nullableNumber(competitor.etv ?? competitor.organicTraffic)}
           </span>
-          <Button
-            variant="outline"
-            size="icon-sm"
-            aria-label="上一页机会"
-            disabled={page <= 1 || loading}
-            onClick={() => setPage((value) => Math.max(1, value - 1))}
-          >
-            <ChevronLeft />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon-sm"
-            aria-label="下一页机会"
-            disabled={page >= pageCount || loading}
-            onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
-          >
-            <ChevronRight />
-          </Button>
+          <span>高机会 {formatNumber(highOpportunityCount)}</span>
         </div>
       </div>
+    </div>
+  )
+}
+
+type OpportunityView = "all" | "high" | "quick" | "untapped"
+
+function isHighOpportunity(item: KeywordCompetitorOpportunity) {
+  return (item.opportunityScore ?? 0) >= 70
+}
+
+function isQuickWin(item: KeywordCompetitorOpportunity) {
+  return (
+    (item.opportunityScore ?? 0) >= 50 &&
+    (item.keywordDifficulty ?? Number.POSITIVE_INFINITY) <= 40
+  )
+}
+
+function OpportunityGapCard({
+  items,
+  total,
+  selectedIds,
+  onSelectionChange,
+}: {
+  items: KeywordCompetitorOpportunity[]
+  total: number
+  selectedIds: Set<string>
+  onSelectionChange: React.Dispatch<React.SetStateAction<Set<string>>>
+}) {
+  const [view, setView] = React.useState<OpportunityView>("all")
+  const visibleItems = items.filter((item) => {
+    if (view === "high") return isHighOpportunity(item)
+    if (view === "quick") return isQuickWin(item)
+    if (view === "untapped") return !item.inLibrary
+    return true
+  })
+  const allVisibleSelected = Boolean(
+    visibleItems.length &&
+    visibleItems.every((item) => selectedIds.has(item.id))
+  )
+
+  return (
+    <Card size="sm" className="min-w-0">
+      <CardHeader>
+        <CardTitle>内容差距</CardTitle>
+        <CardDescription>
+          {formatNumber(visibleItems.length)}/{formatNumber(total)}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <Tabs
+          value={view}
+          onValueChange={(value) => setView(value as OpportunityView)}
+        >
+          <TabsList className="max-w-full justify-start overflow-x-auto">
+            <TabsTrigger value="all">全部</TabsTrigger>
+            <TabsTrigger value="high">高机会</TabsTrigger>
+            <TabsTrigger value="quick">快速取胜</TabsTrigger>
+            <TabsTrigger value="untapped">未覆盖</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <div className="overflow-x-auto">
+          <Table className="min-w-[760px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-10">
+                  <Checkbox
+                    aria-label="选择当前关键词差距"
+                    checked={allVisibleSelected}
+                    onCheckedChange={(checked) => {
+                      onSelectionChange((current) => {
+                        const next = new Set(current)
+                        visibleItems.forEach((item) => {
+                          if (checked) next.add(item.id)
+                          else next.delete(item.id)
+                        })
+                        return next
+                      })
+                    }}
+                  />
+                </TableHead>
+                <TableHead className="min-w-52">关键词</TableHead>
+                <TableHead className="text-right">搜索量</TableHead>
+                <TableHead className="text-right">难度</TableHead>
+                <TableHead className="text-right">CPC</TableHead>
+                <TableHead className="text-right">机会分</TableHead>
+                <TableHead className="min-w-44">排名竞品</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {visibleItems.length ? (
+                visibleItems.map((item) => (
+                  <OpportunityRow
+                    key={item.id}
+                    item={item}
+                    selected={selectedIds.has(item.id)}
+                    onSelectedChange={(selected) => {
+                      onSelectionChange((current) => {
+                        const next = new Set(current)
+                        if (selected) next.add(item.id)
+                        else next.delete(item.id)
+                        return next
+                      })
+                    }}
+                  />
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell
+                    colSpan={7}
+                    className="h-32 text-center text-sm text-muted-foreground"
+                  >
+                    尚未发现关键词差距。
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
     </Card>
   )
 }
@@ -2212,76 +1920,58 @@ function OpportunityRow({
       <TableCell className="max-w-72 font-medium whitespace-normal">
         {item.keyword}
       </TableCell>
-      <TableCell className="text-right font-medium tabular-nums">
-        {item.opportunityScore?.toFixed(1) ?? "-"}
-      </TableCell>
-      <TableCell>
-        <div className="flex flex-wrap gap-1">
-          {item.rankings.slice(0, 3).map((ranking) => (
-            <span
-              key={ranking.competitorId}
-              className="inline-flex max-w-44 items-center gap-1 rounded border px-1.5 py-0.5 text-xs"
-            >
-              <span className="truncate">{ranking.domain}</span>
-              <span className="tabular-nums">#{ranking.rank ?? "-"}</span>
-              {ranking.url ? (
-                <a
-                  href={ranking.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  aria-label={`打开 ${ranking.domain} 排名页面`}
-                  className="text-muted-foreground hover:text-foreground"
-                >
-                  <ExternalLink className="size-3" />
-                </a>
-              ) : null}
-            </span>
-          ))}
-          {item.competitorCount > 3 ? (
-            <span className="text-xs text-muted-foreground">
-              +{item.competitorCount - 3}
-            </span>
-          ) : null}
-        </div>
-      </TableCell>
       <TableCell className="text-right tabular-nums">
         {nullableNumber(item.searchVolume)}
       </TableCell>
       <TableCell className="text-right tabular-nums">
         {nullableNumber(item.keywordDifficulty)}
       </TableCell>
-      <TableCell>{item.intent ? intentLabel(item.intent) : "-"}</TableCell>
+      <TableCell className="text-right tabular-nums">
+        {item.cpc === null ? "-" : `$${item.cpc.toFixed(2)}`}
+      </TableCell>
+      <TableCell className="text-right tabular-nums">
+        {item.opportunityScore === null
+          ? "-"
+          : Math.round(item.opportunityScore)}
+      </TableCell>
       <TableCell>
-        <Badge variant={item.inLibrary ? "secondary" : "outline"}>
-          {item.inLibrary
-            ? "已在词库"
-            : item.status === "dismissed"
-              ? "已忽略"
-              : item.status === "accepted"
-                ? "已接收"
-                : "待处理"}
-        </Badge>
+        <div className="flex flex-wrap gap-1">
+          {item.rankings.slice(0, 3).map((ranking) =>
+            ranking.url ? (
+              <Badge
+                key={ranking.competitorId}
+                variant="outline"
+                className="max-w-44"
+                render={
+                  <a
+                    href={ranking.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`打开 ${ranking.domain} 排名页面`}
+                  />
+                }
+              >
+                <span className="truncate">{ranking.domain}</span>
+                <span className="tabular-nums">#{ranking.rank ?? "-"}</span>
+                <ExternalLink data-icon="inline-end" />
+              </Badge>
+            ) : (
+              <Badge
+                key={ranking.competitorId}
+                variant="outline"
+                className="max-w-44"
+              >
+                <span className="truncate">{ranking.domain}</span>
+                <span className="tabular-nums">#{ranking.rank ?? "-"}</span>
+              </Badge>
+            )
+          )}
+          {item.competitorCount > 3 ? (
+            <Badge variant="ghost">+{item.competitorCount - 3}</Badge>
+          ) : null}
+        </div>
       </TableCell>
     </TableRow>
-  )
-}
-
-function AnalysisStatusBadge({
-  status,
-}: {
-  status: CompetitorAnalysisRun["status"]
-}) {
-  const labels: Record<CompetitorAnalysisRun["status"], string> = {
-    queued: "排队中",
-    running: "分析中",
-    partial: "部分完成",
-    completed: "已完成",
-    failed: "失败",
-  }
-  return (
-    <Badge variant={status === "failed" ? "destructive" : "outline"}>
-      {labels[status]}
-    </Badge>
   )
 }
 
@@ -2425,495 +2115,6 @@ function KeywordLoadingState({
   )
 }
 
-const competitorDomainTypeLabels: Record<
-  KeywordCompetitor["domainType"],
-  string
-> = {
-  direct_product_competitor: "直接产品竞品",
-  publisher_media: "媒体/出版商",
-  marketplace_directory: "市场/目录",
-  community_forum: "社区/论坛",
-  documentation_resource: "文档/资源",
-}
-
-function competitorDomainTypeLabel(value: KeywordCompetitor["domainType"]) {
-  return competitorDomainTypeLabels[value]
-}
-
-function competitorGapStatusLabel(competitor: KeywordCompetitor) {
-  if (!competitor.selectedForGap || competitor.status === "excluded") {
-    return "未付费分析"
-  }
-  const labels: Record<KeywordCompetitor["status"], string> = {
-    pending: "等待分析",
-    running: "分析中",
-    completed: "已分析",
-    failed: "分析失败",
-    excluded: "未付费分析",
-  }
-  return labels[competitor.status]
-}
-
-const competitorSiteStatusLabels: Record<
-  KeywordCompetitor["siteCheckStatus"],
-  string
-> = {
-  not_checked: "未验证",
-  verified: "网站已验证",
-  redirected_related: "相关跳转",
-  redirected_unrelated: "无关跳转",
-  unverified_redirect: "跳转待确认",
-  blocked: "访问被拦截",
-  temporarily_unavailable: "暂时无法访问",
-  permanently_unavailable: "网站不可用",
-  non_html: "非网页结果",
-  unsafe_target: "地址不安全",
-  redirect_loop: "循环跳转",
-  platform_or_login: "平台或登录页",
-}
-
-function competitorSiteStatusLabel(
-  value: KeywordCompetitor["siteCheckStatus"]
-) {
-  return competitorSiteStatusLabels[value]
-}
-
-function LocalMarketField({
-  label,
-  value,
-  min,
-  max,
-  step,
-  onChange,
-}: {
-  label: string
-  value: string
-  min: number
-  max: number
-  step?: string
-  onChange: (value: string) => void
-}) {
-  return (
-    <label className="space-y-1 text-xs font-medium">
-      <span>{label}</span>
-      <Input
-        type="number"
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
-  )
-}
-
-function verificationText(competitor: KeywordCompetitor, key: string): string {
-  const value = competitor.siteVerification[key]
-  return typeof value === "string" ? value : ""
-}
-
-function competitorRedirectDescription(competitor: KeywordCompetitor) {
-  const original = verificationText(competitor, "original_domain")
-  const finalDomain = verificationText(competitor, "final_domain")
-  if (
-    !original ||
-    !finalDomain ||
-    original.toLowerCase() === finalDomain.toLowerCase()
-  ) {
-    return ""
-  }
-  return `${original} 跳转到 ${finalDomain}`
-}
-
-function competitorSiteReason(competitor: KeywordCompetitor) {
-  const reason = verificationText(competitor, "site_reason")
-  if (reason) return reason
-  if (competitor.selectedForGap) return ""
-  const error = verificationText(competitor, "error")
-  return error || "该候选未通过网站与业务相关性验证，不会执行付费差距分析。"
-}
-
-function recordMetric(value: Record<string, unknown> | undefined, key: string) {
-  const metric = value?.[key]
-  if (typeof metric === "number") return formatNumber(metric)
-  return value?.has_data === false ? "无数据" : "-"
-}
-
-function summaryText(value: unknown) {
-  return typeof value === "string" ? value : ""
-}
-
-function summaryStrings(value: unknown) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : []
-}
-
-function evidenceText(value: Record<string, unknown>, key: string) {
-  const item = value[key]
-  return typeof item === "string" ? item : ""
-}
-
-function evidenceNumber(value: Record<string, unknown>, key: string) {
-  const item = value[key]
-  return typeof item === "number" && Number.isFinite(item) ? item : null
-}
-
-function evidenceMonthlySearches(
-  value: Record<string, unknown>
-): KeywordListItem["monthlySearches"] {
-  const items = value.monthly_searches
-  if (!Array.isArray(items)) return []
-  return items.flatMap((item) => {
-    if (!item || typeof item !== "object") return []
-    const row = item as Record<string, unknown>
-    return [
-      {
-        year: typeof row.year === "number" ? row.year : null,
-        month:
-          typeof row.month === "number" || typeof row.month === "string"
-            ? row.month
-            : null,
-        search_volume:
-          typeof row.search_volume === "number" ? row.search_volume : null,
-      },
-    ]
-  })
-}
-
-function CompetitiveQuerySet({ run }: { run: CompetitorAnalysisRun }) {
-  const rows = run.gscQueryEvidence.length
-    ? run.gscQueryEvidence.filter((row) => evidenceText(row, "query"))
-    : run.discoveryKeywords.map((query) => ({ query }))
-  if (!rows.length) return null
-
-  return (
-    <div>
-      <div className="text-xs font-medium text-muted-foreground">查询集</div>
-      <div className="mt-2 overflow-x-auto border-y">
-        <table className="w-full min-w-[1040px] text-left text-sm">
-          <thead className="bg-muted/40 text-xs text-muted-foreground">
-            <tr>
-              <th className="px-3 py-2 font-medium">业务查询</th>
-              <th className="px-3 py-2 font-medium">意图</th>
-              <th className="px-3 py-2 text-right font-medium">GSC 点击</th>
-              <th className="px-3 py-2 text-right font-medium">GSC 曝光</th>
-              <th className="px-3 py-2 text-right font-medium">CTR</th>
-              <th className="px-3 py-2 text-right font-medium">平均排名</th>
-              <th className="px-3 py-2 text-right font-medium">搜索量</th>
-              <th className="px-3 py-2 text-right font-medium">难度</th>
-              <th className="px-3 py-2 text-right font-medium">CPC</th>
-              <th className="px-3 py-2 font-medium">趋势</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {rows.map((row) => {
-              const query = evidenceText(row, "query")
-              const intent =
-                evidenceText(row, "intent") ||
-                evidenceText(row, "provider_intent")
-              const clicks = evidenceNumber(row, "clicks")
-              const impressions = evidenceNumber(row, "impressions")
-              const ctr = evidenceNumber(row, "ctr")
-              const position = evidenceNumber(row, "position")
-              const volume = evidenceNumber(row, "search_volume")
-              const difficulty = evidenceNumber(row, "keyword_difficulty")
-              const cpc = evidenceNumber(row, "cpc")
-              const reason = evidenceText(row, "selection_reason")
-              return (
-                <tr key={query} className="align-middle">
-                  <td className="max-w-72 px-3 py-3">
-                    <div className="font-medium">{query}</div>
-                    {reason ? (
-                      <div className="mt-0.5 text-xs leading-4 text-muted-foreground">
-                        {reason}
-                      </div>
-                    ) : null}
-                  </td>
-                  <td className="px-3 py-3">
-                    {intent ? intentLabel(intent) : "-"}
-                  </td>
-                  <td className="px-3 py-3 text-right tabular-nums">
-                    {clicks === null ? "-" : formatNumber(clicks)}
-                  </td>
-                  <td className="px-3 py-3 text-right tabular-nums">
-                    {impressions === null ? "-" : formatNumber(impressions)}
-                  </td>
-                  <td className="px-3 py-3 text-right tabular-nums">
-                    {ctr === null ? "-" : `${(ctr * 100).toFixed(1)}%`}
-                  </td>
-                  <td className="px-3 py-3 text-right tabular-nums">
-                    {position === null ? "-" : position.toFixed(1)}
-                  </td>
-                  <td className="px-3 py-3 text-right tabular-nums">
-                    {volume === null ? "-" : formatNumber(volume)}
-                  </td>
-                  <td className="px-3 py-3 text-right tabular-nums">
-                    {difficulty === null ? "-" : formatNumber(difficulty)}
-                  </td>
-                  <td className="px-3 py-3 text-right tabular-nums">
-                    {cpc === null ? "-" : `$${cpc.toFixed(2)}`}
-                  </td>
-                  <td className="px-3 py-3">
-                    <KeywordTrend values={evidenceMonthlySearches(row)} />
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  )
-}
-
-function CompetitiveLandscapeSummary({ run }: { run: CompetitorAnalysisRun }) {
-  const summary = run.landscapeSummary
-  const leaders = Array.isArray(summary.market_leaders)
-    ? summary.market_leaders.filter(
-        (item): item is { domain: string; why: string } =>
-          Boolean(
-            item &&
-            typeof item === "object" &&
-            typeof (item as { domain?: unknown }).domain === "string" &&
-            typeof (item as { why?: unknown }).why === "string"
-          )
-      )
-    : []
-  const findings = Array.isArray(summary.competitor_findings)
-    ? summary.competitor_findings.filter(
-        (
-          item
-        ): item is {
-          domain: string
-          type: KeywordCompetitor["domainType"]
-          why_they_matter: string
-          organic_footprint: string
-          winning_themes: string[]
-          weakness_gap: string
-        } =>
-          Boolean(
-            item &&
-            typeof item === "object" &&
-            typeof (item as { domain?: unknown }).domain === "string" &&
-            typeof (item as { type?: unknown }).type === "string" &&
-            typeof (item as { why_they_matter?: unknown }).why_they_matter ===
-              "string" &&
-            typeof (item as { organic_footprint?: unknown })
-              .organic_footprint === "string" &&
-            Array.isArray(
-              (item as { winning_themes?: unknown }).winning_themes
-            ) &&
-            typeof (item as { weakness_gap?: unknown }).weakness_gap ===
-              "string"
-          )
-      )
-    : []
-  const serpIssues = run.serpSnapshots.flatMap((snapshot) => {
-    const query = evidenceText(snapshot, "keyword") || "未知查询"
-    if (snapshot.ok === false) {
-      return [
-        {
-          query,
-          detail:
-            evidenceText(snapshot, "error") ||
-            evidenceText(snapshot, "error_code") ||
-            "SERP 请求失败",
-        },
-      ]
-    }
-    if (
-      snapshot.ok === true &&
-      Array.isArray(snapshot.items) &&
-      !snapshot.items.length
-    ) {
-      return [{ query, detail: "接口成功，但没有返回 SERP 结果" }]
-    }
-    return []
-  })
-  const groups = [
-    ["有效内容形式", summaryStrings(summary.content_formats)],
-    ["获胜主题", summaryStrings(summary.winning_themes)],
-    ["关键词/主题缺口", summaryStrings(summary.keyword_theme_gaps)],
-    ["外链与权威", summaryStrings(summary.backlink_authority_observations)],
-    [
-      "后续工作流",
-      summaryStrings(summary.recommended_workflows).map(
-        recommendedWorkflowLabel
-      ),
-    ],
-  ] as const
-
-  return (
-    <section className="space-y-4 border-b px-4 py-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-sm font-semibold">市场判断</h3>
-        {run.directionalResult ? (
-          <Badge variant="outline">方向性结果</Badge>
-        ) : null}
-      </div>
-      {run.localMarket ? (
-        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span>
-            本地中心 {run.localMarket.latitude}, {run.localMarket.longitude}
-          </span>
-          <span>半径 {run.localMarket.radiusKm} 公里</span>
-          <span>
-            {run.localMarket.searchType === "maps"
-              ? "Google Maps"
-              : "Local Finder"}
-            {` / ${run.localMarket.device === "desktop" ? "桌面" : "移动"}`}
-          </span>
-          {run.localMarket.includeQuestions ? <span>包含商家问答</span> : null}
-        </div>
-      ) : null}
-      {summaryText(summary.market_read) ? (
-        <p className="max-w-5xl text-sm leading-6">
-          {summaryText(summary.market_read)}
-        </p>
-      ) : null}
-      <dl className="grid gap-4 text-sm md:grid-cols-2">
-        <div>
-          <dt className="text-xs font-medium text-muted-foreground">
-            最可赢机会
-          </dt>
-          <dd className="mt-1 leading-5">
-            {summaryText(summary.most_winnable_opportunity) || "-"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-xs font-medium text-muted-foreground">
-            最大排名障碍
-          </dt>
-          <dd className="mt-1 leading-5">
-            {summaryText(summary.biggest_barrier) || "-"}
-          </dd>
-        </div>
-      </dl>
-      {leaders.length ? (
-        <div>
-          <div className="text-xs font-medium text-muted-foreground">
-            市场领导者
-          </div>
-          <div className="mt-2 grid gap-2 md:grid-cols-2">
-            {leaders.map((leader) => (
-              <div key={leader.domain} className="border-l-2 pl-3 text-sm">
-                <div className="font-medium">{leader.domain}</div>
-                <div className="mt-0.5 text-muted-foreground">{leader.why}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      <CompetitiveQuerySet run={run} />
-      {serpIssues.length ? (
-        <div className="border-l-2 border-amber-500 px-3 py-2 text-sm">
-          <div className="font-medium">SERP 证据不完整</div>
-          <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
-            {serpIssues.map((issue) => (
-              <li key={`${issue.query}:${issue.detail}`}>
-                {issue.query}：{issue.detail}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {findings.length ? (
-        <div className="overflow-x-auto border-y">
-          <table className="w-full min-w-[960px] text-left text-sm">
-            <thead className="bg-muted/40 text-xs text-muted-foreground">
-              <tr>
-                <th className="px-3 py-2 font-medium">域名</th>
-                <th className="px-3 py-2 font-medium">类型</th>
-                <th className="px-3 py-2 font-medium">重要原因</th>
-                <th className="px-3 py-2 font-medium">自然搜索规模</th>
-                <th className="px-3 py-2 font-medium">获胜主题</th>
-                <th className="px-3 py-2 font-medium">弱点/缺口</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y">
-              {findings.map((finding) => (
-                <tr key={finding.domain} className="align-top">
-                  <td className="px-3 py-3 font-medium">{finding.domain}</td>
-                  <td className="px-3 py-3">
-                    {competitorDomainTypeLabel(finding.type)}
-                  </td>
-                  <td className="max-w-64 px-3 py-3 leading-5">
-                    {finding.why_they_matter || "-"}
-                  </td>
-                  <td className="max-w-52 px-3 py-3 leading-5">
-                    {finding.organic_footprint || "-"}
-                  </td>
-                  <td className="max-w-64 px-3 py-3 leading-5">
-                    {finding.winning_themes.join("、") || "-"}
-                  </td>
-                  <td className="max-w-64 px-3 py-3 leading-5">
-                    {finding.weakness_gap || "-"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-      <div className="grid gap-4 md:grid-cols-2">
-        {groups.map(([label, values]) =>
-          values.length ? (
-            <div key={label}>
-              <div className="text-xs font-medium text-muted-foreground">
-                {label}
-              </div>
-              <ul className="mt-1 space-y-1 text-sm">
-                {values.map((value) => (
-                  <li key={value}>{value}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null
-        )}
-      </div>
-      {Object.keys(run.costBreakdown).length ? (
-        <div className="flex flex-wrap gap-x-4 gap-y-1 border-t pt-3 text-xs text-muted-foreground">
-          {Object.entries(run.costBreakdown).map(([phase, cost]) => (
-            <span key={phase}>
-              {landscapeCostLabel(phase)} ${cost.toFixed(4)}
-            </span>
-          ))}
-        </div>
-      ) : null}
-    </section>
-  )
-}
-
-function recommendedWorkflowLabel(value: string) {
-  const labels: Record<string, string> = {
-    competitor_analysis: "竞品深度分析",
-    keyword_clustering: "关键词聚类",
-    content_brief: "内容简报",
-  }
-  return labels[value] ?? value
-}
-
-function landscapeCostLabel(value: string) {
-  const labels: Record<string, string> = {
-    ai_query_selection: "查询集选择",
-    keyword_metrics: "关键词指标",
-    live_serps: "SERP 复核",
-    serp_competitors: "竞品发现",
-    local_businesses: "本地商家",
-    local_serps: "本地 SERP",
-    business_questions: "商家问答",
-    ai_domain_classification: "竞品分类",
-    domain_overviews: "域名概览",
-    ranked_keywords: "排名词验证",
-    ai_backlink_assessment: "外链判断",
-    backlinks: "外链验证",
-    ai_landscape_synthesis: "市场综合",
-  }
-  return labels[value] ?? value
-}
-
 function KeywordErrorState({
   title,
   message,
@@ -2997,13 +2198,14 @@ function KeywordRow({
         />
       </TableCell>
       <TableCell className="max-w-72 whitespace-normal">
-        <button
+        <Button
           type="button"
-          className="block w-full text-left leading-5 font-medium break-words hover:text-primary hover:underline"
+          variant="link"
+          className="h-auto w-full justify-start p-0 text-left leading-5 break-words whitespace-normal"
           onClick={onOpenDetails}
         >
           {item.keyword}
-        </button>
+        </Button>
         {item.reviewStatus === "needs_review" && (
           <Badge variant="outline" className="ml-2">
             待检查
@@ -3078,9 +2280,11 @@ function ExplainedTableHead({
           <Tooltip>
             <TooltipTrigger
               render={
-                <button
+                <Button
                   type="button"
-                  className="text-muted-foreground hover:text-foreground"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="text-muted-foreground"
                   aria-label={`${label}说明`}
                 />
               }
@@ -3444,6 +2648,16 @@ function formatDateTime(value: string | null): string {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+  }).format(date)
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "-"
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
   }).format(date)
 }
 

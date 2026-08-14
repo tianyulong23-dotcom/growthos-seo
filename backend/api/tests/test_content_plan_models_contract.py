@@ -1,4 +1,14 @@
-from app.modules.content.models import Article, ArticleReviewDecision
+from app.modules.content.models import (
+    Article,
+    ArticleAssetBinding,
+    ArticleAutosave,
+    ArticlePublication,
+    ArticleReviewDecision,
+    ArticleRun,
+    ArticleVersion,
+    AssetVariant,
+    ContentAsset,
+)
 from app.modules.content_plan.models import (
     ContentPlanBatch,
     ContentPlanCandidate,
@@ -139,3 +149,40 @@ def test_article_model_keeps_review_state_separate_from_publication_quality() ->
     assert "ck_article_review_decisions_decision" in constraint_names(
         ArticleReviewDecision
     )
+
+
+def test_article_production_models_expose_document_run_and_publication_contracts() -> None:
+    assert Article.__table__.c.document_json.nullable is False
+    assert Article.__table__.c.document_schema_version.nullable is False
+    assert Article.__table__.c.current_content_hash.nullable is False
+    assert Article.__table__.c.current_version_number.nullable is False
+    assert ArticleRun.__table__.c.request_hash.nullable is True
+    assert ArticleVersion.__table__.c.content_json.nullable is False
+    assert ArticleVersion.__table__.c.document_snapshot.nullable is False
+    assert ArticleVersion.__table__.c.metadata_snapshot.nullable is False
+    assert ArticleVersion.__table__.c.asset_manifest.nullable is False
+    assert ArticleVersion.__table__.c.content_hash.nullable is False
+    assert "ck_article_publications_status" in constraint_names(ArticlePublication)
+    assert "ck_article_publications_attempt" in constraint_names(ArticlePublication)
+    assert "uq_article_publications_idempotency" in constraint_names(
+        ArticlePublication
+    )
+    assert "ix_article_publications_article_created" in index_names(
+        ArticlePublication
+    )
+    assert "uq_article_publications_active_article" in index_names(
+        ArticlePublication
+    )
+
+
+def test_article_editor_foundation_models_keep_lifecycles_separate() -> None:
+    assert "uq_article_autosaves_client_sequence" in constraint_names(ArticleAutosave)
+    assert "uq_article_autosaves_idempotency" in constraint_names(ArticleAutosave)
+    assert "ix_article_autosaves_latest" in index_names(ArticleAutosave)
+    assert "ix_article_autosaves_expiry" in index_names(ArticleAutosave)
+
+    assert "ck_content_assets_type" in constraint_names(ContentAsset)
+    assert "ck_content_assets_status" in constraint_names(ContentAsset)
+    assert "uq_content_assets_project_hash" in constraint_names(ContentAsset)
+    assert "uq_asset_variants_transform" in constraint_names(AssetVariant)
+    assert "uq_article_asset_bindings_active" in index_names(ArticleAssetBinding)

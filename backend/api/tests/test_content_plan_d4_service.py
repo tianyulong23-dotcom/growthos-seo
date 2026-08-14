@@ -4,7 +4,8 @@ import asyncio
 import os
 from collections import Counter
 from collections.abc import Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -18,6 +19,7 @@ from app.modules.content.dataforseo import (
     DataForSEOOutcomeUnknown,
     OrganicResult,
     SERPResult,
+    SerpTaskReceipt,
 )
 from app.modules.content_plan.d4_service import (
     ContentPlanD4Service,
@@ -260,13 +262,101 @@ class CountingSerpGateway:
                 request_cost_usd=(
                     0.004
                     if keyword in self.invalid_cached_cost
-                    else 0 if keyword in self.cached else 0.004
+                    else 0
+                    if keyword in self.cached
+                    else 0.004
                 ),
                 provider_request_id=None if keyword in self.cached else f"serp-{keyword}",
                 raw_response={"keyword": keyword, "raw": True},
             )
         finally:
             self.active -= 1
+
+
+class StandardSerpGateway:
+    def __init__(
+        self,
+        *,
+        submission_unknown_task_id: bool = False,
+        submission_error_task_id: bool = False,
+        submission_unknown_without_task_id: bool = False,
+        ready_after_checks: int | None = None,
+    ) -> None:
+        self.submissions: list[str] = []
+        self.task_keywords: dict[str, str] = {}
+        self.submission_unknown_task_id = submission_unknown_task_id
+        self.submission_error_task_id = submission_error_task_id
+        self.submission_unknown_without_task_id = submission_unknown_without_task_id
+        self.ready_after_checks = ready_after_checks
+        self.ready_checks = 0
+
+    async def submit_serp_task(
+        self,
+        keyword: str,
+        country: str,
+        language: str,
+        device: str = "desktop",
+        *,
+        tag: str,
+    ) -> SerpTaskReceipt:
+        del country, language, device
+        self.submissions.append(keyword)
+        task_id = f"standard-task-{len(self.submissions)}"
+        self.task_keywords[task_id] = keyword
+        if self.submission_unknown_task_id:
+            self.submission_unknown_task_id = False
+            raise DataForSEOOutcomeUnknown(
+                "dataforseo_request_outcome_unknown",
+                task_id=task_id,
+                cost_usd=0.0035,
+            )
+        if self.submission_error_task_id:
+            self.submission_error_task_id = False
+            raise DataForSEOError(
+                "dataforseo_task_failed",
+                status_code=50301,
+                status_message="Temporary provider failure.",
+                task_id=task_id,
+                cost_usd=0.0035,
+                retryable=False,
+            )
+        if self.submission_unknown_without_task_id:
+            self.submission_unknown_without_task_id = False
+            raise DataForSEOOutcomeUnknown("dataforseo_request_outcome_unknown")
+        return SerpTaskReceipt(
+            task_id=task_id,
+            tag=tag,
+            cost_usd=0.0035,
+            status_code=20100,
+            status_message="Task Created.",
+        )
+
+    async def get_serp_task(self, task_id: str, keyword: str) -> SERPResult:
+        assert self.task_keywords[task_id] == keyword
+        return SERPResult(
+            keyword=keyword,
+            organic_results=[
+                OrganicResult(
+                    position=index,
+                    url=f"https://example.test/{keyword.replace(' ', '-')}/{index}",
+                    domain="example.test",
+                    title=f"Result {index} for {keyword}",
+                    description=f"Description {index}",
+                )
+                for index in range(1, 13)
+            ],
+            people_also_ask=[f"Question about {keyword}?"],
+            related_searches=[f"Related {keyword}"],
+            request_cost_usd=0,
+            provider_request_id=task_id,
+        )
+
+    async def find_ready_serp_task(self, tag: str) -> str | None:
+        del tag
+        self.ready_checks += 1
+        if self.ready_after_checks is None or self.ready_checks < self.ready_after_checks:
+            return None
+        return next(reversed(self.task_keywords), None)
 
 
 class PreviewGateway:
@@ -301,24 +391,26 @@ class PreviewGateway:
         if primary_keyword in self.malformed_once and validation_error is None:
             outputs = []
         else:
-            outputs = [(
-            {
-                "title": f"Guide to {primary_keyword}",
-                "writing_direction": "H2: Introduction\n1. First section\n2. Second section",
-                "evidence_ids": ["organic-1"],
-                "outline": ["Introduction", "Details"],
-            }
-            if primary_keyword in self.invalid_keywords
-            else {
-                "title": f"Guide to {primary_keyword}",
-                "writing_direction": "Explain the key choices and answer the common questions.",
-                "evidence_ids": [
-                    item["evidence_id"]
-                    for group in ("organic", "paa", "related_searches")
-                    for item in evidence[group][:1]
-                ][:2],
-            }
-            )]
+            outputs = [
+                (
+                    {
+                        "title": f"Guide to {primary_keyword}",
+                        "writing_direction": "H2: Introduction\n1. First section\n2. Second section",
+                        "evidence_ids": ["organic-1"],
+                        "outline": ["Introduction", "Details"],
+                    }
+                    if primary_keyword in self.invalid_keywords
+                    else {
+                        "title": f"Guide to {primary_keyword}",
+                        "writing_direction": "Explain the key choices and answer the common questions.",
+                        "evidence_ids": [
+                            item["evidence_id"]
+                            for group in ("organic", "paa", "related_searches")
+                            for item in evidence[group][:1]
+                        ][:2],
+                    }
+                )
+            ]
         return AICallResult(
             output=outputs,
             provider="test-ai",
@@ -427,7 +519,201 @@ async def test_d4_retries_only_the_failed_serp_group(d4_database) -> None:
     assert failed_bundle.serp_snapshots[1].error_code == "serp_request_failed"
 
 
-async def test_d4_empty_serp_keeps_packages_and_creates_zero_items(d4_database) -> None:
+async def test_d4_replaces_unrecoverable_legacy_serp_without_repaying_ready_groups(
+    d4_database,
+) -> None:
+    repository, sessions, project_id = d4_database
+    batch = await create_pack_ready_batch(repository, sessions, project_id)
+    serp = StandardSerpGateway()
+    preview = PreviewGateway()
+    d4 = service(repository, serp, preview)
+    preparations = await repository.get_current_preparations(batch.id)
+
+    for preparation in preparations[:29]:
+        result = await d4.process_preparation(preparation.id)
+        assert result.success is True
+
+    successful_requests = {}
+    for preparation in preparations[:29]:
+        request_key = f"serp:{batch.id}:{preparation.id}:1"
+        request = await repository.get_external_request(request_key)
+        assert request is not None
+        successful_requests[request_key] = (
+            request.status,
+            request.attempt_count,
+            float(request.cost_usd),
+            list(request.provider_request_ids),
+        )
+
+    failed = preparations[29]
+    old_request_key = f"serp:{batch.id}:{failed.id}:1"
+    await repository.prepare_external_request(
+        batch_id=batch.id,
+        preparation_id=failed.id,
+        plan_item_id=None,
+        request_key=old_request_key,
+        provider="dataforseo",
+        endpoint="serp/google/organic/live/advanced",
+        request_hash=d4._hash(
+            {
+                "keyword": "primary topic 30",
+                "country": batch.country,
+                "language": batch.language,
+                "device": "desktop",
+            }
+        ),
+        round_number=0,
+    )
+    await repository.claim_external_request(
+        old_request_key,
+        claim_token="legacy-live-claim",
+        lease_until=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    await repository.fail_external_request(
+        old_request_key,
+        claim_token="legacy-live-claim",
+        status="uncertain",
+        error_code="serp_request_outcome_unknown",
+        error_detail="legacy Live SERP request cannot be reconciled",
+    )
+    await repository.set_preparation_state(
+        failed.id,
+        state="preview_failed",
+        error_code="serp_request_outcome_unknown",
+        error_detail="legacy Live SERP request cannot be reconciled",
+    )
+
+    result = await d4.run(batch.id)
+
+    assert result.status == "completed"
+    assert len(await batch_items(sessions, batch.id)) == 30
+    assert "primary topic 30" not in serp.submissions
+    assert Counter(serp.submissions)["secondary topic 30"] == 1
+    assert len(serp.submissions) == 30
+    for request_key, expected in successful_requests.items():
+        request = await repository.get_external_request(request_key)
+        assert request is not None
+        assert (
+            request.status,
+            request.attempt_count,
+            float(request.cost_usd),
+            list(request.provider_request_ids),
+        ) == expected
+    old_request = await repository.get_external_request(old_request_key)
+    assert old_request is not None
+    assert old_request.status == "uncertain"
+    assert old_request.attempt_count == 1
+    replacement_request = await repository.get_external_request(f"{old_request_key}:package:2")
+    assert replacement_request is not None
+    assert replacement_request.status == "completed"
+    assert replacement_request.attempt_count == 1
+    assert float(replacement_request.cost_usd) == 0.0035
+    failed_bundle = await repository.get_preparation_bundle(failed.id)
+    assert failed_bundle is not None
+    assert failed_bundle.preparation.package_version == 2
+    assert failed_bundle.preparation.state == "preview_ready"
+    assert [
+        row.raw_keyword for row in failed_bundle.keywords if row.selected_role == "primary"
+    ] == ["secondary topic 30"]
+
+
+async def test_d4_records_a_task_id_from_an_unknown_standard_post_response(
+    d4_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, sessions, project_id = d4_database
+    batch = await create_pack_ready_batch(repository, sessions, project_id)
+    serp = StandardSerpGateway(submission_unknown_task_id=True)
+    monkeypatch.setattr("app.modules.content_plan.d4_service.asyncio.sleep", AsyncMock())
+    d4 = service(repository, serp, PreviewGateway())
+    preparation = (await repository.get_current_preparations(batch.id))[0]
+
+    result = await d4.process_preparation(preparation.id)
+
+    assert result.success is True
+    assert serp.submissions == ["primary topic 01"]
+    request = await repository.get_external_request(f"serp:{batch.id}:{preparation.id}:1")
+    assert request is not None
+    assert request.status == "completed"
+    assert request.attempt_count == 1
+    assert request.provider_request_ids == ["standard-task-1"]
+    assert float(request.cost_usd) == 0.0035
+
+
+async def test_d4_records_a_task_id_from_a_standard_post_provider_error(
+    d4_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, sessions, project_id = d4_database
+    batch = await create_pack_ready_batch(repository, sessions, project_id)
+    serp = StandardSerpGateway(submission_error_task_id=True)
+    monkeypatch.setattr("app.modules.content_plan.d4_service.asyncio.sleep", AsyncMock())
+    d4 = service(repository, serp, PreviewGateway())
+    preparation = (await repository.get_current_preparations(batch.id))[0]
+
+    result = await d4.process_preparation(preparation.id)
+
+    assert result.success is True
+    assert serp.submissions == ["primary topic 01"]
+    request = await repository.get_external_request(f"serp:{batch.id}:{preparation.id}:1")
+    assert request is not None
+    assert request.status == "completed"
+    assert request.attempt_count == 1
+    assert request.provider_request_ids == ["standard-task-1"]
+    assert float(request.cost_usd) == 0.0035
+
+
+async def test_d4_recovers_an_unknown_standard_post_by_tag_without_resubmitting(
+    d4_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, sessions, project_id = d4_database
+    batch = await create_pack_ready_batch(repository, sessions, project_id)
+    serp = StandardSerpGateway(
+        submission_unknown_without_task_id=True,
+        ready_after_checks=2,
+    )
+    monkeypatch.setattr("app.modules.content_plan.d4_service.asyncio.sleep", AsyncMock())
+    d4 = service(repository, serp, PreviewGateway())
+    preparation = (await repository.get_current_preparations(batch.id))[0]
+
+    result = await d4.process_preparation(preparation.id)
+
+    assert result.success is True
+    assert serp.submissions == ["primary topic 01"]
+    assert serp.ready_checks == 2
+    request = await repository.get_external_request(f"serp:{batch.id}:{preparation.id}:1")
+    assert request is not None
+    assert request.status == "completed"
+    assert request.attempt_count == 1
+    assert request.provider_request_ids == ["standard-task-1"]
+
+
+async def test_d4_keeps_reconciling_an_unknown_standard_post_without_resubmitting(
+    d4_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, sessions, project_id = d4_database
+    batch = await create_pack_ready_batch(repository, sessions, project_id)
+    serp = StandardSerpGateway(submission_unknown_without_task_id=True)
+    monkeypatch.setattr("app.modules.content_plan.d4_service.asyncio.sleep", AsyncMock())
+    d4 = service(repository, serp, PreviewGateway())
+    preparation = (await repository.get_current_preparations(batch.id))[0]
+
+    first = await d4.process_preparation(preparation.id)
+    replay = await d4.process_preparation(preparation.id)
+
+    assert first.success is replay.success is False
+    assert first.error_code == replay.error_code == "serp_request_failed"
+    assert serp.submissions == ["primary topic 01"]
+    request = await repository.get_external_request(f"serp:{batch.id}:{preparation.id}:1")
+    assert request is not None
+    assert request.status == "uncertain"
+    assert request.attempt_count == 1
+    assert request.provider_request_ids == []
+
+
+async def test_d4_empty_serp_promotes_the_next_package_candidate(d4_database) -> None:
     repository, sessions, project_id = d4_database
     batch = await create_pack_ready_batch(repository, sessions, project_id)
     empty_keyword = "primary topic 30"
@@ -438,15 +724,19 @@ async def test_d4_empty_serp_keeps_packages_and_creates_zero_items(d4_database) 
     first = await d4.run(batch.id)
     replay = await d4.run(batch.id)
 
-    assert first.status == replay.status == "needs_attention"
-    assert first.error_code == "serp_empty_result"
+    assert first.status == replay.status == "completed"
     assert Counter(serp.calls)[empty_keyword] == 1
-    assert await batch_items(sessions, batch.id) == []
+    assert Counter(serp.calls)["secondary topic 30"] == 1
+    assert len(await batch_items(sessions, batch.id)) == 30
     failed = (await repository.get_current_preparations(batch.id))[-1]
-    assert failed.state == "preview_failed"
+    assert failed.state == "preview_ready"
+    assert failed.package_version == 2
     bundle = await repository.get_preparation_bundle(failed.id)
     assert bundle is not None and len(bundle.keywords) == 2
-    assert bundle.serp_snapshots[0].error_code == "serp_empty_result"
+    assert [row.error_code for row in bundle.serp_snapshots] == [
+        None,
+        "serp_empty_result",
+    ]
 
 
 async def test_d4_provider_empty_result_is_not_retried_as_a_technical_failure(
@@ -461,14 +751,18 @@ async def test_d4_provider_empty_result_is_not_retried_as_a_technical_failure(
     first = await d4.run(batch.id)
     replay = await d4.run(batch.id)
 
-    assert first.status == replay.status == "needs_attention"
-    assert first.error_code == "serp_empty_result"
+    assert first.status == replay.status == "completed"
     assert Counter(serp.calls)[empty_keyword] == 1
-    assert await batch_items(sessions, batch.id) == []
+    assert Counter(serp.calls)["secondary topic 30"] == 1
+    assert len(await batch_items(sessions, batch.id)) == 30
     failed = (await repository.get_current_preparations(batch.id))[-1]
+    assert failed.package_version == 2
     bundle = await repository.get_preparation_bundle(failed.id)
     assert bundle is not None
-    assert float(bundle.serp_snapshots[0].cost_usd) == 0.004
+    charged_snapshot = next(
+        row for row in bundle.serp_snapshots if row.error_code == "serp_empty_result"
+    )
+    assert float(charged_snapshot.cost_usd) == 0.004
     request = await repository.get_external_request(
         f"serp:{batch.id}:{failed.id}:{failed.preparation_version}"
     )
@@ -480,6 +774,32 @@ async def test_d4_provider_empty_result_is_not_retried_as_a_technical_failure(
         "keyword": empty_keyword,
         "items": [],
     }
+
+
+async def test_d4_stops_only_after_all_eligible_package_candidates_fail(
+    d4_database,
+) -> None:
+    repository, sessions, project_id = d4_database
+    batch = await create_pack_ready_batch(repository, sessions, project_id)
+    failed_keywords = {"primary topic 30", "secondary topic 30"}
+    serp = CountingSerpGateway(empty=failed_keywords)
+    d4 = service(repository, serp, PreviewGateway())
+
+    first = await d4.run(batch.id)
+    replay = await d4.run(batch.id)
+
+    assert first.status == replay.status == "needs_attention"
+    assert first.error_code == replay.error_code == "serp_primary_candidates_exhausted"
+    assert Counter(serp.calls)["primary topic 30"] == 1
+    assert Counter(serp.calls)["secondary topic 30"] == 1
+    assert await batch_items(sessions, batch.id) == []
+    failed = (await repository.get_current_preparations(batch.id))[-1]
+    assert failed.package_version == 2
+    assert failed.state == "invalid"
+    assert failed.error_code == "serp_primary_candidates_exhausted"
+    bundle = await repository.get_preparation_bundle(failed.id)
+    assert bundle is not None
+    assert all(row.exclusion_reason == "serp_primary_failed" for row in bundle.keywords)
 
 
 async def test_d4_rejects_outline_after_one_structural_repair(d4_database) -> None:
@@ -516,9 +836,7 @@ async def test_d4_repairs_a_malformed_preview_response_once(d4_database) -> None
     calls = [call for call in preview.calls if call["primary_keyword"] == keyword]
     assert len(calls) == 2
     assert calls[0]["validation_error"] is None
-    assert calls[1]["validation_error"] == (
-        "preview response must contain exactly one object"
-    )
+    assert calls[1]["validation_error"] == ("preview response must contain exactly one object")
     assert len(await batch_items(sessions, batch.id)) == 30
 
 
@@ -733,10 +1051,12 @@ async def test_d4_rejects_cached_serp_with_nonzero_cost(d4_database) -> None:
     result = await service(repository, serp, PreviewGateway()).run(batch.id)
     replay = await service(repository, serp, PreviewGateway()).run(batch.id)
 
-    assert result.status == replay.status == "needs_attention"
+    assert result.status == "needs_attention"
     assert result.error_code == "serp_request_outcome_unknown"
+    assert replay.status == "completed"
     assert Counter(serp.calls)[keyword] == 1
-    assert await batch_items(sessions, batch.id) == []
+    assert Counter(serp.calls)["secondary topic 04"] == 1
+    assert len(await batch_items(sessions, batch.id)) == 30
 
 
 async def test_d4_does_not_resubmit_a_serp_request_with_unknown_outcome(
@@ -750,9 +1070,9 @@ async def test_d4_does_not_resubmit_a_serp_request_with_unknown_outcome(
     first = await service(repository, serp, PreviewGateway()).run(batch.id)
     replay = await service(repository, serp, PreviewGateway()).run(batch.id)
 
-    assert first.status == replay.status == "needs_attention"
-    assert first.error_code == replay.error_code == "serp_request_outcome_unknown"
+    assert first.status == replay.status == "completed"
     assert Counter(serp.calls)[keyword] == 1
+    assert Counter(serp.calls)["secondary topic 04"] == 1
     async with sessions() as session:
         request = await session.scalar(
             select(ContentPlanExternalRequest).where(
@@ -764,7 +1084,7 @@ async def test_d4_does_not_resubmit_a_serp_request_with_unknown_outcome(
     assert request is not None
     assert request.error_code == "serp_request_outcome_unknown"
     assert request.attempt_count == 1
-    assert await batch_items(sessions, batch.id) == []
+    assert len(await batch_items(sessions, batch.id)) == 30
 
 
 async def test_d4_rejects_29_current_preparations(d4_database) -> None:

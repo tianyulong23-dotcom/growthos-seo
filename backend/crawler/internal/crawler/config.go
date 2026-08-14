@@ -14,50 +14,52 @@ const defaultCrawlerUserAgent = "Mozilla/5.0 (Linux; Android 10; K) " +
 const defaultRobotsUserAgent = "SEOPlatformBot"
 
 type Config struct {
-	TemporalAddress                 string
-	TemporalNamespace               string
-	TaskQueue                       string
-	WorkerIdleTimeout               time.Duration
-	UserAgent                       string
-	RobotsUserAgent                 string
-	RequestTimeout                  time.Duration
-	SiteUnderstandingRequestTimeout time.Duration
-	BrowserTimeout                  time.Duration
-	RequestDelay                    time.Duration
-	RandomDelay                     time.Duration
-	StatusRequestDelay              time.Duration
-	StatusRandomDelay               time.Duration
-	HTTPConcurrency                 int
-	StatusConcurrency               int
-	BrowserConcurrency              int
-	BrowserWait                     time.Duration
-	MaxBodyBytes                    int
-	MaxRetries                      int
-	ResourceCheckLimit              int
-	SiteUnderstandingMaxRetries     int
-	DiscoveryLimit                  int
-	BrowserEnabled                  bool
-	BrowserExecutable               string
-	BrowserCacheDir                 string
-	PrimaryProxyURL                 string
-	FallbackProxyURL                string
-	DatabaseURL                     string
-	S3EndpointURL                   string
-	S3Region                        string
-	S3Bucket                        string
-	S3AccessKeyID                   string
-	S3SecretAccessKey               string
-	S3UsePathStyle                  bool
-	S3CreateBucket                  bool
-	PageSpeedAPIURL                 string
-	PageSpeedAPIKey                 string
-	BusinessProfileAIBaseURL        string
-	BusinessProfileAIAPIKey         string
-	BusinessProfileAIModel          string
-	BusinessProfileAITimeout        time.Duration
-	BusinessProfileAIMaxRetries     int
-	AISettingsEncryptionKey         string
-	ProbeListenAddress              string
+	TemporalAddress                  string
+	TemporalNamespace                string
+	TaskQueue                        string
+	WorkerIdleTimeout                time.Duration
+	UserAgent                        string
+	RobotsUserAgent                  string
+	RequestTimeout                   time.Duration
+	SiteUnderstandingRequestTimeout  time.Duration
+	BrowserTimeout                   time.Duration
+	RequestDelay                     time.Duration
+	RandomDelay                      time.Duration
+	StatusRequestDelay               time.Duration
+	StatusRandomDelay                time.Duration
+	HTTPConcurrency                  int
+	StatusConcurrency                int
+	BrowserConcurrency               int
+	BrowserWait                      time.Duration
+	MaxBodyBytes                     int
+	MaxRetries                       int
+	ResourceCheckLimit               int
+	SiteUnderstandingMaxRetries      int
+	DiscoveryLimit                   int
+	BrowserEnabled                   bool
+	BrowserExecutable                string
+	BrowserCacheDir                  string
+	PrimaryProxyURL                  string
+	FallbackProxyURL                 string
+	DatabaseURL                      string
+	S3EndpointURL                    string
+	S3Region                         string
+	S3Bucket                         string
+	S3AccessKeyID                    string
+	S3SecretAccessKey                string
+	S3UsePathStyle                   bool
+	S3CreateBucket                   bool
+	PageSpeedAPIURL                  string
+	PageSpeedAPIKey                  string
+	BusinessProfileAIBaseURL         string
+	BusinessProfileAIAPIKey          string
+	BusinessProfileAIModel           string
+	BusinessProfileAIProvider        string
+	BusinessProfileAIReasoningEffort string
+	BusinessProfileAITimeout         time.Duration
+	BusinessProfileAIMaxRetries      int
+	AISettingsEncryptionKey          string
+	ProbeListenAddress               string
 }
 
 func LoadConfig() Config {
@@ -136,6 +138,11 @@ func LoadConfig() Config {
 		BusinessProfileAIModel: envString(
 			"BUSINESS_PROFILE_AI_MODEL",
 			"gpt-5.4-mini",
+		),
+		BusinessProfileAIProvider: envString("BUSINESS_PROFILE_AI_PROVIDER", "openai"),
+		BusinessProfileAIReasoningEffort: envString(
+			"BUSINESS_PROFILE_AI_REASONING_EFFORT",
+			"medium",
 		),
 		BusinessProfileAITimeout: envDuration(
 			"BUSINESS_PROFILE_AI_TIMEOUT",

@@ -153,13 +153,13 @@ export const modules: ModuleConfig[] = [
   {
     id: "performance",
     label: "效果",
-    description: "统一查看搜索、内容和转化表现",
+    description: "查看平台文章在 Google 搜索中的真实表现",
     icon: BarChart3,
     tabs: [
-      { id: "search", label: "搜索表现" },
-      { id: "content", label: "内容表现" },
+      { id: "overview", label: "总览" },
+      { id: "articles", label: "文章效果" },
     ],
-    action: "导出报告",
+    action: "",
   },
   {
     id: "settings",
@@ -180,6 +180,7 @@ export const modules: ModuleConfig[] = [
     tabs: [
       { id: "ai", label: "AI 模型" },
       { id: "dataforseo", label: "DataForSEO" },
+      { id: "google-oauth", label: "Google OAuth" },
     ],
     action: "",
   },

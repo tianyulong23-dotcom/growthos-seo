@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -94,10 +94,20 @@ class FailingDispatcher:
 
 
 class FakeD3:
-    def __init__(self, status: str, error_code: str | None = None) -> None:
+    def __init__(
+        self,
+        status: str,
+        error_code: str | None = None,
+        *,
+        refill_status: str = "not_needed",
+        refill_error_code: str | None = None,
+    ) -> None:
         self.status = status
         self.error_code = error_code
+        self.refill_status = refill_status
+        self.refill_error_code = refill_error_code
         self.calls: list[str] = []
+        self.refill_calls: list[str] = []
 
     async def run(self, batch_id: str):
         self.calls.append(batch_id)
@@ -107,20 +117,39 @@ class FakeD3:
             {"status": self.status, "error_code": self.error_code},
         )()
 
+    async def replenish_serp_exhausted_packages(self, batch_id: str):
+        self.refill_calls.append(batch_id)
+        return type(
+            "D3Result",
+            (),
+            {"status": self.refill_status, "error_code": self.refill_error_code},
+        )()
+
 
 class FakeD4:
-    def __init__(self, status: str = "completed") -> None:
+    def __init__(
+        self,
+        status: str = "completed",
+        *,
+        error_code: str | None = None,
+        results: list[tuple[str, str | None]] | None = None,
+    ) -> None:
         self.status = status
+        self.error_code = error_code
+        self.results = list(results or [])
         self.calls: list[str] = []
 
     async def run(self, batch_id: str):
         self.calls.append(batch_id)
+        status, error_code = (
+            self.results.pop(0) if self.results else (self.status, self.error_code)
+        )
         return type(
             "D4Result",
             (),
             {
-                "status": self.status,
-                "error_code": None,
+                "status": status,
+                "error_code": error_code,
                 "plan_item_count": 30,
             },
         )()
@@ -143,13 +172,24 @@ async def test_batch_service_runs_d3_then_d4_only_when_keyword_packs_are_ready()
 
 
 async def test_batch_service_stops_before_d4_for_permanent_d3_failure() -> None:
-    d3 = FakeD3("needs_attention", "external_request_outcome_unknown")
+    d3 = FakeD3("needs_attention", "expansion_charged_failed")
     d4 = FakeD4()
     service = ContentPlanBatchService(FakeRepository(), d3_service=d3, d4_service=d4)
 
     result = await service.process_batch("batch-a")
 
     assert result["status"] == "needs_attention"
+    assert d4.calls == []
+
+
+async def test_batch_service_retries_automatic_batch_after_unknown_ai_outcome() -> None:
+    d3 = FakeD3("needs_attention", "ai_request_outcome_unknown")
+    d4 = FakeD4()
+    service = ContentPlanBatchService(FakeRepository(), d3_service=d3, d4_service=d4)
+
+    result = await service.process_batch("batch-a")
+
+    assert result["status"] == "retryable_failed"
     assert d4.calls == []
 
 
@@ -166,7 +206,30 @@ async def test_batch_service_resumes_d4_without_replaying_d3() -> None:
 
     assert result["status"] == "completed"
     assert d3.calls == []
+    assert d3.refill_calls == ["batch-a"]
     assert d4.calls == ["batch-a"]
+
+
+async def test_batch_service_replenishes_an_exhausted_serp_package_then_resumes_d4() -> None:
+    d3 = FakeD3("pack_ready", refill_status="pack_ready")
+    d4 = FakeD4(
+        results=[
+            ("needs_attention", "serp_primary_candidates_exhausted"),
+            ("completed", None),
+        ]
+    )
+    service = ContentPlanBatchService(FakeRepository(), d3_service=d3, d4_service=d4)
+
+    result = await service.process_batch("batch-a")
+
+    assert result == {
+        "batch_id": "batch-a",
+        "status": "completed",
+        "plan_item_count": 30,
+    }
+    assert d3.calls == ["batch-a"]
+    assert d3.refill_calls == ["batch-a"]
+    assert d4.calls == ["batch-a", "batch-a"]
 
 
 async def test_batch_service_returns_completed_batch_without_replaying_work() -> None:
@@ -326,6 +389,46 @@ async def test_generation_workflow_retries_only_explicit_retryable_result(
 
     assert execute.await_count == 2
     sleep.assert_awaited_once()
+
+
+async def test_generation_workflow_detects_a_lost_batch_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def execute(activity_name: str, payload: dict, **kwargs):
+        captured.update(kwargs)
+        assert activity_name == "content_plan_process_batch"
+        assert payload == {"batch_id": "batch-a"}
+        return {"status": "completed"}
+
+    monkeypatch.setattr(workflows.workflow, "execute_activity", execute)
+
+    await ContentPlanGenerationWorkflow().run({"batch_id": "batch-a"})
+
+    assert captured["heartbeat_timeout"].total_seconds() == 30
+    assert captured["start_to_close_timeout"].total_seconds() == 4 * 60 * 60
+
+
+async def test_batch_activity_reports_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = SimpleNamespace(
+        process_batch=AsyncMock(return_value={"batch_id": "batch-a", "status": "completed"})
+    )
+    heartbeat = Mock()
+    monkeypatch.setattr(
+        activities,
+        "build_content_plan_batch_service",
+        lambda: service,
+    )
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "heartbeat", heartbeat)
+
+    result = await activities.process_batch({"batch_id": "batch-a"})
+
+    assert result == {"batch_id": "batch-a", "status": "completed"}
+    heartbeat.assert_called()
 
 
 async def test_batch_activity_marks_database_failure_as_retryable(

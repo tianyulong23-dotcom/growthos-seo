@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from httpx import ASGITransport, AsyncClient
+import pytest
 
 from app.api.routes.service_connections import get_service_connection_service
 from app.core.config import Settings
@@ -15,8 +16,12 @@ from app.modules.settings.schemas import (
 )
 from app.modules.settings.service_connections import (
     GSCConnectionRecord,
+    LiveWordPressConnectionTester,
     ProjectServiceConnectionService,
+    ServiceConnectionError,
+    ServiceConnectionEncryptionUnavailableError,
     WordPressConnectionRecord,
+    WordPressVerificationResult,
 )
 
 
@@ -25,20 +30,27 @@ class FakeRepository:
         self.projects = {"project-1"}
         self.gsc: GSCConnectionRecord | None = None
         self.wordpress: WordPressConnectionRecord | None = None
-        self.encryption_keys: list[str] = []
+        self.encryption_keys: list[str | None] = []
+        self.allow_plaintext_values: list[bool] = []
 
     async def project_exists(self, organization_id: str, project_id: str) -> bool:
         return organization_id == "test-org" and project_id in self.projects
 
     async def get_gsc(
-        self, project_id: str, encryption_key: str | None
+        self, project_id: str, encryption_key: str | None, allow_plaintext: bool
     ) -> GSCConnectionRecord | None:
+        self.allow_plaintext_values.append(allow_plaintext)
         return self.gsc
 
     async def upsert_gsc(
-        self, project_id: str, record: GSCConnectionRecord, encryption_key: str
+        self,
+        project_id: str,
+        record: GSCConnectionRecord,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GSCConnectionRecord:
         self.encryption_keys.append(encryption_key)
+        self.allow_plaintext_values.append(allow_plaintext)
         self.gsc = record
         return record
 
@@ -46,14 +58,20 @@ class FakeRepository:
         self.gsc = None
 
     async def get_wordpress(
-        self, project_id: str, encryption_key: str | None
+        self, project_id: str, encryption_key: str | None, allow_plaintext: bool
     ) -> WordPressConnectionRecord | None:
+        self.allow_plaintext_values.append(allow_plaintext)
         return self.wordpress
 
     async def upsert_wordpress(
-        self, project_id: str, record: WordPressConnectionRecord, encryption_key: str
+        self,
+        project_id: str,
+        record: WordPressConnectionRecord,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> WordPressConnectionRecord:
         self.encryption_keys.append(encryption_key)
+        self.allow_plaintext_values.append(allow_plaintext)
         self.wordpress = record
         return record
 
@@ -73,9 +91,21 @@ class FakeWordPressTester:
     def __init__(self) -> None:
         self.calls: list[WordPressConnectionRecord] = []
 
-    async def test(self, record: WordPressConnectionRecord) -> str:
+    async def test(
+        self, record: WordPressConnectionRecord
+    ) -> WordPressVerificationResult:
         self.calls.append(record)
-        return "Site Editor"
+        return WordPressVerificationResult(
+            verified_user="Site Editor",
+            capabilities={
+                "media_upload": True,
+                "media_lookup": True,
+                "post_create": True,
+                "post_update_by_remote_id": True,
+                "post_reconcile": True,
+                "theme_preview": False,
+            },
+        )
 
 
 def build_service() -> tuple[
@@ -143,11 +173,127 @@ def test_save_tests_first_and_never_exposes_secrets() -> None:
     assert gsc.verified_at is not None
     assert wordpress.status == "connected"
     assert wordpress.verified_user == "Site Editor"
+    assert repository.wordpress is not None
+    assert repository.wordpress.capabilities["post_create"] is True
     payload = {**gsc.model_dump(mode="json"), **wordpress.model_dump(mode="json")}
     assert "private_key" not in payload
     assert "application_password" not in payload
     assert "gsc-private-key" not in repr(gsc_tester.calls[0])
     assert "wordpress-secret" not in repr(wordpress_tester.calls[0])
+
+
+def test_wordpress_capabilities_are_derived_from_user_and_route_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tester = LiveWordPressConnectionTester()
+    monkeypatch.setattr(tester, "_ensure_public_host", lambda _url: None)
+    responses: dict[str, object | None] = {
+        "/users/me?context=edit": {
+            "name": "Site Editor",
+            "capabilities": {
+                "edit_posts": True,
+                "publish_posts": False,
+                "edit_published_posts": True,
+                "upload_files": True,
+            },
+        },
+        "/posts?context=edit": [],
+        "/media?context=edit": None,
+    }
+
+    def request_json(endpoint: str, _headers: dict[str, str], **_kwargs: object):
+        return next(
+            value for suffix, value in responses.items() if suffix in endpoint
+        )
+
+    monkeypatch.setattr(tester, "_request_json", request_json)
+    result = tester._test_sync(
+        WordPressConnectionRecord(
+            "https://wordpress.example", "publisher", "application-password"
+        )
+    )
+
+    assert result.verified_user == "Site Editor"
+    assert result.capabilities == {
+        "media_upload": False,
+        "media_lookup": False,
+        "post_create": False,
+        "post_update_by_remote_id": True,
+        "post_reconcile": True,
+        "theme_preview": False,
+    }
+
+
+def test_wordpress_capability_probe_does_not_downgrade_network_failure_to_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tester = LiveWordPressConnectionTester()
+    monkeypatch.setattr(tester, "_ensure_public_host", lambda _url: None)
+
+    def request_json(endpoint: str, _headers: dict[str, str], **_kwargs: object):
+        if "/users/me?" in endpoint:
+            return {
+                "name": "Site Editor",
+                "capabilities": {
+                    "edit_posts": True,
+                    "publish_posts": True,
+                    "edit_published_posts": True,
+                    "upload_files": True,
+                },
+            }
+        raise ServiceConnectionError("无法连接 WordPress")
+
+    monkeypatch.setattr(tester, "_request_json", request_json)
+
+    with pytest.raises(ServiceConnectionError, match="无法连接 WordPress"):
+        tester._test_sync(
+            WordPressConnectionRecord(
+                "https://wordpress.example", "publisher", "application-password"
+            )
+        )
+
+
+def test_production_explicitly_allows_plaintext_storage() -> None:
+    service, repository, _, _ = build_service()
+    service.settings.app_env = "production"
+    service.settings.ai_settings_encryption_key = None
+    service.settings.ai_settings_allow_plaintext = True
+
+    response = asyncio.run(
+        service.update_wordpress(
+            "project-1",
+            UpdateWordPressConnectionRequest(
+                site_url="https://example.com/",
+                username="editor",
+                application_password="wordpress-secret",
+            ),
+        )
+    )
+
+    assert response.status == "connected"
+    assert repository.encryption_keys == [None]
+    assert repository.allow_plaintext_values == [True]
+
+
+def test_production_rejects_storage_without_key_or_plaintext_opt_in() -> None:
+    service, repository, gsc_tester, _ = build_service()
+    service.settings.app_env = "production"
+    service.settings.ai_settings_encryption_key = None
+
+    with pytest.raises(ServiceConnectionEncryptionUnavailableError):
+        asyncio.run(
+            service.update_gsc(
+                "project-1",
+                UpdateGSCServiceAccountConnectionRequest(
+                    property_url="sc-domain:example.com",
+                    service_account_email="seo@example.iam.gserviceaccount.com",
+                    private_key="gsc-private-key",
+                ),
+            )
+        )
+
+    assert repository.gsc is None
+    assert gsc_tester.calls == []
 
 
 def test_blank_secrets_reuse_saved_values_for_test() -> None:

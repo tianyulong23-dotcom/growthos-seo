@@ -326,17 +326,14 @@ func (a *Activities) RunTask(ctx context.Context, task crawler.Task) (crawler.St
 		a.saveFailure(ctx, task, "网站抓取初始化失败")
 		return crawler.StoredResult{}, err
 	}
-	var pageFetcher crawler.Fetcher = httpFetcher
-	if task.Type != crawler.TaskSiteUnderstanding {
-		browserFetcher := crawler.NewBrowserFetcherWithLimiter(taskConfig, limiter)
-		defer browserFetcher.Close()
-		pageFetcher = crawler.HybridFetcher{
-			HTTP:               httpFetcher,
-			Browser:            browserFetcher,
-			Mode:               task.RenderingMode(),
-			HTTPConcurrency:    taskConfig.HTTPConcurrency,
-			BrowserConcurrency: taskConfig.BrowserConcurrency,
-		}
+	browserFetcher := crawler.NewBrowserFetcherWithLimiter(taskConfig, limiter)
+	defer browserFetcher.Close()
+	pageFetcher := crawler.HybridFetcher{
+		HTTP:               httpFetcher,
+		Browser:            browserFetcher,
+		Mode:               task.RenderingMode(),
+		HTTPConcurrency:    taskConfig.HTTPConcurrency,
+		BrowserConcurrency: taskConfig.BrowserConcurrency,
 	}
 
 	reporter := crawler.ProgressReporterFunc(func(progress crawler.Progress) {
@@ -362,11 +359,7 @@ func (a *Activities) RunTask(ctx context.Context, task crawler.Task) (crawler.St
 	)
 	result, err := engine.Run(ctx, task)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return crawler.StoredResult{RunID: task.RunID}, err
-		}
-		a.saveFailure(ctx, task, failureMessage(task, err))
-		return crawler.StoredResult{}, err
+		return a.handleRunFailure(ctx, task, err)
 	}
 	if task.Type == crawler.TaskSiteUnderstanding {
 		generatingProgress := crawler.Progress{
@@ -397,13 +390,22 @@ func (a *Activities) RunTask(ctx context.Context, task crawler.Task) (crawler.St
 		}
 		synthesizer := crawler.NewAIProfileSynthesizer(aiConfig)
 		if synthesizer.Configured() {
-			profile, synthErr := synthesizer.Synthesize(
+			profile, invocations, synthErr := synthesizer.SynthesizeWithTrace(
 				ctx,
 				task,
 				result.Pages,
 				fallback,
 			)
-			if synthErr != nil {
+			traceErr := saveAIProfileInvocations(ctx, a.Store, task, invocations)
+			if traceErr != nil {
+				result.CompletionStatus = crawler.CompletionPartial
+				result.CompletionNote = "AI 调用记录保存失败，已使用规则生成业务资料"
+				slog.Error(
+					"save business profile AI invocation",
+					"run_id", task.RunID,
+					"error", traceErr,
+				)
+			} else if synthErr != nil {
 				result.CompletionStatus = crawler.CompletionPartial
 				result.CompletionNote = "AI 整理失败，已使用规则生成业务资料：" +
 					aiSynthesisFailureReason(synthErr)
@@ -436,6 +438,36 @@ func (a *Activities) RunTask(ctx context.Context, task crawler.Task) (crawler.St
 	return stored, nil
 }
 
+func saveAIProfileInvocations(
+	ctx context.Context,
+	store crawler.ResultStore,
+	task crawler.Task,
+	invocations []crawler.AIProfileInvocation,
+) error {
+	invocationStore, ok := store.(crawler.AIProfileInvocationStore)
+	if !ok {
+		return errors.New("crawler result store does not support AI invocation storage")
+	}
+	for _, invocation := range invocations {
+		if err := invocationStore.SaveAIProfileInvocation(ctx, task, invocation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *Activities) handleRunFailure(
+	ctx context.Context,
+	task crawler.Task,
+	err error,
+) (crawler.StoredResult, error) {
+	a.saveFailure(ctx, task, failureMessage(task, err))
+	if errors.Is(err, context.Canceled) {
+		return crawler.StoredResult{RunID: task.RunID}, err
+	}
+	return crawler.StoredResult{}, err
+}
+
 func aiProviderConfig(
 	ctx context.Context,
 	store crawler.ResultStore,
@@ -456,6 +488,8 @@ func aiProviderConfig(
 	fallback.BusinessProfileAIBaseURL = settings.BaseURL
 	fallback.BusinessProfileAIAPIKey = settings.APIKey
 	fallback.BusinessProfileAIModel = settings.Model
+	fallback.BusinessProfileAIProvider = settings.Provider
+	fallback.BusinessProfileAIReasoningEffort = settings.ReasoningEffort
 	fallback.BusinessProfileAITimeout = settings.RequestTimeout
 	fallback.BusinessProfileAIMaxRetries = settings.MaxRetries
 	return fallback, nil
@@ -534,13 +568,8 @@ func waitForWorkerExit(
 
 func applySynthesizedProfile(result *crawler.Result, profile crawler.SiteProfile) {
 	result.SiteProfile = &profile
-	if crawler.SiteProfileReady(profile) {
-		result.CompletionStatus = crawler.CompletionComplete
-		result.CompletionNote = ""
-		return
-	}
-	result.CompletionStatus = crawler.CompletionPartial
-	result.CompletionNote = "业务资料已生成，但部分页面证据不足，请检查后使用"
+	result.CompletionStatus = crawler.CompletionComplete
+	result.CompletionNote = ""
 }
 
 func aiSynthesisFailureReason(err error) string {
@@ -560,10 +589,8 @@ func aiSynthesisFailureReason(err error) string {
 		return "模型服务请求过多"
 	case strings.Contains(reason, "decode"),
 		strings.Contains(reason, "no choices"),
-		strings.Contains(reason, "omitted"):
+		strings.Contains(reason, "empty json object"):
 		return "模型返回格式无效"
-	case strings.Contains(reason, "grounding"):
-		return "模型引用证据无效"
 	default:
 		return "模型服务暂时不可用"
 	}

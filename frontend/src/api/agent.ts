@@ -8,6 +8,7 @@ import type {
   AgentRun,
   AgentRunStep,
   AgentStreamEvent,
+  AgentTimelineEvent,
 } from "@/features/agent/types"
 
 type ConversationResponse = {
@@ -37,6 +38,21 @@ type ActionResponse = {
   parameters_hash: string
   expires_at: string
   result: Record<string, unknown>
+}
+
+type TimelineEventResponse = {
+  id: string
+  event_key: string
+  conversation_id: string | null
+  sequence: number
+  kind: AgentTimelineEvent["kind"]
+  status: AgentTimelineEvent["status"]
+  title: string
+  content: string | null
+  action: Record<string, unknown>
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
 }
 
 type RunResponse = {
@@ -69,6 +85,7 @@ type StepResponse = {
 type DetailResponse = {
   conversation: ConversationResponse
   messages: MessageResponse[]
+  timeline?: TimelineEventResponse[]
   run: RunResponse | null
   action: ActionResponse | null
 }
@@ -93,6 +110,21 @@ const mapAction = (value: ActionResponse): AgentAction => ({
   parametersHash: value.parameters_hash,
   expiresAt: value.expires_at,
   result: value.result,
+})
+
+const mapTimelineEvent = (value: TimelineEventResponse): AgentTimelineEvent => ({
+  id: value.id,
+  eventKey: value.event_key,
+  conversationId: value.conversation_id,
+  sequence: value.sequence,
+  kind: value.kind,
+  status: value.status,
+  title: value.title,
+  content: value.content,
+  action: value.action,
+  metadata: value.metadata,
+  createdAt: value.created_at,
+  updatedAt: value.updated_at,
 })
 
 const mapRun = (value: RunResponse): AgentRun => ({
@@ -132,6 +164,7 @@ function mapDetail(value: DetailResponse): AgentConversationDetail {
       sequence: message.sequence,
       createdAt: message.created_at,
     })),
+    timeline: (value.timeline ?? []).map(mapTimelineEvent),
     run: value.run ? mapRun(value.run) : null,
     action: value.action ? mapAction(value.action) : null,
   }
@@ -372,6 +405,22 @@ export async function getAgentConversation(
     await apiRequest<DetailResponse>(
       `${path(projectId)}/conversations/${encodeURIComponent(conversationId)}`
     )
+  )
+}
+
+export async function syncProjectOnboarding(projectId: string): Promise<void> {
+  await apiRequest<unknown>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/onboarding`
+  )
+}
+
+export async function retryProjectOnboardingStep(
+  projectId: string,
+  stepKey: string
+): Promise<void> {
+  await apiRequest<unknown>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/onboarding/steps/${encodeURIComponent(stepKey)}/retry`,
+    { method: "POST" }
   )
 }
 

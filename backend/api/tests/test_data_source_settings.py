@@ -11,12 +11,14 @@ import pytest
 
 from app.api.routes.data_sources import (
     get_dataforseo_settings_service,
+    get_gsc_oauth_settings_service,
     get_gsc_service,
     get_google_ads_settings_service,
 )
 from app.core.config import Settings
 from app.main import app
 from app.modules.settings.data_sources import (
+    DataSourceEncryptionUnavailableError,
     DataForSEOSettingsRecord,
     DataForSEOSettingsService,
     GoogleAdsSettingsRecord,
@@ -25,6 +27,8 @@ from app.modules.settings.data_sources import (
 )
 from app.modules.settings.gsc import (
     GSCGrant,
+    GSCOAuthSettingsRecord,
+    GSCOAuthSettingsService,
     GSCReconnectRequiredError,
     GSCService,
     GSCUpstreamError,
@@ -37,6 +41,7 @@ from app.modules.settings.schemas import (
     TestDataForSEOSettingsRequest as DataForSEOSettingsTestRequest,
     TestGoogleAdsSettingsRequest as GoogleAdsSettingsTestRequest,
     UpdateDataForSEOSettingsRequest,
+    UpdateGSCOAuthSettingsRequest,
     UpdateGoogleAdsSettingsRequest,
 )
 
@@ -46,7 +51,8 @@ class FakeDataSourceSettingsRepository:
         self.projects = {"project-1"}
         self.google_ads_record: GoogleAdsSettingsRecord | None = None
         self.dataforseo_record: DataForSEOSettingsRecord | None = None
-        self.encryption_keys: list[str] = []
+        self.encryption_keys: list[str | None] = []
+        self.allow_plaintext_values: list[bool] = []
         self.dataforseo_organizations: list[str] = []
 
     async def project_exists(self, organization_id: str, project_id: str) -> bool:
@@ -58,20 +64,24 @@ class FakeDataSourceSettingsRepository:
     async def get_google_ads(
         self,
         organization_id: str,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GoogleAdsSettingsRecord | None:
         assert organization_id == "test-org"
         self.encryption_keys.append(encryption_key)
+        self.allow_plaintext_values.append(allow_plaintext)
         return self.google_ads_record
 
     async def upsert_google_ads(
         self,
         organization_id: str,
         record: GoogleAdsSettingsRecord,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GoogleAdsSettingsRecord:
         assert organization_id == "test-org"
         self.encryption_keys.append(encryption_key)
+        self.allow_plaintext_values.append(allow_plaintext)
         self.google_ads_record = GoogleAdsSettingsRecord(
             developer_token=record.developer_token,
             client_id=record.client_id,
@@ -86,20 +96,24 @@ class FakeDataSourceSettingsRepository:
     async def get_dataforseo(
         self,
         organization_id: str,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> DataForSEOSettingsRecord | None:
         self.dataforseo_organizations.append(organization_id)
         self.encryption_keys.append(encryption_key)
+        self.allow_plaintext_values.append(allow_plaintext)
         return self.dataforseo_record
 
     async def upsert_dataforseo(
         self,
         organization_id: str,
         record: DataForSEOSettingsRecord,
-        encryption_key: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> DataForSEOSettingsRecord:
         assert organization_id == "test-org"
         self.encryption_keys.append(encryption_key)
+        self.allow_plaintext_values.append(allow_plaintext)
         self.dataforseo_record = DataForSEOSettingsRecord(
             login=record.login,
             password=record.password,
@@ -113,6 +127,7 @@ class FakeGSCRepository:
         self.projects = {"project-1"}
         self.grant: GSCGrant | None = None
         self.marked_reconnect: list[str] = []
+        self.storage_options: list[tuple[str | None, bool]] = []
 
     async def project_exists(self, organization_id: str, project_id: str) -> bool:
         return organization_id == "test-org" and project_id in self.projects
@@ -120,8 +135,13 @@ class FakeGSCRepository:
     async def project_domain(self, organization_id: str, project_id: str) -> str | None:
         return "example.com" if await self.project_exists(organization_id, project_id) else None
 
-    async def get(self, project_id: str, encryption_key: str) -> GSCGrant | None:
-        assert encryption_key == "encryption-key"
+    async def get(
+        self,
+        project_id: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> GSCGrant | None:
+        self.storage_options.append((encryption_key, allow_plaintext))
         return self.grant if self.grant and self.grant.project_id == project_id else None
 
     async def upsert_grant(self, **kwargs) -> None:
@@ -158,8 +178,41 @@ class FakeGSCRepository:
         self.grant = None
 
 
+class FakeGSCOAuthSettingsRepository:
+    def __init__(self) -> None:
+        self.record: GSCOAuthSettingsRecord | None = None
+        self.storage_options: list[tuple[str | None, bool]] = []
+
+    async def get(
+        self,
+        organization_id: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> GSCOAuthSettingsRecord | None:
+        assert organization_id == "test-org"
+        self.storage_options.append((encryption_key, allow_plaintext))
+        return self.record
+
+    async def upsert(
+        self,
+        organization_id: str,
+        record: GSCOAuthSettingsRecord,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> GSCOAuthSettingsRecord:
+        assert organization_id == "test-org"
+        self.storage_options.append((encryption_key, allow_plaintext))
+        self.record = GSCOAuthSettingsRecord(
+            client_id=record.client_id,
+            client_secret=record.client_secret,
+            updated_at=datetime(2026, 8, 11, 12, 0, tzinfo=UTC),
+        )
+        return self.record
+
+
 def build_gsc_service() -> tuple[GSCService, FakeGSCRepository]:
     repository = FakeGSCRepository()
+    oauth_repository = FakeGSCOAuthSettingsRepository()
     settings = Settings(
         app_env="test",
         default_organization_id="test-org",
@@ -169,7 +222,31 @@ def build_gsc_service() -> tuple[GSCService, FakeGSCRepository]:
         gsc_public_api_origin="https://api.example",
         gsc_frontend_origin="https://app.example",
     )
-    return GSCService(settings, repository), repository
+    oauth_settings_service = GSCOAuthSettingsService(settings, oauth_repository)
+    return GSCService(settings, repository, oauth_settings_service), repository
+
+
+def build_gsc_oauth_services() -> tuple[
+    GSCOAuthSettingsService,
+    GSCService,
+    FakeGSCOAuthSettingsRepository,
+]:
+    settings = Settings(
+        app_env="test",
+        default_organization_id="test-org",
+        ai_settings_encryption_key="encryption-key",
+        google_gsc_client_id=None,
+        google_gsc_client_secret=None,
+        gsc_public_api_origin="https://api.example",
+        gsc_frontend_origin="https://app.example",
+    )
+    oauth_repository = FakeGSCOAuthSettingsRepository()
+    oauth_service = GSCOAuthSettingsService(settings, oauth_repository)
+    return (
+        oauth_service,
+        GSCService(settings, FakeGSCRepository(), oauth_service),
+        oauth_repository,
+    )
 
 
 class FakeGoogleAdsConnectionTester:
@@ -278,6 +355,44 @@ def test_dataforseo_record_can_be_loaded_for_the_workflow_organization() -> None
 
     assert record.login == "environment-login"
     assert repository.dataforseo_organizations == ["workflow-org"]
+
+
+def test_production_explicitly_allows_plaintext_data_source_storage() -> None:
+    google_service, dataforseo_service, repository, _, _ = build_services()
+    google_service.settings.app_env = "production"
+    google_service.settings.ai_settings_encryption_key = None
+    google_service.settings.ai_settings_allow_plaintext = True
+
+    response = asyncio.run(
+        dataforseo_service.update_platform(
+            UpdateDataForSEOSettingsRequest(
+                login="saved-login",
+                password="saved-password",
+            )
+        )
+    )
+
+    assert response.configured is True
+    assert repository.encryption_keys[-1] is None
+    assert repository.allow_plaintext_values[-1] is True
+
+
+def test_production_rejects_data_source_storage_without_key_or_opt_in() -> None:
+    google_service, dataforseo_service, repository, _, _ = build_services()
+    google_service.settings.app_env = "production"
+    google_service.settings.ai_settings_encryption_key = None
+
+    with pytest.raises(DataSourceEncryptionUnavailableError):
+        asyncio.run(
+            dataforseo_service.update_platform(
+                UpdateDataForSEOSettingsRequest(
+                    login="saved-login",
+                    password="saved-password",
+                )
+            )
+        )
+
+    assert repository.dataforseo_record is None
 
 
 def test_updates_reuse_existing_secrets_when_the_fields_are_blank() -> None:
@@ -471,7 +586,7 @@ def test_gsc_oauth_state_is_scoped_signed_and_rejects_foreign_callbacks() -> Non
     parsed = urlparse(authorization_url)
     query = parse_qs(parsed.query)
     state = query["state"][0]
-    payload = service._verify_state(state)
+    payload = service._verify_state(state, "gsc-client-secret")
 
     assert parsed.netloc == "accounts.google.com"
     assert query["access_type"] == ["offline"]
@@ -484,7 +599,102 @@ def test_gsc_oauth_state_is_scoped_signed_and_rejects_foreign_callbacks() -> Non
             service.authorization_url("project-1", "https://attacker.example/oauth/callback")
         )
     with pytest.raises(GSCValidationError):
-        service._verify_state(f"{state[:-1]}x")
+        service._verify_state(f"{state[:-1]}x", "gsc-client-secret")
+
+
+def test_gsc_oauth_accepts_explicit_plaintext_storage_without_encryption_key() -> None:
+    service, repository = build_gsc_service()
+    service.settings.app_env = "production"
+    service.settings.ai_settings_encryption_key = None
+    service.settings.ai_settings_allow_plaintext = True
+
+    status = asyncio.run(service.status("project-1"))
+
+    assert status.oauth_configured is True
+    assert status.grant_connected is False
+    assert repository.storage_options == [(None, True)]
+
+
+def test_platform_gsc_oauth_settings_enable_project_authorization() -> None:
+    oauth_service, gsc_service, _ = build_gsc_oauth_services()
+
+    before = asyncio.run(gsc_service.status("project-1"))
+    saved = asyncio.run(
+        oauth_service.update_platform(
+            UpdateGSCOAuthSettingsRequest(
+                client_id="saved-client-id",
+                client_secret="saved-client-secret",
+            )
+        )
+    )
+    after = asyncio.run(gsc_service.status("project-1"))
+    authorization_url = asyncio.run(
+        gsc_service.authorization_url("project-1", "/settings?tab=gsc")
+    )
+    query = parse_qs(urlparse(authorization_url).query)
+
+    assert before.oauth_configured is False
+    assert saved.configured is True
+    assert saved.client_secret_configured is True
+    assert saved.source == "database"
+    assert saved.oauth_redirect_uri == "https://api.example/api/v1/gsc/oauth/callback"
+    assert after.oauth_configured is True
+    assert query["client_id"] == ["saved-client-id"]
+    assert query["redirect_uri"] == [
+        "https://api.example/api/v1/gsc/oauth/callback"
+    ]
+
+
+def test_platform_gsc_oauth_update_preserves_saved_secret() -> None:
+    oauth_service, _, oauth_repository = build_gsc_oauth_services()
+    oauth_repository.record = GSCOAuthSettingsRecord(
+        client_id="old-client-id",
+        client_secret="saved-client-secret",
+    )
+
+    saved = asyncio.run(
+        oauth_service.update_platform(
+            UpdateGSCOAuthSettingsRequest(client_id="new-client-id")
+        )
+    )
+
+    assert saved.client_id == "new-client-id"
+    assert saved.client_secret_configured is True
+    assert oauth_repository.record is not None
+    assert oauth_repository.record.client_secret == "saved-client-secret"
+
+
+def test_platform_gsc_oauth_routes_never_return_the_client_secret() -> None:
+    oauth_service, _, _ = build_gsc_oauth_services()
+    app.dependency_overrides[get_gsc_oauth_settings_service] = lambda: oauth_service
+
+    async def request() -> tuple[dict[str, Any], dict[str, Any]]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            saved_response = await client.put(
+                "/api/v1/platform/settings/gsc-oauth",
+                json={
+                    "client_id": "route-client-id",
+                    "client_secret": "route-client-secret",
+                },
+            )
+            loaded_response = await client.get(
+                "/api/v1/platform/settings/gsc-oauth"
+            )
+        assert saved_response.status_code == 200
+        assert loaded_response.status_code == 200
+        return saved_response.json(), loaded_response.json()
+
+    try:
+        saved_payload, loaded_payload = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert saved_payload["client_id"] == "route-client-id"
+    assert loaded_payload["client_id"] == "route-client-id"
+    assert "client_secret" not in saved_payload
+    assert "client_secret" not in loaded_payload
+    assert "route-client-secret" not in json.dumps((saved_payload, loaded_payload))
 
 
 @pytest.mark.parametrize(
@@ -518,7 +728,11 @@ def test_gsc_callback_uses_verified_userinfo_identity_and_preserves_refresh_toke
             "scope": "openid email webmasters.readonly",
         },
     ]
-    monkeypatch.setattr(service, "_exchange_code", lambda code: token_results.pop(0))
+    monkeypatch.setattr(
+        service,
+        "_exchange_code",
+        lambda code, oauth_settings: token_results.pop(0),
+    )
     monkeypatch.setattr(
         service,
         "_userinfo",
@@ -555,7 +769,7 @@ def test_gsc_callback_reports_cancelled_and_failed_without_losing_query() -> Non
 
     assert cancelled == "/settings?returnTo=%2Fkeywords&gsc_oauth=cancelled"
     assert failed == "/settings?returnTo=%2Fkeywords&gsc_oauth=failed"
-    assert service.failed_callback_path(state) == (
+    assert asyncio.run(service.failed_callback_path(state)) == (
         "/settings?returnTo=%2Fkeywords&gsc_oauth=failed"
     )
 
@@ -774,6 +988,54 @@ def test_gsc_performance_table_uses_start_row_and_extra_row(
     assert len(result.rows) == 25
 
 
+def test_gsc_performance_dataset_fetches_all_page_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = build_gsc_service()
+    repository.grant = GSCGrant(
+        project_id="project-1",
+        organization_id="test-org",
+        site_url="sc-domain:example.com",
+        google_account_id="account-1",
+        connected_account_email="owner@example.com",
+        refresh_token="refresh-token",
+        scopes="scope",
+        requires_reconnect=False,
+    )
+    monkeypatch.setattr(service, "_access_token", AsyncMock(return_value="access-token"))
+    monkeypatch.setattr("app.modules.settings.gsc.GSC_PERFORMANCE_SYNC_ROW_LIMIT", 2)
+    page_offsets: list[int] = []
+
+    def google_json(request) -> dict[str, Any]:
+        body = json.loads(request.data)
+        if body["dimensions"] == ["date"]:
+            return {"rows": [{"keys": ["2026-08-10"], "clicks": 1}]}
+        offset = body.get("startRow", 0)
+        page_offsets.append(offset)
+        rows = [
+            {
+                "keys": ["2026-08-10", f"https://example.com/page-{offset + index}"],
+                "clicks": 1,
+                "impressions": 10,
+                "position": 5,
+            }
+            for index in range(2 if offset < 4 else 1)
+        ]
+        return {"rows": rows}
+
+    monkeypatch.setattr("app.modules.settings.gsc._google_json", google_json)
+    result = asyncio.run(
+        service.performance_dataset(
+            "project-1",
+            start_date=datetime(2026, 8, 1, tzinfo=UTC).date(),
+            end_date=datetime(2026, 8, 10, tzinfo=UTC).date(),
+        )
+    )
+
+    assert page_offsets == [0, 2, 4]
+    assert len(result.page_rows) == 5
+
+
 def test_google_json_reads_valid_responses_larger_than_two_megabytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -856,7 +1118,7 @@ def test_gsc_refresh_failure_marks_connection_for_reconnect(
         requires_reconnect=False,
     )
 
-    def fail_refresh(refresh_token: str) -> str:
+    def fail_refresh(refresh_token: str, oauth_settings: GSCOAuthSettingsRecord) -> str:
         raise GSCReconnectRequiredError("revoked")
 
     monkeypatch.setattr(service, "_refresh_access_token", fail_refresh)
@@ -882,7 +1144,7 @@ def test_gsc_temporary_refresh_failure_does_not_require_reconnect(
         requires_reconnect=False,
     )
 
-    def fail_refresh(refresh_token: str) -> str:
+    def fail_refresh(refresh_token: str, oauth_settings: GSCOAuthSettingsRecord) -> str:
         raise GSCUpstreamError("Google API 返回 HTTP 503", status_code=503)
 
     monkeypatch.setattr(service, "_refresh_access_token", fail_refresh)

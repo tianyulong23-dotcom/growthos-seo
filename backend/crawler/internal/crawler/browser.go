@@ -465,10 +465,23 @@ func needsBrowser(resource Resource, fetchErr error) bool {
 	if len(text) >= 300 {
 		return false
 	}
+	if containsErrorShellSignal(text) {
+		return true
+	}
 	html := strings.ToLower(string(resource.Body))
 	return strings.Contains(html, "<script") ||
 		strings.Contains(html, "__next_data__") ||
 		strings.Contains(html, "data-reactroot") ||
 		strings.Contains(html, "id=\"app\"") ||
 		strings.Contains(html, "id=\"root\"")
+}
+
+func containsErrorShellSignal(value string) bool {
+	return containsBusinessTerm(value, []string{
+		"unsupported client",
+		"unsupported browser",
+		"enable javascript",
+		"javascript is required",
+		"access denied",
+	})
 }

@@ -1431,8 +1431,9 @@ def test_landscape_mismatch_reports_missing_and_duplicate_domains() -> None:
 
 
 class DiscoveryRepository:
-    def __init__(self) -> None:
+    def __init__(self, rows: list[RawKeyword] | None = None) -> None:
         self.partial_failures: list[dict] = []
+        self.rows = list(rows or [])
 
     async def load_context(self, task: dict) -> KeywordRunContext:
         return CONTEXT
@@ -1441,7 +1442,7 @@ class DiscoveryRepository:
         return None
 
     async def request_ideas(self, run_id: str, source: str) -> list[RawKeyword]:
-        return []
+        return [row for row in self.rows if row.source == source]
 
     async def record_partial_failure(self, run_id: str, **kwargs) -> None:
         self.partial_failures.append({"run_id": run_id, **kwargs})
@@ -1607,7 +1608,7 @@ async def test_seed_preparation_saves_every_valid_unique_topic(
     assert result["business_model"] == "service"
     assert result["topic_count"] == candidate_count
     assert result["selected_topic_count"] == candidate_count
-    assert result["google_ads_supplemented"] is False
+    assert result["source"] == "google_ads_site"
     assert len(repository.started_requests) == 2
     assert repository.submitted_requests == repository.started_requests
     assert len(repository.completed_requests) == 2
@@ -1650,14 +1651,13 @@ async def test_seed_preparation_does_not_supplement_fifty_valid_topics(
     result = await activities.prepare_seeds({})
 
     assert result["selected_topic_count"] == 50
-    assert result["google_ads_supplemented"] is False
-    assert result["fallback_keyword_ideas_used"] is False
+    assert result["source"] == "google_ads_site"
     google_ads.assert_not_awaited()
     keyword_ideas.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_seed_preparation_filters_five_hundred_candidates_in_two_batches(
+async def test_seed_preparation_uses_general_ai_classification_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = SeedPreparationRepository(500)
@@ -1695,10 +1695,12 @@ async def test_seed_preparation_filters_five_hundred_candidates_in_two_batches(
 
     result = await activities.prepare_seeds({})
 
-    assert request_sizes == [500]
+    assert request_sizes == [50] * 10
     assert result["selected_topic_count"] == 500
-    assert result["google_ads_supplemented"] is False
-    assert sum(":primary:" in key for key in repository.started_requests) == 1
+    assert result["source"] == "google_ads_site"
+    usability_requests = [key for key in repository.started_requests if ":primary-batch-" in key]
+    assert len(usability_requests) == 10
+    assert len(set(usability_requests)) == 10
     google_ads.assert_not_awaited()
     keyword_ideas.assert_not_awaited()
 
@@ -1712,13 +1714,13 @@ async def test_seed_preparation_skips_second_ai_when_no_duplicate_pairs(
             return [
                 RawKeyword(
                     keyword="solar panel installation",
-                    source="labs_site",
+                    source="google_ads_site",
                     provider_rank=1,
                     search_volume=4_000,
                 ),
                 RawKeyword(
                     keyword="home battery storage",
-                    source="labs_site",
+                    source="google_ads_site",
                     provider_rank=2,
                     search_volume=3_000,
                 ),
@@ -1779,7 +1781,7 @@ async def test_seed_preparation_never_loads_internal_profile_seeds(
             rows = [
                 RawKeyword(
                     keyword="solar installation",
-                    source="labs_site",
+                    source="google_ads_site",
                     search_volume=1_000,
                 ),
                 RawKeyword(
@@ -1820,7 +1822,7 @@ async def test_seed_preparation_never_loads_internal_profile_seeds(
 
     assert result["selected_topic_count"] == 1
     assert repository.requested_sources
-    assert all("profile_seed" not in sources for sources in repository.requested_sources)
+    assert all(sources == ("google_ads_site",) for sources in repository.requested_sources)
 
 
 @pytest.mark.anyio
@@ -1894,64 +1896,14 @@ async def test_invalid_seed_topic_response_keeps_all_mechanically_valid_candidat
     }
 
 
-class SupplementalSeedRepository(SeedPreparationRepository):
-    def __init__(self) -> None:
-        super().__init__(0)
-        self.ideas = [
-            *[
-                RawKeyword(
-                    keyword=f"solar installation topic {index}",
-                    source="labs_site",
-                    provider_rank=index,
-                    search_volume=10_000 - index,
-                )
-                for index in range(1, 19)
-            ],
-            RawKeyword(
-                keyword="solar installation",
-                source="labs_site",
-                provider_rank=19,
-                search_volume=500,
-            ),
-            RawKeyword(
-                keyword="installation solar",
-                source="labs_site",
-                provider_rank=20,
-                search_volume=500,
-            ),
-            RawKeyword(
-                keyword="the solar installation",
-                source="labs_site",
-                provider_rank=21,
-                search_volume=500,
-            ),
-        ]
-
-    async def load_ideas(self, run_id: str, sources: list[str]) -> list[RawKeyword]:
-        return [row for row in self.ideas if row.source in sources]
-
-
 @pytest.mark.anyio
-async def test_seed_preparation_supplements_when_final_valid_count_is_below_fifty(
+async def test_seed_preparation_does_not_supplement_low_google_ads_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = SupplementalSeedRepository()
+    repository = SeedPreparationRepository(21)
     activities = KeywordActivities(repository, KeywordWorkerSettings())
-    supplemented_contexts: list[KeywordRunContext] = []
-
-    async def add_google_ads_rows(context: KeywordRunContext) -> list[RawKeyword]:
-        rows = [
-            RawKeyword(
-                keyword=f"residential solar solution {index}",
-                source="google_ads_site",
-                provider_rank=index,
-                search_volume=400 - index,
-            )
-            for index in range(1, 36)
-        ]
-        repository.ideas.extend(rows)
-        supplemented_contexts.append(context)
-        return rows
+    google_ads = AsyncMock(return_value=[])
+    keyword_ideas = AsyncMock(return_value=([], False))
 
     async def select_topics(client, **kwargs) -> AIResult:
         return AIResult(
@@ -1969,8 +1921,7 @@ async def test_seed_preparation_supplements_when_final_valid_count_is_below_fift
             model="test-model",
         )
 
-    monkeypatch.setattr(activities, "_google_ads_site_request", add_google_ads_rows)
-    keyword_ideas = AsyncMock(return_value=([], False))
+    monkeypatch.setattr(activities, "_google_ads_site_request", google_ads)
     monkeypatch.setattr(activities, "_keyword_ideas_request", keyword_ideas)
     monkeypatch.setattr(
         OpenAICompatibleClient,
@@ -1985,27 +1936,24 @@ async def test_seed_preparation_supplements_when_final_valid_count_is_below_fift
 
     result = await activities.prepare_seeds({})
 
-    assert supplemented_contexts == [repository.context]
-    assert result["google_ads_supplemented"] is True
-    assert result["candidate_count"] == 56
-    assert result["selected_topic_count"] == 54
-    assert result["deterministic_duplicate_pair_count"] == 0
-    assert len(repository.saved_decisions) == 56
-    assert sum(not decision.selected for decision in repository.saved_decisions) == 2
+    assert result["source"] == "google_ads_site"
+    assert result["candidate_count"] == 21
+    assert result["selected_topic_count"] == 21
+    google_ads.assert_not_awaited()
     keyword_ideas.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_seed_preparation_supplements_large_irrelevant_labs_result(
+async def test_seed_preparation_keeps_coherent_unrelated_queries_without_supplementing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class IrrelevantLabsRepository(SeedPreparationRepository):
+    class CoherentGoogleAdsRepository(SeedPreparationRepository):
         def __init__(self) -> None:
             super().__init__(0)
             self.ideas = [
                 RawKeyword(
                     keyword=f"unrelated weather report {index}",
-                    source="labs_site",
+                    source="google_ads_site",
                     provider_rank=index,
                     search_volume=20_000 - index,
                 )
@@ -2020,7 +1968,7 @@ async def test_seed_preparation_supplements_large_irrelevant_labs_result(
             self.ideas.extend(saved)
             return len(saved)
 
-    repository = IrrelevantLabsRepository()
+    repository = CoherentGoogleAdsRepository()
     activities = KeywordActivities(repository, KeywordWorkerSettings())
     google_ads_calls: list[str] = []
     keyword_ideas_calls: list[tuple[list[str], bool]] = []
@@ -2085,15 +2033,11 @@ async def test_seed_preparation_supplements_large_irrelevant_labs_result(
         return rows, False
 
     async def select_topics(client, **kwargs) -> AIResult:
-        decisions = [
-            (
-                "keep"
-                if "solar installation" in candidate.normalized_keyword
-                else "remove_irrelevant"
-            )
-            for candidate in kwargs["candidates"]
-        ]
-        return AIResult(payload={"decisions": decisions}, usage={}, model="test-model")
+        return AIResult(
+            payload=approved_initial_filter_payload(len(kwargs["candidates"])),
+            usage={},
+            model="test-model",
+        )
 
     async def rank_topics(client, **kwargs) -> AIResult:
         return AIResult(payload={"duplicate_pair_ids": []}, usage={}, model="test-model")
@@ -2113,13 +2057,10 @@ async def test_seed_preparation_supplements_large_irrelevant_labs_result(
 
     result = await activities.prepare_seeds({})
 
-    assert google_ads_calls == [repository.context.domain]
-    assert len(keyword_ideas_calls) == 1
-    assert all("solar installation" in keywords for keywords, _ in keyword_ideas_calls)
-    assert {closely_variants for _, closely_variants in keyword_ideas_calls} == {False}
-    assert result["google_ads_supplemented"] is True
-    assert result["fallback_keyword_ideas_used"] is True
-    assert result["selected_topic_count"] >= 20
+    assert google_ads_calls == []
+    assert keyword_ideas_calls == []
+    assert result["source"] == "google_ads_site"
+    assert result["selected_topic_count"] == 500
 
 
 @pytest.mark.anyio
@@ -2794,26 +2735,27 @@ async def test_priority_scores_are_recalculated_from_recovered_metrics() -> None
     assert len(connection.updates) == 2
     first = connection.updates[0]
     assert first[0] == "keyword-1"
-    assert first[2] == 0.9
+    assert first[2] == 1.0
+    assert first[4] == "priority-v3"
     assert first[3]["values"]["difficulty"] == 70.0
     assert first[3]["values"]["intent"] is not None
 
 
 @pytest.mark.anyio
-async def test_labs_site_discovery_requests_five_hundred_candidates(
+async def test_google_ads_site_discovery_uses_domain_locale_and_ads_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = ExpansionRepository()
     activities = KeywordActivities(repository, KeywordWorkerSettings())
-    requested_limits: list[int] = []
+    requests: list[dict] = []
 
-    async def labs_keywords_for_site(client: DataForSEOClient, **kwargs):
-        requested_limits.append(kwargs["limit"])
+    async def google_ads_keywords_for_site(client: DataForSEOClient, **kwargs):
+        requests.append(kwargs)
         return (
             [
                 RawKeyword(
                     keyword="car care products",
-                    source="labs_site",
+                    source="google_ads_site",
                     search_volume=10_000,
                 )
             ],
@@ -2822,130 +2764,85 @@ async def test_labs_site_discovery_requests_five_hundred_candidates(
 
     monkeypatch.setattr(
         DataForSEOClient,
-        "labs_keywords_for_site",
-        labs_keywords_for_site,
+        "google_ads_keywords_for_site",
+        google_ads_keywords_for_site,
     )
 
-    rows = await activities._labs_site_request(CONTEXT)
+    rows = await activities._google_ads_site_request(CONTEXT)
 
-    assert requested_limits == [500]
-    assert rows[0].keyword == "car care products"
-    assert repository.completed_requests[0][1]["metadata"]["limit"] == 500
-
-
-@pytest.mark.anyio
-async def test_seed_discovery_uses_labs_without_calling_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    activities = KeywordActivities(DiscoveryRepository(), KeywordWorkerSettings())
-    labs = AsyncMock(
-        return_value=[
-            RawKeyword(
-                keyword="solar installation",
-                source="labs_site",
-                provider_rank=1,
-            )
-        ]
-    )
-    fallback = AsyncMock()
-    monkeypatch.setattr(activities, "_labs_site_request", labs)
-    monkeypatch.setattr(activities, "_google_ads_site_request", fallback)
-
-    result = await activities.discover_seeds({})
-
-    assert result == {"source": "labs_site", "count": 1, "fallback": False}
-    fallback.assert_not_awaited()
-
-
-@pytest.mark.anyio
-async def test_seed_discovery_falls_back_only_when_labs_returns_zero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    activities = KeywordActivities(DiscoveryRepository(), KeywordWorkerSettings())
-    labs = AsyncMock(return_value=[])
-    fallback = AsyncMock(
-        return_value=[
-            RawKeyword(
-                keyword="car care products",
-                source="google_ads_site",
-                provider_rank=1,
-            )
-        ]
-    )
-    monkeypatch.setattr(activities, "_labs_site_request", labs)
-    monkeypatch.setattr(activities, "_google_ads_site_request", fallback)
-
-    result = await activities.discover_seeds({})
-
-    assert result == {
-        "source": "google_ads_site",
-        "count": 1,
-        "fallback": True,
-    }
-    fallback.assert_awaited_once()
-
-
-@pytest.mark.anyio
-async def test_seed_discovery_defers_empty_sources_to_business_keyword_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    activities = KeywordActivities(DiscoveryRepository(), KeywordWorkerSettings())
-    monkeypatch.setattr(activities, "_labs_site_request", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        activities,
-        "_google_ads_site_request",
-        AsyncMock(return_value=[]),
-    )
-
-    result = await activities.discover_seeds({})
-
-    assert result == {
-        "source": "none",
-        "count": 0,
-        "fallback": True,
-    }
-
-
-@pytest.mark.anyio
-async def test_seed_discovery_uses_google_ads_when_labs_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repository = DiscoveryRepository()
-    activities = KeywordActivities(repository, KeywordWorkerSettings())
-    labs = AsyncMock(
-        side_effect=ApplicationError(
-            "DataForSEO 暂时不可用",
-            type="network_error",
-        )
-    )
-    fallback = AsyncMock(
-        return_value=[
-            RawKeyword(
-                keyword="car care products",
-                source="google_ads_site",
-                provider_rank=1,
-            )
-        ]
-    )
-    monkeypatch.setattr(activities, "_labs_site_request", labs)
-    monkeypatch.setattr(activities, "_google_ads_site_request", fallback)
-
-    result = await activities.discover_seeds({})
-
-    assert result == {
-        "source": "google_ads_site",
-        "count": 1,
-        "fallback": True,
-    }
-    fallback.assert_awaited_once()
-    assert repository.partial_failures == [
+    assert requests == [
         {
-            "run_id": CONTEXT.run_id,
-            "source": "labs_site",
-            "code": "network_error",
-            "message": "network_error: DataForSEO 暂时不可用",
+            "domain": CONTEXT.domain,
+            "country": CONTEXT.country,
+            "language": CONTEXT.language,
         }
     ]
+    assert rows[0].keyword == "car care products"
+    assert repository.started_requests == [
+        f"keyword:{CONTEXT.run_id}:dataforseo:google-ads-site"
+    ]
+    assert repository.completed_requests[0][1]["metadata"] == {
+        "path": ["keywords_for_site"]
+    }
+
+
+@pytest.mark.anyio
+async def test_seed_discovery_reuses_saved_google_ads_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = DiscoveryRepository(
+        [
+            RawKeyword(
+                keyword="solar installation",
+                source="google_ads_site",
+                provider_rank=1,
+            )
+        ]
+    )
+    activities = KeywordActivities(repository, KeywordWorkerSettings())
+    request_google_ads = AsyncMock()
+    monkeypatch.setattr(activities, "_google_ads_site_request", request_google_ads)
+
+    result = await activities.discover_seeds({})
+
+    assert result == {"source": "google_ads_site", "count": 1}
+    request_google_ads.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_seed_discovery_calls_google_ads_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activities = KeywordActivities(DiscoveryRepository(), KeywordWorkerSettings())
+    request_google_ads = AsyncMock(
+        return_value=[
+            RawKeyword(
+                keyword="car care products",
+                source="google_ads_site",
+                provider_rank=1,
+            )
+        ]
+    )
+    monkeypatch.setattr(activities, "_google_ads_site_request", request_google_ads)
+
+    result = await activities.discover_seeds({})
+
+    assert result == {"source": "google_ads_site", "count": 1}
+    request_google_ads.assert_awaited_once_with(CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_seed_discovery_returns_none_when_google_ads_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activities = KeywordActivities(DiscoveryRepository(), KeywordWorkerSettings())
+    request_google_ads = AsyncMock(return_value=[])
+    monkeypatch.setattr(activities, "_google_ads_site_request", request_google_ads)
+
+    result = await activities.discover_seeds({})
+
+    assert result == {"source": "none", "count": 0}
+    request_google_ads.assert_awaited_once_with(CONTEXT)
 
 
 @pytest.mark.anyio

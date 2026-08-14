@@ -21,7 +21,7 @@ MODEL_ACTIVITY_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
     maximum_interval=timedelta(seconds=5),
-    maximum_attempts=2,
+    maximum_attempts=1,
 )
 TOOL_ACTIVITY_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
@@ -92,6 +92,11 @@ def _modifies_data(tool: str) -> bool:
 def _invalidates_remaining_calls(tool: str) -> bool:
     definition = TOOL_DEFINITIONS.get(tool)
     return bool(definition and definition.invalidates_remaining_calls)
+
+
+def _parallel_write_group(tool: str) -> str | None:
+    definition = TOOL_DEFINITIONS.get(tool)
+    return definition.parallel_write_group if definition else None
 
 
 class AgentLoopDetector:
@@ -181,7 +186,6 @@ class AgentWorkflow:
     async def run(self, payload: dict[str, Any]) -> None:
         run_id = str(payload["run_id"])
         limits = dict(payload["limits"])
-        judge_feedback: dict[str, Any] | None = None
         execution_feedback: dict[str, Any] | None = None
         loop_detector = AgentLoopDetector()
         non_retryable_failures: dict[str, dict[str, Any]] = {}
@@ -209,7 +213,6 @@ class AgentWorkflow:
                             "run_id": run_id,
                             "round": round_number,
                             "final_only": round_number == int(limits["model_rounds"]),
-                            "judge_feedback": judge_feedback,
                             "execution_feedback": execution_feedback,
                         },
                         limits,
@@ -272,99 +275,18 @@ class AgentWorkflow:
 
                 if decision["type"] == "final":
                     open_turn = None
-                    final_answer = sanitize_text(str(decision["answer"]))[
-                        :max(1, int(limits.get("final_answer_chars", 8_000)))
-                    ]
-                    try:
-                        judge = await self._call(
-                            "agent_judge_final",
-                            {
-                                "run_id": run_id,
-                                "answer": final_answer,
-                            },
-                            limits,
-                        )
-                    except CancelledError:
-                        raise
-                    except Exception:
-                        await self._call(
-                            "agent_finish",
-                            {
-                                "run_id": run_id,
-                                "answer": final_answer,
-                                "evidence": decision.get("evidence", []),
-                                "status": "failed",
-                                "error_code": "agent_final_check_failed",
-                                "error_message": "最终结果检查失败，不能确认任务已完成",
-                            },
-                            limits,
-                        )
-                        return
-                    if judge.get("type") == "model_error":
-                        await self._call(
-                            "agent_finish",
-                            {
-                                "run_id": run_id,
-                                "answer": final_answer,
-                                "evidence": decision.get("evidence", []),
-                                "status": "failed",
-                                "error_code": judge.get(
-                                    "error_code", "agent_final_check_failed"
-                                ),
-                                "error_message": judge.get(
-                                    "message", "最终结果检查失败，不能确认任务已完成"
-                                ),
-                            },
-                            limits,
-                        )
-                        return
-                    check = await self._check(
-                        run_id,
-                        limits,
-                        ignore_model_rounds=True,
-                    )
-                    if not check["allowed"]:
-                        await self._finish_stopped(run_id, check, limits)
-                        return
-                    completed = judge.get("status") == "completed"
-                    if not completed and round_number < int(limits["model_rounds"]):
-                        judge_feedback = {
-                            "status": judge.get("status", "failed"),
-                            "reason": judge.get("reason", "最终结果未通过检查"),
-                            "criteria": list(judge.get("criteria", [])),
-                            "remaining_work": list(judge.get("remaining_work", [])),
-                            "previous_answer": final_answer,
-                        }
-                        continue
-                    final_message_id = None
-                    if completed:
-                        streamed = await self._call(
-                            "agent_stream_final",
-                            {
-                                "run_id": run_id,
-                                "answer": final_answer,
-                                "evidence": decision.get("evidence", []),
-                            },
-                            limits,
-                        )
-                        if streamed.get("cancelled"):
-                            return
-                        final_message_id = streamed["message_id"]
+                    final_answer = sanitize_text(str(decision["answer"]))
                     await self._call(
                         "agent_finish",
                         {
                             "run_id": run_id,
                             "answer": final_answer,
-                            "message_id": final_message_id,
+                            "message_id": decision["message_id"],
                             "evidence": decision.get("evidence", []),
                             "research": decision.get("research"),
-                            "judge": judge,
-                            "status": "completed" if completed else "failed",
-                            "error_code": (
-                                None if completed
-                                else f"agent_final_check_{judge.get('status', 'failed')}"
-                            ),
-                            "error_message": None if completed else judge.get("reason"),
+                            "status": "completed",
+                            "error_code": None,
+                            "error_message": None,
                         },
                         limits,
                     )
@@ -391,7 +313,7 @@ class AgentWorkflow:
                 batch_id = f"{run_id}:{round_number}"
                 round_results: list[dict[str, Any]] = []
                 for group in self._execution_groups(scheduled_calls):
-                    if len(group) == 1 or _modifies_data(str(group[0][1]["tool"])):
+                    if len(group) == 1:
                         results = [
                             await self._execute_tool_call(
                                 run_id, round_number, group[0][0], group[0][1], limits,
@@ -563,14 +485,37 @@ class AgentWorkflow:
     ) -> list[list[tuple[int, dict[str, Any]]]]:
         groups: list[list[tuple[int, dict[str, Any]]]] = []
         read_group: list[tuple[int, dict[str, Any]]] = []
+        parallel_write_group: list[tuple[int, dict[str, Any]]] = []
+        parallel_write_group_name: str | None = None
+
+        def flush_parallel_writes() -> None:
+            nonlocal parallel_write_group, parallel_write_group_name
+            if parallel_write_group:
+                groups.append(parallel_write_group)
+                parallel_write_group = []
+                parallel_write_group_name = None
+
         for index, call in enumerate(calls, start=1):
-            if _modifies_data(str(call["tool"])):
+            tool = str(call["tool"])
+            if _modifies_data(tool):
                 if read_group:
                     groups.append(read_group)
                     read_group = []
-                groups.append([(index, call)])
+                group_name = _parallel_write_group(tool)
+                if group_name is None:
+                    flush_parallel_writes()
+                    groups.append([(index, call)])
+                elif parallel_write_group_name in {None, group_name}:
+                    parallel_write_group_name = group_name
+                    parallel_write_group.append((index, call))
+                else:
+                    flush_parallel_writes()
+                    parallel_write_group_name = group_name
+                    parallel_write_group.append((index, call))
             else:
+                flush_parallel_writes()
                 read_group.append((index, call))
+        flush_parallel_writes()
         if read_group:
             groups.append(read_group)
         return groups
@@ -580,8 +525,18 @@ class AgentWorkflow:
         calls: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         for index, call in enumerate(calls):
-            if _invalidates_remaining_calls(str(call["tool"])):
-                return calls[: index + 1], calls[index + 1 :]
+            tool = str(call["tool"])
+            if not _invalidates_remaining_calls(tool):
+                continue
+            parallel_group = _parallel_write_group(tool)
+            end = index + 1
+            if parallel_group is not None:
+                while end < len(calls):
+                    next_tool = str(calls[end]["tool"])
+                    if _parallel_write_group(next_tool) != parallel_group:
+                        break
+                    end += 1
+            return calls[:end], calls[end:]
         return calls, []
 
     async def _execute_tool_call(
@@ -766,14 +721,10 @@ class AgentWorkflow:
                     180 if modifies_data else 60,
                 )
             )
-        elif name not in {
-            "agent_model_decide",
-            "agent_judge_final",
-            "agent_stream_final",
-        }:
+        elif name != "agent_model_decide":
             timeout_seconds = 30
         retry_policy = CONTROL_ACTIVITY_RETRY
-        if name in {"agent_model_decide", "agent_judge_final", "agent_stream_final"}:
+        if name == "agent_model_decide":
             retry_policy = MODEL_ACTIVITY_RETRY
         elif name == "agent_execute_tool":
             retry_policy = TOOL_ACTIVITY_RETRY
@@ -782,6 +733,13 @@ class AgentWorkflow:
                 "start_to_close_timeout": timedelta(seconds=max(1, timeout_seconds)),
                 "retry_policy": retry_policy,
             }
+            activity_payload = payload
+            if name == "agent_model_decide":
+                activity_payload = {
+                    **payload,
+                    "request_timeout_seconds": max(1, timeout_seconds - 15),
+                    "max_retries": 0,
+                }
             if name == "agent_execute_tool":
                 activity_options.update({
                     "schedule_to_close_timeout": timedelta(
@@ -793,7 +751,7 @@ class AgentWorkflow:
                 })
             return await workflow.execute_activity(
                 name,
-                payload,
+                activity_payload,
                 **activity_options,
             )
         except Exception as exc:

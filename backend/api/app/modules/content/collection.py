@@ -16,6 +16,7 @@ from app.modules.content.object_storage import (
     S3TextReader,
     StoredTextError,
 )
+from app.modules.content.quality import project_domain_matches
 from app.modules.content.repository import ContentRepository, normalize_source_url
 from app.modules.content.research_gateway import (
     ResearchError,
@@ -27,7 +28,6 @@ from app.modules.content.research_gateway import (
 )
 from app.modules.content.serp_analysis import (
     analyze_serp,
-    select_dominant_type_results,
     serp_analysis_needs_refresh,
 )
 from app.modules.content.source_verification import (
@@ -41,6 +41,7 @@ from app.modules.settings.data_sources import (
     DataSourceNotConfiguredError,
     build_dataforseo_settings_service,
 )
+from app.modules.settings.service import build_ai_settings_service
 from app.workflows.client import connect_temporal
 from app.workflows.worker import get_crawler_worker_launcher
 
@@ -50,10 +51,14 @@ WARNING_MESSAGES = {
     "project_profile_incomplete": "项目业务资料不完整，已使用现有字段继续",
     "internal_sources_unavailable": "未取得可用站内页面，本次不插入内链",
     "dataforseo_unavailable": "关键词搜索数据暂不可用，已使用其他资料继续",
-    "research_unavailable": "联网研究暂不可用，文章将避免无来源的数字和强结论",
+    "research_unavailable": "本轮联网研究暂不可用，系统会更换查询、来源和抓取方式继续查找",
     "competitor_sources_unavailable": "未取得竞争文章正文，已使用搜索摘要和联网研究继续",
     "competitor_sources_partial": "部分竞争文章未取得，已使用成功页面继续",
 }
+COMPETITOR_SOURCE_TARGET = 8
+COMPETITOR_CANDIDATE_LIMIT = 12
+BRAND_RESEARCH_REQUEST_SECONDS = 140
+BRAND_RESEARCH_VERIFICATION_SECONDS = 30.0
 
 
 def warning(code: str) -> dict[str, str]:
@@ -79,19 +84,15 @@ async def collect_sources(
         _collect_internal(repo, settings, run_id, keyword, snapshot)
     )
     serp_task = asyncio.create_task(_collect_serp(repo, settings, run_id, keyword, snapshot))
-    research_task = asyncio.create_task(
-        _collect_research(repo, settings, run_id, keyword, snapshot)
+    internal_outcome, serp_outcome = await asyncio.gather(
+        internal_task, serp_task, return_exceptions=True
     )
-    internal_outcome, serp_outcome, research_outcome = await asyncio.gather(
-        internal_task, serp_task, research_task, return_exceptions=True
-    )
-    outcomes = [internal_outcome, serp_outcome, research_outcome]
+    outcomes = [internal_outcome, serp_outcome]
     warning_codes: list[str] = []
     counts: dict[str, int] = {}
     fallback_codes = (
         "internal_sources_unavailable",
         "dataforseo_unavailable",
-        "research_unavailable",
     )
     for index, outcome in enumerate(outcomes):
         if isinstance(outcome, BaseException):
@@ -138,32 +139,33 @@ async def collect_competitors(
             serp_payload.get("organic_results") or [],
             serp_features=_serp_features(serp_payload),
         )
-    selected_results = select_dominant_type_results(
-        serp_analysis, project_domain=project_domain, limit=8
+    selected_results = _serp_reference_results(
+        serp_payload,
+        serp_analysis,
+        project_domain=project_domain,
+        limit=COMPETITOR_CANDIDATE_LIMIT,
     )
     urls = [str(item["url"]) for item in selected_results]
     if not urls:
         return _competitor_result(run_id, 0, 0)
 
     crawl_run, task = await repo.ensure_competitor_crawl(run_id, urls)
-    if crawl_run.status not in {"completed", "partial", "failed"}:
-        try:
-            await get_crawler_worker_launcher().ensure_started()
-            client = await connect_temporal()
-            try:
-                handle = await client.start_workflow(
-                    "CrawlWorkflow",
-                    task,
-                    id=str(crawl_run.temporal_workflow_id),
-                    task_queue=settings.crawler_task_queue,
-                )
-            except WorkflowAlreadyStartedError:
-                handle = client.get_workflow_handle(str(crawl_run.temporal_workflow_id))
-            await asyncio.wait_for(handle.result(), timeout=300)
-        except Exception:
-            pass
+    pages = await _run_crawl(repo, settings, crawl_run, task)
+    missing_body_urls = [
+        str(page.get("requested_url") or page.get("url") or "")
+        for page in pages
+        if not _competitor_body_available(page)
+    ]
+    if missing_body_urls:
+        rendered_pages = await _crawl_source_verification_pages(
+            repo,
+            settings,
+            run_id,
+            missing_body_urls,
+            rendering="all",
+        )
+        pages = _prefer_pages_with_body(pages, rendered_pages)
 
-    pages = await repo.list_competitor_pages(crawl_run.run_id)
     selected_by_url = {
         normalize_source_url(str(item["url"])): item for item in selected_results
     }
@@ -172,11 +174,12 @@ async def collect_competitors(
         parsed = urlsplit(page["url"])
         requested_url = str(page.get("requested_url") or page["url"])
         selected = selected_by_url.get(normalize_source_url(requested_url), {})
+        body_available = _competitor_body_available(page)
         source_payloads.append(
             {
                 "source_type": "competitor",
                 "url": page["url"],
-                "status": page["status"],
+                "status": "available" if body_available else "failed",
                 "title": page["title"],
                 "domain": parsed.netloc,
                 "content_ref": page["content_ref"],
@@ -189,8 +192,14 @@ async def collect_competitors(
                     "heading_structure": _competitor_heading_structure(page),
                 },
                 "metadata": {
-                    "error_type": page["error_type"],
-                    "selection_reason": "dominant_serp_content_type",
+                    "error_type": (
+                        page["error_type"]
+                        if page.get("error_type")
+                        else None
+                        if body_available
+                        else "body_unavailable"
+                    ),
+                    "selection_reason": "serp_reference",
                     "dominant_content_type": serp_analysis.get(
                         "dominant_content_type"
                     ),
@@ -223,7 +232,6 @@ async def collect_competitors(
         normalize_source_url(str(source["url"])): source for source in persisted_sources
     }
     available = 0
-    failed = 0
     for payload in source_payloads:
         normalized_url = normalize_source_url(str(payload["url"]))
         source = persisted_by_url.get(normalized_url)
@@ -234,9 +242,103 @@ async def collect_competitors(
             and source.get("content_ref")
         ):
             available += 1
-        else:
-            failed += 1
-    return _competitor_result(run_id, available, failed)
+    required = min(COMPETITOR_SOURCE_TARGET, len(source_payloads))
+    failed = max(0, required - available)
+    return _competitor_result(run_id, min(available, required), failed)
+
+
+async def _run_crawl(
+    repo: ContentRepository,
+    settings: Settings,
+    crawl_run: Any,
+    task: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if crawl_run.status not in {"completed", "partial", "failed"}:
+        try:
+            await get_crawler_worker_launcher().ensure_started()
+            client = await connect_temporal()
+            try:
+                handle = await client.start_workflow(
+                    "CrawlWorkflow",
+                    task,
+                    id=str(crawl_run.temporal_workflow_id),
+                    task_queue=settings.crawler_task_queue,
+                )
+            except WorkflowAlreadyStartedError:
+                handle = client.get_workflow_handle(str(crawl_run.temporal_workflow_id))
+            await asyncio.wait_for(handle.result(), timeout=300)
+        except Exception:
+            pass
+    return await repo.list_competitor_pages(crawl_run.run_id)
+
+
+def _competitor_body_available(page: dict[str, Any]) -> bool:
+    return bool(page.get("status") == "available" and page.get("content_ref"))
+
+
+def _available_competitor_count(pages: list[dict[str, Any]]) -> int:
+    return sum(_competitor_body_available(page) for page in pages)
+
+
+def _prefer_pages_with_body(
+    existing: list[dict[str, Any]], candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for page in [*existing, *candidates]:
+        key = normalize_source_url(
+            str(page.get("requested_url") or page.get("url") or "")
+        )
+        if not key:
+            continue
+        if key not in merged:
+            order.append(key)
+            merged[key] = page
+        elif _competitor_body_available(page) and not _competitor_body_available(
+            merged[key]
+        ):
+            merged[key] = page
+    return [merged[key] for key in order]
+
+
+def _serp_reference_results(
+    serp_payload: dict[str, Any],
+    serp_analysis: dict[str, Any],
+    *,
+    project_domain: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    analyzed_by_url = {
+        normalize_source_url(str(item.get("url") or "")): dict(item)
+        for item in [
+            *list(serp_analysis.get("classified_results") or []),
+            *list(serp_analysis.get("top_results") or []),
+        ]
+        if isinstance(item, dict) and item.get("url")
+    }
+    candidates = list(serp_payload.get("organic_results") or []) or list(
+        serp_analysis.get("classified_results")
+        or serp_analysis.get("top_results")
+        or []
+    )
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        url = str(candidate.get("url") or "")
+        normalized = normalize_source_url(url)
+        if (
+            not normalized
+            or normalized in seen
+            or project_domain_matches(url, project_domain)
+        ):
+            continue
+        seen.add(normalized)
+        output.append({**analyzed_by_url.get(normalized, {}), **candidate})
+        if len(output) >= limit:
+            break
+    return output
 
 
 def _competitor_heading_structure(page: dict[str, Any]) -> list[dict[str, Any]]:
@@ -428,17 +530,18 @@ async def _collect_research(
     keyword: str,
     snapshot: dict[str, Any],
     exact_questions: list[str] | None = None,
+    model_snapshot: dict[str, Any] | None = None,
 ) -> tuple[str | None, int]:
     existing_sources = await repo.list_sources(run_id, "authority")
     completed_research = [
         item
         for item in existing_sources
         if (item.get("metadata") or {}).get("source") == "web_research"
-        and (item.get("metadata") or {}).get("verification_status")
+        and not (item.get("metadata") or {}).get("copied_from_run_id")
+        and item.get("status") == "available"
     ]
     if completed_research and not exact_questions:
-        available = sum(item["status"] == "available" for item in completed_research)
-        return (None if available else "research_unavailable"), available
+        return None, len(completed_research)
     serp_sources = await repo.list_sources(run_id, "serp")
     serp = next(
         (item.get("summary") or {} for item in serp_sources if item["status"] == "available"),
@@ -456,25 +559,60 @@ async def _collect_research(
             )
         )[:6]
     )
-    gateway = ResearchGateway(
-        ResearchProviderConfig(
+    if model_snapshot:
+        organization_id = str(
+            snapshot.get("organization_id") or settings.default_organization_id
+        )
+        record = (
+            await build_ai_settings_service().effective_record_for_organization(
+                organization_id
+            )
+        ).for_task("content")
+        primary = ResearchProviderConfig(
+            "responses",
+            str(model_snapshot.get("base_url") or record.base_url),
+            record.api_key,
+            str(model_snapshot.get("model") or record.model),
+            str(
+                model_snapshot.get("reasoning_effort")
+                or record.reasoning_effort
+            ),
+        )
+        fallback = ResearchProviderConfig("", "", "", "")
+        timeout_seconds = int(
+            model_snapshot.get("request_timeout_seconds")
+            or record.request_timeout_seconds
+        )
+    else:
+        primary = ResearchProviderConfig(
             settings.article_research_provider,
             settings.article_research_base_url,
             settings.article_research_api_key,
             settings.article_research_model,
-        ),
-        ResearchProviderConfig(
+        )
+        fallback = ResearchProviderConfig(
             settings.article_research_fallback_provider,
             settings.article_research_fallback_base_url,
             settings.article_research_fallback_api_key,
             settings.article_research_fallback_model,
-        ),
-        settings.article_research_timeout_seconds,
+        )
+        timeout_seconds = settings.article_research_timeout_seconds
+    gateway = ResearchGateway(
+        primary,
+        fallback,
+        min(timeout_seconds, BRAND_RESEARCH_REQUEST_SECONDS)
+        if exact_questions
+        else timeout_seconds,
         cache=get_redis(),
         cache_ttl_seconds=settings.article_research_cache_ttl_seconds,
-        max_concurrency=settings.article_research_max_concurrency,
+        max_concurrency=max(
+            settings.article_research_max_concurrency,
+            len(questions) if exact_questions else 1,
+        ),
         max_retries=settings.article_research_max_retries,
-        timeout_max_retries=settings.article_research_timeout_max_retries,
+        timeout_max_retries=(
+            0 if exact_questions else settings.article_research_timeout_max_retries
+        ),
         circuit_failure_threshold=settings.article_research_circuit_failure_threshold,
         retry_initial_seconds=settings.article_research_retry_initial_seconds,
         retry_max_seconds=settings.article_research_retry_max_seconds,
@@ -507,40 +645,56 @@ async def _collect_research(
             },
         )
         return "research_unavailable", 0
-    verified_sources = await _verify_research_sources(
-        repo, settings, run_id, result
-    )
+    try:
+        verified_sources = await asyncio.wait_for(
+            _verify_research_sources(repo, settings, run_id, result),
+            timeout=(
+                BRAND_RESEARCH_VERIFICATION_SECONDS
+                if exact_questions
+                else None
+            ),
+        )
+    except TimeoutError:
+        verified_sources = [
+            (
+                citation,
+                {
+                    "source_tier": classify_source_tier(citation.url),
+                    "verification_status": "unreachable",
+                    "verification_method": "verification_timeout_v1",
+                    "research_excerpt": citation.exact_quote or citation.excerpt,
+                    "independent_source": False,
+                },
+            )
+            for citation in result.citations
+        ]
     source_payloads: dict[str, dict[str, Any]] = {}
     for citation, verification in verified_sources:
-        accepted = verification["verification_status"] in {
+        verified = verification["verification_status"] in {
             "verified",
             "paraphrase",
         }
         verification_claims = [
             dict(item) for item in verification.get("verification_claims") or []
         ]
-        if not accepted:
-            failed_status = str(verification["verification_status"])
+        if not verification_claims:
             verification_claims = [
-                {**item, "status": failed_status, "evidence": ""}
-                for item in verification_claims
-            ] or [
                 {
                     "claim": citation.claim or citation.excerpt,
-                    "status": failed_status,
-                    "evidence": "",
+                    "status": str(verification["verification_status"]),
+                    "evidence": citation.exact_quote or citation.excerpt,
                 }
             ]
         source_url = (
             str(verification.get("verified_url") or citation.url)
-            if accepted
+            if verified
             else citation.url
         )
         parsed = urlsplit(source_url)
         payload = {
             "source_type": "authority",
             "url": source_url,
-            "status": "available" if accepted else "failed",
+            "status": "available",
             "title": str(verification.get("verified_title") or citation.title),
             "domain": parsed.netloc,
             "content_ref": verification.get("content_ref"),
@@ -548,9 +702,7 @@ async def _collect_research(
                 "research_answer": result.answer[:12000],
                 "citation_excerpt": citation.exact_quote,
                 "research_claim": citation.claim or citation.excerpt,
-                "research_excerpt": (
-                    verification.get("research_excerpt") or "" if accepted else ""
-                ),
+                "research_excerpt": verification.get("research_excerpt") or "",
                 "verification_claims": verification_claims,
             },
             "metadata": {
@@ -565,6 +717,7 @@ async def _collect_research(
                 ),
                 "source_tier": verification["source_tier"],
                 "verification_status": verification["verification_status"],
+                "usage_status": "collected",
                 "verification_method": verification["verification_method"],
                 "verified_url": verification.get("verified_url"),
                 "cited_url": citation.url,
@@ -706,8 +859,6 @@ async def _verify_research_sources(
         normalized = normalize_source_url(citation.url)
         if normalized in selected_url_keys:
             continue
-        if len(selected_urls) == 12:
-            break
         selected_url_keys.add(normalized)
         selected_urls.append(citation.url)
     citations = [
@@ -718,6 +869,18 @@ async def _verify_research_sources(
     pages = await _crawl_source_verification_pages(
         repo, settings, run_id, selected_urls
     )
+    missing_urls = [
+        url
+        for url in selected_urls
+        if not _competitor_body_available(
+            _pages_by_url(pages).get(normalize_source_url(url), {})
+        )
+    ]
+    if missing_urls:
+        rendered_pages = await _crawl_source_verification_pages(
+            repo, settings, run_id, missing_urls, rendering="all"
+        )
+        pages = _prefer_pages_with_body(pages, rendered_pages)
 
     pages_by_url = _pages_by_url(pages)
     upstream_by_citation: dict[str, list[str]] = {}
@@ -735,7 +898,7 @@ async def _verify_research_sources(
             continue
         upstream_by_citation[normalize_source_url(citation.url)] = candidates
         upstream_urls.extend(candidates)
-    upstream_urls = list(dict.fromkeys(upstream_urls))[:6]
+    upstream_urls = list(dict.fromkeys(upstream_urls))
     upstream_pages = (
         await _crawl_source_verification_pages(repo, settings, run_id, upstream_urls)
         if upstream_urls
@@ -802,13 +965,6 @@ async def _verify_research_sources(
     async def verify(citation: ResearchCitation) -> tuple[ResearchCitation, dict[str, Any]]:
         tier = classify_source_tier(citation.url)
         claim = citation.claim or citation.excerpt
-        if tier.startswith("tier_4"):
-            return citation, {
-                "source_tier": tier,
-                "verification_status": "rejected_source",
-                "verification_method": "source_tier_rejection_v1",
-                "independent_source": False,
-            }
         normalized_cited_url = normalize_source_url(citation.url)
         candidates = [
             item
@@ -898,29 +1054,37 @@ async def _crawl_source_verification_pages(
     settings: Settings,
     run_id: str,
     urls: list[str],
+    *,
+    rendering: str = "auto",
 ) -> list[dict[str, Any]]:
     if not urls:
         return []
-    try:
-        crawl_run, task = await repo.ensure_source_verification_crawl(
-            run_id, urls
-        )
-        if crawl_run.status not in {"completed", "partial", "failed"}:
-            await get_crawler_worker_launcher().ensure_started()
-            client = await connect_temporal()
-            try:
-                handle = await client.start_workflow(
-                    "CrawlWorkflow",
-                    task,
-                    id=str(crawl_run.temporal_workflow_id),
-                    task_queue=settings.crawler_task_queue,
+    pages: list[dict[str, Any]] = []
+    for offset in range(0, len(urls), 12):
+        batch = urls[offset : offset + 12]
+        try:
+            if rendering == "auto":
+                crawl_run, task = await repo.ensure_source_verification_crawl(
+                    run_id, batch
                 )
-            except WorkflowAlreadyStartedError:
-                handle = client.get_workflow_handle(str(crawl_run.temporal_workflow_id))
-            await handle.result()
-        return await repo.list_competitor_pages(crawl_run.run_id)
-    except Exception:
-        return []
+            else:
+                crawl_run, task = await repo.ensure_source_verification_crawl(
+                    run_id, batch, rendering=rendering
+                )
+            pages.extend(await _run_crawl(repo, settings, crawl_run, task))
+        except Exception as exc:
+            failure = str(getattr(exc, "code", "") or type(exc).__name__)
+            pages.extend(
+                {
+                    "url": url,
+                    "requested_url": url,
+                    "status": "failed",
+                    "content_ref": None,
+                    "failure": failure,
+                }
+                for url in batch
+            )
+    return pages
 
 
 def _pages_by_url(pages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

@@ -12,7 +12,19 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.core.config import Settings, get_settings
 from app.db.session import session_factory
 from app.modules.agent.events import build_agent_event_store
-from app.modules.agent.models import AgentAction, AgentConversation, AgentMessage, AgentRun
+from app.modules.agent.models import (
+    AgentAction,
+    AgentConversation,
+    AgentMessage,
+    AgentRun,
+    AgentSystemTrigger,
+    AgentTimelineEvent,
+)
+from app.modules.agent.progress import (
+    business_progress_from_evidence,
+    display_parts_from_evidence,
+    failure_answer,
+)
 from app.modules.agent.repository import AgentRepository
 from app.modules.agent.security import sanitize_agent_data, sanitize_text
 from app.modules.agent.schemas import (
@@ -25,6 +37,7 @@ from app.modules.agent.schemas import (
     AgentMessageResponse,
     AgentRunStepResponse,
     AgentRunResponse,
+    AgentTimelineEventResponse,
     SendMessageRequest,
     SendMessageResponse,
 )
@@ -50,6 +63,7 @@ class AgentWorkflowState(StrEnum):
     RUNNING = "running"
     CLOSED = "closed"
     NOT_FOUND = "not_found"
+    UNKNOWN = "unknown"
 
 
 class WorkflowController(Protocol):
@@ -75,6 +89,7 @@ class TemporalAgentController:
                 run_timeout=timedelta(
                     seconds=int(limits["run_timeout_seconds"]) + cleanup_grace
                 ),
+                task_timeout=timedelta(seconds=30),
             )
         except WorkflowAlreadyStartedError:
             return
@@ -91,11 +106,18 @@ class TemporalAgentController:
             if exc.status == RPCStatusCode.NOT_FOUND:
                 return AgentWorkflowState.NOT_FOUND
             raise
-        return (
-            AgentWorkflowState.RUNNING
-            if description.status == WorkflowExecutionStatus.RUNNING
-            else AgentWorkflowState.CLOSED
-        )
+        if description.status == WorkflowExecutionStatus.RUNNING:
+            return AgentWorkflowState.RUNNING
+        if description.status in {
+            WorkflowExecutionStatus.COMPLETED,
+            WorkflowExecutionStatus.FAILED,
+            WorkflowExecutionStatus.CANCELED,
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.CONTINUED_AS_NEW,
+            WorkflowExecutionStatus.TIMED_OUT,
+        }:
+            return AgentWorkflowState.CLOSED
+        return AgentWorkflowState.UNKNOWN
 
 class AgentService:
     def __init__(self, settings: Settings, repository: AgentRepository, controller: WorkflowController) -> None:
@@ -106,11 +128,15 @@ class AgentService:
         return {
             "model_rounds": self.settings.agent_max_model_rounds,
             "consecutive_failures": self.settings.agent_max_consecutive_failures,
+            "model_cost": self.settings.agent_max_model_cost_usd,
+            "paid_tool_cost": self.settings.agent_max_paid_cost_usd,
+            "paid_tool_call_cost": self.settings.agent_paid_tool_reserve_usd,
             "tool_arguments_bytes": self.settings.agent_tool_arguments_bytes,
             "tool_result_bytes": self.settings.agent_tool_result_bytes,
             "tool_round_tokens": self.settings.agent_tool_round_tokens,
             "tool_context_tokens": self.settings.agent_tool_context_tokens,
             "tool_summary_tokens": self.settings.agent_tool_summary_tokens,
+            "max_output_tokens": self.settings.agent_max_output_tokens,
             "final_answer_chars": self.settings.agent_final_answer_chars,
             "model_timeout_seconds": self.settings.agent_model_timeout_seconds,
             "read_tool_timeout_seconds": self.settings.agent_read_tool_timeout_seconds,
@@ -162,14 +188,58 @@ class AgentService:
             raise AgentNotFoundError
         all_messages = await self.repository.conversation_messages(conversation_id)
         messages = [message_response(item, index + 1) for index, item in enumerate(all_messages) if index + 1 > after_sequence]
+        timeline = await self.repository.timeline_events(
+            self.settings.default_organization_id, project_id, conversation_id
+        )
         run = await self.repository.latest_run_for_conversation(conversation_id)
         action = await self.repository.action_for_run(run.id) if run else None
         steps = await self.repository.run_steps(run.id) if run else []
         return AgentConversationDetail(
             conversation=conversation_response(conversation), messages=messages,
+            timeline=[timeline_event_response(item) for item in timeline],
             run=run_response(run, action, all_messages, steps) if run else None,
             action=action_response(action) if action else None,
         )
+
+    async def record_timeline_event(
+        self,
+        project_id: str,
+        *,
+        event_key: str,
+        kind: str,
+        status: str,
+        title: str,
+        content: str | None = None,
+        conversation_id: str | None = None,
+        action: dict | None = None,
+        metadata: dict | None = None,
+    ) -> AgentTimelineEventResponse:
+        if kind not in {"message", "task", "action"}:
+            raise ValueError("unsupported timeline event kind")
+        if status not in {"running", "waiting", "completed", "failed", "cancelled"}:
+            raise ValueError("unsupported timeline event status")
+        if not event_key.strip() or len(event_key) > 200:
+            raise ValueError("timeline event key must be between 1 and 200 characters")
+        if not title.strip():
+            raise ValueError("timeline event title is required")
+        try:
+            event = await self.repository.record_timeline_event(
+                self.settings.default_organization_id,
+                project_id,
+                event_key=event_key.strip(),
+                kind=kind,
+                status=status,
+                title=title,
+                content=content,
+                conversation_id=conversation_id,
+                action=action,
+                metadata=metadata,
+            )
+        except LookupError as exc:
+            raise AgentNotFoundError from exc
+        except RuntimeError as exc:
+            raise AgentConflictError(str(exc)) from exc
+        return timeline_event_response(event)
 
     async def send_message(self, project_id: str, conversation_id: str, request: SendMessageRequest) -> SendMessageResponse:
         try:
@@ -189,6 +259,31 @@ class AgentService:
             raise
         await self._start(run)
         return SendMessageResponse(message_id=message.id, run_id=run.id, status=run.status)
+
+    async def trigger_system_turn(
+        self,
+        project_id: str,
+        *,
+        trigger: str,
+        trigger_version: str,
+        content: str,
+        trusted_write_tools: tuple[str, ...],
+    ) -> AgentSystemTrigger:
+        try:
+            return await self.repository.enqueue_system_trigger(
+                self.settings.default_organization_id,
+                project_id,
+                trigger,
+                trigger_version,
+                content,
+                trusted_write_tools,
+            )
+        except LookupError as exc:
+            raise AgentNotFoundError from exc
+        except RuntimeError as exc:
+            if str(exc) == "idempotency_conflict":
+                raise AgentConflictError("内部任务触发编号冲突") from exc
+            raise
 
     async def rewind(
         self,
@@ -372,6 +467,36 @@ class AgentService:
         steps = await self.repository.run_steps(run.id)
         return run_response(run, action, messages, steps)
 
+    async def retry_system_trigger(
+        self,
+        project_id: str,
+        run_id: str,
+    ) -> SendMessageResponse:
+        try:
+            message, run = await self.repository.retry_system_trigger_run(
+                self.settings.default_organization_id,
+                project_id,
+                run_id,
+                self.limits,
+            )
+        except LookupError as exc:
+            raise AgentNotFoundError from exc
+        except RuntimeError as exc:
+            reason = str(exc)
+            if reason == "active_run":
+                raise AgentConflictError("当前对话已有任务正在运行") from exc
+            if reason.startswith("run_not_retryable:"):
+                raise AgentConflictError("只有失败的 Agent 任务可以重试") from exc
+            if reason == "run_not_system_trigger":
+                raise AgentConflictError("这个任务不是可重试的系统任务") from exc
+            raise
+        await self._start(run)
+        return SendMessageResponse(
+            message_id=message.id,
+            run_id=run.id,
+            status=run.status,
+        )
+
     async def cancel(self, project_id: str, run_id: str) -> AgentRunResponse:
         run = await self.repository.get_run_scoped(self.settings.default_organization_id, project_id, run_id)
         if run is None:
@@ -443,6 +568,7 @@ class AgentService:
 
     async def dispatch_queued(self) -> int:
         count = 0
+        await self.repository.materialize_pending_system_triggers(self.limits)
         for run in await self.repository.list_pending_dispatches():
             try:
                 if await self._start(run):
@@ -461,17 +587,39 @@ class AgentService:
 
     async def _reconcile_run(self, run: AgentRun) -> bool:
         state = await self.controller.status(run.workflow_id)
-        if state == AgentWorkflowState.RUNNING:
+        if state in {AgentWorkflowState.RUNNING, AgentWorkflowState.UNKNOWN}:
             return False
         if state == AgentWorkflowState.NOT_FOUND and run.status == "queued":
             return False
+        confirmed_state = await self.controller.status(run.workflow_id)
+        if confirmed_state in {
+            AgentWorkflowState.RUNNING,
+            AgentWorkflowState.UNKNOWN,
+        }:
+            return False
+        if (
+            confirmed_state == AgentWorkflowState.NOT_FOUND
+            and run.status == "queued"
+        ):
+            return False
+        reason = "Agent 工作流已经结束，但数据库没有保存正常终态。"
+        try:
+            completion = await self.repository.completion_evidence(run.id)
+        except Exception:
+            completion = {}
+        progress = business_progress_from_evidence(completion)
+        metadata: dict[str, Any] = {"reconciled": True}
+        if progress:
+            metadata["business_progress"] = progress
+        answer = failure_answer(progress, reason)
+        metadata["display_parts"] = display_parts_from_evidence(completion, answer)
         await self.repository.finalize_run(
             run.id,
-            "Agent 工作流已经结束，本次任务未能正常收尾。已完成的业务操作会保留，请重新发起未完成的工作。",
-            {"reconciled": True},
+            answer,
+            metadata,
             "failed",
             "agent_workflow_closed",
-            "Agent 工作流已经结束，但数据库没有保存正常终态。",
+            reason,
         )
         return True
 
@@ -546,6 +694,23 @@ def message_response(row: AgentMessage, sequence: int) -> AgentMessageResponse:
     return AgentMessageResponse(id=row.id, run_id=row.run_id, role=row.role, content=row.content, metadata=dict(row.metadata_json), sequence=sequence, created_at=row.created_at)
 
 
+def timeline_event_response(row: AgentTimelineEvent) -> AgentTimelineEventResponse:
+    return AgentTimelineEventResponse(
+        id=row.id,
+        event_key=row.event_key,
+        conversation_id=row.conversation_id,
+        sequence=row.sequence,
+        kind=row.kind,
+        status=row.status,
+        title=row.title,
+        content=row.content,
+        action=dict(row.action_json),
+        metadata=dict(row.metadata_json),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
 def action_response(row: AgentAction) -> AgentActionResponse:
     return AgentActionResponse(
         id=row.id, run_id=row.run_id, tool_name=row.tool_name, status=row.status,
@@ -606,6 +771,18 @@ STEP_LABELS = {
     "update_business_profile": "更新业务资料",
     "refresh_business_profile": "重新识别网站业务",
     "start_technical_audit": "启动技术审核",
+    "start_keyword_library": "建立关键词库",
+    "get_keyword_library_status": "检查关键词库进度",
+    "start_content_plan": "生成 30 篇内容计划",
+    "get_content_plan_status": "检查内容计划进度",
+    "start_articles": "启动文章生成",
+    "get_article_generation_status": "检查文章生成进度",
+    "create_article": "启动关键词文章生成",
+    "list_keywords": "查询关键词库",
+    "get_keyword_competitors": "读取关键词竞品",
+    "get_keyword_opportunities": "读取关键词机会",
+    "get_search_performance": "读取搜索表现",
+    "get_article_performance": "读取文章表现",
 }
 
 

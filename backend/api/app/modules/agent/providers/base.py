@@ -9,6 +9,8 @@ from app.modules.agent.providers.usage import ProviderUsage
 
 
 ProviderName = Literal["openai", "anthropic", "openrouter"]
+ReasoningEffort = Literal["low", "medium", "high"]
+APIProtocol = Literal["chat_completions", "responses"]
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,8 @@ class ProviderConfig:
     model: str
     timeout_seconds: int
     max_retries: int
+    reasoning_effort: ReasoningEffort = "medium"
+    api_protocol: APIProtocol = "chat_completions"
 
 
 @dataclass(frozen=True)

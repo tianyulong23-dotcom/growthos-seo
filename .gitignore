@@ -37,6 +37,9 @@ coverage.out
 # Browser tests
 playwright-report/
 test-results/
+/artifacts/
+/frontend/artifacts/
+/tmp-nav-projects.png
 
 # Editors and operating systems
 .vscode/*

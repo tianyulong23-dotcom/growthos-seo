@@ -17,6 +17,7 @@ export function KeywordsModulePage() {
   const { projectId = projects[0]?.id ?? "" } = useParams<{
     projectId: string
   }>()
+  const project = projects.find((item) => item.id === projectId)
 
   return (
     <ModulePage module={keywordsNavigation}>
@@ -33,6 +34,7 @@ export function KeywordsModulePage() {
             key={projectId}
             projectId={projectId}
             view={activeView}
+            savedCompetitorDomain={project?.competitorDomain}
           />
         </React.Suspense>
       )}

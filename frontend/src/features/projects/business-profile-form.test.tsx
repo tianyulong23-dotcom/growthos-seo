@@ -10,12 +10,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
 import type { Project } from "@/features/projects/types"
 
-const projectApi = vi.hoisted(() => ({
-  listBusinessProfileRuns: vi.fn(),
-}))
-
-vi.mock("@/api/projects", () => projectApi)
-
 const project: Project = {
   id: "project-1",
   name: "Example",
@@ -68,7 +62,6 @@ afterEach(() => {
 describe("BusinessProfileForm", () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    projectApi.listBusinessProfileRuns.mockResolvedValue([])
   })
 
   it("submits all editable business fields", async () => {
@@ -100,7 +93,7 @@ describe("BusinessProfileForm", () => {
     })
   })
 
-  it("shows field ownership and grounded source quotes", () => {
+  it("shows only the editable business profile fields", () => {
     render(
       <BusinessProfileForm
         project={{
@@ -128,17 +121,25 @@ describe("BusinessProfileForm", () => {
       />
     )
 
-    expect(screen.getByText("人工确认")).toBeTruthy()
-    expect(screen.getAllByText("AI 识别").length).toBeGreaterThan(0)
-    expect(screen.getByText("转化动作")).toBeTruthy()
+    expect(screen.getByText("已修改")).toBeTruthy()
+    expect(screen.queryByText("AI 识别")).toBeNull()
+    expect(screen.queryByText("转化动作")).toBeNull()
     expect(screen.queryByText("conversion_actions")).toBeNull()
-    fireEvent.click(screen.getByText("Example provides analytics."))
-    expect(screen.getByText("Analytics for modern teams")).toBeTruthy()
-    expect(
-      screen
-        .getByRole("link", { name: /https:\/\/example.com\/about/ })
-        .getAttribute("href")
-    ).toBe("https://example.com/about")
+    expect(screen.queryByText("查看识别依据")).toBeNull()
+    expect(screen.queryByText("Analytics for modern teams")).toBeNull()
+    expect(screen.queryByText("内容要求")).toBeNull()
+    expect(screen.queryByLabelText("内容要求")).toBeNull()
+    expect(screen.queryByText("识别历史")).toBeNull()
+
+    const targetAudienceField = screen
+      .getByLabelText("目标客户")
+      .closest('[data-slot="form-field"]')
+    const productsServicesField = screen
+      .getByLabelText("产品与服务")
+      .closest('[data-slot="form-field"]')
+    expect(targetAudienceField).toBeTruthy()
+    expect(productsServicesField).toBeTruthy()
+    expect(targetAudienceField).not.toBe(productsServicesField)
   })
 
   it("starts website business recognition without submitting the form", async () => {
@@ -173,46 +174,12 @@ describe("BusinessProfileForm", () => {
       />
     )
 
-    expect(screen.getByText("部分完成")).toBeTruthy()
+    expect(
+      screen.getByText("AI 已生成可用资料，建议检查后再使用。")
+    ).toBeTruthy()
     expect(
       screen.getByText("AI 整理失败，已使用规则生成业务资料：模型请求超时")
     ).toBeTruthy()
-  })
-
-  it("shows the latest website recognition history", async () => {
-    projectApi.listBusinessProfileRuns.mockResolvedValueOnce([
-      {
-        runId: "run-2",
-        attempt: 2,
-        status: "failed",
-        stage: "failed",
-        message: "目标网站拒绝访问",
-        progress: 20,
-        startedAt: "2026-07-23T08:05:00Z",
-        finishedAt: "2026-07-23T08:05:03Z",
-        elapsedSeconds: 3,
-        createdAt: "2026-07-23T08:05:00Z",
-      },
-      {
-        runId: "run-1",
-        attempt: 1,
-        status: "completed",
-        stage: "completed",
-        message: "网站业务资料已生成",
-        progress: 100,
-        startedAt: "2026-07-23T08:00:00Z",
-        finishedAt: "2026-07-23T08:00:12Z",
-        elapsedSeconds: 12,
-        createdAt: "2026-07-23T08:00:00Z",
-      },
-    ])
-
-    render(<BusinessProfileForm project={project} onSave={vi.fn()} />)
-
-    expect(await screen.findByText("目标网站拒绝访问")).toBeTruthy()
-    expect(screen.getByText("网站业务资料已生成")).toBeTruthy()
-    expect(screen.getByText("第 2 次")).toBeTruthy()
-    expect(screen.getByText("3.0 秒")).toBeTruthy()
   })
 
   it("replaces form values when a newer recognition run finishes", async () => {
@@ -258,54 +225,5 @@ describe("BusinessProfileForm", () => {
       expect(screen.getByDisplayValue("Updated summary")).toBeTruthy()
       expect(screen.getByDisplayValue("Updated analytics")).toBeTruthy()
     })
-  })
-
-  it("reloads recognition history when the current run finishes", async () => {
-    const runningProject = {
-      ...project,
-      understandingRunId: "understanding-2",
-      understandingStatus: "running" as const,
-      understandingStage: "extracting_pages",
-      understandingProgress: 70,
-      understandingFinishedAt: null,
-    }
-    const completedRun = {
-      runId: "understanding-2",
-      attempt: 2,
-      status: "completed" as const,
-      stage: "completed",
-      message: "第二次识别完成",
-      progress: 100,
-      startedAt: "2026-07-23T08:10:00Z",
-      finishedAt: "2026-07-23T08:10:10Z",
-      elapsedSeconds: 10,
-      createdAt: "2026-07-23T08:10:00Z",
-    }
-    projectApi.listBusinessProfileRuns
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([completedRun])
-    const { rerender } = render(
-      <BusinessProfileForm project={runningProject} onSave={vi.fn()} />
-    )
-
-    await waitFor(() => {
-      expect(projectApi.listBusinessProfileRuns).toHaveBeenCalledTimes(1)
-    })
-
-    rerender(
-      <BusinessProfileForm
-        project={{
-          ...runningProject,
-          understandingStatus: "completed",
-          understandingStage: "completed",
-          understandingProgress: 100,
-          understandingFinishedAt: "2026-07-23T08:10:10Z",
-        }}
-        onSave={vi.fn()}
-      />
-    )
-
-    expect(await screen.findByText("第二次识别完成")).toBeTruthy()
-    expect(projectApi.listBusinessProfileRuns).toHaveBeenCalledTimes(2)
   })
 })

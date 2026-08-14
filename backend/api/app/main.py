@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.core.authoritative_platform_context import (
     AuthoritativePlatformContextResolver,
+    LocalDevelopmentPlatformContextResolver,
 )
 from app.core.backlinks_gateway import (
     BacklinksGateway,
@@ -21,9 +22,13 @@ from app.db.session import session_factory
 from app.modules.audit.service import AuditService, build_audit_service
 from app.modules.agent.service import build_agent_service
 from app.modules.content.service import build_content_service
+from app.modules.content.asset_service import build_asset_dispatcher
+from app.modules.content.publication_orchestrator import build_publication_orchestrator
 from app.modules.content_plan.d6_service import build_content_plan_d6_service
 from app.modules.content_plan.batch_service import build_content_plan_batch_service
 from app.modules.keywords.service import KeywordService, build_keyword_service
+from app.modules.onboarding.service import OnboardingService, build_onboarding_service
+from app.modules.performance.service import PerformanceService, build_performance_service
 from app.modules.projects.authority import SQLAlchemyWebsiteProjectAuthority
 from app.modules.projects.service import ProjectService, build_project_service
 from app.workflows.worker import get_crawler_worker_launcher
@@ -43,6 +48,20 @@ async def dispatch_site_understanding_workflows(
         except Exception:
             logger.exception("Unable to dispatch pending site understanding workflows")
         await asyncio.sleep(max(interval_seconds, 0.1))
+
+
+async def reconcile_onboarding_runs(
+    service: OnboardingService,
+    interval_seconds: float,
+) -> None:
+    while True:
+        try:
+            await service.reconcile_all()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to reconcile onboarding runs")
+        await asyncio.sleep(max(interval_seconds, 1))
 
 
 async def dispatch_audit_workflows(
@@ -135,6 +154,38 @@ async def dispatch_content_workflows() -> None:
         await asyncio.sleep(5)
 
 
+async def reconcile_content_workflows(
+    interval_seconds: float,
+    timeout_seconds: float,
+) -> None:
+    service = build_content_service()
+    while True:
+        try:
+            await asyncio.wait_for(
+                service.reconcile_active_runs(),
+                timeout=max(timeout_seconds, 0.1),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to reconcile active article workflows")
+        await asyncio.sleep(max(interval_seconds, 1))
+
+
+async def sync_performance_data(
+    service: PerformanceService,
+    interval_seconds: float,
+) -> None:
+    while True:
+        try:
+            await service.sync_due_projects()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to synchronize due performance projects")
+        await asyncio.sleep(max(interval_seconds, 60))
+
+
 async def dispatch_content_plan_preparations() -> None:
     preparation_service = build_content_plan_d6_service()
     batch_service = build_content_plan_batch_service()
@@ -183,8 +234,27 @@ async def lifespan(application: FastAPI):
     )
     agent_dispatch_task = asyncio.create_task(dispatch_agent_workflows())
     content_dispatch_task = asyncio.create_task(dispatch_content_workflows())
+    content_reconcile_task = asyncio.create_task(
+        reconcile_content_workflows(
+            settings.content_reconcile_interval_seconds,
+            settings.content_reconcile_timeout_seconds,
+        )
+    )
+    onboarding_service = build_onboarding_service()
+    onboarding_reconcile_task = asyncio.create_task(
+        reconcile_onboarding_runs(
+            onboarding_service,
+            settings.site_understanding_dispatch_interval_seconds,
+        )
+    )
     content_plan_dispatch_task = asyncio.create_task(
         dispatch_content_plan_preparations()
+    )
+    asset_processing_task = asyncio.create_task(build_asset_dispatcher().run_forever())
+    publication_dispatch_task = asyncio.create_task(
+        build_publication_orchestrator().run_forever(
+            settings.publication_dispatch_poll_seconds
+        )
     )
     keyword_service = build_keyword_service()
     keyword_dispatch_task = asyncio.create_task(
@@ -200,6 +270,12 @@ async def lifespan(application: FastAPI):
             settings.keyword_reconcile_timeout_seconds,
         )
     )
+    performance_sync_task = asyncio.create_task(
+        sync_performance_data(
+            build_performance_service(),
+            settings.performance_sync_interval_seconds,
+        )
+    )
     try:
         await asyncio.wait_for(
             audit_service.reconcile_active_runs(),
@@ -212,17 +288,35 @@ async def lifespan(application: FastAPI):
     except Exception:
         logger.exception("Unable to reconcile active Agent runs during startup")
     try:
+        await onboarding_service.reconcile_all(limit=500)
+    except Exception:
+        logger.exception("Unable to reconcile onboarding runs during startup")
+    try:
+        await asyncio.wait_for(
+            build_content_service().reconcile_active_runs(),
+            timeout=settings.content_reconcile_timeout_seconds,
+        )
+    except Exception:
+        logger.exception("Unable to reconcile active article runs during startup")
+    try:
         yield
     finally:
         dispatch_task.cancel()
+        onboarding_reconcile_task.cancel()
         audit_dispatch_task.cancel()
         agent_dispatch_task.cancel()
         content_dispatch_task.cancel()
+        content_reconcile_task.cancel()
         content_plan_dispatch_task.cancel()
+        asset_processing_task.cancel()
+        publication_dispatch_task.cancel()
         keyword_dispatch_task.cancel()
         keyword_reconcile_task.cancel()
+        performance_sync_task.cancel()
         with suppress(asyncio.CancelledError):
             await dispatch_task
+        with suppress(asyncio.CancelledError):
+            await onboarding_reconcile_task
         with suppress(asyncio.CancelledError):
             await audit_dispatch_task
         with suppress(asyncio.CancelledError):
@@ -230,11 +324,19 @@ async def lifespan(application: FastAPI):
         with suppress(asyncio.CancelledError):
             await content_dispatch_task
         with suppress(asyncio.CancelledError):
+            await content_reconcile_task
+        with suppress(asyncio.CancelledError):
             await content_plan_dispatch_task
+        with suppress(asyncio.CancelledError):
+            await asset_processing_task
+        with suppress(asyncio.CancelledError):
+            await publication_dispatch_task
         with suppress(asyncio.CancelledError):
             await keyword_dispatch_task
         with suppress(asyncio.CancelledError):
             await keyword_reconcile_task
+        with suppress(asyncio.CancelledError):
+            await performance_sync_task
         await worker_launcher.stop()
         owned_gateway = getattr(application.state, "owned_backlinks_gateway", None)
         if owned_gateway is not None:
@@ -244,6 +346,12 @@ async def lifespan(application: FastAPI):
 def create_platform_context_resolver(
     settings: Settings,
 ) -> PlatformContextResolver:
+    projects = SQLAlchemyWebsiteProjectAuthority(session_factory)
+    if (
+        settings.app_env != "production"
+        and settings.platform_local_development_auth_enabled
+    ):
+        return LocalDevelopmentPlatformContextResolver(projects=projects)
     if (
         settings.platform_auth_signing_key is None
         or settings.platform_context_signing_key is None
@@ -255,7 +363,7 @@ def create_platform_context_resolver(
             signing_key=settings.platform_auth_signing_key.get_secret_value(),
             max_token_ttl_seconds=settings.platform_auth_max_token_ttl_seconds,
         ),
-        projects=SQLAlchemyWebsiteProjectAuthority(session_factory),
+        projects=projects,
     )
 
 

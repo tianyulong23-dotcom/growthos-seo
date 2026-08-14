@@ -8,6 +8,9 @@ from httpx import ASGITransport, AsyncClient
 from app.api.routes.settings import get_ai_settings_service
 from app.core.config import Settings
 from app.main import app
+from app.modules.agent.providers import ProviderConfig, ProviderRequest
+from app.modules.agent.providers.anthropic import AnthropicProvider
+from app.modules.agent.providers.openai import OpenAIProvider
 from app.modules.settings.schemas import (
     TestAIProviderSettingsRequest as AIProviderSettingsTestRequest,
     UpdateAIProviderSettingsRequest,
@@ -56,9 +59,20 @@ class FakeAISettingsRepository:
         self.encryption_keys.append(encryption_key)
         self.allow_plaintext_values.append(allow_plaintext)
         self.record = AIProviderSettingsRecord(
+            provider=record.provider,
+            api_protocol=record.api_protocol,
             base_url=record.base_url,
             api_key=record.api_key,
             model=record.model,
+            business_model=record.business_model,
+            keyword_model=record.keyword_model,
+            content_model=record.content_model,
+            agent_model=record.agent_model,
+            reasoning_effort=record.reasoning_effort,
+            business_reasoning_effort=record.business_reasoning_effort,
+            keyword_reasoning_effort=record.keyword_reasoning_effort,
+            content_reasoning_effort=record.content_reasoning_effort,
+            agent_reasoning_effort=record.agent_reasoning_effort,
             request_timeout_seconds=record.request_timeout_seconds,
             max_retries=record.max_retries,
             updated_at=datetime(2026, 7, 23, 10, 0, tzinfo=UTC),
@@ -68,17 +82,29 @@ class FakeAISettingsRepository:
 
 class FakeConnectionTester:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, str, str, int]] = []
+        self.calls: list[tuple[str, str, str, str, str, str, int]] = []
 
     async def test(
         self,
         provider: str,
+        api_protocol: str,
         base_url: str,
         api_key: str,
         model: str,
+        reasoning_effort: str,
         request_timeout_seconds: int,
     ) -> None:
-        self.calls.append((provider, base_url, api_key, model, request_timeout_seconds))
+        self.calls.append(
+            (
+                provider,
+                api_protocol,
+                base_url,
+                api_key,
+                model,
+                reasoning_effort,
+                request_timeout_seconds,
+            )
+        )
 
 
 def build_service() -> tuple[
@@ -128,6 +154,72 @@ def test_effective_record_can_be_loaded_for_the_workflow_organization() -> None:
     assert repository.requested_organizations == ["workflow-org"]
 
 
+def test_task_models_override_default_and_blank_values_fall_back() -> None:
+    record = AIProviderSettingsRecord(
+        base_url="https://models.example/v1",
+        api_key="saved-key",
+        model="default-model",
+        business_model="business-model",
+        keyword_model=None,
+        content_model="content-model",
+        agent_model=None,
+        reasoning_effort="medium",
+        business_reasoning_effort="high",
+        content_reasoning_effort="low",
+    )
+
+    assert record.for_task("business").model == "business-model"
+    assert record.for_task("keyword").model == "default-model"
+    assert record.for_task("content").model == "content-model"
+    assert record.for_task("agent").model == "default-model"
+    assert record.for_task("business").reasoning_effort == "high"
+    assert record.for_task("keyword").reasoning_effort == "medium"
+    assert record.for_task("content").reasoning_effort == "low"
+    assert record.for_task("agent").reasoning_effort == "medium"
+
+
+def test_optional_task_models_normalize_blank_values_to_none() -> None:
+    request = UpdateAIProviderSettingsRequest(
+        base_url="https://models.example/v1",
+        model="default-model",
+        business_model="  ",
+        keyword_model=" keyword-model ",
+    )
+
+    assert request.business_model is None
+    assert request.keyword_model == "keyword-model"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "provider"),
+    [
+        ("https://openrouter.ai/api/v1", "openrouter"),
+        ("https://api.anthropic.com/v1", "anthropic"),
+        ("https://models.example/v1", "openai"),
+    ],
+)
+def test_provider_is_inferred_when_client_omits_it(
+    base_url: str,
+    provider: str,
+) -> None:
+    request = UpdateAIProviderSettingsRequest(
+        base_url=base_url,
+        model="test-model",
+    )
+
+    assert request.provider == provider
+
+
+def test_known_provider_url_overrides_incompatible_client_value() -> None:
+    request = UpdateAIProviderSettingsRequest(
+        provider="openai",
+        base_url="https://api.anthropic.com/v1",
+        model="claude-model",
+    )
+
+    assert request.provider == "anthropic"
+
+
 def test_update_reuses_current_key_when_request_leaves_it_blank() -> None:
     service, repository, _ = build_service()
 
@@ -137,6 +229,15 @@ def test_update_reuses_current_key_when_request_leaves_it_blank() -> None:
             UpdateAIProviderSettingsRequest(
                 base_url="https://models.example/v1/",
                 model="new-model",
+                business_model="business-model",
+                keyword_model="keyword-model",
+                content_model="content-model",
+                agent_model="agent-model",
+                reasoning_effort="low",
+                business_reasoning_effort="high",
+                keyword_reasoning_effort="medium",
+                content_reasoning_effort=None,
+                agent_reasoning_effort="high",
                 request_timeout_seconds=120,
                 max_retries=1,
             ),
@@ -146,6 +247,15 @@ def test_update_reuses_current_key_when_request_leaves_it_blank() -> None:
     assert repository.record is not None
     assert repository.record.api_key == "environment-key"
     assert repository.record.base_url == "https://models.example/v1"
+    assert repository.record.business_model == "business-model"
+    assert repository.record.keyword_model == "keyword-model"
+    assert repository.record.content_model == "content-model"
+    assert repository.record.agent_model == "agent-model"
+    assert repository.record.reasoning_effort == "low"
+    assert repository.record.business_reasoning_effort == "high"
+    assert repository.record.keyword_reasoning_effort == "medium"
+    assert repository.record.content_reasoning_effort is None
+    assert repository.record.agent_reasoning_effort == "high"
     assert repository.record.request_timeout_seconds == 120
     assert repository.record.max_retries == 1
     assert response.source == "database"
@@ -194,6 +304,28 @@ def test_production_rejects_save_without_encryption_key() -> None:
 
     assert repository.record is None
     assert repository.encryption_keys == []
+
+
+def test_production_allows_explicit_plaintext_storage() -> None:
+    service, repository, _ = build_service()
+    service.settings.app_env = "production"
+    service.settings.ai_settings_encryption_key = None
+    service.settings.ai_settings_allow_plaintext = True
+
+    response = asyncio.run(
+        service.update(
+            "project-1",
+            UpdateAIProviderSettingsRequest(
+                base_url="https://models.example/v1",
+                api_key="plaintext-production-key",
+                model="production-model",
+            ),
+        )
+    )
+
+    assert response.configured is True
+    assert repository.encryption_keys == [None]
+    assert repository.allow_plaintext_values == [True]
 
 
 def test_production_saves_with_encryption_and_disables_plaintext() -> None:
@@ -269,6 +401,13 @@ def test_connection_uses_unsaved_api_key_and_form_values() -> None:
             AIProviderSettingsTestRequest(
                 base_url="https://models.example/v1",
                 model="test-model",
+                business_model="business-model",
+                keyword_model="test-model",
+                content_model="content-model",
+                agent_model="agent-model",
+                reasoning_effort="medium",
+                business_reasoning_effort="high",
+                content_reasoning_effort="low",
                 api_key="new-key",
                 request_timeout_seconds=75,
             ),
@@ -277,8 +416,128 @@ def test_connection_uses_unsaved_api_key_and_form_values() -> None:
 
     assert response.success is True
     assert tester.calls == [
-        ("openai", "https://models.example/v1", "new-key", "test-model", 75)
+        ("openai", "chat_completions", "https://models.example/v1", "new-key", "test-model", "medium", 75),
+        ("openai", "chat_completions", "https://models.example/v1", "new-key", "business-model", "high", 75),
+        ("openai", "chat_completions", "https://models.example/v1", "new-key", "content-model", "low", 75),
+        ("openai", "chat_completions", "https://models.example/v1", "new-key", "agent-model", "medium", 75),
     ]
+    assert response.message == "连接成功，已验证 4 个模型配置"
+
+
+def test_reasoning_effort_rejects_automatic_values() -> None:
+    with pytest.raises(ValueError):
+        UpdateAIProviderSettingsRequest(
+            base_url="https://models.example/v1",
+            model="test-model",
+            reasoning_effort="auto",  # type: ignore[arg-type]
+        )
+
+
+def test_openai_request_uses_configured_reasoning_effort() -> None:
+    provider = OpenAIProvider(
+        ProviderConfig(
+            provider="openai",
+            base_url="https://models.example/v1",
+            api_key="test-key",
+            model="test-model",
+            timeout_seconds=10,
+            max_retries=0,
+            reasoning_effort="high",
+        )
+    )
+
+    payload = provider.serialize(
+        ProviderRequest(messages=[{"role": "user", "content": "test"}]),
+        stream=False,
+    )
+
+    assert payload["reasoning_effort"] == "high"
+
+
+def test_responses_request_uses_input_and_flat_function_tools() -> None:
+    provider = OpenAIProvider(
+        ProviderConfig(
+            provider="openai",
+            api_protocol="responses",
+            base_url="https://models.example/v1",
+            api_key="test-key",
+            model="test-model",
+            timeout_seconds=10,
+            max_retries=0,
+            reasoning_effort="high",
+        )
+    )
+
+    payload = provider.serialize(
+        ProviderRequest(
+            messages=[
+                {"role": "assistant", "content": "", "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect_site", "arguments": "{}"},
+                }]},
+                {"role": "tool", "tool_call_id": "call-1", "content": '{"ok":true}'},
+            ],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "inspect_site",
+                    "description": "Inspect the site",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": True,
+                },
+            }],
+            tool_choice="required",
+            parallel_tool_calls=True,
+            max_output_tokens=128,
+        ),
+        stream=False,
+    )
+
+    assert "messages" not in payload
+    assert payload["reasoning"] == {"effort": "high"}
+    assert payload["max_output_tokens"] == 128
+    assert payload["tools"] == [{
+        "type": "function",
+        "name": "inspect_site",
+        "description": "Inspect the site",
+        "parameters": {"type": "object", "properties": {}},
+        "strict": True,
+    }]
+    assert payload["input"] == [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "inspect_site",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": '{"ok":true}',
+        },
+    ]
+
+
+def test_anthropic_request_uses_configured_reasoning_effort() -> None:
+    provider = AnthropicProvider(
+        ProviderConfig(
+            provider="anthropic",
+            base_url="https://api.anthropic.com/v1",
+            api_key="test-key",
+            model="test-model",
+            timeout_seconds=10,
+            max_retries=0,
+            reasoning_effort="low",
+        )
+    )
+
+    payload = provider.serialize(
+        ProviderRequest(messages=[{"role": "user", "content": "test"}]),
+        stream=False,
+    )
+
+    assert payload["output_config"] == {"effort": "low"}
 
 
 def test_routes_save_and_load_settings_without_exposing_key() -> None:
@@ -294,6 +553,10 @@ def test_routes_save_and_load_settings_without_exposing_key() -> None:
                     "base_url": "https://models.example/v1",
                     "api_key": "saved-key",
                     "model": "saved-model",
+                    "business_model": "business-model",
+                    "keyword_model": "keyword-model",
+                    "content_model": "content-model",
+                    "agent_model": None,
                     "request_timeout_seconds": 90,
                     "max_retries": 1,
                 },
@@ -309,6 +572,10 @@ def test_routes_save_and_load_settings_without_exposing_key() -> None:
     assert status_code == 200
     assert saved["source"] == "database"
     assert loaded["base_url"] == "https://models.example/v1"
+    assert loaded["business_model"] == "business-model"
+    assert loaded["keyword_model"] == "keyword-model"
+    assert loaded["content_model"] == "content-model"
+    assert loaded["agent_model"] is None
     assert loaded["request_timeout_seconds"] == 90
     assert loaded["max_retries"] == 1
     assert "api_key" not in saved

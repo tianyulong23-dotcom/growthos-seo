@@ -13,8 +13,12 @@ from app.modules.content_plan.providers import (
     bind_content_plan_organization,
     reset_content_plan_organization,
 )
-from app.modules.content_plan.recovery import RECOVERABLE_PREPARATION_ERROR_CODES
+from app.modules.content_plan.recovery import AUTOMATIC_RETRYABLE_BATCH_ERROR_CODES
 from app.modules.content_plan.recovery import MANUAL_RETRYABLE_BATCH_ERROR_CODES
+from app.modules.content_plan.recovery import RECOVERABLE_PREPARATION_ERROR_CODES
+from app.modules.content_plan.recovery import (
+    USER_RETRYABLE_AUTOMATIC_BATCH_ERROR_CODES,
+)
 from app.modules.content_plan.repository import (
     ActiveAutomaticBatchError,
     BatchProgress,
@@ -172,17 +176,21 @@ class ContentPlanBatchService:
             if not self._d4_started(batch.status, batch.stage):
                 d3_result = await self.d3_service.run(batch_id)
                 if d3_result.status != "pack_ready":
-                    return {
-                        "batch_id": batch_id,
-                        "status": (
-                            "retryable_failed"
-                            if d3_result.error_code
-                            in RECOVERABLE_PREPARATION_ERROR_CODES
-                            else "needs_attention"
-                        ),
-                        "error_code": d3_result.error_code,
-                    }
+                    return self._failed_result(batch_id, d3_result.error_code)
+            else:
+                refill_result = await self.d3_service.replenish_serp_exhausted_packages(
+                    batch_id
+                )
+                if refill_result.status not in {"pack_ready", "not_needed"}:
+                    return self._failed_result(batch_id, refill_result.error_code)
             d4_result = await self.d4_service.run(batch_id)
+            if d4_result.error_code == "serp_primary_candidates_exhausted":
+                refill_result = await self.d3_service.replenish_serp_exhausted_packages(
+                    batch_id
+                )
+                if refill_result.status != "pack_ready":
+                    return self._failed_result(batch_id, refill_result.error_code)
+                d4_result = await self.d4_service.run(batch_id)
             if d4_result.status == "completed":
                 return {
                     "batch_id": batch_id,
@@ -200,6 +208,18 @@ class ContentPlanBatchService:
             }
         finally:
             reset_content_plan_organization(token)
+
+    @staticmethod
+    def _failed_result(batch_id: str, error_code: str | None) -> dict[str, object]:
+        return {
+            "batch_id": batch_id,
+            "status": (
+                "retryable_failed"
+                if error_code in AUTOMATIC_RETRYABLE_BATCH_ERROR_CODES
+                else "needs_attention"
+            ),
+            "error_code": error_code,
+        }
 
     async def mark_retry_exhausted(
         self, batch_id: str, *, last_error_code: str | None
@@ -266,7 +286,7 @@ class ContentPlanBatchService:
         if status in {"completed", "cancelled"}:
             return False
         if status == "needs_attention":
-            return error_code in RECOVERABLE_PREPARATION_ERROR_CODES
+            return error_code in AUTOMATIC_RETRYABLE_BATCH_ERROR_CODES
         return True
 
     @staticmethod
@@ -297,7 +317,12 @@ class ContentPlanBatchService:
             total_cost_usd=progress.total_cost_usd,
             retryable=(
                 batch.status == "needs_attention"
-                and batch.error_code in MANUAL_RETRYABLE_BATCH_ERROR_CODES
+                and batch.error_code
+                in (
+                    USER_RETRYABLE_AUTOMATIC_BATCH_ERROR_CODES
+                    if batch.source == "automatic"
+                    else MANUAL_RETRYABLE_BATCH_ERROR_CODES
+                )
             ),
             error_code=batch.error_code,
             error_detail=batch.error_detail,

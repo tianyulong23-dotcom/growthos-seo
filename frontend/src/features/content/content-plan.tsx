@@ -33,6 +33,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   InputGroup,
   InputGroupAddon,
@@ -690,11 +691,12 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                   </div>
                 ) : (
                   visiblePlans.map((item) => (
-                    <button
+                    <Button
                       key={item.id}
                       type="button"
+                      variant="ghost"
                       onClick={() => void openPlan(item.id)}
-                      className="flex w-full items-center gap-3 border-b px-4 py-3 text-left last:border-b-0"
+                      className="h-auto w-full justify-start gap-3 rounded-none border-b px-4 py-3 text-left whitespace-normal last:border-b-0"
                     >
                       <div className="w-16 shrink-0 text-sm font-medium">
                         {formatShortDate(item.publish_local_date)}
@@ -708,7 +710,7 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                         </div>
                       </div>
                       <PlanBadge item={item} />
-                    </button>
+                    </Button>
                   ))
                 )}
               </div>
@@ -736,7 +738,9 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                         {formatShortDate(item.publish_local_date, true)}
                       </TableCell>
                       <TableCell className="min-w-64">
-                        <div className="text-base font-medium">{item.title}</div>
+                        <div className="text-base font-medium">
+                          {item.title}
+                        </div>
                         <div className="mt-1 text-sm text-muted-foreground">
                           {item.primary_keyword}
                         </div>
@@ -792,7 +796,7 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
             <SheetDescription>排期规则以后端保存的设置为准。</SheetDescription>
           </SheetHeader>
           <div className="space-y-6 overflow-y-auto px-6 pb-6">
-            <label className="flex items-center justify-between gap-4">
+            <Label className="flex items-center justify-between gap-4">
               <span>
                 <span className="block font-medium">暂停自动生成</span>
                 <span className="mt-1 block text-xs text-muted-foreground">
@@ -800,9 +804,9 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                 </span>
               </span>
               <Switch checked={draftPaused} onCheckedChange={setDraftPaused} />
-            </label>
+            </Label>
             <Separator />
-            <label className="grid gap-2 text-sm">
+            <Label className="grid gap-2 text-sm">
               <span className="font-medium">发布频率</span>
               <Select
                 value={draftCadence}
@@ -821,15 +825,15 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                   ))}
                 </SelectContent>
               </Select>
-            </label>
-            <label className="grid gap-2 text-sm">
+            </Label>
+            <Label className="grid gap-2 text-sm">
               <span className="font-medium">时区</span>
               <Input
                 value={draftTimezone}
                 onChange={(event) => setDraftTimezone(event.target.value)}
                 placeholder="Asia/Shanghai"
               />
-            </label>
+            </Label>
             <div className="border-t pt-4 text-xs text-muted-foreground">
               文章固定在目标上稿日前 1 天开始生成。
             </div>
@@ -888,7 +892,7 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                     {detailError}
                   </div>
                 )}
-                <label className="grid gap-2 text-sm">
+                <Label className="grid gap-2 text-sm">
                   <span className="font-medium">标题</span>
                   <Input
                     value={detail.title}
@@ -897,8 +901,8 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                     }
                     disabled={detailBusy}
                   />
-                </label>
-                <label className="grid gap-2 text-sm">
+                </Label>
+                <Label className="grid gap-2 text-sm">
                   <span className="font-medium">写作方向</span>
                   <Textarea
                     value={detail.writingDirection}
@@ -911,8 +915,8 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                     className="min-h-28"
                     disabled={detailBusy}
                   />
-                </label>
-                <label className="grid gap-2 text-sm">
+                </Label>
+                <Label className="grid gap-2 text-sm">
                   <span className="font-medium">目标上稿日期</span>
                   <Input
                     type="date"
@@ -929,8 +933,8 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                   <span className="text-xs text-muted-foreground">
                     预计生成：{formatGenerationDate(selectedPlan.generation_at)}
                   </span>
-                </label>
-                <label className="grid gap-2 text-sm">
+                </Label>
+                <Label className="grid gap-2 text-sm">
                   <span className="font-medium">次关键词（每行一个）</span>
                   <Textarea
                     value={detail.secondaryKeywords}
@@ -943,10 +947,10 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                     className="min-h-24"
                     disabled={detailBusy}
                   />
-                </label>
+                </Label>
                 <Separator />
                 <div className="grid gap-4">
-                  <label className="grid gap-2 text-sm">
+                  <Label className="grid gap-2 text-sm">
                     <span className="font-medium">种子词</span>
                     <div className="flex gap-2">
                       <Input
@@ -971,8 +975,8 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                         重新准备
                       </Button>
                     </div>
-                  </label>
-                  <label className="grid gap-2 text-sm">
+                  </Label>
+                  <Label className="grid gap-2 text-sm">
                     <span className="font-medium">主关键词</span>
                     <div className="flex gap-2">
                       <Input
@@ -997,7 +1001,7 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
                         重新准备
                       </Button>
                     </div>
-                  </label>
+                  </Label>
                 </div>
                 {selectedPlan.article_id ? (
                   <Button

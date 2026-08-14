@@ -22,6 +22,9 @@ dependencies = [
     "temporalio>=1.17,<2",
     "textstat>=0.7,<1",
     "uvicorn[standard]>=0.35,<1",
+    "markdown-it-py>=4,<5",
+    "pillow>=11,<13",
+    "mutagen>=1.47,<2",
 ]
 
 [dependency-groups]

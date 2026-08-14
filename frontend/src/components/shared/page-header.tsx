@@ -31,9 +31,9 @@ export function PageHeader({
   const project = getProject(projectId)
 
   return (
-    <div className="flex flex-col gap-4 border-b px-4 py-5 sm:px-6 lg:flex-row lg:items-end lg:justify-between lg:px-8">
+    <div className="flex flex-col gap-4 border-b px-4 py-2 sm:px-6 lg:flex-row lg:items-end lg:justify-between lg:px-8">
       <div className="min-w-0">
-        <div className="mb-2 flex items-center gap-1 text-xs text-muted-foreground">
+        <div className="mb-4 flex items-center gap-1 text-xs text-muted-foreground">
           <Link
             to={`/projects/${project.id}`}
             className="truncate hover:text-foreground"
@@ -49,9 +49,6 @@ export function PageHeader({
             <Badge variant="secondary">健康度 {project.auditHealth}</Badge>
           )}
         </div>
-        <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-          {module.description}
-        </p>
       </div>
       {actionLabel && (
         <Button

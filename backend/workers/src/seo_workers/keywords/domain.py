@@ -9,7 +9,7 @@ from difflib import SequenceMatcher
 from typing import Any, Iterable
 
 SEED_RULE_VERSION = "seed-v5-provider-brand-gate"
-PRIORITY_RULE_VERSION = "priority-v1"
+PRIORITY_RULE_VERSION = "priority-v3"
 ROUND_KEYWORD_LIMIT = 500
 ACTIVE_SEED_LIMIT = 20
 SEED_POOL_LIMIT = 100
@@ -26,7 +26,7 @@ INITIAL_LIBRARY_REJECTION_REASONS = (
     "remove_irrelevant",
     "remove_entity",
     "remove_navigation",
-    "remove_unusable",
+    "remove_incomplete",
 )
 
 ENGLISH_VARIANT_FILLERS = {
@@ -654,17 +654,13 @@ def validate_initial_library_filter(
     language: str,
 ) -> dict[str, InitialLibraryAssessment]:
     expected = {f"k{index:03d}": candidate for index, candidate in enumerate(candidates, start=1)}
-    allowed_categories = {
-        *INITIAL_LIBRARY_APPROVAL_SCORES,
-        *INITIAL_LIBRARY_REJECTION_REASONS,
-    }
+    allowed_categories = {"keep", "remove_incomplete"}
     if set(payload) != {"decisions"}:
         raise ValueError("AI initial-library filter must contain only the decisions array")
     raw_decisions = payload.get("decisions")
     if not isinstance(raw_decisions, list) or len(raw_decisions) != len(candidates):
         raise ValueError("AI initial-library filter must classify every candidate exactly once")
 
-    allowed_brands = profile_brand_names(profile, None)
     assessments: dict[str, InitialLibraryAssessment] = {}
     for (candidate_id, candidate), category in zip(
         expected.items(),
@@ -673,17 +669,6 @@ def validate_initial_library_filter(
     ):
         if not isinstance(category, str) or category not in allowed_categories:
             raise ValueError("AI initial-library filter contains an invalid decision category")
-        if category == "remove_entity" and excluded_brand_name(
-            candidate.raw,
-            allowed_brands,
-        ) is None:
-            category = "keep"
-        elif category == "remove_irrelevant" and strong_seed_business_evidence(
-            candidate,
-            profile,
-            language,
-        ):
-            category = "keep"
         approved = category in INITIAL_LIBRARY_APPROVAL_SCORES
         assessments[candidate_id] = InitialLibraryAssessment(
             candidate_id=candidate_id,
@@ -2004,14 +1989,12 @@ def priority_score(
             else None
         ),
         "intent": intent_score(metric.get("intent") if metric else None),
-        "content_gap": content_gap_score(candidate.keyword, profile, language),
     }
     weights = {
-        "business_relevance": 35.0,
-        "search_volume": 25.0,
-        "difficulty": 20.0,
-        "intent": 10.0,
-        "content_gap": 10.0,
+        "business_relevance": 10.0,
+        "search_volume": 40.0,
+        "difficulty": 35.0,
+        "intent": 15.0,
     }
     available_weight = sum(weights[key] for key, value in values.items() if value is not None)
     if available_weight <= 0:
@@ -2025,7 +2008,7 @@ def priority_score(
         )
     score = (
         sum(float(value) * weights[key] for key, value in values.items() if value is not None)
-        / available_weight
+        / 100.0
     )
     confidence = available_weight / 100.0
     return (
@@ -2289,30 +2272,6 @@ def intent_score(intent: str | None) -> float | None:
         "navigation": 40.0,
     }
     return mapping.get(normalized)
-
-
-def content_gap_score(
-    keyword: str,
-    profile: dict[str, Any],
-    language: str,
-) -> float | None:
-    pages = profile.get("key_pages")
-    if not isinstance(pages, list) or not pages:
-        return None
-    keyword_tokens = set(tokenize(keyword, language))
-    if not keyword_tokens:
-        return None
-    best = 0.0
-    for page in pages:
-        if not isinstance(page, dict):
-            continue
-        text = " ".join(str(page.get(field) or "") for field in ("title", "description"))
-        page_tokens = set(tokenize(text, language))
-        if not page_tokens:
-            continue
-        overlap = len(keyword_tokens & page_tokens) / len(keyword_tokens)
-        best = max(best, overlap)
-    return round((1 - min(best, 1.0)) * 100, 2)
 
 
 def string_list(value: Any) -> list[str]:

@@ -97,10 +97,7 @@ func (e *Engine) Run(ctx context.Context, task Task) (result Result, err error) 
 	case TaskSiteUnderstanding, TaskTechnicalAudit:
 		result.Pages, err = e.crawlSite(ctx, task)
 		if err == nil && task.Type == TaskSiteUnderstanding {
-			result.CompletionStatus = CompletionPartial
-			if siteUnderstandingComplete(task, result.Pages) {
-				result.CompletionStatus = CompletionComplete
-			}
+			result.CompletionStatus = CompletionComplete
 		}
 		if err == nil && task.Type == TaskTechnicalAudit {
 			e.report(
@@ -167,10 +164,69 @@ func (e *Engine) Run(ctx context.Context, task Task) (result Result, err error) 
 		if err == nil {
 			result.CompletionStatus = CompletionComplete
 		}
+	case TaskContentResearch, TaskSourceVerification:
+		result.Pages, result.CompletionStatus, err = e.crawlRequestedURLs(ctx, task)
+		if err == nil && result.CompletionStatus == CompletionPartial {
+			result.CompletionNote = "部分页面抓取失败，已保留成功页面并继续处理"
+		}
 	default:
 		err = fmt.Errorf("unsupported task type %q", task.Type)
 	}
 	return result, err
+}
+
+func (e *Engine) crawlRequestedURLs(
+	ctx context.Context,
+	task Task,
+) ([]Page, CompletionStatus, error) {
+	ctx = withRequestLocale(ctx, task.Language, task.Country)
+	limit := task.PageLimit()
+	pages := make([]Page, 0, limit)
+	successful := 0
+	e.report(StageAnalyzing, "正在抓取指定资料页面", limit, 0, 0)
+
+	for index, rawURL := range task.URLs[:limit] {
+		if err := ctx.Err(); err != nil {
+			return pages, CompletionPartial, err
+		}
+		resource, fetchErr := e.fetchResource(ctx, rawURL)
+		page := pageFromResource(resource, 0, "")
+		if fetchErr == nil && resource.StatusCode >= 200 && resource.StatusCode < 400 && isHTML(resource) {
+			parsed, parseErr := e.parser.Parse(resource, 0, "")
+			if parseErr == nil {
+				page = parsed
+				page.Score = ScorePage(page)
+				if e.processor != nil {
+					page, parseErr = e.processor.ProcessPage(ctx, task, page, resource)
+				}
+			}
+			if parseErr == nil {
+				successful++
+			} else {
+				page = pageFromResource(resource, 0, "")
+				page.Error = parseErr.Error()
+				page.ErrorType = "parse_error"
+			}
+		} else if fetchErr == nil {
+			switch {
+			case resource.StatusCode < 200 || resource.StatusCode >= 400:
+				page.Error = fmt.Sprintf("HTTP status %d", resource.StatusCode)
+				page.ErrorType = "http_status"
+			case !isHTML(resource):
+				page.Error = "response is not an HTML page"
+				page.ErrorType = "unsupported_content_type"
+			}
+		}
+		pages = append(pages, page)
+		e.report(StageExtracting, "正在整理资料页面", limit, index+1, successful)
+	}
+
+	status := CompletionComplete
+	if successful != limit {
+		status = CompletionPartial
+	}
+	e.report(StageCompleted, "资料页面抓取完成", limit, limit, successful)
+	return pages, status, nil
 }
 
 func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
@@ -195,7 +251,7 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 	discoveryLimit := max(e.config.DiscoveryLimit, limit)
 	attemptLimit := discoveryLimit
 	if task.Type == TaskSiteUnderstanding {
-		attemptLimit = min(discoveryLimit, max(limit*2, siteUnderstandingMinimumPages))
+		attemptLimit = min(discoveryLimit, max(limit*2, siteUnderstandingMinimumAttempts))
 	}
 
 	e.report(StageAnalyzing, "正在分析网站", 0, 0, 0)
@@ -215,9 +271,12 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 			return nil, loadErr
 		}
 		if found {
-			for _, state := range checkpoint.Candidates {
+			for index, state := range checkpoint.Candidates {
 				candidate, candidateErr := candidateFromState(state)
 				if candidateErr == nil && scope.Allows(candidate.URL) {
+					if candidate.DiscoveryOrder <= 0 {
+						candidate.DiscoveryOrder = index + 1
+					}
 					candidates[candidate.URL.String()] = candidate
 				}
 			}
@@ -265,54 +324,25 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 	var homepageResource Resource
 	var homepageErr error
 	homepageFetched := false
-	preferredLocales := preferredLocaleValues(task.Language, task.Country)
-	var sitemapResults <-chan []Candidate
-	var cancelSitemap context.CancelFunc
 	robots := NewRobotsPolicyCache(
 		e.http,
 		defaultString(e.config.RobotsUserAgent, defaultRobotsUserAgent),
 	)
-	policy, policyErr := robots.Policy(ctx, root)
-	if policyErr != nil {
-		return nil, policyErr
-	}
-	startSitemapDiscovery := func() {
-		if sitemapResults != nil {
-			return
+	policy := RobotsPolicy{}
+	if task.Type == TaskTechnicalAudit {
+		var policyErr error
+		policy, policyErr = robots.Policy(ctx, root)
+		if policyErr != nil {
+			return nil, policyErr
 		}
-		sitemapCtx, cancel := context.WithTimeout(
-			ctx,
-			siteUnderstandingSitemapTimeout,
-		)
-		cancelSitemap = cancel
-		results := make(chan []Candidate, 1)
-		sitemapResults = results
-		go func() {
-			discovered, _ := discoverSitemapURLs(
-				sitemapCtx,
-				e.http,
-				scope,
-				defaultSitemapURLs(root, policy.Sitemaps),
-				discoveryLimit,
-				siteUnderstandingSitemapDocumentLimit,
-				preferredLocales,
-			)
-			results <- discovered
-		}()
 	}
-	if task.Type == TaskSiteUnderstanding {
-		startSitemapDiscovery()
-	}
-	rootAllowed, robotsErr := robots.Allows(ctx, root)
+	rootAllowed, robotsErr := taskURLAllowed(ctx, task.Type, robots, root)
 	if robotsErr != nil {
 		return nil, robotsErr
 	}
 	if !restored && rootAllowed {
 		homepageResource, homepageErr = e.fetchResource(ctx, root.String())
 		homepageFetched = true
-	}
-	if cancelSitemap != nil {
-		defer cancelSitemap()
 	}
 	if !restored {
 		addCandidate(candidates, Candidate{URL: root, Depth: 0})
@@ -406,49 +436,17 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 			imageScheduler.EnqueuePage(page)
 		}
 	}
-	if task.Type == TaskSiteUnderstanding && restored {
-		startSitemapDiscovery()
-		if cancelSitemap != nil {
-			defer cancelSitemap()
-		}
-	}
-
 	for len(pages) < limit && attempted < attemptLimit {
 		if err := ctx.Err(); err != nil {
 			return pages, err
 		}
-		if sitemapResults != nil {
-			select {
-			case sitemapCandidates := <-sitemapResults:
-				sitemapResults = nil
-				for _, sitemapCandidate := range sitemapCandidates {
-					addCandidate(candidates, sitemapCandidate)
-				}
-			default:
-			}
-		}
-		if task.Type == TaskSiteUnderstanding && siteUnderstandingComplete(task, pages) {
-			break
-		}
 		candidate, ok := bestCandidate(candidates, processed, task.Type, pages)
-		if !ok && sitemapResults != nil {
-			select {
-			case sitemapCandidates := <-sitemapResults:
-				sitemapResults = nil
-				for _, sitemapCandidate := range sitemapCandidates {
-					addCandidate(candidates, sitemapCandidate)
-				}
-				candidate, ok = bestCandidate(candidates, processed, task.Type, pages)
-			case <-ctx.Done():
-				return pages, ctx.Err()
-			}
-		}
 		if !ok {
 			break
 		}
 		value := candidate.URL.String()
 		processed[value] = struct{}{}
-		allowed, robotsErr := robots.Allows(ctx, candidate.URL)
+		allowed, robotsErr := taskURLAllowed(ctx, task.Type, robots, candidate.URL)
 		if robotsErr != nil {
 			return nil, robotsErr
 		}
@@ -466,16 +464,16 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 				limit-len(pages),
 				attemptLimit-attempted+1,
 			)
-			roleCounts := businessPageRoleCounts(pages)
-			roleCounts[CandidateBusinessRole(candidate)]++
-			for _, additional := range bestUnderstandingCandidates(
+			occupiedRoles := siteUnderstandingPageRoleCounts(pages)
+			occupiedRoles[CandidateBusinessRole(candidate)]++
+			for _, additional := range pendingSiteUnderstandingCandidates(
 				candidates,
 				processed,
-				roleCounts,
+				occupiedRoles,
 				batchLimit-1,
 			) {
 				processed[additional.URL.String()] = struct{}{}
-				allowed, robotsErr := robots.Allows(ctx, additional.URL)
+				allowed, robotsErr := taskURLAllowed(ctx, task.Type, robots, additional.URL)
 				if robotsErr != nil {
 					return nil, robotsErr
 				}
@@ -498,7 +496,7 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 			) {
 				additionalURL := additional.URL.String()
 				processed[additionalURL] = struct{}{}
-				allowed, robotsErr := robots.Allows(ctx, additional.URL)
+				allowed, robotsErr := taskURLAllowed(ctx, task.Type, robots, additional.URL)
 				if robotsErr != nil {
 					return nil, robotsErr
 				}
@@ -549,9 +547,6 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 
 		batchPageStart := len(pages)
 		for index, candidate := range batch {
-			if task.Type == TaskSiteUnderstanding && siteUnderstandingComplete(task, pages) {
-				break
-			}
 			value := candidate.URL.String()
 			resource := outcomes[index].Resource
 			fetchErr := outcomes[index].Err
@@ -631,6 +626,9 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 				}
 			}
 			addPageLinks(candidates, scope, page, discoveryLimit, task.Type)
+			if task.Type == TaskSiteUnderstanding && !siteUnderstandingPageEligible(page, pages) {
+				continue
+			}
 			if e.processor != nil {
 				page, err = e.processor.ProcessPage(ctx, task, page, resource)
 				if err != nil {
@@ -708,12 +706,6 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 				pages[homepageIndex].FaviconBody = icon.Body
 			}
 		}
-		sort.SliceStable(pages, func(i, j int) bool {
-			if pages[i].Score == pages[j].Score {
-				return pages[i].URL < pages[j].URL
-			}
-			return pages[i].Score > pages[j].Score
-		})
 	}
 	if len(pages) > limit {
 		pages = pages[:limit]
@@ -839,6 +831,7 @@ func candidateState(candidate Candidate) CandidateState {
 	return CandidateState{
 		URL:             value,
 		Depth:           candidate.Depth,
+		DiscoveryOrder:  candidate.DiscoveryOrder,
 		DiscoveredFrom:  candidate.DiscoveredFrom,
 		AnchorText:      candidate.AnchorText,
 		Placement:       candidate.Placement,
@@ -858,6 +851,7 @@ func candidateFromState(state CandidateState) (Candidate, error) {
 	return Candidate{
 		URL:             candidateURL,
 		Depth:           state.Depth,
+		DiscoveryOrder:  state.DiscoveryOrder,
 		DiscoveredFrom:  state.DiscoveredFrom,
 		AnchorText:      state.AnchorText,
 		Placement:       state.Placement,
@@ -1387,6 +1381,18 @@ func (e *Engine) report(stage ProgressStage, message string, discovered, process
 	})
 }
 
+func taskURLAllowed(
+	ctx context.Context,
+	taskType TaskType,
+	robots *RobotsPolicyCache,
+	target *url.URL,
+) (bool, error) {
+	if taskType == TaskSiteUnderstanding {
+		return true, nil
+	}
+	return robots.Allows(ctx, target)
+}
+
 func addCandidate(candidates map[string]Candidate, candidate Candidate) {
 	if candidate.URL == nil {
 		return
@@ -1395,6 +1401,9 @@ func addCandidate(candidates map[string]Candidate, candidate Candidate) {
 	value := candidate.URL.String()
 	previous, exists := candidates[value]
 	if !exists {
+		if candidate.DiscoveryOrder <= 0 {
+			candidate.DiscoveryOrder = len(candidates) + 1
+		}
 		candidates[value] = candidate
 		return
 	}
@@ -1430,6 +1439,9 @@ func addPageLinks(
 	taskType TaskType,
 ) {
 	if len(candidates) >= limit {
+		return
+	}
+	if taskType == TaskSiteUnderstanding && page.Depth >= 2 {
 		return
 	}
 	base, err := url.Parse(page.FinalURL)
@@ -1493,7 +1505,7 @@ func bestCandidate(
 	for value, candidate := range candidates {
 		if _, exists := processed[value]; !exists {
 			if taskType == TaskSiteUnderstanding &&
-				CandidateBusinessRole(candidate) == BusinessPageUtility {
+				(candidate.Depth > 2 || CandidateBusinessRole(candidate) == BusinessPageUtility) {
 				continue
 			}
 			pending = append(pending, candidate)
@@ -1503,16 +1515,15 @@ func bestCandidate(
 		return Candidate{}, false
 	}
 	if taskType == TaskSiteUnderstanding {
-		roleCounts := businessPageRoleCounts(pages)
-		sort.SliceStable(pending, func(i, j int) bool {
-			left := siteUnderstandingSelectionScore(pending[i], roleCounts)
-			right := siteUnderstandingSelectionScore(pending[j], roleCounts)
-			if left == right {
-				return pending[i].URL.String() < pending[j].URL.String()
-			}
-			return left > right
-		})
-		return pending[0], true
+		selected := selectSiteUnderstandingCandidates(
+			pending,
+			siteUnderstandingPageRoleCounts(pages),
+			1,
+		)
+		if len(selected) == 0 {
+			return Candidate{}, false
+		}
+		return selected[0], true
 	}
 	return Candidate{}, false
 }
@@ -1602,10 +1613,10 @@ func defaultSitemapURLs(root *url.URL, declared []string) []string {
 	return uniqueStrings(values)
 }
 
-func bestUnderstandingCandidates(
+func pendingSiteUnderstandingCandidates(
 	candidates map[string]Candidate,
 	processed map[string]struct{},
-	roleCounts map[BusinessPageRole]int,
+	occupiedRoles map[BusinessPageRole]int,
 	limit int,
 ) []Candidate {
 	if limit <= 0 {
@@ -1614,103 +1625,176 @@ func bestUnderstandingCandidates(
 	pending := make([]Candidate, 0, len(candidates))
 	for value, candidate := range candidates {
 		if _, exists := processed[value]; !exists {
-			if CandidateBusinessRole(candidate) == BusinessPageUtility {
+			if candidate.Depth > 2 || !siteUnderstandingCandidateEligible(candidate) {
 				continue
 			}
 			pending = append(pending, candidate)
 		}
 	}
-	selected := make([]Candidate, 0, min(limit, len(pending)))
-	for len(pending) > 0 && len(selected) < limit {
-		sort.SliceStable(pending, func(i, j int) bool {
-			left := siteUnderstandingSelectionScore(pending[i], roleCounts)
-			right := siteUnderstandingSelectionScore(pending[j], roleCounts)
-			if left == right {
-				return pending[i].URL.String() < pending[j].URL.String()
+	return selectSiteUnderstandingCandidates(pending, occupiedRoles, limit)
+}
+
+func selectSiteUnderstandingCandidates(
+	candidates []Candidate,
+	occupiedRoles map[BusinessPageRole]int,
+	limit int,
+) []Candidate {
+	selected := make([]Candidate, 0, min(limit, len(candidates)))
+	roleCounts := make(map[BusinessPageRole]int, len(occupiedRoles))
+	for role, count := range occupiedRoles {
+		roleCounts[role] = count
+	}
+	used := make([]bool, len(candidates))
+	for len(selected) < limit {
+		bestIndex := -1
+		for index, candidate := range candidates {
+			role := CandidateBusinessRole(candidate)
+			if used[index] || !siteUnderstandingCandidateEligible(candidate) ||
+				roleCounts[role] >= siteUnderstandingCandidateRoleLimit(role) {
+				continue
 			}
-			return left > right
-		})
-		candidate := pending[0]
-		pending = pending[1:]
+			if bestIndex < 0 || siteUnderstandingCandidateLess(
+				candidate,
+				candidates[bestIndex],
+				roleCounts,
+			) {
+				bestIndex = index
+			}
+		}
+		if bestIndex < 0 {
+			break
+		}
+		candidate := candidates[bestIndex]
+		role := CandidateBusinessRole(candidate)
+		used[bestIndex] = true
+		roleCounts[role]++
 		selected = append(selected, candidate)
-		roleCounts[CandidateBusinessRole(candidate)]++
 	}
 	return selected
 }
 
-func businessPageRoleCounts(pages []Page) map[BusinessPageRole]int {
-	counts := make(map[BusinessPageRole]int)
-	for _, page := range pages {
-		counts[PageBusinessRole(page)]++
+func siteUnderstandingCandidateLess(
+	left Candidate,
+	right Candidate,
+	roleCounts map[BusinessPageRole]int,
+) bool {
+	leftPriority := siteUnderstandingRolePriority(
+		CandidateBusinessRole(left),
+		roleCounts[CandidateBusinessRole(left)],
+	)
+	rightPriority := siteUnderstandingRolePriority(
+		CandidateBusinessRole(right),
+		roleCounts[CandidateBusinessRole(right)],
+	)
+	if leftPriority != rightPriority {
+		return leftPriority < rightPriority
 	}
-	return counts
+	if left.Depth != right.Depth {
+		return left.Depth < right.Depth
+	}
+	if candidatePathDepth(left) != candidatePathDepth(right) {
+		return candidatePathDepth(left) < candidatePathDepth(right)
+	}
+	if left.DiscoveryOrder != right.DiscoveryOrder {
+		return left.DiscoveryOrder < right.DiscoveryOrder
+	}
+	return left.URL.String() < right.URL.String()
 }
 
-func siteUnderstandingSelectionScore(
-	candidate Candidate,
-	roleCounts map[BusinessPageRole]int,
-) int {
-	score := candidate.Score
-	role := CandidateBusinessRole(candidate)
-	count := roleCounts[role]
-	if count > 0 {
-		switch role {
-		case BusinessPageHomepage:
-			score -= 200
-		case BusinessPageAbout, BusinessPageOffering, BusinessPagePricing,
-			BusinessPageProof, BusinessPageContact:
-			score -= count * 100
-		case BusinessPageContent:
-			score -= 70
-		default:
-			score -= count * 10
-		}
-		return score
+func candidatePathDepth(candidate Candidate) int {
+	if candidate.URL == nil {
+		return 0
 	}
+	path := strings.Trim(candidate.URL.Path, "/")
+	if path == "" {
+		return 0
+	}
+	return len(strings.Split(path, "/"))
+}
 
+func siteUnderstandingPageRoleCounts(pages []Page) map[BusinessPageRole]int {
+	roles := make(map[BusinessPageRole]int, len(pages))
+	for _, page := range pages {
+		role := PageBusinessRole(page)
+		if siteUnderstandingRoleEligible(role) {
+			roles[role]++
+		}
+	}
+	return roles
+}
+
+func siteUnderstandingRoleLimit(role BusinessPageRole) int {
+	if role == BusinessPageOffering {
+		return 2
+	}
+	return 1
+}
+
+func siteUnderstandingRoleEligible(role BusinessPageRole) bool {
+	switch role {
+	case BusinessPageHomepage, BusinessPageAbout, BusinessPageOffering,
+		BusinessPagePricing, BusinessPageProof:
+		return true
+	default:
+		return false
+	}
+}
+
+func siteUnderstandingCandidateEligible(candidate Candidate) bool {
+	if candidate.Depth > 2 {
+		return false
+	}
+	return CandidateBusinessRole(candidate) != BusinessPageUtility
+}
+
+func siteUnderstandingCandidateRoleLimit(role BusinessPageRole) int {
+	if role == BusinessPageOther {
+		return siteUnderstandingHardLimit
+	}
+	return siteUnderstandingRoleLimit(role)
+}
+
+func siteUnderstandingPageEligible(page Page, selected []Page) bool {
+	if pageLooksLikeErrorShell(page) {
+		return false
+	}
+	role := PageBusinessRole(page)
+	if !siteUnderstandingRoleEligible(role) || siteUnderstandingPageValue(page) < 0 {
+		return false
+	}
+	for _, retained := range selected {
+		if PageBusinessRole(retained) == role &&
+			duplicateSimilarity(retained, page) >= 0.85 {
+			return false
+		}
+	}
+	return siteUnderstandingPageRoleCounts(selected)[role] < siteUnderstandingRoleLimit(role)
+}
+
+func siteUnderstandingRolePriority(role BusinessPageRole, occupied int) int {
 	switch role {
 	case BusinessPageHomepage:
-		score += 100
+		return 0
 	case BusinessPageAbout:
-		score += 70
+		return 1
 	case BusinessPageOffering:
-		score += 60
-	case BusinessPagePricing:
-		score += 40
-	case BusinessPageProof:
-		score += 30
-	case BusinessPageContact:
-		score += 15
-	case BusinessPageContent:
-		score -= 50
-	case BusinessPageUtility:
-		score -= 200
-	default:
-		if candidate.InNavigation {
-			score += 10
+		if occupied > 0 {
+			return 5
 		}
+		return 2
+	case BusinessPagePricing:
+		return 3
+	case BusinessPageProof:
+		return 4
+	case BusinessPageOther:
+		return 6
+	case BusinessPageContact:
+		return 7
+	case BusinessPageContent:
+		return 8
+	default:
+		return 9
 	}
-	return score
-}
-
-func siteUnderstandingComplete(task Task, pages []Page) bool {
-	if len(pages) < siteUnderstandingMinimumPages {
-		return false
-	}
-	roles := businessPageRoleCounts(pages)
-	if roles[BusinessPageHomepage] == 0 || roles[BusinessPageOffering] == 0 {
-		return false
-	}
-	if roles[BusinessPageAbout] == 0 &&
-		roles[BusinessPagePricing] == 0 &&
-		roles[BusinessPageProof] == 0 {
-		return false
-	}
-	profile := BuildSiteProfile(task, pages)
-	if profile.BusinessName == "" || profile.BusinessSummary == "" {
-		return false
-	}
-	return profile.BusinessType != "Business website" || len(profile.ProductsServices) > 0
 }
 
 func isHTML(resource Resource) bool {

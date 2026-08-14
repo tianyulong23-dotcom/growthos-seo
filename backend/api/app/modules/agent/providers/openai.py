@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import random
 import socket
@@ -36,6 +37,16 @@ CONTEXT_OVERFLOW_MARKERS = (
     "context window",
 )
 MAX_RESPONSE_BYTES = 1024 * 1024
+
+
+def request_not_submitted(error: BaseException) -> bool:
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, (socket.gaierror, ConnectionRefusedError)):
+        return True
+    return isinstance(reason, OSError) and (
+        reason.errno in {errno.ENETUNREACH, errno.EHOSTUNREACH}
+        or getattr(reason, "winerror", None) in {10051, 10065}
+    )
 
 
 def endpoint_for(base_url: str, suffix: str) -> str:
@@ -98,12 +109,20 @@ def parse_usage(payload: dict[str, Any]) -> ProviderUsage:
     prompt_details = (
         usage.get("prompt_tokens_details")
         if isinstance(usage.get("prompt_tokens_details"), dict)
-        else {}
+        else (
+            usage.get("input_tokens_details")
+            if isinstance(usage.get("input_tokens_details"), dict)
+            else {}
+        )
     )
     completion_details = (
         usage.get("completion_tokens_details")
         if isinstance(usage.get("completion_tokens_details"), dict)
-        else {}
+        else (
+            usage.get("output_tokens_details")
+            if isinstance(usage.get("output_tokens_details"), dict)
+            else {}
+        )
     )
     return ProviderUsage(
         input_tokens=optional_int(usage.get("prompt_tokens", usage.get("input_tokens"))),
@@ -125,6 +144,108 @@ def parse_usage(payload: dict[str, Any]) -> ProviderUsage:
     )
 
 
+def responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        if role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": str(message.get("tool_call_id") or ""),
+                "output": message.get("content") or "",
+            })
+            continue
+        content = message.get("content")
+        if content is not None and content != "" and content != []:
+            items.append({"role": role, "content": content})
+        raw_calls = message.get("tool_calls")
+        if not isinstance(raw_calls, list):
+            continue
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                function = {}
+            items.append({
+                "type": "function_call",
+                "call_id": str(raw_call.get("id") or ""),
+                "name": str(function.get("name") or ""),
+                "arguments": str(function.get("arguments") or ""),
+            })
+    return items
+
+
+def responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function")
+        if tool.get("type") != "function" or not isinstance(function, dict):
+            converted.append(tool)
+            continue
+        converted.append({
+            "type": "function",
+            "name": str(function.get("name") or ""),
+            "description": str(function.get("description") or ""),
+            "parameters": function.get("parameters") or {},
+            "strict": bool(function.get("strict", False)),
+        })
+    return converted
+
+
+def responses_text_format(response_format: dict[str, Any]) -> dict[str, Any]:
+    if response_format.get("type") != "json_schema":
+        return dict(response_format)
+    schema = response_format.get("json_schema")
+    if not isinstance(schema, dict):
+        return dict(response_format)
+    return {
+        "type": "json_schema",
+        "name": str(schema.get("name") or "response"),
+        "strict": bool(schema.get("strict", False)),
+        "schema": schema.get("schema") or {},
+    }
+
+
+def normalize_responses_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    output = payload.get("output")
+    for item in output if isinstance(output, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call":
+            tool_calls.append({
+                "id": str(item.get("call_id") or item.get("id") or ""),
+                "type": "function",
+                "function": {
+                    "name": str(item.get("name") or ""),
+                    "arguments": str(item.get("arguments") or ""),
+                },
+            })
+            continue
+        content = item.get("content")
+        for part in content if isinstance(content, list) else []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in {"output_text", "text"} and isinstance(
+                part.get("text"), str
+            ):
+                text_parts.append(part["text"])
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(text_parts),
+    }
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    normalized = dict(payload)
+    normalized["choices"] = [{
+        "message": message,
+        "finish_reason": "tool_calls" if tool_calls else payload.get("status"),
+    }]
+    return normalized
+
+
 class OpenAIProvider:
     def __init__(self, config: ProviderConfig) -> None:
         self.config = config
@@ -136,9 +257,33 @@ class OpenAIProvider:
         }
 
     def serialize(self, request: ProviderRequest, *, stream: bool) -> dict[str, Any]:
+        if self.config.api_protocol == "responses":
+            payload: dict[str, Any] = {
+                "model": self.config.model,
+                "input": responses_input(request.messages),
+                "reasoning": {"effort": self.config.reasoning_effort},
+            }
+            if request.response_format is not None:
+                payload["text"] = {
+                    "format": responses_text_format(request.response_format)
+                }
+            if request.tools:
+                payload["tools"] = responses_tools(request.tools)
+            if request.tool_choice is not None:
+                payload["tool_choice"] = request.tool_choice
+            if request.parallel_tool_calls is not None and request.tools:
+                payload["parallel_tool_calls"] = request.parallel_tool_calls
+            if request.max_output_tokens is not None:
+                payload["max_output_tokens"] = request.max_output_tokens
+            if request.metadata:
+                payload["metadata"] = request.metadata
+            if stream:
+                payload["stream"] = True
+            return apply_provider_privacy(self.config.base_url, payload)
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": request.messages,
+            "reasoning_effort": self.config.reasoning_effort,
         }
         if request.response_format is not None:
             payload["response_format"] = request.response_format
@@ -157,6 +302,8 @@ class OpenAIProvider:
 
     async def complete(self, request: ProviderRequest) -> ProviderResult:
         payload = await self._retry(lambda: asyncio.to_thread(self._complete_once, request))
+        if self.config.api_protocol == "responses":
+            payload = normalize_responses_payload(payload)
         try:
             choice = payload["choices"][0]
             message = choice["message"]
@@ -184,7 +331,12 @@ class OpenAIProvider:
         )
 
     def _complete_once(self, request: ProviderRequest) -> dict[str, Any]:
-        endpoint = endpoint_for(self.config.base_url, "/chat/completions")
+        endpoint = endpoint_for(
+            self.config.base_url,
+            "/responses"
+            if self.config.api_protocol == "responses"
+            else "/chat/completions",
+        )
         body = json.dumps(self.serialize(request, stream=False)).encode()
         raw_request = Request(
             endpoint,
@@ -236,6 +388,7 @@ class OpenAIProvider:
                             code=exc.code,
                             retryable=False,
                             status_code=exc.status_code,
+                            request_not_submitted=exc.request_not_submitted,
                         ) from exc
                     raise
                 await self._sleep_before_retry(attempt, exc.retry_after_seconds)
@@ -312,7 +465,12 @@ class OpenAIProvider:
         stop: threading.Event,
         response_holder: dict[str, Any],
     ) -> None:
-        endpoint = endpoint_for(self.config.base_url, "/chat/completions")
+        endpoint = endpoint_for(
+            self.config.base_url,
+            "/responses"
+            if self.config.api_protocol == "responses"
+            else "/chat/completions",
+        )
         body = json.dumps(self.serialize(request, stream=True)).encode()
         raw_request = Request(
             endpoint,
@@ -356,6 +514,48 @@ class OpenAIProvider:
                         ) from exc
                     if event.get("id"):
                         response_id = str(event["id"])
+                    if self.config.api_protocol == "responses":
+                        event_type = str(event.get("type") or "")
+                        response_payload = (
+                            event.get("response")
+                            if isinstance(event.get("response"), dict)
+                            else {}
+                        )
+                        if response_payload.get("id"):
+                            response_id = str(response_payload["id"])
+                        if event_type == "response.output_text.delta":
+                            delta = event.get("delta")
+                            if isinstance(delta, str) and delta:
+                                emit("content_delta", delta)
+                        elif event_type == "response.output_item.added":
+                            item = event.get("item")
+                            if isinstance(item, dict) and item.get("type") == "function_call":
+                                index = event.get("output_index", 0)
+                                emit("toolcall_delta", {
+                                    "index": index if isinstance(index, int) else 0,
+                                    "id_delta": str(item.get("call_id") or item.get("id") or ""),
+                                    "name_delta": str(item.get("name") or ""),
+                                    "arguments_delta": str(item.get("arguments") or ""),
+                                })
+                        elif event_type == "response.function_call_arguments.delta":
+                            index = event.get("output_index", 0)
+                            emit("toolcall_delta", {
+                                "index": index if isinstance(index, int) else 0,
+                                "id_delta": "",
+                                "name_delta": "",
+                                "arguments_delta": str(event.get("delta") or ""),
+                            })
+                        elif event_type == "response.completed":
+                            completed = True
+                            stop_reason = str(response_payload.get("status") or "completed")
+                            usage = parse_usage(response_payload).as_dict()
+                        elif event_type in {"response.failed", "response.incomplete"}:
+                            raise ProviderError(
+                                "模型服务未完成响应",
+                                code="model_provider_invalid_response",
+                                retryable=False,
+                            )
+                        continue
                     if isinstance(event.get("usage"), dict):
                         usage = parse_usage(event).as_dict()
                     choices = event.get("choices")
@@ -469,6 +669,7 @@ class OpenAIProvider:
                             code=exc.code,
                             retryable=False,
                             status_code=exc.status_code,
+                            request_not_submitted=exc.request_not_submitted,
                         ) from exc
                     raise
                 await self._sleep_before_retry(attempt, exc.retry_after_seconds)
@@ -497,6 +698,7 @@ class OpenAIProvider:
                 "无法连接模型服务",
                 code="model_provider_unavailable",
                 retryable=True,
+                request_not_submitted=request_not_submitted(exc),
             ) from exc
         if len(response_body) > MAX_RESPONSE_BYTES:
             raise ProviderError(

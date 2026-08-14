@@ -20,6 +20,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   InputGroup,
   InputGroupAddon,
@@ -237,9 +238,9 @@ export function AuditSetup({
       >
         <div className="grid gap-5 sm:grid-cols-[minmax(0,1fr)_220px]">
           <div>
-            <label className="text-sm font-medium" htmlFor="audit-domain">
+            <Label className="text-sm font-medium" htmlFor="audit-domain">
               审计网站
-            </label>
+            </Label>
             <InputGroup className="mt-2 h-10">
               <InputGroupAddon>
                 <Globe2 />
@@ -256,9 +257,9 @@ export function AuditSetup({
             </InputGroup>
           </div>
           <div>
-            <label className="text-sm font-medium" htmlFor="audit-page-limit">
+            <Label className="text-sm font-medium" htmlFor="audit-page-limit">
               最大抓取页面
-            </label>
+            </Label>
             <InputGroup className="mt-2 h-10">
               <InputGroupInput
                 id="audit-page-limit"
@@ -423,7 +424,7 @@ export function AuditSetup({
 
               <TabsContent value="crawl" className="pt-5">
                 <div className="grid gap-5 sm:grid-cols-2">
-                  <label className="block">
+                  <Label className="block">
                     <span className="text-sm font-medium">抓取范围</span>
                     <Select
                       value={scope}
@@ -446,9 +447,9 @@ export function AuditSetup({
                     <span className="mt-1.5 block text-xs text-muted-foreground">
                       决定本次审计允许访问的网站范围
                     </span>
-                  </label>
+                  </Label>
 
-                  <label className="block">
+                  <Label className="block">
                     <span className="text-sm font-medium">JS 渲染</span>
                     <Select
                       value={rendering}
@@ -469,11 +470,11 @@ export function AuditSetup({
                     <span className="mt-1.5 block text-xs text-muted-foreground">
                       自动模式仅在页面需要时使用浏览器渲染
                     </span>
-                  </label>
+                  </Label>
                 </div>
 
                 {scope === "directory" && (
-                  <label className="mt-5 block">
+                  <Label className="mt-5 block">
                     <span className="text-sm font-medium">指定目录</span>
                     <Input
                       value={directory}
@@ -488,13 +489,13 @@ export function AuditSetup({
                         {directoryError}
                       </span>
                     )}
-                  </label>
+                  </Label>
                 )}
               </TabsContent>
 
               <TabsContent value="rules" className="space-y-5 pt-5">
                 <div className="grid gap-5 sm:grid-cols-2">
-                  <label className="block">
+                  <Label className="block">
                     <span className="text-sm font-medium">允许抓取的目录</span>
                     <Textarea
                       value={allowedPaths}
@@ -509,8 +510,8 @@ export function AuditSetup({
                         每行填写一个以 / 开头的目录，最多 100 个
                       </span>
                     )}
-                  </label>
-                  <label className="block">
+                  </Label>
+                  <Label className="block">
                     <span className="text-sm font-medium">排除抓取的目录</span>
                     <Textarea
                       value={excludedPaths}
@@ -525,10 +526,10 @@ export function AuditSetup({
                         每行填写一个以 / 开头的目录，最多 100 个
                       </span>
                     )}
-                  </label>
+                  </Label>
                 </div>
 
-                <label className="block">
+                <Label className="block">
                   <span className="text-sm font-medium">忽略的 URL 参数</span>
                   <Textarea
                     value={ignoredParameters}
@@ -547,9 +548,9 @@ export function AuditSetup({
                       参数仅支持字母、数字、点、横线、下划线及末尾通配符 *
                     </span>
                   )}
-                </label>
+                </Label>
 
-                <label className="block">
+                <Label className="block">
                   <span className="text-sm font-medium">不产生问题的 URL</span>
                   <Textarea
                     value={issueExclusionPatterns}
@@ -568,20 +569,20 @@ export function AuditSetup({
                       每行一个规则，最多 250 个，每个规则最多 2,048 个字符
                     </span>
                   )}
-                </label>
+                </Label>
               </TabsContent>
 
               <TabsContent value="checks" className="space-y-3 pt-5">
                 <div className="rounded-3xl border p-4">
                   <div className="flex items-start justify-between gap-4">
-                    <label htmlFor="duplication-check" className="min-w-0">
+                    <Label htmlFor="duplication-check" className="min-w-0">
                       <span className="block text-sm font-medium">
                         重复内容检查
                       </span>
                       <span className="mt-1 block text-xs text-muted-foreground">
                         比较 Title、Description、H1 和页面词数
                       </span>
-                    </label>
+                    </Label>
                     <Switch
                       id="duplication-check"
                       checked={enableDuplicationCheck}
@@ -590,7 +591,7 @@ export function AuditSetup({
                     />
                   </div>
                   {enableDuplicationCheck && (
-                    <label className="mt-4 block border-t pt-4">
+                    <Label className="mt-4 block border-t pt-4">
                       <span className="text-sm font-medium">相似度阈值</span>
                       <Input
                         type="number"
@@ -610,19 +611,19 @@ export function AuditSetup({
                           请输入 0 到 1 之间的数值
                         </span>
                       )}
-                    </label>
+                    </Label>
                   )}
                 </div>
 
                 <div className="flex items-start justify-between gap-4 rounded-3xl border p-4">
-                  <label htmlFor="pagespeed-check" className="min-w-0">
+                  <Label htmlFor="pagespeed-check" className="min-w-0">
                     <span className="block text-sm font-medium">
                       PageSpeed 分析
                     </span>
                     <span className="mt-1 block text-xs text-muted-foreground">
                       抓取完成后分析移动端和桌面端性能，耗时会更长
                     </span>
-                  </label>
+                  </Label>
                   <Switch
                     id="pagespeed-check"
                     checked={enablePageSpeed}

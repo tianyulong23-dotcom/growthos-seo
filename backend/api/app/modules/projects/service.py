@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -15,6 +16,7 @@ from sqlalchemy.orm import aliased
 
 from app.core.config import Settings, get_settings
 from app.db.session import session_factory
+from app.modules.agent.models import AgentConversation
 from app.modules.audit.object_storage import (
     AuditObjectCleaner,
     NoopAuditObjectCleaner,
@@ -27,22 +29,14 @@ from app.modules.audit.service import (
     progress_percentage,
 )
 from app.modules.crawling.models import CrawlRun, Page
+from app.modules.content_plan.models import ContentPlanSettings
 from app.modules.keywords.models import (
     KeywordBuildRun,
     KeywordCompetitorAnalysisDispatch,
     KeywordCompetitorAnalysisRun,
     KeywordWorkflowDispatch,
 )
-from app.modules.keywords.service import (
-    KeywordBootstrapRecord,
-    KeywordCompetitorAnalysisBootstrapRecord,
-    build_competitor_analysis_bootstrap,
-    build_initial_keyword_bootstrap,
-    competitor_analysis_dispatch_from_bootstrap,
-    competitor_analysis_run_from_bootstrap,
-    keyword_dispatch_from_bootstrap,
-    keyword_run_from_bootstrap,
-)
+from app.modules.onboarding.service import OnboardingService, build_onboarding_records
 from app.modules.projects.models import (
     Project,
     SiteProfile,
@@ -63,6 +57,8 @@ from app.modules.projects.schemas import (
 from app.workflows.worker import get_crawler_worker_launcher
 
 logger = logging.getLogger(__name__)
+
+FORCED_DELETE_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 class ProjectAlreadyExistsError(Exception):
@@ -168,8 +164,6 @@ class ProjectRepository(Protocol):
         project: ProjectRecord,
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
-        keyword_bootstrap: KeywordBootstrapRecord,
-        competitor_bootstrap: KeywordCompetitorAnalysisBootstrapRecord | None = None,
     ) -> None: ...
 
     async def list(self, organization_id: str) -> list[ProjectRecord]: ...
@@ -250,8 +244,6 @@ class SQLAlchemyProjectRepository:
         project: ProjectRecord,
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
-        keyword_bootstrap: KeywordBootstrapRecord,
-        competitor_bootstrap: KeywordCompetitorAnalysisBootstrapRecord | None = None,
     ) -> None:
         async with self.sessions() as session:
             session.add(
@@ -273,9 +265,8 @@ class SQLAlchemyProjectRepository:
             )
             session.add(run)
             try:
-                # Persist parent rows before the keyword outbox rows that
-                # reference them. These models do not declare ORM relationships,
-                # so SQLAlchemy cannot infer the required flush order.
+                # Persist the project before project-scoped settings and
+                # orchestration rows that reference it.
                 await session.flush()
             except IntegrityError as exc:
                 await session.rollback()
@@ -284,6 +275,20 @@ class SQLAlchemyProjectRepository:
                 raise
 
             session.add(
+                ContentPlanSettings(
+                    project_id=project.id,
+                    cadence="weekly_2_3",
+                    paused=False,
+                    timezone="UTC",
+                    default_publish_local_time=time(10),
+                    cadence_anchor_week=(
+                        project.created_at.date()
+                        - timedelta(days=project.created_at.weekday())
+                    ),
+                    version=1,
+                )
+            )
+            session.add(
                 WorkflowDispatch(
                     run_id=dispatch.run_id,
                     workflow_id=dispatch.workflow_id,
@@ -291,14 +296,27 @@ class SQLAlchemyProjectRepository:
                     status="pending",
                 )
             )
-            session.add(keyword_run_from_bootstrap(keyword_bootstrap))
-            if competitor_bootstrap is not None:
-                session.add(competitor_analysis_run_from_bootstrap(competitor_bootstrap))
+            agent_conversation = AgentConversation(
+                id=str(uuid4()),
+                organization_id=project.organization_id,
+                project_id=project.id,
+                created_by="system",
+                title="网站初始化",
+                created_at=project.created_at,
+                updated_at=project.created_at,
+            )
+            session.add(agent_conversation)
+            onboarding_run, onboarding_steps = build_onboarding_records(
+                project.organization_id,
+                project.id,
+                project.created_at,
+                run.run_id,
+                agent_conversation.id,
+            )
+            session.add(onboarding_run)
+            session.add_all(onboarding_steps)
             try:
                 await session.flush()
-                session.add(keyword_dispatch_from_bootstrap(keyword_bootstrap))
-                if competitor_bootstrap is not None:
-                    session.add(competitor_analysis_dispatch_from_bootstrap(competitor_bootstrap))
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
@@ -668,12 +686,14 @@ class ProjectService:
         repository: ProjectRepository,
         site_icon_reader: SiteIconReader,
         object_cleaner: AuditObjectCleaner | None = None,
+        onboarding_service: OnboardingService | None = None,
     ) -> None:
         self.settings = settings
         self.launcher = launcher
         self.repository = repository
         self.site_icon_reader = site_icon_reader
         self.object_cleaner = object_cleaner or NoopAuditObjectCleaner()
+        self.onboarding_service = onboarding_service
 
     async def create(self, request: CreateProjectRequest) -> ProjectResponse:
         domain = normalize_domain(request.domain)
@@ -733,33 +753,12 @@ class ProjectService:
             workflow_id=f"crawler:site_understanding:{project.id}:{run_id}",
             task_payload=task,
         )
-        keyword_bootstrap = build_initial_keyword_bootstrap(
-            organization_id=project.organization_id,
-            project_id=project.id,
-            created_at=created_at,
-        )
-        competitor_bootstrap = (
-            build_competitor_analysis_bootstrap(
-                organization_id=project.organization_id,
-                project_id=project.id,
-                target_domain=project.domain,
-                country=project.country,
-                language=project.language,
-                analysis_mode="manual",
-                competitor_domains=[competitor_domain],
-                local_market={},
-                created_at=created_at,
-            )
-            if competitor_domain
-            else None
-        )
         await self.repository.create_with_understanding_run(
             project,
             run,
             dispatch,
-            keyword_bootstrap,
-            competitor_bootstrap,
         )
+        await self._reconcile_onboarding_after_profile_update(project.id)
         await self._dispatch(dispatch)
         current = await self.repository.get(project.organization_id, project.id)
         return build_project_response(current or project)
@@ -790,6 +789,7 @@ class ProjectService:
             project_id,
             updates,
         )
+        await self._reconcile_onboarding_after_profile_update(project_id)
         return build_project_response(project)
 
     async def update_business_profile_once(
@@ -813,7 +813,19 @@ class ProjectService:
             parameters_hash,
             expected_before,
         )
+        await self._reconcile_onboarding_after_profile_update(project_id)
         return build_project_response(project), already_completed
+
+    async def _reconcile_onboarding_after_profile_update(self, project_id: str) -> None:
+        if self.onboarding_service is None:
+            return
+        try:
+            await self.onboarding_service.reconcile_project(project_id)
+        except Exception:
+            logger.exception(
+                "Unable to reconcile onboarding after business profile update",
+                extra={"project_id": project_id},
+            )
 
     async def list_business_profile_runs(
         self,
@@ -943,34 +955,22 @@ class ProjectService:
         if project is None:
             raise ProjectNotFoundError
 
-        keyword_workflow_ids = await self.repository.active_keyword_workflow_ids(
-            project.organization_id,
-            project.id,
-        )
-        workflow_ids = [*active_project_workflow_ids(project), *keyword_workflow_ids]
-        for workflow_id in dict.fromkeys(workflow_ids):
-            try:
-                await self.launcher.cancel(workflow_id)
-            except Exception as exc:
-                logger.exception(
-                    "project workflow cancellation failed; keeping project",
-                    extra={"project_id": project.id, "workflow_id": workflow_id},
-                    exc_info=exc,
-                )
-                raise ProjectDeleteError("无法停止项目正在运行的任务") from exc
-
         try:
-            await self.object_cleaner.delete_project_objects(
-                project.organization_id,
-                project.id,
+            keyword_workflow_ids = await asyncio.wait_for(
+                self.repository.active_keyword_workflow_ids(
+                    project.organization_id,
+                    project.id,
+                ),
+                timeout=FORCED_DELETE_CLEANUP_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             logger.exception(
-                "project object cleanup failed; keeping project",
+                "project workflow lookup failed; continuing forced deletion",
                 extra={"project_id": project.id},
                 exc_info=exc,
             )
-            raise ProjectDeleteError("项目抓取数据清理失败") from exc
+            keyword_workflow_ids = []
+        workflow_ids = [*active_project_workflow_ids(project), *keyword_workflow_ids]
 
         deleted = await self.repository.delete(
             self.settings.default_organization_id,
@@ -978,6 +978,40 @@ class ProjectService:
         )
         if not deleted:
             raise ProjectNotFoundError
+
+        async def cancel_workflow(workflow_id: str) -> None:
+            try:
+                await asyncio.wait_for(
+                    self.launcher.cancel(workflow_id),
+                    timeout=FORCED_DELETE_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "project workflow cancellation failed after forced deletion",
+                    extra={"project_id": project.id, "workflow_id": workflow_id},
+                    exc_info=exc,
+                )
+
+        async def clean_project_objects() -> None:
+            try:
+                await asyncio.wait_for(
+                    self.object_cleaner.delete_project_objects(
+                        project.organization_id,
+                        project.id,
+                    ),
+                    timeout=FORCED_DELETE_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "project object cleanup failed after forced deletion",
+                    extra={"project_id": project.id},
+                    exc_info=exc,
+                )
+
+        await asyncio.gather(
+            *(cancel_workflow(workflow_id) for workflow_id in dict.fromkeys(workflow_ids)),
+            clean_project_objects(),
+        )
 
 
 def normalize_domain(value: str) -> str:
@@ -1318,6 +1352,8 @@ def project_record_from_row(row: Any) -> ProjectRecord:
 
 
 def build_project_service() -> ProjectService:
+    from app.modules.onboarding.service import build_onboarding_service
+
     settings = get_settings()
     return ProjectService(
         settings=settings,
@@ -1328,4 +1364,5 @@ def build_project_service() -> ProjectService:
         repository=SQLAlchemyProjectRepository(session_factory),
         site_icon_reader=S3SiteIconReader(settings),
         object_cleaner=S3AuditObjectCleaner(settings),
+        onboarding_service=build_onboarding_service(),
     )

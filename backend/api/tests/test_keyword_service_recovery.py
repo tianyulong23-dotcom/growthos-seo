@@ -85,6 +85,7 @@ class RecoveryRepository:
         self.competitor_dispatch_successes: list[tuple[str, str]] = []
         self.competitor_dispatch_failures: list[tuple[str, str, str]] = []
         self.resume_calls: list[str] = []
+        self.competitor_configuration_resume_calls: list[str] = []
         self.stale_settlements = 0
         self.cleanup_calls: list[int] = []
         self.worker_healthy = True
@@ -146,6 +147,14 @@ class RecoveryRepository:
         **kwargs: Any,
     ) -> int:
         self.resume_calls.append(organization_id)
+        return 0
+
+    async def resume_ready_failed_competitor_analysis_runs(
+        self,
+        organization_id: str,
+        **kwargs: Any,
+    ) -> int:
+        self.competitor_configuration_resume_calls.append(organization_id)
         return 0
 
     async def mark_dispatch_succeeded(self, run_id: str) -> None:
@@ -478,6 +487,7 @@ async def test_dispatch_checks_blocked_runs_before_starting_pending_workflows() 
 
     assert dispatched == 1
     assert repository.resume_calls == ["test-org"]
+    assert repository.competitor_configuration_resume_calls == ["test-org"]
     assert launcher.start_calls == [({"run_id": "run-1"}, "keywords:build:run-1")]
 
 

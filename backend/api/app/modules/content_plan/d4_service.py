@@ -14,8 +14,10 @@ from app.modules.content.dataforseo import (
     DataForSEOEmptyResult,
     DataForSEOError,
     DataForSEOOutcomeUnknown,
+    DataForSEOTaskPending,
     OrganicResult,
     SERPResult,
+    SerpTaskReceipt,
 )
 from app.modules.content_plan.ai_retry import (
     AI_REQUEST_MAX_ATTEMPTS,
@@ -39,6 +41,20 @@ class SerpGateway(Protocol):
         language: str,
         device: str = "desktop",
     ) -> SERPResult: ...
+
+    async def submit_serp_task(
+        self,
+        keyword: str,
+        country: str,
+        language: str,
+        device: str = "desktop",
+        *,
+        tag: str,
+    ) -> SerpTaskReceipt: ...
+
+    async def get_serp_task(self, task_id: str, keyword: str) -> SERPResult: ...
+
+    async def find_ready_serp_task(self, tag: str) -> str | None: ...
 
 
 class PreviewGateway(Protocol):
@@ -78,6 +94,7 @@ class GroupResult:
     success: bool
     error_code: str | None = None
     error_detail: str | None = None
+    replace_primary: bool = False
 
 
 class D4GroupError(Exception):
@@ -87,11 +104,13 @@ class D4GroupError(Exception):
         detail: str,
         *,
         serp_result: SERPResult | None = None,
+        replace_primary: bool = False,
     ) -> None:
         super().__init__(detail)
         self.code = code
         self.detail = detail
         self.serp_result = serp_result
+        self.replace_primary = replace_primary
 
 
 class ContentPlanD4Service:
@@ -185,7 +204,7 @@ class ContentPlanD4Service:
                 and row.error_code in RECOVERABLE_PREPARATION_ERROR_CODES
             )
         ]
-        if pending:
+        while pending:
             await self.repository.update_batch_progress(
                 batch.id,
                 status="building_previews",
@@ -202,6 +221,26 @@ class ContentPlanD4Service:
             unexpected = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
             if unexpected:
                 raise unexpected[0]
+            replacements: list[ContentPlanPreparation] = []
+            for outcome in outcomes:
+                if not isinstance(outcome, GroupResult) or not outcome.replace_primary:
+                    continue
+                replacement = await self.repository.replace_failed_primary_keyword(
+                    outcome.preparation_id
+                )
+                if replacement is None:
+                    await self.repository.set_preparation_state(
+                        outcome.preparation_id,
+                        state="invalid",
+                        error_code="serp_primary_candidates_exhausted",
+                        error_detail="No eligible keyword remains in the current package",
+                    )
+                    continue
+                bundle = await self.repository.get_preparation_bundle(outcome.preparation_id)
+                if bundle is None:
+                    raise ValueError("content plan preparation does not exist")
+                replacements.append(bundle.preparation)
+            pending = replacements
 
         preparations = await self.repository.get_current_preparations(batch.id)
         ready_count = sum(row.state == "preview_ready" for row in preparations)
@@ -242,9 +281,7 @@ class ContentPlanD4Service:
         if bundle.preparation.state in {"cancelled", "superseded"}:
             raise D4GroupError("preparation_superseded", "准备版本已失效")
         batch = await self._require_batch(bundle.preparation.batch_id)
-        return await self._process_group(
-            batch, bundle.preparation, max_secondaries=max_secondaries
-        )
+        return await self._process_group(batch, bundle.preparation, max_secondaries=max_secondaries)
 
     async def _bounded_process_group(
         self,
@@ -265,11 +302,7 @@ class ContentPlanD4Service:
         bundle = await self.repository.get_preparation_bundle(preparation.id)
         if bundle is None:
             raise ValueError("content plan preparation does not exist")
-        selected = [
-            row
-            for row in bundle.keywords
-            if row.selected_role in {"primary", "secondary"}
-        ]
+        selected = [row for row in bundle.keywords if row.selected_role in {"primary", "secondary"}]
         primary = [row for row in selected if row.selected_role == "primary"]
         secondaries = [row for row in selected if row.selected_role == "secondary"]
         if len(primary) != 1 or len(secondaries) > max_secondaries:
@@ -294,7 +327,13 @@ class ContentPlanD4Service:
                 error_code=exc.code,
                 error_detail=exc.detail,
             )
-            return GroupResult(preparation.id, False, exc.code, exc.detail)
+            return GroupResult(
+                preparation.id,
+                False,
+                exc.code,
+                exc.detail,
+                exc.replace_primary,
+            )
 
         evidence = self._build_evidence(serp)
         all_evidence_ids = {
@@ -315,7 +354,11 @@ class ContentPlanD4Service:
                 error_detail=detail,
             )
             return GroupResult(
-                preparation.id, False, "serp_empty_result", detail
+                preparation.id,
+                False,
+                "serp_empty_result",
+                detail,
+                True,
             )
 
         try:
@@ -371,6 +414,15 @@ class ContentPlanD4Service:
         preparation: ContentPlanPreparation,
         primary_keyword: str,
     ) -> SERPResult:
+        if all(
+            callable(getattr(self.serp_gateway, name, None))
+            for name in (
+                "submit_serp_task",
+                "get_serp_task",
+                "find_ready_serp_task",
+            )
+        ):
+            return await self._run_standard_serp_request(batch, preparation, primary_keyword)
         request_key = self._serp_request_key(batch, preparation)
         request = await self.repository.prepare_external_request(
             batch_id=batch.id,
@@ -395,6 +447,7 @@ class ContentPlanD4Service:
             raise D4GroupError(
                 request.error_code or "serp_request_outcome_unknown",
                 request.error_detail or f"SERP 请求 {request_key} 不能自动重试",
+                replace_primary=True,
             )
         if (
             request.status == "retryable_failed"
@@ -403,6 +456,7 @@ class ContentPlanD4Service:
             raise D4GroupError(
                 "serp_retry_exhausted",
                 request.error_detail or f"SERP 请求 {request_key} 已达到重试上限",
+                replace_primary=True,
             )
         claim_token = uuid4().hex
         claim = await self.repository.claim_external_request(
@@ -418,9 +472,7 @@ class ContentPlanD4Service:
                     "serp_request_outcome_unknown",
                     stale.error_detail or f"SERP 请求 {request_key} 结果未知",
                 )
-            raise D4GroupError(
-                "serp_request_in_progress", f"SERP 请求 {request_key} 正在执行"
-            )
+            raise D4GroupError("serp_request_in_progress", f"SERP 请求 {request_key} 正在执行")
         try:
             result = await self.serp_gateway.search(
                 primary_keyword,
@@ -447,6 +499,7 @@ class ContentPlanD4Service:
                 "serp_empty_result",
                 str(exc),
                 serp_result=result,
+                replace_primary=True,
             ) from exc
         except DataForSEOOutcomeUnknown as exc:
             await self.repository.fail_external_request(
@@ -456,7 +509,11 @@ class ContentPlanD4Service:
                 error_code="serp_request_outcome_unknown",
                 error_detail=str(exc),
             )
-            raise D4GroupError("serp_request_outcome_unknown", str(exc)) from exc
+            raise D4GroupError(
+                "serp_request_outcome_unknown",
+                str(exc),
+                replace_primary=True,
+            ) from exc
         except DataForSEOError as exc:
             await self.repository.fail_external_request(
                 request_key,
@@ -494,6 +551,310 @@ class ContentPlanD4Service:
                 "serp_request_claim_lost", f"SERP 请求 {request_key} 保存前失去领取权"
             )
         return result
+
+    async def _run_standard_serp_request(
+        self,
+        batch: ContentPlanBatch,
+        preparation: ContentPlanPreparation,
+        primary_keyword: str,
+    ) -> SERPResult:
+        request_key = self._serp_request_key(batch, preparation)
+        request = await self.repository.prepare_external_request(
+            batch_id=batch.id,
+            preparation_id=preparation.id,
+            plan_item_id=None,
+            request_key=request_key,
+            provider="dataforseo",
+            endpoint="serp/google/organic/task_post",
+            request_hash=self._hash(
+                {
+                    "keyword": primary_keyword,
+                    "country": batch.country,
+                    "language": batch.language,
+                    "device": "desktop",
+                }
+            ),
+            round_number=0,
+        )
+        if request.status == "completed":
+            return self._serp_from_metadata(request.response_metadata_json)
+        if request.status in {"charged_failed", "failed"}:
+            raise D4GroupError(
+                request.error_code or "serp_request_outcome_unknown",
+                request.error_detail or "SERP request cannot be retried",
+                replace_primary=True,
+            )
+        if request.status == "uncertain" and not request.endpoint.endswith("task_post"):
+            raise D4GroupError(
+                request.error_code or "serp_request_outcome_unknown",
+                request.error_detail or "SERP request cannot be reconciled",
+                replace_primary=True,
+            )
+
+        claim_token = uuid4().hex
+        if request.status == "submitted":
+            claim = await self.repository.take_over_submitted_external_request(
+                request_key,
+                claim_token=claim_token,
+                lease_until=datetime.now(UTC) + timedelta(seconds=45),
+            )
+        elif request.status in {"uncertain", "retryable_failed"}:
+            claim = await self.repository.claim_external_request_reconciliation(
+                request_key,
+                claim_token=claim_token,
+                lease_until=datetime.now(UTC) + timedelta(seconds=45),
+            )
+        else:
+            claim = await self.repository.claim_external_request(
+                request_key,
+                claim_token=claim_token,
+                lease_until=datetime.now(UTC) + timedelta(seconds=45),
+                max_attempts=self.external_request_max_attempts,
+            )
+        if claim is None:
+            raise D4GroupError("serp_request_in_progress", "SERP task is still being processed")
+
+        task_id = str(request.provider_request_ids[0]) if request.provider_request_ids else None
+        submission_cost = float(request.cost_usd)
+        if task_id is None and request.status == "submitted":
+            if request.endpoint.endswith("task_post"):
+                task_id = await self._find_standard_serp_task(request_key)
+            if task_id is None:
+                detail = (
+                    "Legacy Live SERP request has no recoverable task id"
+                    if request.endpoint.endswith("live/advanced")
+                    else "Standard SERP task id could not be reconciled by tag"
+                )
+                await self.repository.fail_external_request(
+                    request_key,
+                    claim_token=claim_token,
+                    status="uncertain",
+                    error_code="serp_request_outcome_unknown",
+                    error_detail=detail,
+                )
+                raise D4GroupError(
+                    (
+                        "serp_request_outcome_unknown"
+                        if request.endpoint.endswith("live/advanced")
+                        else "serp_request_failed"
+                    ),
+                    detail,
+                    replace_primary=request.endpoint.endswith("live/advanced"),
+                )
+            recorded = await self.repository.record_external_request_submission(
+                request_key,
+                claim_token=claim_token,
+                provider_request_ids=[task_id],
+                cost_usd=submission_cost,
+                response_metadata={"tag": request_key, "phase": "task_recovered"},
+            )
+            if recorded is None:
+                raise D4GroupError(
+                    "serp_request_claim_lost", "Recovered SERP task could not be saved"
+                )
+
+        try:
+            if task_id is None:
+                if request.status in {"uncertain", "retryable_failed"}:
+                    task_id = await self._find_standard_serp_task(request_key)
+                    if task_id is None:
+                        raise DataForSEOOutcomeUnknown("dataforseo_task_reconciliation_pending")
+                    submission_metadata = {
+                        "tag": request_key,
+                        "phase": "task_recovered",
+                    }
+                else:
+                    try:
+                        receipt = await self.serp_gateway.submit_serp_task(
+                            primary_keyword,
+                            country=batch.country,
+                            language=batch.language,
+                            device="desktop",
+                            tag=request_key,
+                        )
+                    except DataForSEOOutcomeUnknown as exc:
+                        task_id = exc.task_id
+                        submission_cost = max(submission_cost, exc.cost_usd)
+                        if task_id is None:
+                            task_id = await self._find_standard_serp_task(request_key)
+                        if task_id is None:
+                            raise
+                        submission_metadata = {
+                            "tag": request_key,
+                            "phase": "task_recovered",
+                        }
+                    except DataForSEOError as exc:
+                        if not exc.task_id:
+                            raise
+                        task_id = exc.task_id
+                        submission_cost = max(submission_cost, exc.cost_usd)
+                        submission_metadata = {
+                            "tag": request_key,
+                            "phase": "task_recovered",
+                            "provider_status_code": exc.status_code,
+                            "provider_status_message": exc.status_message,
+                        }
+                    else:
+                        task_id = receipt.task_id
+                        submission_cost = receipt.cost_usd
+                        submission_metadata = {
+                            "tag": request_key,
+                            "phase": "task_submitted",
+                            "provider_status_code": receipt.status_code,
+                            "provider_status_message": receipt.status_message,
+                        }
+                recorded = await self.repository.record_external_request_submission(
+                    request_key,
+                    claim_token=claim_token,
+                    provider_request_ids=[task_id],
+                    cost_usd=submission_cost,
+                    response_metadata=submission_metadata,
+                )
+                if recorded is None:
+                    raise D4GroupError(
+                        "serp_request_claim_lost",
+                        "Submitted SERP task id could not be saved",
+                    )
+            result = await self._collect_standard_serp_task(task_id, primary_keyword)
+            self._validate_serp_result(result)
+        except DataForSEOEmptyResult as exc:
+            result = exc.result
+            cost = max(submission_cost, result.request_cost_usd)
+            await self.repository.fail_external_request(
+                request_key,
+                claim_token=claim_token,
+                status="charged_failed" if cost > 0 else "failed",
+                error_code="serp_empty_result",
+                error_detail=str(exc),
+                cost_usd=cost,
+                provider_request_ids=[task_id] if task_id else [],
+                response_metadata=self._serp_metadata(result),
+            )
+            raise D4GroupError(
+                "serp_empty_result",
+                str(exc),
+                serp_result=result,
+                replace_primary=True,
+            ) from exc
+        except DataForSEOOutcomeUnknown as exc:
+            await self.repository.fail_external_request(
+                request_key,
+                claim_token=claim_token,
+                status=("retryable_failed" if task_id else "uncertain"),
+                error_code=(
+                    "serp_result_retrieval_failed" if task_id else "serp_request_outcome_unknown"
+                ),
+                error_detail=str(exc),
+                cost_usd=submission_cost,
+                provider_request_ids=[task_id] if task_id else [],
+                response_metadata={"tag": request_key, "phase": "task_submitted"},
+            )
+            raise D4GroupError(
+                "serp_request_failed",
+                str(exc),
+            ) from exc
+        except DataForSEOTaskPending as exc:
+            await self.repository.fail_external_request(
+                request_key,
+                claim_token=claim_token,
+                status="retryable_failed",
+                error_code="serp_result_pending",
+                error_detail=str(exc),
+                cost_usd=submission_cost,
+                provider_request_ids=[task_id] if task_id else [],
+                response_metadata={"tag": request_key, "phase": "task_submitted"},
+            )
+            raise D4GroupError("serp_request_failed", str(exc)) from exc
+        except DataForSEOError as exc:
+            cost = max(submission_cost, exc.cost_usd)
+            status = (
+                "charged_failed"
+                if cost > 0
+                else ("retryable_failed" if exc.retryable else "failed")
+            )
+            await self.repository.fail_external_request(
+                request_key,
+                claim_token=claim_token,
+                status=status,
+                error_code=(
+                    "serp_retryable_failed"
+                    if status == "retryable_failed"
+                    else "serp_provider_failed"
+                ),
+                error_detail=exc.status_message or str(exc),
+                cost_usd=cost,
+                provider_request_ids=[task_id] if task_id else [],
+                response_metadata={
+                    "tag": request_key,
+                    "provider_status_code": exc.status_code,
+                    "provider_status_message": exc.status_message,
+                },
+            )
+            raise D4GroupError(
+                "serp_request_failed",
+                exc.status_message or str(exc),
+                replace_primary=status in {"charged_failed", "failed"},
+            ) from exc
+
+        effective_cost = max(submission_cost, result.request_cost_usd)
+        if effective_cost != result.request_cost_usd:
+            result = SERPResult(
+                keyword=result.keyword,
+                organic_results=result.organic_results,
+                features=result.features,
+                people_also_ask=result.people_also_ask,
+                related_searches=result.related_searches,
+                featured_snippet=result.featured_snippet,
+                cached=result.cached,
+                request_cost_usd=effective_cost,
+                provider_request_id=result.provider_request_id or task_id,
+                raw_response=result.raw_response,
+            )
+        completed = await self.repository.complete_external_request(
+            request_key,
+            claim_token=claim_token,
+            cost_usd=result.request_cost_usd,
+            result_count=(
+                len(result.organic_results)
+                + len(result.people_also_ask)
+                + len(result.related_searches)
+            ),
+            provider_request_ids=[task_id],
+            response_metadata={
+                **self._serp_metadata(result),
+                "tag": request_key,
+                "phase": "task_completed",
+            },
+        )
+        if completed is None:
+            raise D4GroupError("serp_request_claim_lost", "SERP task result could not be saved")
+        return result
+
+    async def _find_standard_serp_task(self, request_key: str) -> str | None:
+        for attempt in range(5):
+            try:
+                task_id = await self.serp_gateway.find_ready_serp_task(request_key)
+            except DataForSEOError:
+                task_id = None
+            if task_id:
+                return task_id
+            if attempt < 4:
+                await asyncio.sleep(3)
+        return None
+
+    async def _collect_standard_serp_task(self, task_id: str, primary_keyword: str) -> SERPResult:
+        transport_failures = 0
+        for _attempt in range(200):
+            try:
+                return await self.serp_gateway.get_serp_task(task_id, primary_keyword)
+            except DataForSEOTaskPending:
+                await asyncio.sleep(3)
+            except DataForSEOOutcomeUnknown:
+                transport_failures += 1
+                if transport_failures >= 5:
+                    raise
+                await asyncio.sleep(3)
+        raise DataForSEOTaskPending("dataforseo_task_pending", task_id=task_id, retryable=True)
 
     async def _preview_with_repair(
         self,
@@ -549,6 +910,8 @@ class ContentPlanD4Service:
             f"ai:preview:{self.preview_version}:{batch.id}:{preparation.id}:"
             f"{preparation.preparation_version}:{attempt}"
         )
+        if preparation.package_version > 1:
+            request_key = f"{request_key}:package:{preparation.package_version}"
         request = await self.repository.prepare_external_request(
             batch_id=batch.id,
             preparation_id=preparation.id,
@@ -591,9 +954,7 @@ class ContentPlanD4Service:
                 max_attempts=AI_REQUEST_MAX_ATTEMPTS,
             )
             if claim is None:
-                stale = await self.repository.mark_stale_submitted_request_uncertain(
-                    request_key
-                )
+                stale = await self.repository.mark_stale_submitted_request_uncertain(request_key)
                 if stale is not None:
                     raise D4GroupError(
                         "preview_request_outcome_unknown",
@@ -617,9 +978,7 @@ class ContentPlanD4Service:
             except ProviderError as exc:
                 failure_status = classify_ai_provider_error(exc)
                 error_code = (
-                    "preview_request_outcome_unknown"
-                    if failure_status == "uncertain"
-                    else exc.code
+                    "preview_request_outcome_unknown" if failure_status == "uncertain" else exc.code
                 )
                 await self.repository.fail_external_request(
                     request_key,
@@ -726,7 +1085,13 @@ class ContentPlanD4Service:
             raise ValueError("automatic batch must have exactly 30 current preparations")
         if [row.plan_order for row in preparations] != list(range(1, 31)):
             raise ValueError("automatic preparation plan_order must be contiguous from 1 to 30")
-        allowed = {"pack_ready", "serp_preview", "preview_ready", "preview_failed"}
+        allowed = {
+            "pack_ready",
+            "serp_preview",
+            "preview_ready",
+            "preview_failed",
+            "invalid",
+        }
         if any(row.state not in allowed for row in preparations):
             raise ValueError("all preparations must have completed D3 keyword packages")
 
@@ -758,10 +1123,7 @@ class ContentPlanD4Service:
 
     @staticmethod
     def _mark_used(values: Sequence[dict[str, Any]], used: set[str]) -> list[dict[str, Any]]:
-        return [
-            {**value, "used_by_preview": value["evidence_id"] in used}
-            for value in values
-        ]
+        return [{**value, "used_by_preview": value["evidence_id"] in used} for value in values]
 
     @staticmethod
     def _validate_serp_result(result: SERPResult) -> None:
@@ -803,9 +1165,7 @@ class ContentPlanD4Service:
         try:
             return SERPResult(
                 keyword=str(value["keyword"]),
-                organic_results=[
-                    OrganicResult(**row) for row in value.get("organic_results", [])
-                ],
+                organic_results=[OrganicResult(**row) for row in value.get("organic_results", [])],
                 features=list(value.get("features", [])),
                 people_also_ask=list(value.get("people_also_ask", [])),
                 related_searches=list(value.get("related_searches", [])),
@@ -816,9 +1176,7 @@ class ContentPlanD4Service:
                 raw_response=value.get("raw_response"),
             )
         except (KeyError, TypeError, ValueError) as exc:
-            raise D4GroupError(
-                "serp_audit_record_invalid", "SERP 请求账本缺少可恢复结果"
-            ) from exc
+            raise D4GroupError("serp_audit_record_invalid", "SERP 请求账本缺少可恢复结果") from exc
 
     @staticmethod
     def _hash(value: dict[str, Any]) -> str:
@@ -826,18 +1184,14 @@ class ContentPlanD4Service:
         return hashlib.sha256(payload.encode()).hexdigest()
 
     @staticmethod
-    def _serp_request_key(
-        batch: ContentPlanBatch, preparation: ContentPlanPreparation
-    ) -> str:
-        return (
-            f"serp:{batch.id}:{preparation.id}:"
-            f"{preparation.preparation_version}"
-        )
+    def _serp_request_key(batch: ContentPlanBatch, preparation: ContentPlanPreparation) -> str:
+        request_key = f"serp:{batch.id}:{preparation.id}:{preparation.preparation_version}"
+        if preparation.package_version > 1:
+            return f"{request_key}:package:{preparation.package_version}"
+        return request_key
 
 
-def validate_preview_output(
-    value: dict[str, Any], allowed_evidence_ids: set[str]
-) -> PreviewOutput:
+def validate_preview_output(value: dict[str, Any], allowed_evidence_ids: set[str]) -> PreviewOutput:
     if set(value) != {"title", "writing_direction", "evidence_ids"}:
         raise ValueError("preview output contains missing or unsupported fields")
     title = value["title"]
@@ -855,9 +1209,7 @@ def validate_preview_output(
         raise ValueError("writing_direction must be 1 to 600 characters of plain text")
     if re.search(r"(?im)^\s*(?:#{1,6}\s+|h[2-6]\s*:|\d+[.)]\s+|[-*]\s+)", direction):
         raise ValueError("writing_direction must not contain an outline")
-    sentence_count = len(
-        [part for part in re.split(r"[.!?。！？]+", direction) if part.strip()]
-    )
+    sentence_count = len([part for part in re.split(r"[.!?。！？]+", direction) if part.strip()])
     if not 1 <= sentence_count <= 3:
         raise ValueError("writing_direction must contain 1 to 3 sentences")
     if (

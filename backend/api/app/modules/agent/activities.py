@@ -32,6 +32,11 @@ from app.modules.agent.model_gateway import (
     compact_tool_result,
     merge_usage,
 )
+from app.modules.agent.progress import (
+    business_progress_from_evidence,
+    display_parts_from_evidence,
+    failure_answer,
+)
 from app.modules.agent.repository import AgentRepository, ToolExecutionLeaseLostError
 from app.modules.agent.tools import (
     MEMORY_MODELS,
@@ -42,6 +47,11 @@ from app.modules.agent.tools import (
     action_hash,
 )
 from app.modules.audit.service import build_audit_service
+from app.modules.content.service import build_content_service
+from app.modules.content_plan.batch_service import build_content_plan_batch_service
+from app.modules.keywords.service import build_keyword_service
+from app.modules.onboarding.service import SQLAlchemyOnboardingRepository
+from app.modules.performance.service import build_performance_service
 from app.modules.projects.service import build_project_service
 from app.modules.settings.service import (
     AIProviderNotConfiguredError,
@@ -52,6 +62,15 @@ from app.modules.settings.service import (
 
 def repository() -> AgentRepository:
     return AgentRepository(session_factory)
+
+
+def activity_model_gateway(payload: dict[str, Any]) -> ModelGateway:
+    gateway = ModelGateway()
+    if payload.get("request_timeout_seconds") is not None:
+        gateway.request_timeout_seconds = int(payload["request_timeout_seconds"])
+    if payload.get("max_retries") is not None:
+        gateway.max_retries = int(payload["max_retries"])
+    return gateway
 
 
 async def start_recorded_step(
@@ -87,7 +106,16 @@ async def finish_recorded_step(
 
 
 def registry() -> ToolRegistry:
-    return ToolRegistry(get_settings(), build_project_service(), build_audit_service())
+    return ToolRegistry(
+        get_settings(),
+        build_project_service(),
+        build_audit_service(),
+        keywords=build_keyword_service(),
+        content_plans=build_content_plan_batch_service(),
+        content=build_content_service(),
+        performance=build_performance_service(),
+        onboarding=SQLAlchemyOnboardingRepository(session_factory),
+    )
 
 
 def runtime_base_event(context: dict[str, Any], run_id: str) -> dict[str, Any]:
@@ -174,6 +202,50 @@ def bounded_runtime_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if encoded_size(arguments) <= 8_192:
         return arguments
     return compact_tool_arguments(arguments)
+
+
+def research_update_for_run(
+    messages: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+    answer: str,
+) -> dict[str, Any] | None:
+    evidence_reads: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    evidence_tools = set(READ_MODELS) - {"search_project_memory"}
+    for result in tool_results:
+        tool = str(result.get("tool", ""))
+        if tool not in evidence_tools or not result.get("ok"):
+            continue
+        arguments = dict(result.get("arguments", {}))
+        if encoded_size(arguments) > 2_048:
+            arguments = compact_tool_arguments(arguments)
+        key = tool + ":" + json.dumps(
+            arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        evidence_reads.append({"tool": tool, "arguments": arguments})
+        if len(evidence_reads) == 20:
+            break
+    if not evidence_reads:
+        return None
+    topic = next(
+        (
+            str(message.get("content", "")).strip()
+            for message in reversed(messages)
+            if message.get("role") == "user" and str(message.get("content", "")).strip()
+        ),
+        "",
+    )[:500]
+    conclusion = answer.strip()[:2_000]
+    if not topic or not conclusion:
+        return None
+    return {
+        "topic": topic,
+        "input_scope": {"evidence_reads": evidence_reads},
+        "conclusion": conclusion,
+    }
 
 
 def error_details(exc: Exception) -> tuple[str, str, bool]:
@@ -328,9 +400,33 @@ WRITE_INTENT_PATTERNS = {
         r"(?:请|帮我|直接)?(?:启动|开始|发起|运行|执行|创建).{0,16}(?:技术审计|网站审计|站点审计|SEO审计|SEO审核|网站审核|扫描|爬取)",
         r"(?:技术审计|网站审计|站点审计|SEO审计|SEO审核|网站审核|扫描|爬取).{0,16}(?:启动|开始|发起|运行|执行|创建)",
     ),
+    "start_keyword_library": (
+        r"(?:请|帮我|直接)?(?:启动|开始|建立|生成|创建).{0,16}(?:关键词库|关键词研究|关键词任务)",
+        r"(?:关键词库|关键词研究|关键词任务).{0,16}(?:启动|开始|建立|生成|创建)",
+    ),
+    "start_content_plan": (
+        r"(?:请|帮我|直接)?(?:启动|开始|生成|创建|建立).{0,16}(?:内容计划|选题计划|30篇计划|30篇内容)",
+        r"(?:内容计划|选题计划|30篇计划|30篇内容).{0,16}(?:启动|开始|生成|创建|建立)",
+    ),
+    "start_articles": (
+        r"(?:请|帮我|直接)?(?:从|根据|使用).{0,12}(?:内容计划|选题计划|计划选题|计划中).{0,20}(?:生成|创建|撰写|写).{0,8}(?:文章|内容初稿|首篇内容)",
+        r"(?:生成|创建|撰写|写).{0,8}(?:内容计划|选题计划|计划选题|计划中).{0,12}(?:的)?(?:文章|内容初稿|首篇内容)",
+        r"(?:generate|write|create).{0,24}(?:article|draft).{0,24}(?:content|editorial).{0,8}plan",
+    ),
+    "create_article": (
+        r"(?:请|帮我|直接)?(?:用|使用|围绕|根据|选|随机选).{0,40}(?:关键词|主题|keyword).{0,20}(?:生成|创建|撰写|写).{0,8}(?:一篇)?(?:文章|内容|初稿)",
+        r"(?:请|帮我|直接)?(?:生成|创建|撰写|写).{0,8}(?:一篇)?(?:关于|围绕|针对|用)?.{0,40}(?:文章|内容|初稿)",
+        r"(?:generate|write|create).{0,24}(?:article|post|draft).{0,40}(?:keyword|topic)",
+        r"(?:keyword|topic).{0,40}(?:generate|write|create).{0,24}(?:article|post|draft)",
+    ),
 }
 NEGATED_WRITE_INTENT = re.compile(
     r"(?:不要|不用|无需|别|禁止|不允许|不能).{0,12}(?:修改|更新|调整|设置|改成|补充|删除|重新识别|重新分析|刷新|启动|开始|发起|运行|执行|创建)"
+)
+NEGATED_CONTENT_PLAN_INTENT = re.compile(
+    r"(?:不要|不用|无需|别|禁止|不允许|不能).{0,12}"
+    r"(?:启动|开始|生成|创建|建立).{0,8}"
+    r"(?:内容计划|选题计划|30篇计划|30篇内容)"
 )
 
 
@@ -344,12 +440,44 @@ def user_explicitly_requested_write(name: str, messages: list[dict[str, Any]]) -
         "",
     )
     normalized = re.sub(r"\s+", "", user_message)
+    if name == "create_article":
+        normalized = NEGATED_CONTENT_PLAN_INTENT.sub("", normalized)
     if not normalized or NEGATED_WRITE_INTENT.search(normalized):
+        return False
+    if name in {"create_article", "start_articles"} and re.search(
+        r"(?:能不能|能否|是否|可不可以|可以.{0,24}(?:吗|么)|怎么|如何|有没有办法)",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    if name == "create_article" and re.search(
+        r"(?:内容计划|选题计划|计划选题|计划中的?文章|contentplan|editorialplan)",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
         return False
     return any(
         re.search(pattern, normalized, flags=re.IGNORECASE)
         for pattern in WRITE_INTENT_PATTERNS.get(name, ())
     )
+
+
+def trusted_system_authorized_write(
+    name: str, messages: list[dict[str, Any]]
+) -> bool:
+    latest_user = next(
+        (item for item in reversed(messages) if item.get("role") == "user"),
+        None,
+    )
+    if latest_user is None:
+        return False
+    metadata = latest_user.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("trusted_system_trigger") is not True:
+        return False
+    allowed = metadata.get("trusted_write_tools")
+    return isinstance(allowed, list) and name in allowed
 
 
 def context_trigger_tokens(limits: dict[str, Any]) -> int:
@@ -448,6 +576,7 @@ async def compact_history(
     *,
     request_tokens: int,
     force: bool = False,
+    gateway: ModelGateway | None = None,
 ) -> bool:
     message_key = "force_compactable_messages" if force else "compactable_messages"
     through_key = (
@@ -480,7 +609,7 @@ async def compact_history(
         repo, run_id, "model", "history_compaction", step_input
     )
     try:
-        gateway = ModelGateway()
+        gateway = gateway or ModelGateway()
         summary = context["conversation_summary"]
         usages: list[dict[str, int | float | str | None]] = []
         for batch in batches:
@@ -561,7 +690,7 @@ def bound_tool_result_batch(
             for key in (
                 "id", "run_id", "status", "verified", "already_completed",
                 "operation_id", "requested_count", "completed_count", "failed_count",
-                "record_ids", "completion",
+                "record_ids", "completion", "articles",
             )
             if isinstance(item.get("data"), dict) and key in item["data"]
         }
@@ -585,6 +714,7 @@ async def compact_tool_history(
     current_round: int,
     tool_context: dict[str, Any],
     limits: dict[str, Any],
+    gateway: ModelGateway | None = None,
 ) -> None:
     await repo.repair_interrupted_tool_calls(run_id, current_round)
     older = [
@@ -610,7 +740,7 @@ async def compact_tool_history(
         repo, run_id, "model", "tool_history_compaction", step_input
     )
     try:
-        result = await ModelGateway().summarize_tool_history(
+        result = await (gateway or ModelGateway()).summarize_tool_history(
             str(tool_context.get("summary", "")), older
         )
         summary = truncate_text_to_tokens(
@@ -697,6 +827,26 @@ async def check_run(payload: dict[str, Any]) -> dict[str, Any]:
             "reason_code": "run_timeout", "reason": "本次任务已达到平台运行时长上限",
         }
     usage = await repo.run_usage(payload["run_id"])
+    model_cost = max(float(usage.get("model_cost") or 0), 0)
+    tool_cost = max(float(usage.get("tool_cost") or 0), 0)
+    if model_cost >= float(context["limits"].get("model_cost", float("inf"))):
+        return {
+            "allowed": False,
+            "status": "limit_reached",
+            "reason_code": "model_cost_limit",
+            "reason": "本次任务已达到模型费用上限。",
+            "usage": usage,
+        }
+    if model_cost + tool_cost >= float(
+        context["limits"].get("paid_tool_cost", float("inf"))
+    ):
+        return {
+            "allowed": False,
+            "status": "limit_reached",
+            "reason_code": "paid_cost_limit",
+            "reason": "本次任务已达到总费用上限。",
+            "usage": usage,
+        }
     return {"allowed": True, "usage": usage}
 
 
@@ -749,12 +899,17 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
         )
         return {"type": "tool_calls", "tool_calls": registered}
     try:
-        gateway = ModelGateway()
+        gateway = activity_model_gateway(payload)
         tool_context = await repo.tool_model_context(
             payload["run_id"], int(payload["round"])
         )
         await compact_tool_history(
-            repo, payload["run_id"], int(payload["round"]), tool_context, context["limits"]
+            repo,
+            payload["run_id"],
+            int(payload["round"]),
+            tool_context,
+            context["limits"],
+            gateway,
         )
         tool_context = await repo.tool_model_context(
             payload["run_id"], int(payload["round"])
@@ -768,8 +923,10 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
         request_options = {
             "project_context": model_project_context,
             "final_only": bool(payload.get("final_only")),
-            "judge_feedback": payload.get("judge_feedback"),
             "execution_feedback": payload.get("execution_feedback"),
+            "max_output_tokens": int(
+                context["limits"].get("max_output_tokens", 4_000)
+            ),
         }
         input_token_limit = context_input_tokens(context["limits"])
         tool_token_limit = int(context["limits"].get("tool_round_tokens", 8_000))
@@ -782,6 +939,7 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
             context,
             payload["run_id"],
             request_tokens=request_token_count,
+            gateway=gateway,
         ):
             context = await repo.get_run_context(payload["run_id"])
             model_project_context = project_context(context)
@@ -805,6 +963,7 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
                 payload["run_id"],
                 request_tokens=request_token_count,
                 force=True,
+                gateway=gateway,
             ):
                 tool_results, request_token_count = await fit_tool_results_to_request(
                     gateway,
@@ -833,7 +992,6 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
             "round": payload["round"],
             "tool_result_count": len(tool_results),
             "final_only": bool(payload.get("final_only")),
-            "has_judge_feedback": bool(payload.get("judge_feedback")),
             "has_execution_feedback": bool(payload.get("execution_feedback")),
             "request_tokens": request_token_count,
             "request_token_limit": input_token_limit,
@@ -842,24 +1000,127 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
             repo, payload["run_id"], "model", "chat.completions", step_input
         )
         try:
-            update_sequences: dict[int, int] = {}
+            update_sequences: dict[tuple[int, str], int] = {}
+            started_messages: set[tuple[int, str]] = set()
+            discarded_messages: set[tuple[int, str]] = set()
+            tool_attempts: set[int] = set()
+            streamed_text: dict[int, list[str]] = {}
+            final_message_id = str(uuid5(
+                NAMESPACE_URL,
+                f"seo-agent-final:{payload['run_id']}",
+            ))
+            final_answer_chars = max(
+                1, int(context["limits"].get("final_answer_chars", 8_000))
+            )
+            streamed_answer_chars = 0
 
             async def publish_model_update(update: dict[str, Any]) -> None:
+                nonlocal streamed_answer_chars
                 attempt = int(update.get("attempt", 0))
-                message_id = str(uuid5(
-                    NAMESPACE_URL,
-                    f"seo-agent-decision:{payload['run_id']}:{round_number}:{attempt}",
-                ))
+                kind = str(update.get("kind", ""))
+                if kind == "stream_start":
+                    return
+                if kind.startswith("toolcall_"):
+                    tool_attempts.add(attempt)
+                    final_key = (attempt, "final")
+                    if (
+                        final_key in started_messages
+                        and final_key not in discarded_messages
+                    ):
+                        discarded_messages.add(final_key)
+                        await publish_runtime_event(
+                            context,
+                            payload["run_id"],
+                            "message_end",
+                            {
+                                "round": round_number,
+                                "message_id": final_message_id,
+                                "part_id": f"{final_message_id}:text",
+                                "phase": "final",
+                                "attempt": attempt,
+                                "status": "recovered",
+                                "outcome": "discarded",
+                                "event_key": (
+                                    f"{payload['run_id']}:final:{round_number}:"
+                                    f"{attempt}:end:discarded"
+                                ),
+                            },
+                        )
+                if kind.startswith("text_"):
+                    if attempt in tool_attempts:
+                        phase = "decision"
+                        message_id = str(uuid5(
+                            NAMESPACE_URL,
+                            (
+                                f"seo-agent-decision:{payload['run_id']}:"
+                                f"{round_number}:{attempt}"
+                            ),
+                        ))
+                        part_id = f"{message_id}:assistant"
+                    else:
+                        phase = "final"
+                        message_id = final_message_id
+                        part_id = f"{message_id}:text"
+                else:
+                    phase = "decision"
+                    message_id = str(uuid5(
+                        NAMESPACE_URL,
+                        (
+                            f"seo-agent-decision:{payload['run_id']}:"
+                            f"{round_number}:{attempt}"
+                        ),
+                    ))
+                    part_id = f"{message_id}:assistant"
                 message_event = {
                     "round": round_number,
                     "message_id": message_id,
-                    "part_id": f"{message_id}:assistant",
-                    "phase": "decision",
+                    "part_id": part_id,
+                    "phase": phase,
                     "attempt": attempt,
                 }
-                kind = str(update.get("kind", ""))
-                if kind == "stream_start":
-                    update_sequences[attempt] = 0
+                message_key = (attempt, phase)
+                if kind == "stream_end":
+                    for active_attempt, active_phase in sorted(started_messages):
+                        if active_attempt != attempt:
+                            continue
+                        if (active_attempt, active_phase) in discarded_messages:
+                            continue
+                        active_message_id = (
+                            final_message_id
+                            if active_phase == "final"
+                            else str(uuid5(
+                                NAMESPACE_URL,
+                                (
+                                    f"seo-agent-decision:{payload['run_id']}:"
+                                    f"{round_number}:{attempt}"
+                                ),
+                            ))
+                        )
+                        await close_runtime_message(
+                            context,
+                            payload["run_id"],
+                            {
+                                "round": round_number,
+                                "message_id": active_message_id,
+                                "part_id": (
+                                    f"{active_message_id}:text"
+                                    if active_phase == "final"
+                                    else f"{active_message_id}:assistant"
+                                ),
+                                "phase": active_phase,
+                                "attempt": attempt,
+                                "status": str(update.get("status", "completed")),
+                                "event_key": (
+                                    f"{payload['run_id']}:{active_phase}:"
+                                    f"{round_number}:{attempt}:end:"
+                                    f"{update.get('status', 'completed')}"
+                                ),
+                            },
+                        )
+                    return
+                if message_key not in started_messages:
+                    started_messages.add(message_key)
+                    update_sequences[message_key] = 0
                     await publish_runtime_event(
                         context,
                         payload["run_id"],
@@ -867,27 +1128,22 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
                         {
                             **message_event,
                             "event_key": (
-                                f"{payload['run_id']}:decision:{round_number}:"
+                                f"{payload['run_id']}:{phase}:{round_number}:"
                                 f"{attempt}:start"
                             ),
                         },
                     )
-                    return
-                if kind == "stream_end":
-                    await close_runtime_message(
-                        context,
-                        payload["run_id"],
-                        {
-                            **message_event,
-                            "status": str(update.get("status", "completed")),
-                            "event_key": (
-                                f"{payload['run_id']}:decision:{round_number}:"
-                                f"{attempt}:end:{update.get('status', 'completed')}"
-                            ),
-                        },
-                    )
-                    return
-                update_sequences[attempt] = update_sequences.get(attempt, 0) + 1
+                if kind == "text_delta":
+                    remaining = final_answer_chars - streamed_answer_chars
+                    if remaining <= 0:
+                        return
+                    delta = str(update.get("delta", ""))[:remaining]
+                    if not delta:
+                        return
+                    update = {**update, "delta": delta}
+                    streamed_answer_chars += len(delta)
+                    streamed_text.setdefault(attempt, []).append(delta)
+                update_sequences[message_key] = update_sequences.get(message_key, 0) + 1
                 assistant_event = {
                     key: update[key]
                     for key in (
@@ -904,8 +1160,8 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
                         **message_event,
                         "assistant_message_event": assistant_event,
                         "event_key": (
-                            f"{payload['run_id']}:decision:{round_number}:"
-                            f"{attempt}:update:{update_sequences[attempt]}"
+                            f"{payload['run_id']}:{phase}:{round_number}:"
+                            f"{attempt}:update:{update_sequences[message_key]}"
                         ),
                     },
                 )
@@ -930,6 +1186,7 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
                 payload["run_id"],
                 request_tokens=request_token_count,
                 force=True,
+                gateway=gateway,
             )
             if history_compacted:
                 context = await repo.get_run_context(payload["run_id"])
@@ -989,9 +1246,18 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
         code, message, retryable = error_details(exc)
         step_input = locals().get("step_input", {"round": payload["round"]})
         step_id = locals().get("step_id")
+        failed_output = {"error": message}
+        if "streamed_text" in locals():
+            progress_text = "".join(
+                delta
+                for attempt in sorted(streamed_text)
+                for delta in streamed_text[attempt]
+            ).strip()
+            if progress_text:
+                failed_output["progress_text"] = progress_text
         await finish_recorded_step(
             repo, step_id, payload["run_id"], "model", "chat.completions", step_input,
-            {"error": message}, int((time.monotonic() - started) * 1000),
+            failed_output, int((time.monotonic() - started) * 1000),
             status="failed", error_code=code, error_message=message,
         )
         if isinstance(
@@ -1021,12 +1287,28 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
         "model": model_result.model,
     })
     output = model_result.decision.model_dump(mode="json")
+    if output.get("type") == "final":
+        output["answer"] = str(output["answer"])[
+            :max(1, int(context["limits"].get("final_answer_chars", 8_000)))
+        ]
+        if not output.get("research"):
+            output["research"] = research_update_for_run(
+                context["messages"], raw_tool_results, output["answer"]
+            )
+        output["message_id"] = final_message_id
     if output.get("type") == "tool_calls":
+        progress_text = "".join(
+            delta
+            for attempt in sorted(streamed_text)
+            for delta in streamed_text[attempt]
+        ).strip()
         refs = await repo.register_tool_calls(
             payload["run_id"], int(payload["round"]), output["tool_calls"],
             int(context["limits"].get("tool_arguments_bytes", 256_000)),
         )
         output = {"type": "tool_calls", "tool_calls": refs}
+        if progress_text:
+            output["progress_text"] = progress_text
     await finish_recorded_step(
         repo, step_id, payload["run_id"], "model", "chat.completions", step_input,
         output, int((time.monotonic() - started) * 1000), usage=model_result.usage,
@@ -1039,148 +1321,6 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
             {"round": round_number, "outcome": "final", "tool_result_count": 0},
         )
     return output
-
-
-@activity.defn(name="agent_judge_final")
-async def judge_final(payload: dict[str, Any]) -> dict[str, Any]:
-    started = time.monotonic()
-    repo = repository()
-    context = await repo.get_run_context(payload["run_id"])
-    if context["status"] == "cancelled":
-        return {"status": "blocked", "reason": "任务已取消"}
-    user_goal = next(
-        (
-            str(item.get("content", ""))
-            for item in reversed(context["messages"])
-            if item.get("role") == "user"
-        ),
-        "",
-    )
-    try:
-        evidence = await repo.completion_evidence(payload["run_id"])
-        tool_context = await repo.tool_model_context(payload["run_id"], 1_000_000)
-        evidence["tool_history_summary"] = str(tool_context.get("summary") or "")
-        evidence["tool_history_through_round"] = int(
-            tool_context.get("through_round") or 0
-        )
-        if "tool_evidence" not in evidence:
-            evidence["tool_evidence"] = [
-                compact_tool_result(item) for item in tool_context["results"]
-            ]
-        step_input = {
-            "tool_result_count": len(evidence["tool_evidence"]),
-            "tool_execution_count": int(
-                evidence.get("execution_summary", {}).get("total", 0)
-            ),
-            "run_step_count": len(evidence.get("run_steps", [])),
-            "unfinished_count": len(evidence.get("unfinished", [])),
-        }
-        step_id = await start_recorded_step(
-            repo, payload["run_id"], "model", "final_check", step_input
-        )
-        result = await ModelGateway().judge(
-            user_goal,
-            str(payload["answer"]),
-            evidence,
-        )
-    except Exception as exc:
-        code, message, retryable = error_details(exc)
-        step_input = locals().get("step_input", {})
-        step_id = locals().get("step_id")
-        await finish_recorded_step(
-            repo, step_id, payload["run_id"], "model", "final_check", step_input,
-            {"error": message}, int((time.monotonic() - started) * 1000),
-            status="failed", error_code=code, error_message=message,
-        )
-        if isinstance(
-            exc,
-            (AgentModelRequestError, AIProviderNotConfiguredError, AgentModelOutputError),
-        ):
-            return {
-                "type": "model_error",
-                "error_code": code,
-                "message": message,
-                "retryable": retryable,
-            }
-        raise
-    output = result.decision.model_dump(mode="json")
-    await finish_recorded_step(
-        repo, step_id, payload["run_id"], "model", "final_check", step_input,
-        output, int((time.monotonic() - started) * 1000), usage=result.usage,
-    )
-    return output
-
-
-@activity.defn(name="agent_stream_final")
-async def stream_final(payload: dict[str, Any]) -> dict[str, Any]:
-    started = time.monotonic()
-    repo = repository()
-    context = await repo.get_run_context(payload["run_id"])
-    answer = str(payload["answer"])
-    message_id = str(uuid5(NAMESPACE_URL, f"seo-agent-final:{payload['run_id']}"))
-    part_id = f"{message_id}:text"
-    event_store = build_agent_event_store()
-    base_event = {
-        "project_id": context["project_id"],
-        "conversation_id": context["conversation_id"],
-        "run_id": payload["run_id"],
-        "message_id": message_id,
-        "part_id": part_id,
-        "phase": "final",
-        "attempt": 0,
-    }
-    if context["status"] == "cancelled":
-        return {
-            "answer": answer,
-            "message_id": message_id,
-            "streamed": False,
-            "cancelled": True,
-        }
-    await event_store.publish(
-        context["conversation_id"],
-        "message_start",
-        {**base_event, "event_key": f"{payload['run_id']}:final:start"},
-    )
-    step_input = {
-        "source": "judge_approved_answer",
-        "answer_chars": len(answer),
-        "evidence_count": len(payload.get("evidence", [])),
-    }
-    step_id = await start_recorded_step(
-        repo, payload["run_id"], "execution", "final_response", step_input
-    )
-    update_id = await event_store.publish(
-        context["conversation_id"],
-        "message_update",
-        {
-            **base_event,
-            "event_key": f"{payload['run_id']}:final:update:1",
-            "assistant_message_event": {"kind": "text_delta", "delta": answer},
-        },
-    )
-    await event_store.close_message(
-        context["conversation_id"],
-        {
-            **base_event,
-            "event_key": f"{payload['run_id']}:final:end:completed",
-            "status": "completed",
-        },
-    )
-    await finish_recorded_step(
-        repo,
-        step_id,
-        payload["run_id"],
-        "execution",
-        "final_response",
-        step_input,
-        {"answer_chars": len(answer), "streamed": update_id is not None},
-        int((time.monotonic() - started) * 1000),
-    )
-    return {
-        "answer": answer,
-        "message_id": message_id,
-        "streamed": update_id is not None,
-    }
 
 
 @activity.defn(name="agent_execute_tool")
@@ -1323,8 +1463,10 @@ async def execute_tool(payload: dict[str, Any]) -> dict[str, Any]:
             },
         )
         return dict(model_views["long_term"])
-    if name in WRITE_MODELS and not user_explicitly_requested_write(
-        name, context["messages"]
+    if (
+        name in WRITE_MODELS
+        and not user_explicitly_requested_write(name, context["messages"])
+        and not trusted_system_authorized_write(name, context["messages"])
     ):
         rejected = await record_rejected_tool(
             repo, payload["run_id"], tool_call_id, execution.model_tool_call_id,
@@ -1350,6 +1492,39 @@ async def execute_tool(payload: dict[str, Any]) -> dict[str, Any]:
             },
         )
         return rejected
+    if definition.calls_external_service:
+        budget = await repo.reserve_paid_tool_budget(
+            payload["run_id"],
+            tool_call_id,
+            name,
+            float(context["limits"].get("paid_tool_call_cost", 0)),
+            float(context["limits"].get("paid_tool_cost", 0)),
+        )
+        if not budget.get("allowed"):
+            rejected = await record_rejected_tool(
+                repo, payload["run_id"], tool_call_id,
+                execution.model_tool_call_id, worker_id, name, arguments,
+                context["limits"], started, "paid_tool_budget_exceeded",
+                "本次任务的费用预算不足，平台没有启动这个付费操作",
+            )
+            await publish_runtime_event(
+                context,
+                payload["run_id"],
+                "tool_execution_end",
+                {
+                    **tool_event,
+                    "is_error": True,
+                    "status": "rejected",
+                    "error_code": "paid_tool_budget_exceeded",
+                    "retryable": False,
+                    "summary": rejected["summary"],
+                    "event_key": (
+                        f"{payload['run_id']}:tool:{tool_call_id}:"
+                        f"{execution_attempt}:end:budget_rejected"
+                    ),
+                },
+            )
+            return rejected
     step_id = await start_recorded_step(
         repo, payload["run_id"], "tool", name,
         {"tool_call_id": tool_call_id, "parameters_hash": execution.parameters_hash},
@@ -1706,6 +1881,23 @@ def tool_summary(name: str, result: dict[str, Any]) -> str:
         return f"网站业务识别任务状态：{result.get('status', 'unknown')}"
     if name == "start_technical_audit":
         return f"技术审核任务状态：{result.get('status', 'unknown')}"
+    if name == "start_keyword_library":
+        return f"关键词库任务状态：{result.get('status', 'unknown')}"
+    if name == "start_content_plan":
+        return f"内容计划任务状态：{result.get('status', 'unknown')}"
+    if name in {"start_articles", "create_article"}:
+        count = len(result.get("articles", [])) or (1 if result.get("article_id") else 0)
+        return f"已启动 {count} 篇文章生成"
+    if name == "list_keywords":
+        return f"关键词库中找到 {result.get('total', 0)} 个关键词"
+    if name == "get_keyword_competitors":
+        return f"读取到 {len(result.get('items', []))} 个关键词竞品"
+    if name == "get_keyword_opportunities":
+        return f"找到 {result.get('total', 0)} 个关键词机会"
+    if name == "get_search_performance":
+        return "已读取项目搜索表现"
+    if name == "get_article_performance":
+        return "已读取文章搜索表现"
     return "数据读取完成"
 
 
@@ -1728,13 +1920,31 @@ async def finish(payload: dict[str, Any]) -> None:
         if payload.get("status", "completed") == "completed"
         else None,
     )
+    try:
+        completion = await repo.completion_evidence(payload["run_id"])
+    except Exception:
+        completion = {}
+    progress = business_progress_from_evidence(completion)
+    status = payload.get("status", "completed")
+    answer = (
+        failure_answer(
+            progress,
+            payload.get("error_message"),
+            error_code=payload.get("error_code"),
+            limit_reached=status == "limit_reached",
+            evidence=completion,
+        )
+        if status in {"failed", "limit_reached"}
+        else payload["answer"]
+    )
+    metadata = {"evidence": payload.get("evidence", [])}
+    if progress:
+        metadata["business_progress"] = progress
+    metadata["display_parts"] = display_parts_from_evidence(completion, answer)
     await repo.finalize_run(
-        payload["run_id"], payload["answer"],
-        {
-            "evidence": payload.get("evidence", []),
-            "judge": payload.get("judge"),
-        },
-        payload.get("status", "completed"),
+        payload["run_id"], answer,
+        metadata,
+        status,
         payload.get("error_code"), payload.get("error_message"),
         payload.get("message_id"),
     )
@@ -1771,6 +1981,6 @@ async def finish(payload: dict[str, Any]) -> None:
 
 
 AGENT_ACTIVITIES = [
-    set_status, finish_turn, check_run, model_decide, judge_final, stream_final,
+    set_status, finish_turn, check_run, model_decide,
     execute_tool, skip_tool_calls, finish,
 ]

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+import logging
+import time
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -10,6 +14,25 @@ from app.modules.content_plan.d6_service import (
     build_content_plan_d6_service,
 )
 from app.modules.content_plan.batch_service import build_content_plan_batch_service
+
+
+logger = logging.getLogger(__name__)
+
+
+async def _run_with_heartbeat(awaitable, details: dict[str, str]):
+    task = asyncio.create_task(awaitable)
+    try:
+        while True:
+            if activity.in_activity():
+                activity.heartbeat(details)
+            done, _ = await asyncio.wait({task}, timeout=10)
+            if task in done:
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 @activity.defn(name="content_plan_process_preparation")
@@ -41,15 +64,39 @@ async def process_batch(payload: dict[str, Any]) -> dict[str, Any]:
     if set(payload) != {"batch_id"}:
         raise ValueError("content-plan batch activity only accepts batch_id")
     batch_id = str(payload["batch_id"])
+    started_at = time.monotonic()
+    logger.info("content_plan_process_batch started batch_id=%s", batch_id)
     try:
-        return await build_content_plan_batch_service().process_batch(batch_id)
+        result = await _run_with_heartbeat(
+            build_content_plan_batch_service().process_batch(batch_id),
+            {"batch_id": batch_id},
+        )
+        logger.info(
+            "content_plan_process_batch finished batch_id=%s status=%s elapsed_seconds=%.3f",
+            batch_id,
+            result.get("status"),
+            time.monotonic() - started_at,
+        )
+        return result
     except SQLAlchemyError as exc:
+        logger.exception(
+            "content_plan_process_batch database_failed batch_id=%s elapsed_seconds=%.3f",
+            batch_id,
+            time.monotonic() - started_at,
+        )
         return {
             "batch_id": batch_id,
             "status": "retryable_failed",
             "error_code": "content_plan_database_failed",
             "error_detail": str(exc),
         }
+    except BaseException:
+        logger.exception(
+            "content_plan_process_batch failed batch_id=%s elapsed_seconds=%.3f",
+            batch_id,
+            time.monotonic() - started_at,
+        )
+        raise
 
 
 @activity.defn(name="content_plan_mark_batch_retry_exhausted")

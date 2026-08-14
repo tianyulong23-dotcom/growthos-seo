@@ -13,7 +13,22 @@ import pycountry
 
 
 class DataForSEOError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        status_message: str | None = None,
+        task_id: str | None = None,
+        cost_usd: float = 0.0,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.status_message = status_message
+        self.task_id = task_id
+        self.cost_usd = cost_usd
+        self.retryable = retryable
 
 
 class DataForSEOOutcomeUnknown(DataForSEOError):
@@ -24,6 +39,10 @@ class DataForSEOEmptyResult(DataForSEOError):
     def __init__(self, result: SERPResult) -> None:
         super().__init__("dataforseo_empty_result")
         self.result = result
+
+
+class DataForSEOTaskPending(DataForSEOError):
+    pass
 
 
 COUNTRY_LOCATION_CODES = {
@@ -81,8 +100,19 @@ class SERPResult:
         return json.dumps(payload, ensure_ascii=False)
 
 
+@dataclass(frozen=True)
+class SerpTaskReceipt:
+    task_id: str
+    tag: str
+    cost_usd: float
+    status_code: int
+    status_message: str
+
+
 class DataForSEOClient:
     endpoint = "/v3/serp/google/organic/live/advanced"
+    task_post_endpoint = "/v3/serp/google/organic/task_post"
+    tasks_ready_endpoint = "/v3/serp/google/organic/tasks_ready"
 
     def __init__(
         self,
@@ -128,29 +158,114 @@ class DataForSEOClient:
         await self._cache_set(cache_key, result.cache_value())
         return result
 
+    async def submit_serp_task(
+        self,
+        keyword: str,
+        country: str,
+        language: str,
+        device: str = "desktop",
+        *,
+        tag: str,
+    ) -> SerpTaskReceipt:
+        self._require_credentials()
+        language_code = normalize_language_code(language)
+        request_item = self._request_item(
+            keyword, country, language_code, device, tag=tag
+        )
+        response = await asyncio.to_thread(
+            self._request_json,
+            "POST",
+            self.task_post_endpoint,
+            [request_item],
+        )
+        task = _require_provider_task(response, accepted_statuses={20000, 20100})
+        task_id = str(task.get("id") or "")
+        task_data = task.get("data")
+        response_tag = task_data.get("tag") if isinstance(task_data, dict) else None
+        if not task_id or response_tag != tag:
+            raise DataForSEOOutcomeUnknown(
+                "dataforseo_task_submission_mismatch",
+                task_id=task_id or None,
+                cost_usd=_task_cost(task),
+            )
+        return SerpTaskReceipt(
+            task_id=task_id,
+            tag=tag,
+            cost_usd=_task_cost(task),
+            status_code=int(task.get("status_code") or 0),
+            status_message=str(task.get("status_message") or ""),
+        )
+
+    async def get_serp_task(self, task_id: str, keyword: str) -> SERPResult:
+        self._require_credentials()
+        response = await asyncio.to_thread(
+            self._request_json,
+            "GET",
+            f"/v3/serp/google/organic/task_get/advanced/{task_id}",
+        )
+        task = _first_task(response)
+        status_code = _status_code(task)
+        if status_code in {20100, 40601, 40602, 40603}:
+            raise DataForSEOTaskPending(
+                "dataforseo_task_pending",
+                status_code=status_code,
+                status_message=str(task.get("status_message") or ""),
+                task_id=task_id,
+                cost_usd=_task_cost(task),
+                retryable=True,
+            )
+        result = parse_serp_response(response, keyword)
+        if (
+            not result.organic_results
+            and not result.people_also_ask
+            and not result.related_searches
+        ):
+            raise DataForSEOEmptyResult(result)
+        return result
+
+    async def find_ready_serp_task(self, tag: str) -> str | None:
+        self._require_credentials()
+        response = await asyncio.to_thread(
+            self._request_json, "GET", self.tasks_ready_endpoint
+        )
+        task = _require_provider_task(response, accepted_statuses={20000})
+        results = task.get("result") or []
+        for item in results if isinstance(results, list) else []:
+            if not isinstance(item, dict) or item.get("tag") != tag:
+                continue
+            task_id = str(item.get("id") or "")
+            if task_id:
+                return task_id
+        return None
+
     def _request(
         self, keyword: str, country: str, language: str, device: str
     ) -> dict[str, Any]:
+        request_item = self._request_item(keyword, country, language, device)
+        return self._request_json("POST", self.endpoint, [request_item])
+
+    def _request_json(
+        self,
+        method: str,
+        endpoint: str,
+        payload: Any | None = None,
+    ) -> dict[str, Any]:
+        self._require_credentials()
         credentials = base64.b64encode(
             f"{self.login}:{self.password}".encode("utf-8")
         ).decode("ascii")
-        request_item = {
-            "keyword": keyword,
-            "language_code": language,
-            "device": device,
-            "os": "windows",
-            "depth": 20,
-            **location_parameter(country),
-        }
-        payload = [request_item]
         request = Request(
-            self.base_url + self.endpoint,
-            data=json.dumps(payload).encode("utf-8"),
+            self.base_url + endpoint,
+            data=(
+                json.dumps(payload).encode("utf-8")
+                if payload is not None
+                else None
+            ),
             headers={
                 "Authorization": f"Basic {credentials}",
                 "Content-Type": "application/json",
             },
-            method="POST",
+            method=method,
         )
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
@@ -161,6 +276,31 @@ class DataForSEOClient:
             raise DataForSEOOutcomeUnknown(
                 "dataforseo_request_outcome_unknown"
             ) from exc
+
+    @staticmethod
+    def _request_item(
+        keyword: str,
+        country: str,
+        language: str,
+        device: str,
+        *,
+        tag: str | None = None,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {
+            "keyword": keyword,
+            "language_code": language,
+            "device": device,
+            "os": "windows",
+            "depth": 20,
+            **location_parameter(country),
+        }
+        if tag is not None:
+            item["tag"] = tag
+        return item
+
+    def _require_credentials(self) -> None:
+        if not self.login or not self.password:
+            raise DataForSEOError("dataforseo_not_configured")
 
     async def _cache_get(self, key: str) -> str | None:
         if self.cache is None:
@@ -217,12 +357,7 @@ class DataForSEOClient:
 
 
 def parse_serp_response(response: dict[str, Any], keyword: str) -> SERPResult:
-    if response.get("status_code") != 20000:
-        raise DataForSEOError("dataforseo_response_failed")
-    tasks = response.get("tasks") or []
-    if not tasks or tasks[0].get("status_code") != 20000:
-        raise DataForSEOError("dataforseo_task_failed")
-    task = tasks[0]
+    task = _require_provider_task(response, accepted_statuses={20000})
     results = task.get("result") or []
     if not results:
         raise DataForSEOError("dataforseo_empty_result")
@@ -322,3 +457,41 @@ def _task_cost(task: dict[str, Any]) -> float:
         return max(0.0, float(task.get("cost") or 0.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _status_code(value: dict[str, Any]) -> int | None:
+    raw = value.get("status_code")
+    return int(raw) if isinstance(raw, int) else None
+
+
+def _first_task(response: dict[str, Any]) -> dict[str, Any]:
+    response_status = _status_code(response)
+    if response_status != 20000:
+        raise _provider_error(response, "dataforseo_response_failed")
+    tasks = response.get("tasks") or []
+    if not isinstance(tasks, list) or not tasks or not isinstance(tasks[0], dict):
+        raise DataForSEOOutcomeUnknown("dataforseo_task_missing")
+    return tasks[0]
+
+
+def _require_provider_task(
+    response: dict[str, Any], *, accepted_statuses: set[int]
+) -> dict[str, Any]:
+    task = _first_task(response)
+    if _status_code(task) not in accepted_statuses:
+        raise _provider_error(task, "dataforseo_task_failed")
+    return task
+
+
+def _provider_error(value: dict[str, Any], message: str) -> DataForSEOError:
+    status_code = _status_code(value)
+    cost = _task_cost(value)
+    retryable = status_code in {40202, 40209, 50301, 50303, 50401}
+    return DataForSEOError(
+        message,
+        status_code=status_code,
+        status_message=str(value.get("status_message") or ""),
+        task_id=str(value.get("id") or "") or None,
+        cost_usd=cost,
+        retryable=retryable and cost == 0,
+    )

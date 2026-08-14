@@ -151,6 +151,7 @@ async def conversation_event_stream(
     previous_status = ""
     previous_step = -1
     previous_sequence = 0
+    previous_timeline_version: tuple[tuple[str, str, str], ...] = ()
     heartbeat = 0
     while not await request.is_disconnected():
         detail = await service.get_conversation(project_id, conversation_id)
@@ -158,10 +159,15 @@ async def conversation_event_stream(
         current_status = detail.run.status if detail.run else ""
         current_step = detail.run.current_step if detail.run else 0
         current_sequence = max((item.sequence for item in detail.messages), default=0)
+        current_timeline_version = tuple(
+            (item.id, item.status, item.updated_at.isoformat())
+            for item in detail.timeline
+        )
         changed = (
             current_status != previous_status
             or current_step != previous_step
             or current_sequence != previous_sequence
+            or current_timeline_version != previous_timeline_version
         )
         if changed:
             yield sse_event("snapshot", payload)
@@ -185,6 +191,7 @@ async def conversation_event_stream(
             previous_status = current_status
             previous_step = current_step
             previous_sequence = current_sequence
+            previous_timeline_version = current_timeline_version
             heartbeat = 0
         active_run_id = detail.run.id if detail.run else None
         if redis_available:
@@ -240,6 +247,26 @@ async def get_run(project_id: str, run_id: str, service: Annotated[AgentService,
     try:
         return await service.get_run(project_id, run_id)
     except AgentNotFoundError as exc:
+        raise agent_error(exc) from exc
+
+
+@router.post(
+    "/runs/{run_id}/retry",
+    response_model=SendMessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_system_trigger_run(
+    project_id: str,
+    run_id: str,
+    service: Annotated[AgentService, Depends(get_agent_service)],
+) -> SendMessageResponse:
+    try:
+        return await service.retry_system_trigger(project_id, run_id)
+    except (
+        AgentNotFoundError,
+        AgentConflictError,
+        AgentWorkflowUnavailableError,
+    ) as exc:
         raise agent_error(exc) from exc
 
 

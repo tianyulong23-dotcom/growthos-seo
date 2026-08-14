@@ -36,6 +36,7 @@ from app.modules.settings.schemas import (
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 CONNECTION_TIMEOUT_SECONDS = 20
+PLAINTEXT_SECRET_PREFIX = b"plaintext:v1:"
 
 
 class ServiceConnectionProjectNotFoundError(Exception):
@@ -69,27 +70,42 @@ class WordPressConnectionRecord:
     application_password: str = field(repr=False)
     verified_user: str | None = None
     verified_at: datetime | None = None
+    capabilities: dict[str, bool] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WordPressVerificationResult:
+    verified_user: str
+    capabilities: dict[str, bool]
 
 
 class ServiceConnectionRepository(Protocol):
     async def project_exists(self, organization_id: str, project_id: str) -> bool: ...
 
     async def get_gsc(
-        self, project_id: str, encryption_key: str | None
+        self, project_id: str, encryption_key: str | None, allow_plaintext: bool
     ) -> GSCConnectionRecord | None: ...
 
     async def upsert_gsc(
-        self, project_id: str, record: GSCConnectionRecord, encryption_key: str
+        self,
+        project_id: str,
+        record: GSCConnectionRecord,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GSCConnectionRecord: ...
 
     async def delete_gsc(self, project_id: str) -> None: ...
 
     async def get_wordpress(
-        self, project_id: str, encryption_key: str | None
+        self, project_id: str, encryption_key: str | None, allow_plaintext: bool
     ) -> WordPressConnectionRecord | None: ...
 
     async def upsert_wordpress(
-        self, project_id: str, record: WordPressConnectionRecord, encryption_key: str
+        self,
+        project_id: str,
+        record: WordPressConnectionRecord,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> WordPressConnectionRecord: ...
 
     async def delete_wordpress(self, project_id: str) -> None: ...
@@ -112,7 +128,10 @@ class SQLAlchemyServiceConnectionRepository:
             )
 
     async def get_gsc(
-        self, project_id: str, encryption_key: str | None
+        self,
+        project_id: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GSCConnectionRecord | None:
         async with self.sessions() as session:
             row = (
@@ -127,15 +146,13 @@ class SQLAlchemyServiceConnectionRepository:
             ).one_or_none()
             if row is None:
                 return None
-            if not encryption_key:
-                raise ServiceConnectionEncryptionUnavailableError
-            private_key = await session.scalar(
-                select(
-                    func.pgp_sym_decrypt(
-                        GSCProjectConnection.private_key_encrypted,
-                        encryption_key,
-                    )
-                ).where(GSCProjectConnection.project_id == project_id)
+            private_key = await self._read_secret(
+                session,
+                GSCProjectConnection.private_key_encrypted,
+                GSCProjectConnection.project_id == project_id,
+                row.private_key_encrypted,
+                encryption_key,
+                allow_plaintext,
             )
         return GSCConnectionRecord(
             property_url=row.property_url,
@@ -145,21 +162,27 @@ class SQLAlchemyServiceConnectionRepository:
         )
 
     async def upsert_gsc(
-        self, project_id: str, record: GSCConnectionRecord, encryption_key: str
+        self,
+        project_id: str,
+        record: GSCConnectionRecord,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> GSCConnectionRecord:
+        if not encryption_key and not allow_plaintext:
+            raise ServiceConnectionEncryptionUnavailableError
+        secret_expression = self._secret_expression(encryption_key).format(
+            value="private_key"
+        )
         async with self.sessions() as session:
             await session.execute(
                 text(
-                    """
+                    f"""
                     INSERT INTO gsc_project_connections (
                         project_id, property_url, service_account_email,
                         private_key_encrypted, verified_at
                     ) VALUES (
                         :project_id, :property_url, :service_account_email,
-                        pgp_sym_encrypt(
-                            :private_key, :encryption_key,
-                            'cipher-algo=aes256, compress-algo=1'
-                        ), :verified_at
+                        {secret_expression}, :verified_at
                     )
                     ON CONFLICT (project_id) DO UPDATE SET
                         property_url = EXCLUDED.property_url,
@@ -174,12 +197,14 @@ class SQLAlchemyServiceConnectionRepository:
                     "property_url": record.property_url,
                     "service_account_email": record.service_account_email,
                     "private_key": record.private_key,
+                    "private_key_plaintext": PLAINTEXT_SECRET_PREFIX
+                    + record.private_key.encode("utf-8"),
                     "encryption_key": encryption_key,
                     "verified_at": record.verified_at,
                 },
             )
             await session.commit()
-        saved = await self.get_gsc(project_id, encryption_key)
+        saved = await self.get_gsc(project_id, encryption_key, allow_plaintext)
         if saved is None:
             raise RuntimeError("GSC connection was not saved")
         return saved
@@ -194,7 +219,10 @@ class SQLAlchemyServiceConnectionRepository:
             await session.commit()
 
     async def get_wordpress(
-        self, project_id: str, encryption_key: str | None
+        self,
+        project_id: str,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> WordPressConnectionRecord | None:
         async with self.sessions() as session:
             row = (
@@ -205,20 +233,19 @@ class SQLAlchemyServiceConnectionRepository:
                         WordPressProjectConnection.application_password_encrypted,
                         WordPressProjectConnection.verified_user,
                         WordPressProjectConnection.verified_at,
+                        WordPressProjectConnection.capabilities_json,
                     ).where(WordPressProjectConnection.project_id == project_id)
                 )
             ).one_or_none()
             if row is None:
                 return None
-            if not encryption_key:
-                raise ServiceConnectionEncryptionUnavailableError
-            password = await session.scalar(
-                select(
-                    func.pgp_sym_decrypt(
-                        WordPressProjectConnection.application_password_encrypted,
-                        encryption_key,
-                    )
-                ).where(WordPressProjectConnection.project_id == project_id)
+            password = await self._read_secret(
+                session,
+                WordPressProjectConnection.application_password_encrypted,
+                WordPressProjectConnection.project_id == project_id,
+                row.application_password_encrypted,
+                encryption_key,
+                allow_plaintext,
             )
         return WordPressConnectionRecord(
             site_url=row.site_url,
@@ -226,24 +253,33 @@ class SQLAlchemyServiceConnectionRepository:
             application_password=password,
             verified_user=row.verified_user,
             verified_at=row.verified_at,
+            capabilities=dict(row.capabilities_json or {}),
         )
 
     async def upsert_wordpress(
-        self, project_id: str, record: WordPressConnectionRecord, encryption_key: str
+        self,
+        project_id: str,
+        record: WordPressConnectionRecord,
+        encryption_key: str | None,
+        allow_plaintext: bool,
     ) -> WordPressConnectionRecord:
+        if not encryption_key and not allow_plaintext:
+            raise ServiceConnectionEncryptionUnavailableError
+        secret_expression = self._secret_expression(encryption_key).format(
+            value="application_password"
+        )
         async with self.sessions() as session:
             await session.execute(
                 text(
-                    """
+                    f"""
                     INSERT INTO wordpress_project_connections (
                         project_id, site_url, username,
-                        application_password_encrypted, verified_user, verified_at
+                        application_password_encrypted, verified_user, verified_at,
+                        capabilities_json
                     ) VALUES (
                         :project_id, :site_url, :username,
-                        pgp_sym_encrypt(
-                            :application_password, :encryption_key,
-                            'cipher-algo=aes256, compress-algo=1'
-                        ), :verified_user, :verified_at
+                        {secret_expression}, :verified_user, :verified_at,
+                        CAST(:capabilities_json AS jsonb)
                     )
                     ON CONFLICT (project_id) DO UPDATE SET
                         site_url = EXCLUDED.site_url,
@@ -251,6 +287,7 @@ class SQLAlchemyServiceConnectionRepository:
                         application_password_encrypted = EXCLUDED.application_password_encrypted,
                         verified_user = EXCLUDED.verified_user,
                         verified_at = EXCLUDED.verified_at,
+                        capabilities_json = EXCLUDED.capabilities_json,
                         updated_at = now()
                     """
                 ),
@@ -259,13 +296,18 @@ class SQLAlchemyServiceConnectionRepository:
                     "site_url": record.site_url,
                     "username": record.username,
                     "application_password": record.application_password,
+                    "application_password_plaintext": PLAINTEXT_SECRET_PREFIX
+                    + record.application_password.encode("utf-8"),
                     "encryption_key": encryption_key,
                     "verified_user": record.verified_user,
                     "verified_at": record.verified_at,
+                    "capabilities_json": json.dumps(record.capabilities),
                 },
             )
             await session.commit()
-        saved = await self.get_wordpress(project_id, encryption_key)
+        saved = await self.get_wordpress(
+            project_id, encryption_key, allow_plaintext
+        )
         if saved is None:
             raise RuntimeError("WordPress connection was not saved")
         return saved
@@ -279,13 +321,45 @@ class SQLAlchemyServiceConnectionRepository:
             )
             await session.commit()
 
+    @staticmethod
+    def _secret_expression(encryption_key: str | None) -> str:
+        if encryption_key:
+            return (
+                "pgp_sym_encrypt(:{value}, :encryption_key, "
+                "'cipher-algo=aes256, compress-algo=1')"
+            )
+        return ":{value}_plaintext"
+
+    @staticmethod
+    async def _read_secret(
+        session: AsyncSession,
+        column: object,
+        predicate: object,
+        stored_value: bytes,
+        encryption_key: str | None,
+        allow_plaintext: bool,
+    ) -> str:
+        value = bytes(stored_value)
+        if value.startswith(PLAINTEXT_SECRET_PREFIX):
+            if not allow_plaintext:
+                raise ServiceConnectionEncryptionUnavailableError
+            return value.removeprefix(PLAINTEXT_SECRET_PREFIX).decode("utf-8")
+        if not encryption_key:
+            raise ServiceConnectionEncryptionUnavailableError
+        decrypted = await session.scalar(
+            select(func.pgp_sym_decrypt(column, encryption_key)).where(predicate)
+        )
+        return str(decrypted or "")
+
 
 class GSCConnectionTester(Protocol):
     async def test(self, record: GSCConnectionRecord) -> None: ...
 
 
 class WordPressConnectionTester(Protocol):
-    async def test(self, record: WordPressConnectionRecord) -> str: ...
+    async def test(
+        self, record: WordPressConnectionRecord
+    ) -> WordPressVerificationResult: ...
 
 
 class LiveGSCConnectionTester:
@@ -338,25 +412,79 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 class LiveWordPressConnectionTester:
-    async def test(self, record: WordPressConnectionRecord) -> str:
+    async def test(
+        self, record: WordPressConnectionRecord
+    ) -> WordPressVerificationResult:
         return await asyncio.to_thread(self._test_sync, record)
 
-    def _test_sync(self, record: WordPressConnectionRecord) -> str:
+    def _test_sync(
+        self, record: WordPressConnectionRecord
+    ) -> WordPressVerificationResult:
         self._ensure_public_host(record.site_url)
         credentials = base64.b64encode(
             f"{record.username}:{record.application_password}".encode()
         ).decode()
-        request = Request(
+        headers = {
+            "Authorization": f"Basic {credentials}",
+            "Accept": "application/json",
+        }
+        payload = self._request_json(
             f"{record.site_url}/wp-json/wp/v2/users/me?context=edit",
-            headers={"Authorization": f"Basic {credentials}"},
-            method="GET",
+            headers,
         )
+        if not isinstance(payload, dict):
+            raise ServiceConnectionError("WordPress 返回格式不正确")
+        verified_user = payload.get("name") or payload.get("slug")
+        if not isinstance(verified_user, str) or not verified_user.strip():
+            raise ServiceConnectionError("WordPress 未返回可验证的用户身份")
+        raw_capabilities = payload.get("capabilities")
+        user_capabilities = (
+            raw_capabilities if isinstance(raw_capabilities, dict) else {}
+        )
+        posts_readable = self._probe_read_route(
+            f"{record.site_url}/wp-json/wp/v2/posts?context=edit&per_page=1&_fields=id,slug",
+            headers,
+        )
+        media_readable = self._probe_read_route(
+            f"{record.site_url}/wp-json/wp/v2/media?context=edit&per_page=1&_fields=id,slug",
+            headers,
+        )
+        can_publish_posts = user_capabilities.get("publish_posts") is True
+        can_edit_posts = user_capabilities.get("edit_posts") is True
+        can_edit_published_posts = (
+            user_capabilities.get("edit_published_posts") is True
+        )
+        can_upload_files = user_capabilities.get("upload_files") is True
+        return WordPressVerificationResult(
+            verified_user=verified_user.strip(),
+            capabilities={
+                "media_upload": can_upload_files and media_readable,
+                "media_lookup": media_readable,
+                "post_create": can_edit_posts and can_publish_posts and posts_readable,
+                "post_update_by_remote_id": (
+                    can_edit_published_posts and posts_readable
+                ),
+                "post_reconcile": posts_readable,
+                "theme_preview": False,
+            },
+        )
+
+    def _request_json(
+        self,
+        endpoint: str,
+        headers: dict[str, str],
+        *,
+        permission_denied_ok: bool = False,
+    ) -> object | None:
+        request = Request(endpoint, headers=headers, method="GET")
         try:
             with build_opener(_NoRedirectHandler()).open(
                 request, timeout=CONNECTION_TIMEOUT_SECONDS
             ) as response:
                 body = response.read(MAX_RESPONSE_BYTES + 1)
         except HTTPError as exc:
+            if permission_denied_ok and exc.code in {401, 403, 404}:
+                return None
             if exc.code in {301, 302, 303, 307, 308}:
                 raise ServiceConnectionError("WordPress 地址发生重定向，请填写最终站点地址") from exc
             if exc.code in {401, 403}:
@@ -371,15 +499,15 @@ class LiveWordPressConnectionTester:
         if len(body) > MAX_RESPONSE_BYTES:
             raise ServiceConnectionError("WordPress 响应过大")
         try:
-            payload = json.loads(body)
+            return json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ServiceConnectionError("WordPress 返回格式不正确") from exc
-        if not isinstance(payload, dict):
-            raise ServiceConnectionError("WordPress 返回格式不正确")
-        verified_user = payload.get("name") or payload.get("slug")
-        if not isinstance(verified_user, str) or not verified_user.strip():
-            raise ServiceConnectionError("WordPress 未返回可验证的用户身份")
-        return verified_user.strip()
+
+    def _probe_read_route(self, endpoint: str, headers: dict[str, str]) -> bool:
+        payload = self._request_json(
+            endpoint, headers, permission_denied_ok=True
+        )
+        return isinstance(payload, list)
 
     def _ensure_public_host(self, site_url: str) -> None:
         hostname = urlsplit(site_url).hostname
@@ -410,13 +538,18 @@ class ProjectServiceConnectionService:
 
     async def get_gsc(self, project_id: str) -> GSCServiceAccountConnectionResponse:
         await self._ensure_project(project_id)
-        record = await self.repository.get_gsc(project_id, self._optional_encryption_key())
+        record = await self.repository.get_gsc(
+            project_id,
+            self._optional_encryption_key(),
+            self._allow_plaintext_storage(),
+        )
         return gsc_response(record)
 
     async def update_gsc(
         self, project_id: str, request: UpdateGSCServiceAccountConnectionRequest
     ) -> GSCServiceAccountConnectionResponse:
         await self._ensure_project(project_id)
+        self._require_storage_configuration()
         record = await self._merged_gsc(project_id, request)
         await self.gsc_tester.test(record)
         verified = GSCConnectionRecord(
@@ -426,7 +559,10 @@ class ProjectServiceConnectionService:
             verified_at=datetime.now(UTC),
         )
         saved = await self.repository.upsert_gsc(
-            project_id, verified, self._encryption_key()
+            project_id,
+            verified,
+            self._optional_encryption_key(),
+            self._allow_plaintext_storage(),
         )
         return gsc_response(saved)
 
@@ -449,7 +585,9 @@ class ProjectServiceConnectionService:
     async def get_wordpress(self, project_id: str) -> WordPressConnectionResponse:
         await self._ensure_project(project_id)
         record = await self.repository.get_wordpress(
-            project_id, self._optional_encryption_key()
+            project_id,
+            self._optional_encryption_key(),
+            self._allow_plaintext_storage(),
         )
         return wordpress_response(record)
 
@@ -457,17 +595,22 @@ class ProjectServiceConnectionService:
         self, project_id: str, request: UpdateWordPressConnectionRequest
     ) -> WordPressConnectionResponse:
         await self._ensure_project(project_id)
+        self._require_storage_configuration()
         record = await self._merged_wordpress(project_id, request)
-        verified_user = await self.wordpress_tester.test(record)
+        verification = await self.wordpress_tester.test(record)
         verified = WordPressConnectionRecord(
             site_url=record.site_url,
             username=record.username,
             application_password=record.application_password,
-            verified_user=verified_user,
+            verified_user=verification.verified_user,
             verified_at=datetime.now(UTC),
+            capabilities=verification.capabilities,
         )
         saved = await self.repository.upsert_wordpress(
-            project_id, verified, self._encryption_key()
+            project_id,
+            verified,
+            self._optional_encryption_key(),
+            self._allow_plaintext_storage(),
         )
         return wordpress_response(saved)
 
@@ -476,11 +619,11 @@ class ProjectServiceConnectionService:
     ) -> TestWordPressConnectionResponse:
         await self._ensure_project(project_id)
         record = await self._merged_wordpress(project_id, request)
-        verified_user = await self.wordpress_tester.test(record)
+        verification = await self.wordpress_tester.test(record)
         return TestWordPressConnectionResponse(
             success=True,
             site_url=record.site_url,
-            verified_user=verified_user,
+            verified_user=verification.verified_user,
             message="连接成功，WordPress REST API 可以正常访问",
         )
 
@@ -494,7 +637,9 @@ class ProjectServiceConnectionService:
         current = None
         if request.private_key is None:
             current = await self.repository.get_gsc(
-                project_id, self._optional_encryption_key()
+                project_id,
+                self._optional_encryption_key(),
+                self._allow_plaintext_storage(),
             )
         private_key = request.private_key or (current.private_key if current else "")
         if not private_key:
@@ -512,7 +657,9 @@ class ProjectServiceConnectionService:
         current = None
         if request.application_password is None:
             current = await self.repository.get_wordpress(
-                project_id, self._optional_encryption_key()
+                project_id,
+                self._optional_encryption_key(),
+                self._allow_plaintext_storage(),
             )
         password = request.application_password or (
             current.application_password if current else ""
@@ -535,11 +682,15 @@ class ProjectServiceConnectionService:
     def _optional_encryption_key(self) -> str | None:
         return (self.settings.ai_settings_encryption_key or "").strip() or None
 
-    def _encryption_key(self) -> str:
-        key = self._optional_encryption_key()
-        if not key:
+    def _allow_plaintext_storage(self) -> bool:
+        return (
+            self.settings.ai_settings_allow_plaintext
+            or self.settings.app_env != "production"
+        )
+
+    def _require_storage_configuration(self) -> None:
+        if not self._optional_encryption_key() and not self._allow_plaintext_storage():
             raise ServiceConnectionEncryptionUnavailableError
-        return key
 
 
 def gsc_response(

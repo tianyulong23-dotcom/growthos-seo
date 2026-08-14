@@ -283,6 +283,7 @@ func structuredStrings(value any) []string {
 }
 
 func inferBusinessType(pages []Page, facts structuredFacts) sourcedValue {
+	var localBusinessSignal sourcedValue
 	for _, signal := range facts.TypeSignals {
 		switch strings.ToLower(signal.Value) {
 		case "softwareapplication", "webapplication", "mobileapplication":
@@ -301,7 +302,7 @@ func inferBusinessType(pages []Page, facts structuredFacts) sourcedValue {
 		case "medicalorganization":
 			return sourcedValue{Value: "Healthcare", SourceURL: signal.SourceURL}
 		case "localbusiness":
-			return sourcedValue{Value: "Local business", SourceURL: signal.SourceURL}
+			localBusinessSignal = signal
 		}
 	}
 
@@ -336,6 +337,9 @@ func inferBusinessType(pages []Page, facts structuredFacts) sourcedValue {
 			}
 		}
 	}
+	if localBusinessSignal.Value != "" {
+		return sourcedValue{Value: "Business website", SourceURL: localBusinessSignal.SourceURL}
+	}
 	return sourcedValue{Value: "Business website", SourceURL: firstPageURL(pages)}
 }
 
@@ -343,7 +347,7 @@ func collectOfferingLabels(pages []Page, limit int) []sourcedValue {
 	values := make([]sourcedValue, 0, limit)
 	for _, page := range pages {
 		role := PageBusinessRole(page)
-		if role != BusinessPageOffering && role != BusinessPagePricing {
+		if role != BusinessPageOffering {
 			continue
 		}
 		pageURL, err := url.Parse(pageSourceURL(page, ""))
@@ -358,7 +362,7 @@ func collectOfferingLabels(pages []Page, limit int) []sourcedValue {
 		if genericPageLabel(label) {
 			label = cleanProfileText(path.Base(pageURL.Path))
 		}
-		if !genericPageLabel(label) {
+		if !genericPageLabel(label) && offeringLabelSupported(page, label) {
 			values = appendSourced(
 				values,
 				sourcedValue{Value: label, SourceURL: pageURL.String()},
@@ -369,6 +373,16 @@ func collectOfferingLabels(pages []Page, limit int) []sourcedValue {
 		}
 	}
 	return values
+}
+
+func offeringLabelSupported(page Page, label string) bool {
+	body := strings.ToLower(strings.Join(
+		append(append([]string{}, page.H1...), page.H2...),
+		" ",
+	) + " " + page.MainText)
+	label = strings.ToLower(strings.TrimSpace(label))
+	return label != "" && strings.Contains(body, label) &&
+		containsBusinessTerm(body, commercialEvidenceTerms)
 }
 
 var audiencePatterns = []*regexp.Regexp{

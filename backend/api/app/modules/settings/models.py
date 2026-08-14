@@ -1,8 +1,9 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, LargeBinary, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, text
 
 from app.db.base import Base
 
@@ -22,13 +23,55 @@ class AIProviderSetting(Base):
             "provider IN ('openai','anthropic','openrouter')",
             name="ck_ai_provider_settings_provider",
         ),
+        CheckConstraint(
+            "api_protocol IN ('chat_completions','responses')",
+            name="ck_ai_provider_settings_api_protocol",
+        ),
+        CheckConstraint(
+            "reasoning_effort IN ('low','medium','high')",
+            name="ck_ai_provider_settings_reasoning_effort",
+        ),
+        CheckConstraint(
+            "business_reasoning_effort IS NULL OR "
+            "business_reasoning_effort IN ('low','medium','high')",
+            name="ck_ai_provider_settings_business_reasoning_effort",
+        ),
+        CheckConstraint(
+            "keyword_reasoning_effort IS NULL OR "
+            "keyword_reasoning_effort IN ('low','medium','high')",
+            name="ck_ai_provider_settings_keyword_reasoning_effort",
+        ),
+        CheckConstraint(
+            "content_reasoning_effort IS NULL OR "
+            "content_reasoning_effort IN ('low','medium','high')",
+            name="ck_ai_provider_settings_content_reasoning_effort",
+        ),
+        CheckConstraint(
+            "agent_reasoning_effort IS NULL OR "
+            "agent_reasoning_effort IN ('low','medium','high')",
+            name="ck_ai_provider_settings_agent_reasoning_effort",
+        ),
     )
 
     organization_id: Mapped[str] = mapped_column(Text, primary_key=True)
     provider: Mapped[str] = mapped_column(Text, nullable=False, server_default="openai")
+    api_protocol: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="chat_completions"
+    )
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     api_key_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
+    business_model: Mapped[str | None] = mapped_column(Text)
+    keyword_model: Mapped[str | None] = mapped_column(Text)
+    content_model: Mapped[str | None] = mapped_column(Text)
+    agent_model: Mapped[str | None] = mapped_column(Text)
+    reasoning_effort: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="medium"
+    )
+    business_reasoning_effort: Mapped[str | None] = mapped_column(Text)
+    keyword_reasoning_effort: Mapped[str | None] = mapped_column(Text)
+    content_reasoning_effort: Mapped[str | None] = mapped_column(Text)
+    agent_reasoning_effort: Mapped[str | None] = mapped_column(Text)
     request_timeout_seconds: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -81,6 +124,25 @@ class DataForSEOProviderSetting(Base):
     organization_id: Mapped[str] = mapped_column(Text, primary_key=True)
     login: Mapped[str] = mapped_column(Text, nullable=False)
     password_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class GSCOAuthProviderSetting(Base):
+    __tablename__ = "gsc_oauth_provider_settings"
+
+    organization_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_secret_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -150,6 +212,9 @@ class WordPressProjectConnection(Base):
         LargeBinary, nullable=False
     )
     verified_user: Mapped[str | None] = mapped_column(Text)
+    capabilities_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

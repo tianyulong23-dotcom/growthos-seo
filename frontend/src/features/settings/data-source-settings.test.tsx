@@ -7,6 +7,11 @@ import {
 } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { ApiError } from "@/api/client"
+import {
+  keywordQueryClient,
+  keywordQueryKeys,
+} from "@/features/keywords/keyword-query-client"
 import { DataSourceSettings } from "@/features/settings/data-source-settings"
 
 const settingsApi = vi.hoisted(() => ({
@@ -33,6 +38,7 @@ const dataForSEOSettings = {
 describe("DataSourceSettings", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    keywordQueryClient.clear()
     window.history.replaceState({}, "", "/")
     settingsApi.getDataForSEOSettings.mockResolvedValue(dataForSEOSettings)
     settingsApi.getGSCConnection.mockResolvedValue({
@@ -75,6 +81,7 @@ describe("DataSourceSettings", () => {
     ).toBeTruthy()
     expect(screen.queryByText("Google Ads")).toBeNull()
     expect(settingsApi.getGSCConnection).toHaveBeenCalledWith("project-1")
+    expect(screen.getByText("未授权")).toBeTruthy()
     expect(
       screen.getByRole("button", { name: "使用 Google 授权" })
     ).toBeTruthy()
@@ -145,12 +152,52 @@ describe("DataSourceSettings", () => {
     expect(
       await screen.findByText("管理员需要先配置 Google OAuth")
     ).toBeTruthy()
+    expect(screen.getByText("OAuth 未配置")).toBeTruthy()
     expect(
       (screen.getByLabelText("OAuth 回调地址") as HTMLInputElement).value
     ).toBe("https://api.example/api/v1/gsc/oauth/callback")
     expect(
       screen.getByRole("button", { name: "打开 Google Cloud Console" })
     ).toBeTruthy()
+  })
+
+  it("does not report OAuth as unconfigured when connection loading fails", async () => {
+    settingsApi.getGSCConnection.mockRejectedValue(new Error("项目不存在"))
+
+    render(
+      <DataSourceSettings projectId="missing-project" projectDomain="example.com" />
+    )
+
+    expect(
+      await screen.findByText("无法读取 Search Console 连接状态")
+    ).toBeTruthy()
+    expect(screen.getByText("项目不存在")).toBeTruthy()
+    expect(
+      screen.getByRole("button", { name: "重试 Search Console 连接状态" })
+    ).toBeTruthy()
+    expect(screen.queryByText("管理员需要先配置 Google OAuth")).toBeNull()
+  })
+
+  it("automatically recovers when the GSC status endpoint briefly returns 502", async () => {
+    settingsApi.getGSCConnection
+      .mockRejectedValueOnce(new ApiError(502, "API request failed: 502"))
+      .mockResolvedValueOnce({
+        oauthConfigured: true,
+        oauthRedirectUri: "https://api.example/api/v1/gsc/oauth/callback",
+        grantConnected: false,
+        propertyConnected: false,
+        siteUrl: null,
+        connectedAccountEmail: null,
+        requiresReconnect: false,
+      })
+
+    render(
+      <DataSourceSettings projectId="project-1" projectDomain="example.com" />
+    )
+
+    expect(await screen.findByText("未授权")).toBeTruthy()
+    expect(settingsApi.getGSCConnection).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText("API request failed: 502")).toBeNull()
   })
 
   it("shows every property with eligibility reasons and saves a matching property", async () => {
@@ -198,6 +245,15 @@ describe("DataSourceSettings", () => {
         "project-1",
         "sc-domain:example.com"
       )
+    })
+    expect(
+      keywordQueryClient.getQueryData(
+        keywordQueryKeys.connection("project-1")
+      )
+    ).toMatchObject({
+      propertyConnected: true,
+      siteUrl: "sc-domain:example.com",
+      requiresReconnect: false,
     })
     expect(await screen.findByText("已连接，只读权限")).toBeTruthy()
   })

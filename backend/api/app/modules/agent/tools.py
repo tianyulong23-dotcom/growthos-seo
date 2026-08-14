@@ -11,6 +11,8 @@ from app.core.config import Settings
 from app.db.retry import retry_database_read
 from app.modules.audit.models import CreateAuditRunRequest
 from app.modules.audit.service import AuditRunNotFoundError, AuditService
+from app.modules.content.schemas import CreateArticleRequest
+from app.modules.onboarding.service import OnboardingNotFoundError
 from app.modules.projects.schemas import UpdateBusinessProfileRequest
 from app.modules.projects.service import ProjectService
 from app.modules.agent.schemas import MemoryCategory, UpdateProjectMemoryArgs
@@ -74,6 +76,66 @@ class StartAuditArgs(CreateAuditRunRequest):
     model_config = ConfigDict(extra="forbid")
 
 
+class ContentPlanStatusArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    batch_id: str = Field(min_length=1, max_length=200)
+
+
+class StartArticlesArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    batch_id: str = Field(min_length=1, max_length=200)
+    count: int = Field(default=2, ge=1, le=2)
+
+
+class ArticleGenerationStatusArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    article_ids: list[str] = Field(default_factory=list, max_length=2)
+    search: str | None = Field(default=None, max_length=200)
+
+
+class ListKeywordsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    search: str | None = Field(default=None, max_length=200)
+    intent: str | None = Field(default=None, max_length=100)
+    source: str | None = Field(default=None, max_length=100)
+    metrics_status: Literal["pending", "fresh", "stale", "failed"] | None = None
+    min_volume: int | None = Field(default=None, ge=0)
+    max_difficulty: int | None = Field(default=None, ge=0, le=100)
+    sort: Literal[
+        "keyword", "search_volume", "difficulty", "priority", "updated_at"
+    ] = "priority"
+    order: Literal["asc", "desc"] = "desc"
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=10, ge=1, le=20)
+
+
+class KeywordOpportunitiesArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    search: str = Field(default="", max_length=200)
+    competitor_domain: str = Field(default="", max_length=253)
+    intent: str = Field(default="", max_length=100)
+    opportunity_status: Literal["new", "accepted", "dismissed", "all"] = "new"
+    min_volume: int | None = Field(default=None, ge=0)
+    max_difficulty: int | None = Field(default=None, ge=0, le=100)
+    in_library: bool | None = None
+    sort: Literal[
+        "keyword", "opportunity_score", "search_volume", "difficulty",
+        "best_rank", "competitor_count", "updated_at",
+    ] = "opportunity_score"
+    order: Literal["asc", "desc"] = "desc"
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=10, ge=1, le=20)
+
+
+class PerformanceArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    days: Literal[7, 28, 90] = 28
+
+
+class ArticlePerformanceArgs(PerformanceArgs):
+    article_id: str = Field(min_length=1, max_length=100)
+
+
 READ_MODELS: dict[str, type[BaseModel]] = {
     "get_project_profile": EmptyArgs,
     "search_project_memory": SearchProjectMemoryArgs,
@@ -81,11 +143,23 @@ READ_MODELS: dict[str, type[BaseModel]] = {
     "get_audit_status": AuditStatusArgs,
     "get_audit_issues": AuditIssuesArgs,
     "get_audit_pages": AuditPagesArgs,
+    "get_keyword_library_status": EmptyArgs,
+    "get_content_plan_status": ContentPlanStatusArgs,
+    "get_article_generation_status": ArticleGenerationStatusArgs,
+    "list_keywords": ListKeywordsArgs,
+    "get_keyword_competitors": EmptyArgs,
+    "get_keyword_opportunities": KeywordOpportunitiesArgs,
+    "get_search_performance": PerformanceArgs,
+    "get_article_performance": ArticlePerformanceArgs,
 }
 WRITE_MODELS: dict[str, type[BaseModel]] = {
     "update_business_profile": UpdateProfileArgs,
     "refresh_business_profile": EmptyArgs,
     "start_technical_audit": StartAuditArgs,
+    "start_keyword_library": EmptyArgs,
+    "start_content_plan": EmptyArgs,
+    "start_articles": StartArticlesArgs,
+    "create_article": CreateArticleRequest,
 }
 MEMORY_MODELS: dict[str, type[BaseModel]] = {
     "update_project_memory": UpdateProjectMemoryArgs,
@@ -100,6 +174,7 @@ class ToolDefinition:
     retryable: bool = True
     estimated_cost: float = 0.0
     invalidates_remaining_calls: bool = False
+    parallel_write_group: str | None = None
 
 
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
@@ -143,6 +218,80 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         "start_technical_audit", "按平台允许的参数启动当前项目技术审核。", StartAuditArgs,
         modifies_data=True, calls_external_service=True,
         invalidates_remaining_calls=True,
+        parallel_write_group="initial_discovery",
+    ),
+    "start_keyword_library": ToolDefinition(
+        "start_keyword_library",
+        "为当前项目启动首次关键词库构建。项目身份和任务编号由服务端提供。",
+        EmptyArgs,
+        modifies_data=True,
+        calls_external_service=True,
+        invalidates_remaining_calls=True,
+        parallel_write_group="initial_discovery",
+    ),
+    "get_keyword_library_status": ToolDefinition(
+        "get_keyword_library_status",
+        "读取当前项目真实的关键词库任务状态、进度和关键词数量。",
+        EmptyArgs,
+    ),
+    "start_content_plan": ToolDefinition(
+        "start_content_plan",
+        "基于当前项目已完成的关键词库启动 30 篇自动内容计划。项目身份由服务端提供。",
+        EmptyArgs,
+        modifies_data=True,
+        calls_external_service=True,
+        invalidates_remaining_calls=True,
+    ),
+    "get_content_plan_status": ToolDefinition(
+        "get_content_plan_status",
+        "按启动工具返回的 batch_id 读取 30 篇内容计划的真实状态和进度。",
+        ContentPlanStatusArgs,
+    ),
+    "start_articles": ToolDefinition(
+        "start_articles",
+        "从当前项目内容计划中启动前 1 至 2 篇文章。计划项和版本由服务端选择。",
+        StartArticlesArgs,
+        modifies_data=True,
+        calls_external_service=True,
+        invalidates_remaining_calls=True,
+    ),
+    "get_article_generation_status": ToolDefinition(
+        "get_article_generation_status",
+        "读取文章生成的真实状态和进度。可按 article_ids 精确读取，或用 search 按主关键词或标题查找；两者都不提供时读取首次生成记录，若没有则读取最近两篇文章。",
+        ArticleGenerationStatusArgs,
+    ),
+    "list_keywords": ToolDefinition(
+        "list_keywords",
+        "查询当前项目已经保存的关键词库。可按关键词、意图、来源、搜索量和难度筛选；不会发起新的付费研究。",
+        ListKeywordsArgs,
+    ),
+    "get_keyword_competitors": ToolDefinition(
+        "get_keyword_competitors",
+        "读取当前项目已经完成的关键词竞品分析结果；不会启动新的竞品分析。",
+        EmptyArgs,
+    ),
+    "get_keyword_opportunities": ToolDefinition(
+        "get_keyword_opportunities",
+        "查询当前项目已有的竞品关键词机会，可按竞品、意图、搜索量和难度筛选；不会启动新的付费分析。",
+        KeywordOpportunitiesArgs,
+    ),
+    "get_search_performance": ToolDefinition(
+        "get_search_performance",
+        "读取当前项目已经同步的 7、28 或 90 天搜索表现，包括点击、曝光、CTR、平均排名和文章变化。不会主动同步数据。",
+        PerformanceArgs,
+    ),
+    "get_article_performance": ToolDefinition(
+        "get_article_performance",
+        "读取当前项目指定文章的搜索表现、查询词、趋势和优化信号。article_id 必须来自当前项目。",
+        ArticlePerformanceArgs,
+    ),
+    "create_article": ToolDefinition(
+        "create_article",
+        "根据用户指定的关键词直接为当前项目创建并启动一篇文章，不依赖内容计划。可选标题、次要关键词、文章类型、写作方向和语言。",
+        CreateArticleRequest,
+        modifies_data=True,
+        calls_external_service=True,
+        invalidates_remaining_calls=True,
     ),
     "update_project_memory": ToolDefinition(
         "update_project_memory",
@@ -163,8 +312,24 @@ class PreparedWrite:
 
 
 class ToolRegistry:
-    def __init__(self, settings: Settings, projects: ProjectService, audits: AuditService) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        projects: ProjectService,
+        audits: AuditService,
+        *,
+        keywords: Any | None = None,
+        content_plans: Any | None = None,
+        content: Any | None = None,
+        performance: Any | None = None,
+        onboarding: Any | None = None,
+    ) -> None:
         self.settings, self.projects, self.audits = settings, projects, audits
+        self.keywords = keywords
+        self.content_plans = content_plans
+        self.content = content
+        self.performance = performance
+        self.onboarding = onboarding
 
     @retry_database_read
     async def execute_read(self, project_id: str, name: str, arguments: dict) -> dict:
@@ -228,6 +393,146 @@ class ToolRegistry:
                 project_id, args.run_id, args.page, args.page_size, args.search,
                 args.status_code, args.status_family,
             )).model_dump(mode="json")
+        if name == "get_keyword_library_status":
+            self._require_service(self.keywords, name)
+            payload = (await self.keywords.status(project_id)).model_dump(mode="json")
+            billing = await self.keywords.keyword_library_billing(project_id)
+            payload["billing"] = {
+                "source": "keyword_external_requests",
+                "reference_id": str(billing.get("run_id") or ""),
+                "reported_cost_usd": max(
+                    float(billing.get("reported_cost_usd") or 0), 0
+                ),
+                "complete": billing.get("complete") is True,
+            }
+            return payload
+        if name == "get_content_plan_status":
+            self._require_service(self.content_plans, name)
+            payload = (
+                await self.content_plans.get_batch(
+                    self.settings.default_organization_id,
+                    project_id,
+                    args.batch_id,
+                )
+            ).model_dump(mode="json")
+            payload["billing"] = {
+                "source": "content_plan_external_requests",
+                "reference_id": str(payload.get("batch_id") or args.batch_id),
+                "reported_cost_usd": max(
+                    float(payload.get("total_cost_usd") or 0), 0
+                ),
+                "complete": payload.get("status") in {"completed", "cancelled"},
+            }
+            return payload
+        if name == "get_article_generation_status":
+            self._require_service(self.content, name)
+            article_ids = list(args.article_ids)
+            if not article_ids and args.search:
+                matches = await self.content.list_articles(
+                    project_id,
+                    1,
+                    2,
+                    None,
+                    args.search,
+                    organization_id=self.settings.default_organization_id,
+                )
+                article_ids = [item.id for item in matches.items]
+            if not article_ids and not args.search:
+                self._require_service(self.onboarding, name)
+                article_ids = await self.onboarding.article_ids_for_initial_generation(
+                    self.settings.default_organization_id,
+                    project_id,
+                )
+                if not article_ids:
+                    recent = await self.content.list_articles(
+                        project_id,
+                        1,
+                        2,
+                        None,
+                        None,
+                        organization_id=self.settings.default_organization_id,
+                    )
+                    article_ids = [item.id for item in recent.items]
+            articles = []
+            reported_cost = 0.0
+            estimated_cost = 0.0
+            billing_complete = True
+            for article_id in article_ids:
+                article = await self.content.get_article_generation_snapshot(
+                    project_id,
+                    article_id,
+                    organization_id=self.settings.default_organization_id,
+                )
+                billing = article.get("billing")
+                billing = billing if isinstance(billing, dict) else {}
+                reported = billing.get("reported_cost")
+                estimated = billing.get("estimated_cost")
+                if isinstance(reported, (int, float)) and not isinstance(reported, bool):
+                    reported_cost += max(float(reported), 0)
+                if isinstance(estimated, (int, float)) and not isinstance(estimated, bool):
+                    estimated_cost += max(float(estimated), 0)
+                if billing.get("complete") is not True:
+                    billing_complete = False
+                articles.append({
+                    "article_id": article["article_id"],
+                    "primary_keyword": article.get("primary_keyword"),
+                    "title": article.get("title"),
+                    "run_id": article.get("run_id"),
+                    "status": article.get("status"),
+                    "stage": article.get("stage"),
+                    "progress": article.get("progress"),
+                    "warnings": article.get("warnings", []),
+                    "error_code": article.get("error_code"),
+                    "error_detail": article.get("error_detail"),
+                })
+            return {
+                "articles": articles,
+                "billing": {
+                    "source": "article_run_steps",
+                    "reference_id": ",".join(sorted({
+                        str(item.get("run_id"))
+                        for item in articles
+                        if item.get("run_id")
+                    })),
+                    "reported_cost_usd": round(reported_cost, 8),
+                    "estimated_cost_usd": round(estimated_cost, 8),
+                    "complete": billing_complete,
+                },
+            }
+        if name == "list_keywords":
+            self._require_service(self.keywords, name)
+            payload = await self.keywords.list_keywords(
+                project_id,
+                **args.model_dump(mode="json"),
+                status="active",
+                seed_id=None,
+            )
+            return payload.model_dump(mode="json")
+        if name == "get_keyword_competitors":
+            self._require_service(self.keywords, name)
+            payload = await self.keywords.list_competitors(
+                project_id, include_evidence=False
+            )
+            return payload.model_dump(mode="json")
+        if name == "get_keyword_opportunities":
+            self._require_service(self.keywords, name)
+            payload = await self.keywords.list_competitor_opportunities(
+                project_id, **args.model_dump(mode="json")
+            )
+            return payload.model_dump(mode="json")
+        if name == "get_search_performance":
+            self._require_service(self.performance, name)
+            payload = await self.performance.overview(project_id, args.days)
+            return payload.model_dump(mode="json")
+        if name == "get_article_performance":
+            self._require_service(self.performance, name)
+            payload = await self.performance.article_detail(
+                project_id, args.article_id, args.days
+            )
+            result = payload.model_dump(mode="json")
+            result["queries"] = result.get("queries", [])[:20]
+            result["trend"] = result.get("trend", [])[-90:]
+            return result
         raise ValueError("未知工具")
 
     @retry_database_read
@@ -258,8 +563,11 @@ class ToolRegistry:
         elif name == "refresh_business_profile":
             before = {"understanding_run_id": project.understanding_run_id, "understanding_status": project.understanding_status}
             validated = {"operation_id": operation_id}
-        else:
+        elif name == "start_technical_audit":
             before = {"audit_run_id": project.audit_run_id, "audit_status": project.audit_status}
+            validated["operation_id"] = operation_id
+        else:
+            before = {}
             validated["operation_id"] = operation_id
         parameters_hash = action_hash(name, validated, before)
         return PreparedWrite(
@@ -287,7 +595,7 @@ class ToolRegistry:
                     "already_completed": True,
                 }
             current_before = {"understanding_run_id": current.understanding_run_id, "understanding_status": current.understanding_status}
-        else:
+        elif name == "start_technical_audit":
             try:
                 existing = await self._get_audit_run(
                     project_id, arguments["operation_id"]
@@ -303,6 +611,8 @@ class ToolRegistry:
                     "already_completed": True,
                 }
             current_before = {"audit_run_id": current.audit_run_id, "audit_status": current.audit_status}
+        else:
+            current_before = {}
         if (
             name != "update_business_profile"
             and action_hash(name, arguments, current_before) != expected_hash
@@ -340,15 +650,139 @@ class ToolRegistry:
                 "run_id": result.understanding_run_id,
                 "status": result.understanding_status,
             }
-        payload = {key: value for key, value in arguments.items() if key != "operation_id"}
-        result = await self.audits.create_run(project_id, CreateAuditRunRequest.model_validate(payload), arguments["operation_id"])
-        verified = await self._get_audit_run(project_id, arguments["operation_id"])
-        return {
-            "operation_id": arguments["operation_id"],
-            "verified": verified.run_id == result.run_id,
-            "run_id": result.run_id,
-            "status": verified.status,
-        }
+        if name == "start_technical_audit":
+            payload = {key: value for key, value in arguments.items() if key != "operation_id"}
+            result = await self.audits.create_run(project_id, CreateAuditRunRequest.model_validate(payload), arguments["operation_id"])
+            verified = await self._get_audit_run(project_id, arguments["operation_id"])
+            await self._observe_started_step(project_id, "technical_audit", result.run_id)
+            return {
+                "operation_id": arguments["operation_id"],
+                "verified": verified.run_id == result.run_id,
+                "run_id": result.run_id,
+                "status": verified.status,
+            }
+        if name == "start_keyword_library":
+            self._require_service(self.keywords, name)
+            result = await self.keywords.start_initial_build(
+                project_id, arguments["operation_id"]
+            )
+            await self._observe_started_step(project_id, "keyword_library", result.run_id)
+            return {
+                "operation_id": arguments["operation_id"],
+                "verified": True,
+                "run_id": result.run_id,
+                "status": result.status,
+            }
+        if name == "start_content_plan":
+            self._require_service(self.content_plans, name)
+            self._require_service(self.keywords, name)
+            keyword_state = await self.keywords.status(project_id)
+            if (
+                keyword_state.run is None
+                or keyword_state.run.status not in {"partial", "completed"}
+            ):
+                raise RuntimeError("keyword_library_not_ready")
+            result = await self.content_plans.create_automatic(
+                self.settings.default_organization_id,
+                project_id,
+                idempotency_key=f"agent:{arguments['operation_id']}:content-plan",
+            )
+            await self._observe_started_step(project_id, "content_plan", result.batch_id)
+            return {
+                "operation_id": arguments["operation_id"],
+                "verified": True,
+                "batch_id": result.batch_id,
+                "status": "queued",
+            }
+        if name == "start_articles":
+            self._require_service(self.content, name)
+            self._require_service(self.content_plans, name)
+            batch = await self.content_plans.get_batch(
+                self.settings.default_organization_id,
+                project_id,
+                arguments["batch_id"],
+            )
+            if (
+                batch.source != "automatic"
+                or batch.status != "completed"
+                or batch.target_count != 30
+                or batch.plan_item_count != 30
+            ):
+                raise RuntimeError("content_plan_not_ready")
+            results = await self.content.generate_next_planned_articles(
+                project_id,
+                arguments["count"],
+                organization_id=self.settings.default_organization_id,
+                batch_id=arguments["batch_id"],
+            )
+            articles = []
+            for index, result in enumerate(results):
+                if result.run is None:
+                    raise RuntimeError("article_run_missing")
+                await self._observe_started_step(
+                    project_id,
+                    "first_article" if index == 0 else "second_article",
+                    result.run.id,
+                )
+                articles.append(
+                    {
+                        "article_id": result.id,
+                        "run_id": result.run.id,
+                        "title": result.title,
+                        "status": result.run.status,
+                    }
+                )
+            return {
+                "operation_id": arguments["operation_id"],
+                "verified": len(articles) == arguments["count"],
+                "article_ids": [item["article_id"] for item in articles],
+                "articles": articles,
+            }
+        if name == "create_article":
+            self._require_service(self.content, name)
+            payload = {
+                key: value for key, value in arguments.items() if key != "operation_id"
+            }
+            article = await self.content.create_article(
+                project_id,
+                CreateArticleRequest.model_validate(payload),
+                idempotency_key=f"agent:{arguments['operation_id']}:article",
+                organization_id=self.settings.default_organization_id,
+            )
+            if article.run is None:
+                raise RuntimeError("article_run_missing")
+            return {
+                "operation_id": arguments["operation_id"],
+                "verified": True,
+                "article_id": article.id,
+                "run_id": article.run.id,
+                "primary_keyword": article.primary_keyword,
+                "title": article.title,
+                "status": article.run.status,
+                "stage": article.run.stage,
+                "progress": article.run.progress,
+            }
+        raise ValueError("unsupported write tool")
+
+    @staticmethod
+    def _require_service(service: Any | None, name: str) -> None:
+        if service is None:
+            raise RuntimeError(f"tool_service_not_configured:{name}")
+
+    async def _observe_started_step(
+        self, project_id: str, step_key: str, external_run_id: str
+    ) -> None:
+        if self.onboarding is None:
+            return
+        try:
+            await self.onboarding.observe_started_step(
+                self.settings.default_organization_id,
+                project_id,
+                step_key,
+                external_run_id,
+            )
+        except OnboardingNotFoundError:
+            return
 
     @retry_database_read
     async def _get_project(self, project_id: str) -> Any:

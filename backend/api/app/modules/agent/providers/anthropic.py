@@ -50,6 +50,7 @@ class AnthropicProvider(OpenAIProvider):
             "model": self.config.model,
             "messages": messages,
             "max_tokens": request.max_output_tokens or 4096,
+            "output_config": {"effort": self.config.reasoning_effort},
         }
         if system:
             payload["system"] = system

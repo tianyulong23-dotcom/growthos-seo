@@ -19,16 +19,12 @@ export function ProjectFavicon({
   const [failedUrl, setFailedUrl] = React.useState("")
   const failed = faviconUrl !== "" && failedUrl === faviconUrl
 
-  if (!project.siteProfile) {
-    return null
-  }
-
   const wrapperClassName = cn(
     "flex size-8 shrink-0 items-center justify-center overflow-hidden",
     className
   )
 
-  if (!faviconUrl || failed) {
+  if (!project.siteProfile || !faviconUrl || failed) {
     return (
       <span className={wrapperClassName} aria-hidden="true">
         <Globe2 className="size-5 text-muted-foreground" strokeWidth={1.75} />

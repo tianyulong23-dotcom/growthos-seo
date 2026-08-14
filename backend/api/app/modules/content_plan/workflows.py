@@ -75,6 +75,7 @@ class ContentPlanGenerationWorkflow:
                     "content_plan_process_batch",
                     {"batch_id": batch_id},
                     start_to_close_timeout=timedelta(hours=4),
+                    heartbeat_timeout=timedelta(seconds=30),
                     retry_policy=PAID_ACTIVITY_RETRY,
                 )
             except ActivityError:

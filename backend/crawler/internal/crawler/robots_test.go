@@ -84,6 +84,62 @@ func TestEngineRobotsUsesCrawlerProductTokenWithMobileRequests(t *testing.T) {
 	}
 }
 
+func TestSiteUnderstandingSkipsRobotsAndFetchesHomepage(t *testing.T) {
+	fetcher := &fakeFetcher{resources: map[string]Resource{
+		"https://example.com/robots.txt": {
+			FinalURL:   "https://example.com/robots.txt",
+			StatusCode: http.StatusForbidden,
+		},
+		"https://example.com/": {
+			URL:         "https://example.com/",
+			FinalURL:    "https://example.com/",
+			StatusCode:  http.StatusOK,
+			ContentType: "text/html",
+			Body: []byte(
+				`<html><head><title>Acme Software</title></head>` +
+					`<body><nav><a href="/products">Products</a></nav>` +
+					`<h1>Acme Software</h1></body></html>`,
+			),
+		},
+		"https://example.com/products": {
+			URL:         "https://example.com/products",
+			FinalURL:    "https://example.com/products",
+			StatusCode:  http.StatusOK,
+			ContentType: "text/html",
+			Body:        []byte(`<html><head><title>Acme Products</title></head><body><h1>Products</h1></body></html>`),
+		},
+	}}
+	engine := NewEngine(
+		Config{UserAgent: defaultCrawlerUserAgent, DiscoveryLimit: 10},
+		fetcher,
+		fetcher,
+		nil,
+	)
+
+	result, err := engine.Run(context.Background(), Task{
+		OrganizationID: "org",
+		ProjectID:      "project",
+		RunID:          "understanding-without-robots",
+		Type:           TaskSiteUnderstanding,
+		TargetURL:      "https://example.com",
+		Country:        "US",
+		Language:       "en",
+		MaxPages:       2,
+	})
+	if err != nil {
+		t.Fatalf("Run() returned an error: %v", err)
+	}
+	if fetcher.callCount("https://example.com/robots.txt") != 0 {
+		t.Fatal("site understanding requested robots.txt")
+	}
+	if fetcher.callCount("https://example.com/") != 1 {
+		t.Fatal("site understanding did not fetch the homepage")
+	}
+	if len(result.Pages) != 2 {
+		t.Fatalf("page count = %d, want 2", len(result.Pages))
+	}
+}
+
 func TestLoadRobotsAllowsWhenFetchFails(t *testing.T) {
 	fetcher := &fakeFetcher{
 		resources: map[string]Resource{

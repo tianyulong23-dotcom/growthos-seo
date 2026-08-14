@@ -1,4 +1,5 @@
 from app.modules.agent.providers.base import (
+    APIProtocol,
     ModelProvider,
     ProviderConfig,
     ProviderName,
@@ -11,6 +12,7 @@ from app.modules.agent.providers.events import ProviderStreamEvent
 from app.modules.agent.providers.registry import build_provider
 
 __all__ = [
+    "APIProtocol",
     "ModelProvider",
     "ProviderConfig",
     "ProviderError",

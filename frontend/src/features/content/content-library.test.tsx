@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { ArticleCollection } from "@/api/articles"
@@ -24,8 +30,24 @@ const collection = {
       slug: "test-title",
       meta_title: "test-title",
       meta_description: "test-description",
+      focus_keyword: "test-keyword",
+      secondary_keywords: [],
+      canonical_url: null,
+      indexing: "index/follow",
+      field_states: {},
       status: "completed_with_warnings",
       publication_status: "complete_draft",
+      review_status: "pending_review",
+      review_version: 1,
+      document_schema_version: 2,
+      current_content_hash: "content-hash-1",
+      current_version_number: 1,
+      approved_version_number: null,
+      publication_blocked_reason: "quality_not_ready",
+      wordpress_post_id: null,
+      wordpress_url: null,
+      cms_publication_status: null,
+      cms_publication_error: null,
       warning_count: 1,
       run: null,
       created_at: "2026-07-29T00:00:00Z",
@@ -48,7 +70,12 @@ describe("ContentLibrary", () => {
     await waitFor(() => {
       expect(screen.getByText("test-title")).toBeTruthy()
     })
-    expect(articleApi.listArticles).toHaveBeenCalledWith("project-1")
+    expect(articleApi.listArticles).toHaveBeenCalledWith("project-1", {
+      page: 1,
+      pageSize: 20,
+      search: "",
+      status: undefined,
+    })
     expect(screen.getByText("完整草稿")).toBeTruthy()
     expect(screen.getByRole("combobox").textContent).toContain("全部状态")
 
@@ -56,6 +83,13 @@ describe("ContentLibrary", () => {
       target: { value: "missing" },
     })
 
-    expect(screen.getByText("没有符合条件的文章")).toBeTruthy()
+    await waitFor(() => {
+      expect(articleApi.listArticles).toHaveBeenLastCalledWith("project-1", {
+        page: 1,
+        pageSize: 20,
+        search: "missing",
+        status: undefined,
+      })
+    })
   })
 })

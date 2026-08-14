@@ -3,6 +3,7 @@ import pytest
 
 from app.modules.keywords.coverage import (
     FakeKeywordCoverageQuery,
+    SQLAlchemyKeywordCoverageQuery,
     coverage_response,
     validate_coverage_response,
 )
@@ -73,6 +74,34 @@ async def test_fake_coverage_query_preserves_covered_uncovered_and_unknown() -> 
         "unknown",
     ]
     assert response.results[1].relation_id == "coverage-2"
+
+
+@pytest.mark.anyio
+async def test_sqlalchemy_coverage_marks_keywords_without_active_articles_uncovered() -> None:
+    class Result:
+        def all(self) -> list[tuple[str, str]]:
+            return [("article-1", "Car Wash Cost")]
+
+    class Session:
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _statement: object) -> Result:
+            return Result()
+
+    query = SQLAlchemyKeywordCoverageQuery(lambda: Session())
+
+    response = await query.query(_request())
+
+    assert [item.status for item in response.results] == [
+        "uncovered",
+        "covered",
+        "uncovered",
+    ]
+    assert response.results[1].relation_id == "article-1"
 
 
 def test_coverage_contract_requires_exactly_one_result_per_request() -> None:

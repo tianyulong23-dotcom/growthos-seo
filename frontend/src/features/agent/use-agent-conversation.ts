@@ -6,27 +6,25 @@ import {
   editAgentMessage,
   getAgentConversation,
   listAgentConversations,
+  retryProjectOnboardingStep,
   rewindAgentConversation,
   sendAgentMessage,
   subscribeAgentConversation,
+  syncProjectOnboarding,
 } from "@/api/agent"
 import { ApiError } from "@/api/client"
 import type {
   AgentAssistantMessageEvent,
+  AgentConversation,
   AgentConversationDetail,
-  AgentMessage,
   AgentRuntime,
   AgentRuntimeMessage,
   AgentRuntimeTool,
   AgentStreamEvent,
 } from "@/features/agent/types"
+import type { Project } from "@/features/projects/types"
 
-const activeStatuses = new Set([
-  "queued",
-  "running",
-  "executing",
-  "verifying",
-])
+const activeStatuses = new Set(["queued", "running", "executing", "verifying"])
 
 export function mergeAgentStreamEvent(
   current: AgentConversationDetail | null,
@@ -36,8 +34,12 @@ export function mergeAgentStreamEvent(
     if (!current) return event.detail
     const persistedIds = new Set(event.detail.messages.map((item) => item.id))
     const activeRunId = event.detail.run?.id
+    const runIsActive = Boolean(
+      activeRunId && activeStatuses.has(event.detail.run?.status ?? "")
+    )
     const streaming = current.messages.filter(
       (item) =>
+        runIsActive &&
         (item.streaming || item.streamError) &&
         item.runId === activeRunId &&
         !persistedIds.has(item.id)
@@ -45,11 +47,15 @@ export function mergeAgentStreamEvent(
     return {
       ...event.detail,
       messages: [...event.detail.messages, ...streaming],
+      timeline: event.detail.timeline ?? [],
       runtime:
-        current.runtime?.runId === activeRunId ? current.runtime : undefined,
+        runIsActive && current.runtime?.runId === activeRunId
+          ? current.runtime
+          : undefined,
     }
   }
-  if (!current || current.conversation.id !== event.conversationId) return current
+  if (!current || current.conversation.id !== event.conversationId)
+    return current
   if (current.run?.id !== event.runId) return current
   const runtime = currentRuntime(current.runtime, event.runId)
   runtime.lastEventType = event.type
@@ -61,6 +67,16 @@ export function mergeAgentStreamEvent(
   if (event.type === "agent_end") {
     runtime.agentStatus = event.status
     runtime.activeRound = null
+    for (const tool of runtime.tools) {
+      if (
+        ["claimed", "running", "writing", "verifying", "retrying"].includes(
+          tool.stage
+        )
+      ) {
+        tool.stage = event.status === "cancelled" ? "cancelled" : "failed"
+        tool.isError = event.status !== "cancelled"
+      }
+    }
     return { ...current, runtime }
   }
   if (event.type === "turn_start") {
@@ -72,37 +88,30 @@ export function mergeAgentStreamEvent(
     return { ...current, runtime }
   }
   if (isMessageStreamEvent(event)) {
-    const messages = [...current.messages]
     const runtimeMessage = upsertRuntimeMessage(runtime, event)
     if (event.type === "message_start") {
       resetRuntimeMessage(runtimeMessage)
-      if (event.phase === "final") {
-        upsertStreamingChatMessage(messages, event)
-      }
     } else if (event.type === "message_update") {
       applyAssistantUpdate(runtimeMessage, event.assistantMessageEvent)
-      if (
-        event.phase === "final" &&
-        event.assistantMessageEvent.kind === "text_delta"
-      ) {
-        appendStreamingChatDelta(
-          messages,
-          event.messageId,
-          event.assistantMessageEvent.delta
-        )
-      }
     } else {
       runtimeMessage.status = runtimeMessageStatus(event.status)
-      if (event.phase === "final") {
-        finishStreamingChatMessage(
-          messages,
-          event.messageId,
-          event.status === "error" ? event.message || "回答生成中断" : null
+      if (event.phase === "final" && event.outcome === "discarded") {
+        const index = runtime.messages.findIndex(
+          (item) => item.id === runtimeMessage.id
         )
+        if (runtimeMessage.text.trim()) {
+          runtime.messages[index] = {
+            ...runtimeMessage,
+            id: `${runtimeMessage.id}:decision:${event.round}:${event.attempt}`,
+            phase: "decision",
+            status: "completed",
+          }
+        } else if (index >= 0) {
+          runtime.messages.splice(index, 1)
+        }
       }
     }
-    runtime.messages = runtime.messages.slice(-24)
-    return { ...current, messages, runtime }
+    return { ...current, runtime }
   }
 
   const tool = upsertRuntimeTool(runtime, event)
@@ -122,7 +131,6 @@ export function mergeAgentStreamEvent(
     tool.errorCode = event.errorCode
     tool.retryable = event.retryable
   }
-  runtime.tools = runtime.tools.slice(-40)
   return { ...current, runtime }
 }
 
@@ -131,7 +139,10 @@ export function agentStreamEventKey(event: AgentStreamEvent): string {
   return event.eventKey || event.eventId || `${event.runId}:${event.sequence}`
 }
 
-function currentRuntime(runtime: AgentRuntime | undefined, runId: string): AgentRuntime {
+function currentRuntime(
+  runtime: AgentRuntime | undefined,
+  runId: string
+): AgentRuntime {
   if (runtime?.runId === runId) {
     return {
       ...runtime,
@@ -161,13 +172,13 @@ type ToolStreamEvent = Extract<
   AgentStreamEvent,
   {
     type:
-      | "tool_execution_start"
-      | "tool_execution_update"
-      | "tool_execution_end"
+      "tool_execution_start" | "tool_execution_update" | "tool_execution_end"
   }
 >
 
-function isMessageStreamEvent(event: AgentStreamEvent): event is MessageStreamEvent {
+function isMessageStreamEvent(
+  event: AgentStreamEvent
+): event is MessageStreamEvent {
   return (
     event.type === "message_start" ||
     event.type === "message_update" ||
@@ -183,6 +194,7 @@ function upsertRuntimeMessage(
   if (!message) {
     message = {
       id: event.messageId,
+      order: event.sequence,
       phase: event.phase,
       attempt: event.attempt,
       round: event.round,
@@ -216,7 +228,9 @@ function applyAssistantUpdate(
     return
   }
   if (event.kind === "toolcall_start") {
-    const existing = message.toolCalls.find((item) => item.index === event.index)
+    const existing = message.toolCalls.find(
+      (item) => item.index === event.index
+    )
     if (existing) {
       existing.toolCallId = event.toolCallId
       existing.toolName = event.toolName
@@ -251,7 +265,9 @@ function applyAssistantUpdate(
     return
   }
   if (event.kind === "toolcall_end") {
-    const toolCall = message.toolCalls.find((item) => item.index === event.index)
+    const toolCall = message.toolCalls.find(
+      (item) => item.index === event.index
+    )
     if (toolCall) {
       toolCall.toolCallId = event.toolCallId || toolCall.toolCallId
       toolCall.toolName = event.toolName || toolCall.toolName
@@ -261,7 +277,7 @@ function applyAssistantUpdate(
 }
 
 function runtimeMessageStatus(
-  status: Extract<AgentStreamEvent, { type: "message_end" }>['status']
+  status: Extract<AgentStreamEvent, { type: "message_end" }>["status"]
 ): AgentRuntimeMessage["status"] {
   if (
     status === "completed" ||
@@ -274,63 +290,6 @@ function runtimeMessageStatus(
   return status === "failed" || status === "cancelled" ? "error" : "completed"
 }
 
-function upsertStreamingChatMessage(
-  messages: AgentMessage[],
-  event: Extract<AgentStreamEvent, { type: "message_start" }>
-) {
-  const index = messages.findIndex((item) => item.id === event.messageId)
-  if (index >= 0) {
-    if (messages[index].streaming || messages[index].streamError) {
-      messages[index] = {
-        ...messages[index],
-        content: "",
-        streaming: true,
-        streamError: null,
-      }
-    }
-    return
-  }
-  messages.push({
-    id: event.messageId,
-    runId: event.runId,
-    role: "assistant",
-    content: "",
-    metadata: { partId: event.partId },
-    sequence: Math.max(0, ...messages.map((item) => item.sequence)) + 1,
-    createdAt: event.createdAt,
-    streaming: true,
-    streamError: null,
-  })
-}
-
-function appendStreamingChatDelta(
-  messages: AgentMessage[],
-  messageId: string,
-  delta: string
-) {
-  const index = messages.findIndex((item) => item.id === messageId)
-  if (index < 0 || !messages[index].streaming) return
-  messages[index] = {
-    ...messages[index],
-    content: messages[index].content + delta,
-    streamError: null,
-  }
-}
-
-function finishStreamingChatMessage(
-  messages: AgentMessage[],
-  messageId: string,
-  error: string | null
-) {
-  const index = messages.findIndex((item) => item.id === messageId)
-  if (index < 0) return
-  messages[index] = {
-    ...messages[index],
-    streaming: false,
-    streamError: error,
-  }
-}
-
 function upsertRuntimeTool(
   runtime: AgentRuntime,
   event: ToolStreamEvent
@@ -340,8 +299,12 @@ function upsertRuntimeTool(
       item.toolCallId === event.toolCallId && item.attempt === event.attempt
   )
   if (!tool) {
+    const original = runtime.tools.find(
+      (item) => item.toolCallId === event.toolCallId
+    )
     tool = {
       toolCallId: event.toolCallId,
+      order: original?.order ?? event.sequence,
       toolName: event.toolName,
       attempt: event.attempt,
       stage: "claimed",
@@ -355,55 +318,159 @@ function upsertRuntimeTool(
   return tool
 }
 
-export function useAgentConversation(projectId: string) {
-  const [detail, setDetail] = React.useState<AgentConversationDetail | null>(null)
-  const [loading, setLoading] = React.useState(true)
-  const [error, setError] = React.useState("")
+export function useAgentConversation(
+  projectId: string,
+  understandingStatus?: Project["understandingStatus"]
+) {
+  const [detail, setDetail] = React.useState<AgentConversationDetail | null>(
+    null
+  )
+  const [conversations, setConversations] = React.useState<AgentConversation[]>(
+    []
+  )
+  const [loadedProjectId, setLoadedProjectId] = React.useState("")
+  const [historyState, setHistoryState] = React.useState({
+    projectId: "",
+    loading: false,
+  })
+  const [errorState, setErrorState] = React.useState({
+    projectId: "",
+    message: "",
+  })
+  const [pendingRun, setPendingRun] = React.useState<{
+    projectId: string
+    conversationId: string
+    runId: string
+  } | null>(null)
   const [streamFallbackKey, setStreamFallbackKey] = React.useState("")
   const streamFailures = React.useRef({ key: "", count: 0 })
   const seenStreamEvents = React.useRef(new Set<string>())
-  const conversationId = detail?.conversation.id ?? ""
-  const runId = detail?.run?.id ?? ""
-  const runStatus = detail?.run?.status ?? ""
-  const streamKey = `${conversationId}:${runId}`
-  const streamFallback = Boolean(runId && streamFallbackKey === streamKey)
+  const onboardingActivity = React.useRef({ projectId: "", active: false })
+  const currentDetail =
+    detail?.conversation.projectId === projectId ? detail : null
+  const currentConversations = conversations.filter(
+    (conversation) => conversation.projectId === projectId
+  )
+  const loading = Boolean(projectId && loadedProjectId !== projectId)
+  const historyLoading =
+    historyState.projectId === projectId && historyState.loading
+  const error = errorState.projectId === projectId ? errorState.message : ""
+  const setError = React.useCallback(
+    (message: string) => setErrorState({ projectId, message }),
+    [projectId]
+  )
+  const conversationId = currentDetail?.conversation.id ?? ""
+  const runId = currentDetail?.run?.id ?? ""
+  const streamKey = conversationId
+  const streamFallback = Boolean(
+    conversationId && streamFallbackKey === streamKey
+  )
+  const awaitingRun = Boolean(
+    pendingRun &&
+    pendingRun.projectId === projectId &&
+    pendingRun.conversationId === conversationId &&
+    pendingRun.runId !== runId
+  )
+  const timelineOnboardingActive = Boolean(
+    currentDetail?.timeline.some(
+      (event) =>
+        (event.status === "running" || event.status === "waiting") &&
+        (event.metadata.source === "onboarding" ||
+          event.metadata.source === "site_understanding" ||
+          event.metadata.source === "site_profile")
+    )
+  )
+
+  const settlePendingRun = React.useCallback(
+    (next: AgentConversationDetail) => {
+      setPendingRun((current) => {
+        if (
+          current?.projectId === next.conversation.projectId &&
+          current.conversationId === next.conversation.id &&
+          current.runId === next.run?.id
+        ) {
+          return null
+        }
+        return current
+      })
+    },
+    []
+  )
 
   const refresh = React.useCallback(async () => {
     if (!projectId || !conversationId) return
     const next = await getAgentConversation(projectId, conversationId)
+    settlePendingRun(next)
     setDetail(next)
-  }, [conversationId, projectId])
+  }, [conversationId, projectId, settlePendingRun])
 
   const create = React.useCallback(async () => {
     if (!projectId) return
     setError("")
+    setPendingRun(null)
     const conversation = await createAgentConversation(projectId)
-    setDetail(await getAgentConversation(projectId, conversation.id))
-  }, [projectId])
+    const next = await getAgentConversation(projectId, conversation.id)
+    setConversations((current) => [
+      conversation,
+      ...current.filter((item) => item.id !== conversation.id),
+    ])
+    setDetail(next)
+  }, [projectId, setError])
+
+  const loadConversations = React.useCallback(async () => {
+    if (!projectId) return
+    setHistoryState({ projectId, loading: true })
+    setError("")
+    try {
+      setConversations(await listAgentConversations(projectId))
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setHistoryState({ projectId, loading: false })
+    }
+  }, [projectId, setError])
+
+  const selectConversation = React.useCallback(
+    async (nextConversationId: string) => {
+      if (!projectId || nextConversationId === conversationId) return
+      setError("")
+      setPendingRun(null)
+      setDetail(await getAgentConversation(projectId, nextConversationId))
+    },
+    [conversationId, projectId, setError]
+  )
 
   React.useEffect(() => {
     let active = true
+    streamFailures.current = { key: "", count: 0 }
+    seenStreamEvents.current.clear()
     if (!projectId) {
       return
     }
-    void listAgentConversations(projectId)
+    void syncProjectOnboarding(projectId)
+      .catch(() => undefined)
+      .then(() => listAgentConversations(projectId))
       .then(async (conversations) => {
+        if (!active) return null
+        setConversations(conversations)
         const conversation =
           conversations[0] ?? (await createAgentConversation(projectId))
         return getAgentConversation(projectId, conversation.id)
       })
-      .then((next) => active && setDetail(next))
+      .then((next) => {
+        if (!active || !next) return
+        setError("")
+        setDetail(next)
+      })
       .catch((reason) => active && setError(errorMessage(reason)))
-      .finally(() => active && setLoading(false))
+      .finally(() => active && setLoadedProjectId(projectId))
     return () => {
       active = false
     }
-  }, [projectId])
+  }, [projectId, setError])
 
   React.useEffect(() => {
-    if (!runId || !activeStatuses.has(runStatus)) {
-      return
-    }
+    if (!projectId || !conversationId) return
     streamFailures.current = { key: streamKey, count: 0 }
     seenStreamEvents.current.clear()
     return subscribeAgentConversation(
@@ -418,6 +485,7 @@ export function useAgentConversation(projectId: string) {
         const dedupeKey = agentStreamEventKey(event)
         if (dedupeKey && seenStreamEvents.current.has(dedupeKey)) return
         if (dedupeKey) seenStreamEvents.current.add(dedupeKey)
+        if (event.type === "snapshot") settlePendingRun(event.detail)
         setDetail((current) => mergeAgentStreamEvent(current, event))
         if (
           event.type === "agent_end" ||
@@ -426,7 +494,10 @@ export function useAgentConversation(projectId: string) {
             event.outcome === "persisted")
         ) {
           void getAgentConversation(projectId, conversationId)
-            .then((next) => setDetail(next))
+            .then((next) => {
+              settlePendingRun(next)
+              setDetail(next)
+            })
             .catch((reason) => setError(errorMessage(reason)))
         }
       },
@@ -436,47 +507,133 @@ export function useAgentConversation(projectId: string) {
         if (streamFailures.current.count >= 3) setStreamFallbackKey(streamKey)
       }
     )
-  }, [conversationId, projectId, runId, runStatus, streamKey])
+  }, [conversationId, projectId, setError, settlePendingRun, streamKey])
 
   React.useEffect(() => {
-    if (!streamFallback || !runId || !activeStatuses.has(runStatus)) {
-      return
-    }
+    if (!streamFallback) return
     const timer = window.setInterval(() => {
       void refresh().catch((reason) => setError(errorMessage(reason)))
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [refresh, runId, runStatus, streamFallback])
+  }, [refresh, setError, streamFallback])
+
+  React.useEffect(() => {
+    const onboardingIsActive =
+      understandingStatus === "queued" ||
+      understandingStatus === "running" ||
+      timelineOnboardingActive
+    const onboardingWasActive =
+      onboardingActivity.current.projectId === projectId &&
+      onboardingActivity.current.active
+    onboardingActivity.current = { projectId, active: onboardingIsActive }
+
+    if (
+      !projectId ||
+      !conversationId ||
+      (!onboardingIsActive && !onboardingWasActive)
+    ) {
+      return
+    }
+
+    let active = true
+    let timer = 0
+
+    async function reconcile() {
+      try {
+        await syncProjectOnboarding(projectId)
+        const next = await getAgentConversation(projectId, conversationId)
+        if (active) setDetail(next)
+      } catch {
+        // Keep the current timeline visible and retry on the next project poll.
+      }
+    }
+
+    if (!onboardingIsActive) {
+      void reconcile()
+      return () => {
+        active = false
+      }
+    }
+
+    async function poll() {
+      await reconcile()
+      if (active) {
+        timer = window.setTimeout(() => {
+          void poll()
+        }, 1200)
+      }
+    }
+
+    timer = window.setTimeout(() => {
+      void poll()
+    }, 1200)
+
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [conversationId, projectId, timelineOnboardingActive, understandingStatus])
+
+  React.useEffect(() => {
+    if (
+      !pendingRun ||
+      pendingRun.projectId !== projectId ||
+      pendingRun.conversationId !== conversationId
+    ) {
+      return
+    }
+    if (pendingRun.runId === runId) return
+    const timer = window.setInterval(() => {
+      void refresh().catch((reason) => setError(errorMessage(reason)))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [conversationId, pendingRun, projectId, refresh, runId, setError])
 
   const send = React.useCallback(
-    async (content: string, pageContext?: { module: string; view?: string }) => {
-      if (!projectId || !detail) return
+    async (
+      content: string,
+      pageContext?: { module: string; view?: string }
+    ) => {
+      if (!projectId || !currentDetail) return
       setError("")
+      setPendingRun(null)
       const clientRequestId = crypto.randomUUID()
+      let accepted: { messageId: string; runId: string }
       try {
-        await sendAgentMessage(
+        accepted = await sendAgentMessage(
           projectId,
-          detail.conversation.id,
+          currentDetail.conversation.id,
           content,
           pageContext,
           clientRequestId
         )
       } catch (reason) {
         if (!(reason instanceof ApiError) || reason.status !== 503) throw reason
-        await sendAgentMessage(
+        accepted = await sendAgentMessage(
           projectId,
-          detail.conversation.id,
+          currentDetail.conversation.id,
           content,
           pageContext,
           clientRequestId
         )
-      } finally {
-        setDetail(
-          await getAgentConversation(projectId, detail.conversation.id)
+      }
+      setPendingRun({
+        projectId,
+        conversationId: currentDetail.conversation.id,
+        runId: accepted.runId,
+      })
+      try {
+        const next = await getAgentConversation(
+          projectId,
+          currentDetail.conversation.id
         )
+        settlePendingRun(next)
+        setDetail(next)
+      } catch (reason) {
+        setError(errorMessage(reason))
       }
     },
-    [detail, projectId]
+    [currentDetail, projectId, setError, settlePendingRun]
   )
 
   const cancel = React.useCallback(async () => {
@@ -484,7 +641,17 @@ export function useAgentConversation(projectId: string) {
     setError("")
     await cancelAgentRun(projectId, runId)
     await refresh()
-  }, [projectId, refresh, runId])
+  }, [projectId, refresh, runId, setError])
+
+  const retryOnboardingStep = React.useCallback(
+    async (stepKey: string) => {
+      if (!projectId) return
+      setError("")
+      await retryProjectOnboardingStep(projectId, stepKey)
+      await refresh()
+    },
+    [projectId, refresh, setError]
+  )
 
   const rewind = React.useCallback(
     async (messageId: string) => {
@@ -497,16 +664,18 @@ export function useAgentConversation(projectId: string) {
       )
       setDetail(next)
     },
-    [conversationId, projectId]
+    [conversationId, projectId, setError]
   )
 
   const edit = React.useCallback(
     async (messageId: string, content: string) => {
       if (!projectId || !conversationId) return
       setError("")
+      setPendingRun(null)
       const clientRequestId = crypto.randomUUID()
+      let accepted: { messageId: string; runId: string }
       try {
-        await editAgentMessage(
+        accepted = await editAgentMessage(
           projectId,
           conversationId,
           messageId,
@@ -515,30 +684,42 @@ export function useAgentConversation(projectId: string) {
         )
       } catch (reason) {
         if (!(reason instanceof ApiError) || reason.status !== 503) throw reason
-        await editAgentMessage(
+        accepted = await editAgentMessage(
           projectId,
           conversationId,
           messageId,
           content,
           clientRequestId
         )
-      } finally {
-        setDetail(await getAgentConversation(projectId, conversationId))
+      }
+      setPendingRun({ projectId, conversationId, runId: accepted.runId })
+      try {
+        const next = await getAgentConversation(projectId, conversationId)
+        settlePendingRun(next)
+        setDetail(next)
+      } catch (reason) {
+        setError(errorMessage(reason))
       }
     },
-    [conversationId, projectId]
+    [conversationId, projectId, setError, settlePendingRun]
   )
 
   return {
-    detail,
+    detail: currentDetail,
+    conversations: currentConversations,
     loading,
+    historyLoading,
+    awaitingRun,
     error,
     setError,
     create,
+    loadConversations,
+    selectConversation,
     send,
     cancel,
     rewind,
     edit,
+    retryOnboardingStep,
     refresh,
   }
 }

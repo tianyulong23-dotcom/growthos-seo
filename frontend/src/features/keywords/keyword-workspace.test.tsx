@@ -15,7 +15,11 @@ import type {
   KeywordListResult,
 } from "@/api/keywords"
 import { KeywordWorkspace } from "@/features/keywords/keyword-workspace"
-import { keywordQueryClient } from "@/features/keywords/keyword-query-client"
+import {
+  DEFAULT_KEYWORD_LIBRARY_QUERY,
+  keywordQueryClient,
+  keywordQueryKeys,
+} from "@/features/keywords/keyword-query-client"
 
 const keywordApi = vi.hoisted(() => ({
   assignKeywordTags: vi.fn(),
@@ -244,10 +248,18 @@ afterEach(() => {
 })
 
 describe("KeywordWorkspace", () => {
-  it("手动添加竞品时直接提交指定域名", async () => {
+  it("未连接 GSC 时也允许手动添加竞品", async () => {
+    settingsApi.getGSCConnection.mockResolvedValue({
+      oauthConfigured: true,
+      grantConnected: false,
+      propertyConnected: false,
+      siteUrl: null,
+      connectedAccountEmail: null,
+      requiresReconnect: false,
+    })
     render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
 
-    await screen.findByText("竞争对手机会缺口")
+    await screen.findByText("竞争对手")
     fireEvent.click(screen.getByRole("button", { name: "手动添加" }))
     fireEvent.change(screen.getByRole("textbox", { name: "竞争对手域名 1" }), {
       target: { value: "manual.example" },
@@ -262,14 +274,13 @@ describe("KeywordWorkspace", () => {
     })
   })
 
-  it("自动发现只提交自动模式", async () => {
+  it("自动发现无需二次确认并直接提交全国自动模式", async () => {
     render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
 
-    await screen.findByText("竞争对手机会缺口")
-    const autoButton = screen.getByRole("button", { name: "自动发现" })
+    await screen.findByText("竞争对手")
+    const autoButton = screen.getByRole("button", { name: "分析竞争对手" })
     await waitFor(() => expect(autoButton.hasAttribute("disabled")).toBe(false))
     fireEvent.click(autoButton)
-    fireEvent.click(screen.getByRole("button", { name: "开始发现" }))
 
     await waitFor(() => {
       expect(keywordApi.startCompetitorAnalysis).toHaveBeenCalledWith(
@@ -277,64 +288,132 @@ describe("KeywordWorkspace", () => {
         { mode: "auto" }
       )
     })
+    expect(screen.queryByText("全国搜索")).toBeNull()
+    expect(screen.queryByRole("button", { name: "开始发现" })).toBeNull()
   })
 
-  it("本地自动发现完整提交坐标和本地 SERP 参数", async () => {
+  it("打开自动发现时重新读取 GSC 连接，避免使用旧的未连接缓存", async () => {
+    keywordQueryClient.setQueryData(keywordQueryKeys.connection("project-1"), {
+      oauthConfigured: true,
+      grantConnected: false,
+      propertyConnected: false,
+      siteUrl: null,
+      connectedAccountEmail: null,
+      requiresReconnect: false,
+    })
+
     render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
 
-    await screen.findByText("竞争对手机会缺口")
-    const autoButton = screen.getByRole("button", { name: "自动发现" })
-    await waitFor(() => expect(autoButton.hasAttribute("disabled")).toBe(false))
-    fireEvent.click(autoButton)
-    fireEvent.click(screen.getByRole("button", { name: "本地搜索" }))
-    fireEvent.change(screen.getByLabelText("纬度"), {
-      target: { value: "-26.2041" },
-    })
-    fireEvent.change(screen.getByLabelText("经度"), {
-      target: { value: "28.0473" },
-    })
-    fireEvent.change(screen.getByLabelText("商家名称筛选"), {
-      target: { value: "video service" },
-    })
-    fireEvent.change(screen.getByLabelText("商家分类"), {
-      target: { value: "media_company, video_store" },
-    })
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "获取 Google 商家问答证据" })
-    )
-    fireEvent.change(screen.getByLabelText("商家问答关键词"), {
-      target: { value: "Elephant TV" },
-    })
-    fireEvent.change(screen.getByLabelText("商家问答深度"), {
-      target: { value: "12" },
-    })
-    fireEvent.click(screen.getByRole("button", { name: "开始发现" }))
+    await screen.findByText("竞争对手")
+    fireEvent.click(screen.getByRole("button", { name: "分析竞争对手" }))
 
     await waitFor(() => {
       expect(keywordApi.startCompetitorAnalysis).toHaveBeenCalledWith(
         "project-1",
-        {
-          mode: "auto",
-          localMarket: {
-            latitude: -26.2041,
-            longitude: 28.0473,
-            radiusKm: 10,
-            zoom: 12,
-            searchType: "maps",
-            device: "desktop",
-            depth: 20,
-            businessQuery: "video service",
-            categories: ["media_company", "video_store"],
-            includeQuestions: true,
-            questionsKeyword: "Elephant TV",
-            questionsDepth: 12,
-          },
-        }
+        { mode: "auto" }
       )
     })
+    expect(settingsApi.getGSCConnection).toHaveBeenCalledWith("project-1")
   })
 
-  it("未连接 GSC 时不加载竞品差距并提供设置入口", async () => {
+  it("不再展示本地发现入口和本地参数表单", async () => {
+    render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
+
+    await screen.findByText("竞争对手")
+    expect(screen.queryByRole("button", { name: "本地发现" })).toBeNull()
+    expect(screen.queryByText("本地发现竞争对手")).toBeNull()
+  })
+
+  it("尚未分析时只展示竞品分析引导，不展示结果表格和筛选", async () => {
+    render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
+
+    expect(await screen.findByText("竞争对手情报")).toBeTruthy()
+    expect(screen.getByText("发现内容机会")).toBeTruthy()
+    expect(
+      screen.getByText("找出竞争对手已有排名、但当前网站尚未覆盖的关键词")
+    ).toBeTruthy()
+    expect(screen.getByText("自动发现")).toBeTruthy()
+    expect(screen.getByText("差距分析")).toBeTruthy()
+    expect(screen.getByText("机会评分")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "分析竞争对手" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "手动添加" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "重新分析" })).toBeNull()
+    expect(screen.getByText("大约需要 2 分钟")).toBeTruthy()
+    expect(screen.queryByText("内容差距")).toBeNull()
+    expect(screen.queryByRole("columnheader", { name: "关键词" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "筛选" })).toBeNull()
+  })
+
+  it("分析中展示实时进度和两栏空结果框架", async () => {
+    keywordApi.getCompetitorAnalysisStatus.mockResolvedValue({
+      ...queuedCompetitorRun,
+      status: "running",
+      stage: "gap_analysis",
+      message: "正在分析竞争对手关键词",
+      progress: 36,
+      completedCompetitors: 0,
+    })
+
+    render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
+
+    expect(await screen.findByText("分析竞争对手（0/5）")).toBeTruthy()
+    expect(screen.getByText("正在分析竞争对手关键词")).toBeTruthy()
+    expect(screen.getByText("36%")).toBeTruthy()
+    expect(screen.getByText("尚未分析任何竞争对手")).toBeTruthy()
+    expect(
+      screen.getByRole("button", { name: "手动添加" }).hasAttribute("disabled")
+    ).toBe(true)
+    expect(screen.getByText("内容差距")).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "全部" })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "高机会" })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "快速取胜" })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "未覆盖" })).toBeTruthy()
+    expect(screen.getByText("尚未发现关键词差距。")).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "重新分析" })).toBeNull()
+  })
+
+  it("最新分析没有有效结果时仍保留项目中已保存的竞品", async () => {
+    keywordApi.getCompetitorAnalysisStatus.mockResolvedValue({
+      ...queuedCompetitorRun,
+      status: "completed",
+      stage: "completed",
+      message: "竞争对手关键词分析未完成",
+      progress: 100,
+      discoveredCount: 25,
+      analyzedCompetitorCount: 0,
+      completedCompetitors: 0,
+      finishedAt: "2026-08-04T00:01:00Z",
+    })
+    keywordApi.listKeywordCompetitors.mockResolvedValue({
+      runId: "competitor-run-queued",
+      items: [
+        {
+          id: "candidate-only",
+          domain: "candidate-only.example",
+          selectedForGap: true,
+          status: "pending",
+        },
+      ],
+    })
+
+    render(
+      <KeywordWorkspace
+        projectId="project-1"
+        view="competitor-gap"
+        savedCompetitorDomain="stremio.com"
+      />
+    )
+
+    expect(await screen.findByText("竞争对手情报")).toBeTruthy()
+    expect(screen.queryByText("已分析 25 个竞品")).toBeNull()
+    expect(screen.queryByText("25 个竞争对手")).toBeNull()
+    expect(screen.queryByText("candidate-only.example")).toBeNull()
+    expect(screen.queryByRole("button", { name: "重新分析" })).toBeNull()
+    expect(screen.getByText("stremio.com")).toBeTruthy()
+    expect(screen.getByText("待分析")).toBeTruthy()
+  })
+
+  it("未连接 GSC 时仍加载竞品差距，只拦截自动发现", async () => {
     settingsApi.getGSCConnection.mockResolvedValue({
       oauthConfigured: true,
       grantConnected: false,
@@ -345,13 +424,28 @@ describe("KeywordWorkspace", () => {
     })
     render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
 
-    await screen.findByText("连接 Google Search Console")
-    expect(screen.queryByRole("button", { name: "自动发现" })).toBeNull()
-    expect(keywordApi.getCompetitorAnalysisStatus).not.toHaveBeenCalled()
+    await screen.findByText("竞争对手")
+    expect(screen.getByRole("button", { name: "手动添加" })).toBeTruthy()
+    const autoButton = screen.getByRole("button", { name: "分析竞争对手" })
+    await waitFor(() => expect(autoButton.hasAttribute("disabled")).toBe(false))
+    fireEvent.click(autoButton)
+
+    expect(
+      await screen.findByText(
+        "请先连接当前项目的 Google Search Console，再使用自动发现。"
+      )
+    ).toBeTruthy()
+    expect(
+      screen.queryByText(/连接并为当前项目选择对应的 Search Console/)
+    ).toBeNull()
+    expect(keywordApi.getCompetitorAnalysisStatus).toHaveBeenCalledWith(
+      "project-1"
+    )
     expect(keywordApi.startCompetitorAnalysis).not.toHaveBeenCalled()
     expect(
       screen.getByRole("button", { name: "前往连接" }).getAttribute("href")
     ).toContain("/settings/data-sources?returnTo=")
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull()
   })
 
   it("搜索表现未授权时不读取数据，授权后显示 GSC 指标", async () => {
@@ -524,7 +618,9 @@ describe("KeywordWorkspace", () => {
 
     fireEvent.click(await screen.findByRole("tab", { name: "搜索查询" }))
     expect(
-      await screen.findByText("Google Search Console 暂时不可用")
+      await screen.findByText("Google Search Console 暂时不可用", undefined, {
+        timeout: 2500,
+      })
     ).toBeTruthy()
     expect(screen.queryByRole("combobox", { name: "每页数量" })).toBeNull()
   })
@@ -557,29 +653,54 @@ describe("KeywordWorkspace", () => {
     expect(settingsApi.getGSCConnection).toHaveBeenCalledTimes(2)
   })
 
-  it("竞争分析完成后清除排队提示", async () => {
+  it("竞争分析完成后自动刷新竞品和机会结果", async () => {
+    keywordApi.getCompetitorAnalysisStatus
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(queuedCompetitorRun)
     render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
 
-    await screen.findByText("竞争对手机会缺口")
-    const autoButton = screen.getByRole("button", { name: "自动发现" })
+    await screen.findByText("竞争对手")
+    const autoButton = screen.getByRole("button", { name: "分析竞争对手" })
     await waitFor(() => expect(autoButton.hasAttribute("disabled")).toBe(false))
     fireEvent.click(autoButton)
-    fireEvent.click(screen.getByRole("button", { name: "开始发现" }))
-    expect(await screen.findByText("竞争分析已进入队列")).toBeTruthy()
+    await waitFor(() => {
+      expect(keywordApi.startCompetitorAnalysis).toHaveBeenCalledWith(
+        "project-1",
+        { mode: "auto" }
+      )
+    })
+    expect(await screen.findByText("分析竞争对手（0/5）")).toBeTruthy()
+    expect(screen.getByText("竞争分析已进入队列")).toBeTruthy()
+    expect(screen.getAllByText("竞争分析已进入队列")).toHaveLength(1)
+    expect(screen.getByText("0%")).toBeTruthy()
 
-    keywordApi.getCompetitorAnalysisStatus.mockResolvedValue({
+    const competitorCalls = keywordApi.listKeywordCompetitors.mock.calls.length
+    const opportunityCalls =
+      keywordApi.listKeywordCompetitorOpportunities.mock.calls.length
+    const finishedRun = {
       ...queuedCompetitorRun,
-      status: "completed",
+      status: "completed" as const,
       stage: "completed",
       message: "竞争分析已完成",
       progress: 100,
       completedCompetitors: 5,
       finishedAt: "2026-08-04T00:01:00Z",
+    }
+    await act(async () => {
+      keywordQueryClient.setQueryData(
+        keywordQueryKeys.competitorStatus("project-1"),
+        finishedRun
+      )
     })
-    fireEvent.click(screen.getByRole("button", { name: "刷新竞争分析" }))
 
     await waitFor(() => {
       expect(screen.queryByText("竞争分析已进入队列")).toBeNull()
+      expect(
+        keywordApi.listKeywordCompetitors.mock.calls.length
+      ).toBeGreaterThan(competitorCalls)
+      expect(
+        keywordApi.listKeywordCompetitorOpportunities.mock.calls.length
+      ).toBeGreaterThan(opportunityCalls)
     })
   })
 
@@ -751,7 +872,24 @@ describe("KeywordWorkspace", () => {
     expect(screen.getByRole("columnheader", { name: "趋势" })).toBeTruthy()
   })
 
-  it("展示搜索竞品聚合后的机会缺口并可批量接收", async () => {
+  it("后台结果版本更新后绕过旧列表缓存并自动展示关键词", async () => {
+    keywordQueryClient.setQueryData(
+      keywordQueryKeys.libraryList("project-1", DEFAULT_KEYWORD_LIBRARY_QUERY),
+      {
+        ...keywordResult,
+        items: [],
+        total: 0,
+        resultVersion: 0,
+      } satisfies KeywordListResult
+    )
+
+    render(<KeywordWorkspace projectId="project-1" />)
+
+    expect(await screen.findByText("solar panel installation")).toBeTruthy()
+    expect(keywordApi.listKeywords).toHaveBeenCalledTimes(1)
+  })
+
+  it("有分析结果时按竞品信息层级展示摘要、竞品和关键词差距", async () => {
     const analysisRun = {
       runId: "competitor-run-1",
       targetDomain: "example.com",
@@ -928,101 +1066,46 @@ describe("KeywordWorkspace", () => {
 
     render(<KeywordWorkspace projectId="project-1" view="competitor-gap" />)
 
-    expect(await screen.findByText("竞争对手机会缺口")).toBeTruthy()
-    expect(keywordApi.listCompetitorAnalysisRuns).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole("button", { name: "分析历史" }))
-    await waitFor(() => {
-      expect(keywordApi.listCompetitorAnalysisRuns).toHaveBeenCalledTimes(1)
-    })
-    expect(await screen.findByText("solar panels")).toBeTruthy()
-    expect(screen.getByRole("columnheader", { name: "GSC 点击" })).toBeTruthy()
-    expect(screen.getByText("10.0%")).toBeTruthy()
-    expect(screen.getByText("$3.50")).toBeTruthy()
-    expect(await screen.findByText("覆盖词 4")).toBeTruthy()
-    expect(screen.getByText("ETV 9,000")).toBeTruthy()
-    expect(screen.getByText("排名词证据 无数据")).toBeTruthy()
-    expect(screen.getByText("中位排名 7.0")).toBeTruthy()
-    expect(screen.getByText("SERP 证据不完整")).toBeTruthy()
+    expect(await screen.findByText("所有竞争对手")).toBeTruthy()
+    expect(screen.getByText("分析于 2026/08/04")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "重新分析" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "手动添加" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "添加竞争对手" })).toBeNull()
     expect(
-      screen.getByText("solar panels：接口成功，但没有返回 SERP 结果")
-    ).toBeTruthy()
+      screen.getAllByText("1", { selector: "[data-slot='metric-value']" })
+    ).toHaveLength(3)
     expect(
-      screen.getByText("solar installation：SERP service unavailable")
+      screen.getByText("1,300", { selector: "[data-slot='metric-value']" })
     ).toBeTruthy()
-    expect(screen.getByText("弱点/缺口")).toBeTruthy()
-    expect(screen.getByText("Limited buyer calculator coverage")).toBeTruthy()
+    expect(screen.getByText("关键词")).toBeTruthy()
+    expect(screen.getByText("/月")).toBeTruthy()
+    expect(screen.getByText("所有竞争对手")).toBeTruthy()
+    expect(screen.getByText("内容差距")).toBeTruthy()
+    expect(screen.queryByText("市场判断")).toBeNull()
+    expect(screen.queryByRole("button", { name: "分析历史" })).toBeNull()
+    expect(screen.getAllByText("competitor.example").length).toBeGreaterThan(1)
+    expect(screen.getByText("月流量 9,000")).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "全部" })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "高机会" })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "快速取胜" })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: "未覆盖" })).toBeTruthy()
+    expect(screen.getByRole("columnheader", { name: "关键词" })).toBeTruthy()
+    expect(screen.getByRole("columnheader", { name: "搜索量" })).toBeTruthy()
+    expect(screen.getByRole("columnheader", { name: "难度" })).toBeTruthy()
+    expect(screen.getByRole("columnheader", { name: "CPC" })).toBeTruthy()
+    expect(screen.getByRole("columnheader", { name: "机会分" })).toBeTruthy()
+    expect(screen.getByRole("columnheader", { name: "排名竞品" })).toBeTruthy()
+    expect(screen.queryByRole("columnheader", { name: "意图" })).toBeNull()
+    expect(screen.queryByRole("columnheader", { name: "竞争度" })).toBeNull()
+    expect(screen.queryByRole("columnheader", { name: "最佳排名" })).toBeNull()
+    expect(screen.queryByRole("columnheader", { name: "状态" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "筛选" })).toBeNull()
     expect(await screen.findByText("commercial solar panels")).toBeTruthy()
+    expect(screen.getByText("$4.10")).toBeTruthy()
+    expect(screen.getByText("78")).toBeTruthy()
     expect(
-      screen.getAllByText("competitor.example").length
-    ).toBeGreaterThanOrEqual(3)
-    fireEvent.click(
       screen.getByRole("checkbox", { name: "选择 commercial solar panels" })
-    )
-    expect(screen.getByRole("button", { name: "忽略" })).toBeTruthy()
-    expect(screen.queryByRole("button", { name: "恢复" })).toBeNull()
-    let resolveRefresh: ((value: typeof opportunityResult) => void) | undefined
-    keywordApi.listKeywordCompetitorOpportunities.mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveRefresh = resolve
-      })
-    )
-    fireEvent.click(screen.getByRole("button", { name: "刷新竞争分析" }))
-    await waitFor(() => {
-      expect(
-        (
-          screen.getByRole("button", {
-            name: "刷新竞争分析",
-          }) as HTMLButtonElement
-        ).disabled
-      ).toBe(true)
-    })
-    expect(screen.getByText(/正在更新/)).toBeTruthy()
-    resolveRefresh?.(opportunityResult)
-    await waitFor(() => {
-      expect(
-        screen
-          .getByRole("checkbox", { name: "选择 commercial solar panels" })
-          .getAttribute("aria-checked")
-      ).toBe("true")
-    })
-    fireEvent.click(screen.getByRole("button", { name: "接收并加入词库" }))
-    await act(async () => undefined)
-    expect(keywordApi.updateCompetitorOpportunities).toHaveBeenCalledWith(
-      "project-1",
-      ["opportunity-1"],
-      "accept"
-    )
-    await waitFor(() => {
-      expect(
-        (
-          screen.getByRole("button", {
-            name: "刷新竞争分析",
-          }) as HTMLButtonElement
-        ).disabled
-      ).toBe(false)
-    })
-
-    keywordApi.listKeywordCompetitorOpportunities.mockResolvedValue({
-      ...opportunityResult,
-      items: opportunityResult.items.map((item) => ({
-        ...item,
-        status: "dismissed",
-      })),
-    })
-    fireEvent.click(screen.getByRole("button", { name: "刷新竞争分析" }))
-    await screen.findByText("已忽略")
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "选择 commercial solar panels" })
-    )
-    expect(screen.queryByRole("button", { name: "忽略" })).toBeNull()
-    fireEvent.click(screen.getByRole("button", { name: "恢复" }))
-    await waitFor(() => {
-      expect(keywordApi.updateCompetitorOpportunities).toHaveBeenLastCalledWith(
-        "project-1",
-        ["opportunity-1"],
-        "restore"
-      )
-    })
+    ).toBeTruthy()
   })
 
   it("竞争支线失败时主关键词库仍显示已完成", async () => {

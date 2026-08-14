@@ -9,6 +9,21 @@ import (
 	"time"
 )
 
+type recordingPageProcessor struct {
+	urls []string
+}
+
+func (p *recordingPageProcessor) ProcessPage(
+	_ context.Context,
+	_ Task,
+	page Page,
+	_ Resource,
+) (Page, error) {
+	p.urls = append(p.urls, page.FinalURL)
+	page.MainTextRef = "stored://" + page.FinalURL
+	return page, nil
+}
+
 type fakeCheckpointStore struct {
 	mu         sync.Mutex
 	checkpoint CrawlCheckpoint
@@ -248,6 +263,77 @@ func TestInitializationReusesHomepageFetch(t *testing.T) {
 	}
 	if pageFetcher.callCount("https://example.com/") != 1 {
 		t.Fatalf("homepage fetch count = %d", pageFetcher.callCount("https://example.com/"))
+	}
+}
+
+func TestContentResearchCrawlsRequestedCrossDomainURLsAndKeepsPartialResults(t *testing.T) {
+	now := time.Now().UTC()
+	urls := []string{
+		"https://one.example/article",
+		"https://broken.example/article",
+		"https://two.example/guide",
+	}
+	fetcher := &fakeFetcher{
+		resources: map[string]Resource{
+			urls[0]: {
+				URL:         urls[0],
+				FinalURL:    urls[0],
+				StatusCode:  200,
+				ContentType: "text/html",
+				Body:        []byte(`<html><head><title>One</title></head><body><main><h1>First answer</h1><p>Useful first-party details.</p></main></body></html>`),
+				FetchedAt:   now,
+			},
+			urls[1]: {
+				URL:      urls[1],
+				FinalURL: urls[1],
+			},
+			urls[2]: {
+				URL:         urls[2],
+				FinalURL:    urls[2],
+				StatusCode:  200,
+				ContentType: "text/html",
+				Body:        []byte(`<html><head><title>Two</title></head><body><article><h1>Second answer</h1><p>Independent supporting details.</p></article></body></html>`),
+				FetchedAt:   now,
+			},
+		},
+		errors: map[string]error{urls[1]: errors.New("temporary timeout")},
+	}
+	processor := &recordingPageProcessor{}
+	engine := NewEngine(
+		Config{},
+		fetcher,
+		fetcher,
+		nil,
+		WithPageArtifactProcessor(processor),
+	)
+
+	result, err := engine.Run(context.Background(), Task{
+		OrganizationID: "org",
+		ProjectID:      "project",
+		RunID:          "run",
+		Type:           TaskContentResearch,
+		URLs:           urls,
+		Country:        "US",
+		Language:       "en",
+		Rendering:      RenderingAuto,
+	})
+	if err != nil {
+		t.Fatalf("Run() returned an error: %v", err)
+	}
+	if result.CompletionStatus != CompletionPartial {
+		t.Fatalf("CompletionStatus = %q, want %q", result.CompletionStatus, CompletionPartial)
+	}
+	if len(result.Pages) != 3 {
+		t.Fatalf("len(Pages) = %d, want 3", len(result.Pages))
+	}
+	if result.Pages[0].MainTextRef == "" || result.Pages[2].MainTextRef == "" {
+		t.Fatal("successful pages were not sent through artifact storage")
+	}
+	if result.Pages[1].ErrorType != "timeout" {
+		t.Fatalf("failed page ErrorType = %q, want timeout", result.Pages[1].ErrorType)
+	}
+	if len(processor.urls) != 2 {
+		t.Fatalf("processed page count = %d, want 2", len(processor.urls))
 	}
 }
 
@@ -1096,7 +1182,7 @@ func TestDiscoveryLimitNeverFallsBelowMaxPages(t *testing.T) {
 	}
 }
 
-func TestSiteUnderstandingStopsAfterThreeCompleteBusinessPages(t *testing.T) {
+func TestSiteUnderstandingUsesConfiguredPageLimit(t *testing.T) {
 	now := time.Now().UTC()
 	httpFetcher := &fakeFetcher{resources: map[string]Resource{
 		"https://example.com/robots.txt": {
@@ -1121,6 +1207,8 @@ func TestSiteUnderstandingStopsAfterThreeCompleteBusinessPages(t *testing.T) {
 					`<a href="/about">About</a>` +
 					`<a href="/products">Products</a>` +
 					`<a href="/products/second">Second product</a>` +
+					`<a href="/pricing">Pricing</a>` +
+					`<a href="/partners">Partners</a>` +
 					`<a href="/blog">Blog</a>` +
 					`</nav><h1>Operations automation</h1></body></html>`,
 			),
@@ -1158,6 +1246,22 @@ func TestSiteUnderstandingStopsAfterThreeCompleteBusinessPages(t *testing.T) {
 			Body:        []byte(`<html><head><title>Blog</title></head><body><h1>Blog</h1></body></html>`),
 			FetchedAt:   now,
 		},
+		"https://example.com/pricing": {
+			URL:         "https://example.com/pricing",
+			FinalURL:    "https://example.com/pricing",
+			StatusCode:  200,
+			ContentType: "text/html",
+			Body:        []byte(`<html><head><title>Pricing</title></head><body><h1>Pricing</h1></body></html>`),
+			FetchedAt:   now,
+		},
+		"https://example.com/partners": {
+			URL:         "https://example.com/partners",
+			FinalURL:    "https://example.com/partners",
+			StatusCode:  200,
+			ContentType: "text/html",
+			Body:        []byte(`<html><head><title>Partners</title></head><body><h1>Partners</h1></body></html>`),
+			FetchedAt:   now,
+		},
 	}}
 	engine := NewEngine(
 		Config{UserAgent: "SEOPlatformBot/1.0", DiscoveryLimit: 20},
@@ -1179,20 +1283,22 @@ func TestSiteUnderstandingStopsAfterThreeCompleteBusinessPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() returned an error: %v", err)
 	}
-	if len(result.Pages) != 3 {
-		t.Fatalf("page count = %d, want 3", len(result.Pages))
+	if len(result.Pages) != 5 {
+		t.Fatalf("page count = %d, want 5", len(result.Pages))
 	}
 	if pageFetcher.callCount("https://example.com/about") != 1 ||
-		pageFetcher.callCount("https://example.com/products") != 1 {
-		t.Fatalf("important pages were not fetched")
+		pageFetcher.callCount("https://example.com/products") != 1 ||
+		pageFetcher.callCount("https://example.com/products/second") != 1 ||
+		pageFetcher.callCount("https://example.com/pricing") != 1 {
+		t.Fatalf("site understanding omitted a core business page")
 	}
-	if pageFetcher.callCount("https://example.com/products/second") != 0 ||
-		pageFetcher.callCount("https://example.com/blog") != 0 {
-		t.Fatalf("crawl continued after business profile was complete")
+	if pageFetcher.callCount("https://example.com/blog") != 0 ||
+		pageFetcher.callCount("https://example.com/partners") != 0 {
+		t.Fatalf("site understanding fetched peripheral pages to fill the budget")
 	}
 }
 
-func TestSiteUnderstandingUsesFivePagesWhenBusinessProfileIsIncomplete(t *testing.T) {
+func TestSiteUnderstandingFetchesThenRejectsPeripheralPages(t *testing.T) {
 	now := time.Now().UTC()
 	httpFetcher := &fakeFetcher{resources: map[string]Resource{
 		"https://example.com/robots.txt": {
@@ -1253,8 +1359,86 @@ func TestSiteUnderstandingUsesFivePagesWhenBusinessProfileIsIncomplete(t *testin
 	if err != nil {
 		t.Fatalf("Run() returned an error: %v", err)
 	}
-	if len(result.Pages) != 5 {
-		t.Fatalf("page count = %d, want 5", len(result.Pages))
+	if len(result.Pages) != 3 {
+		t.Fatalf("page count = %d, want 3", len(result.Pages))
+	}
+	if pageFetcher.callCount("https://example.com/contact") != 1 ||
+		pageFetcher.callCount("https://example.com/blog") != 1 {
+		t.Fatal("site understanding did not inspect peripheral candidate pages")
+	}
+}
+
+func TestSiteUnderstandingClassifiesUnknownCandidateAfterFetch(t *testing.T) {
+	now := time.Now().UTC()
+	httpFetcher := &fakeFetcher{resources: map[string]Resource{
+		"https://example.com/robots.txt": {
+			FinalURL:   "https://example.com/robots.txt",
+			StatusCode: 404,
+		},
+	}}
+	pageFetcher := &fakeFetcher{resources: map[string]Resource{
+		"https://example.com/": {
+			URL:         "https://example.com/",
+			FinalURL:    "https://example.com/",
+			StatusCode:  200,
+			ContentType: "text/html",
+			Body: []byte(
+				`<html><head><title>Acme</title></head><body><nav>` +
+					`<a href="/choices">Explore</a>` +
+					`<a href="/community">Community</a>` +
+					`</nav><h1>Acme business platform</h1></body></html>`,
+			),
+			FetchedAt: now,
+		},
+		"https://example.com/choices": {
+			URL:         "https://example.com/choices",
+			FinalURL:    "https://example.com/choices",
+			StatusCode:  200,
+			ContentType: "text/html",
+			Body: []byte(
+				`<html><head><title>Choose what fits</title></head>` +
+					`<body><h1>Pricing packages</h1><p>Compare available options.</p></body></html>`,
+			),
+			FetchedAt: now,
+		},
+		"https://example.com/community": {
+			URL:         "https://example.com/community",
+			FinalURL:    "https://example.com/community",
+			StatusCode:  200,
+			ContentType: "text/html",
+			Body:        []byte(`<html><head><title>Community</title></head><body><h1>Community</h1></body></html>`),
+			FetchedAt:   now,
+		},
+	}}
+	engine := NewEngine(
+		Config{UserAgent: "SEOPlatformBot/1.0", DiscoveryLimit: 20},
+		httpFetcher,
+		pageFetcher,
+		nil,
+	)
+
+	result, err := engine.Run(context.Background(), Task{
+		OrganizationID: "org",
+		ProjectID:      "project",
+		RunID:          "understanding-classify-after-fetch",
+		Type:           TaskSiteUnderstanding,
+		TargetURL:      "https://example.com",
+		Country:        "US",
+		Language:       "en",
+		MaxPages:       3,
+	})
+	if err != nil {
+		t.Fatalf("Run() returned an error: %v", err)
+	}
+	if pageFetcher.callCount("https://example.com/choices") != 1 ||
+		pageFetcher.callCount("https://example.com/community") != 1 {
+		t.Fatal("site understanding did not fetch unknown candidates before classifying them")
+	}
+	if len(result.Pages) != 2 {
+		t.Fatalf("page count = %d, want 2", len(result.Pages))
+	}
+	if result.Pages[1].FinalURL != "https://example.com/choices" {
+		t.Fatalf("selected page = %q, want pricing page discovered after fetch", result.Pages[1].FinalURL)
 	}
 }
 
@@ -1548,8 +1732,8 @@ func TestSiteUnderstandingLimitsFailedCandidateAttempts(t *testing.T) {
 		errors: map[string]error{},
 	}
 	for index := 0; index < 20; index++ {
-		rawURL := fmt.Sprintf("https://example.com/page-%02d", index)
-		links += fmt.Sprintf(`<a href="/page-%02d">Page</a>`, index)
+		rawURL := fmt.Sprintf("https://example.com/products/page-%02d", index)
+		links += fmt.Sprintf(`<a href="/products/page-%02d">Product</a>`, index)
 		pageFetcher.resources[rawURL] = Resource{URL: rawURL, FinalURL: rawURL}
 		pageFetcher.errors[rawURL] = errors.New("dial timeout")
 	}
@@ -1611,17 +1795,17 @@ func TestRobotsDisallowedCandidatesDoNotConsumeFetchBudget(t *testing.T) {
 					`<a href="/private/products">Private products</a>` +
 					`<a href="/private/services">Private services</a>` +
 					`<a href="/private/platform">Private platform</a>` +
-					`<a href="/contact">Contact</a>` +
+					`<a href="/about">About</a>` +
 					`</nav><h1>Example</h1></body></html>`,
 			),
 			FetchedAt: now,
 		},
-		"https://example.com/contact": {
-			URL:         "https://example.com/contact",
-			FinalURL:    "https://example.com/contact",
+		"https://example.com/about": {
+			URL:         "https://example.com/about",
+			FinalURL:    "https://example.com/about",
 			StatusCode:  200,
 			ContentType: "text/html",
-			Body:        []byte(`<html lang="en"><head><title>Contact</title></head><body><h1>Contact</h1></body></html>`),
+			Body:        []byte(`<html lang="en"><head><title>About</title></head><body><h1>About</h1></body></html>`),
 			FetchedAt:   now,
 		},
 	}}
@@ -1648,10 +1832,10 @@ func TestRobotsDisallowedCandidatesDoNotConsumeFetchBudget(t *testing.T) {
 	if len(result.Pages) != 2 {
 		t.Fatalf("page count = %d, want 2", len(result.Pages))
 	}
-	if pageFetcher.callCount("https://example.com/contact") != 1 {
+	if pageFetcher.callCount("https://example.com/about") != 1 {
 		t.Fatalf(
-			"contact fetch count = %d, want 1",
-			pageFetcher.callCount("https://example.com/contact"),
+			"about fetch count = %d, want 1",
+			pageFetcher.callCount("https://example.com/about"),
 		)
 	}
 	if pageFetcher.callCount("https://example.com/private/products") != 0 ||
@@ -1791,6 +1975,14 @@ func TestSiteUnderstandingFetchesRemainingCandidatesAsOneBatch(t *testing.T) {
 	if len(pageFetcher.batches[0]) != 3 {
 		t.Fatalf("batch URL count = %d, want 3", len(pageFetcher.batches[0]))
 	}
+	if len(result.Pages) != 3 {
+		t.Fatalf("retained page count = %d, want 3", len(result.Pages))
+	}
+	for _, page := range result.Pages {
+		if page.FinalURL == "https://example.com/contact" {
+			t.Fatal("contact page was retained after its body was classified")
+		}
+	}
 	if pageFetcher.acceptValue != "en-US,en;q=0.9" {
 		t.Fatalf("batch Accept-Language = %q", pageFetcher.acceptValue)
 	}
@@ -1799,7 +1991,7 @@ func TestSiteUnderstandingFetchesRemainingCandidatesAsOneBatch(t *testing.T) {
 	}
 }
 
-func TestSiteUnderstandingDoesNotWaitForSlowSitemapWhenNavigationIsEnough(t *testing.T) {
+func TestSiteUnderstandingDoesNotDiscoverSitemap(t *testing.T) {
 	now := time.Now().UTC()
 	baseHTTPFetcher := &fakeFetcher{resources: map[string]Resource{
 		"https://example.com/robots.txt": {
@@ -1811,11 +2003,6 @@ func TestSiteUnderstandingDoesNotWaitForSlowSitemapWhenNavigationIsEnough(t *tes
 			StatusCode: 404,
 		},
 	}}
-	httpFetcher := delayedURLFetcher{
-		Fetcher: baseHTTPFetcher,
-		url:     "https://example.com/sitemap.xml",
-		delay:   750 * time.Millisecond,
-	}
 	pageFetcher := &fakeBatchFetcher{fakeFetcher: &fakeFetcher{
 		resources: map[string]Resource{
 			"https://example.com/": {
@@ -1851,12 +2038,11 @@ func TestSiteUnderstandingDoesNotWaitForSlowSitemapWhenNavigationIsEnough(t *tes
 	}}
 	engine := NewEngine(
 		Config{UserAgent: "SEOPlatformBot/1.0", DiscoveryLimit: 20},
-		httpFetcher,
+		baseHTTPFetcher,
 		pageFetcher,
 		nil,
 	)
 
-	startedAt := time.Now()
 	result, err := engine.Run(context.Background(), Task{
 		OrganizationID: "org",
 		ProjectID:      "project",
@@ -1867,14 +2053,13 @@ func TestSiteUnderstandingDoesNotWaitForSlowSitemapWhenNavigationIsEnough(t *tes
 		Language:       "en",
 		MaxPages:       3,
 	})
-	elapsed := time.Since(startedAt)
 	if err != nil {
 		t.Fatalf("Run() returned an error: %v", err)
 	}
 	if len(result.Pages) != 3 {
 		t.Fatalf("page count = %d, want 3", len(result.Pages))
 	}
-	if elapsed >= 400*time.Millisecond {
-		t.Fatalf("site understanding waited %s for a nonessential sitemap", elapsed)
+	if calls := baseHTTPFetcher.callCount("https://example.com/sitemap.xml"); calls != 0 {
+		t.Fatalf("sitemap fetch calls = %d, want 0", calls)
 	}
 }

@@ -2,6 +2,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
+from app.modules.onboarding.schemas import OnboardingRunResponse
+from app.modules.onboarding.service import (
+    OnboardingNotFoundError,
+    OnboardingService,
+    OnboardingStepConflictError,
+    build_onboarding_service,
+)
 from app.modules.projects.schemas import (
     BusinessProfileRunResponse,
     CreateProjectRequest,
@@ -26,6 +33,10 @@ def get_project_service() -> ProjectService:
     return build_project_service()
 
 
+def get_onboarding_service() -> OnboardingService:
+    return build_onboarding_service()
+
+
 @router.get("", response_model=list[ProjectResponse])
 async def list_projects(
     service: Annotated[ProjectService, Depends(get_project_service)],
@@ -45,6 +56,43 @@ async def get_project(
             detail="项目不存在",
         )
     return project
+
+
+@router.get("/{project_id}/onboarding", response_model=OnboardingRunResponse)
+async def get_project_onboarding(
+    project_id: str,
+    service: Annotated[OnboardingService, Depends(get_onboarding_service)],
+) -> OnboardingRunResponse:
+    try:
+        return await service.get(project_id)
+    except OnboardingNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在",
+        ) from exc
+
+
+@router.post(
+    "/{project_id}/onboarding/steps/{step_key}/retry",
+    response_model=OnboardingRunResponse,
+)
+async def retry_project_onboarding_step(
+    project_id: str,
+    step_key: str,
+    service: Annotated[OnboardingService, Depends(get_onboarding_service)],
+) -> OnboardingRunResponse:
+    try:
+        return await service.retry_step(project_id, step_key)
+    except OnboardingNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在",
+        ) from exc
+    except (OnboardingStepConflictError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前任务不能重试",
+        ) from exc
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

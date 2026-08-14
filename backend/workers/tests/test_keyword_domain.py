@@ -39,51 +39,26 @@ PROFILE = {
 }
 
 
-def test_initial_library_filter_trusts_explicit_ai_categories_without_lexical_override() -> None:
-    streaming_profile = {
-        "business_name": "ElephTV",
-        "business_type": "South African IPTV subscription service",
-        "business_summary": "Premium IPTV streaming for customers in South Africa.",
-        "products_services": ["IPTV subscriptions", "live sports streaming", "Android TV app"],
-        "target_audiences": ["South African streaming customers"],
-    }
+def test_initial_library_filter_trusts_binary_usability_decisions() -> None:
     candidates, _ = prepare_seed_candidates(
         [
-            RawKeyword(keyword="iptv south africa", source="labs_site", search_volume=1_000),
-            RawKeyword(keyword="live sports streaming", source="labs_site", search_volume=900),
-            RawKeyword(keyword="discover pakistan tv", source="labs_site", search_volume=800),
-            RawKeyword(keyword="nrk streaming", source="labs_site", search_volume=700),
-            RawKeyword(keyword="tv guide abq", source="labs_site", search_volume=600),
+            RawKeyword(keyword="first candidate", source="labs_site"),
+            RawKeyword(keyword="second candidate", source="labs_site"),
         ],
-        streaming_profile,
+        PROFILE,
         "en",
     )
 
     assessments = validate_initial_library_filter(
         candidates,
-        {
-            "decisions": [
-                "keep",
-                "keep",
-                "remove_irrelevant",
-                "remove_irrelevant",
-                "keep",
-            ]
-        },
-        streaming_profile,
+        {"decisions": ["keep", "remove_incomplete"]},
+        PROFILE,
         "en",
     )
 
-    assert {identifier for identifier, item in assessments.items() if item.approved} == {
-        "k001",
-        "k002",
-        "k005",
-    }
+    assert {identifier for identifier, item in assessments.items() if item.approved} == {"k001"}
     assert assessments["k001"].business_relevance == 0.8
-    assert assessments["k002"].business_relevance == 0.8
-    assert assessments["k003"].category == "remove_irrelevant"
-    assert assessments["k005"].approved is True
-    assert assessments["k005"].category == "keep"
+    assert assessments["k002"].category == "remove_incomplete"
 
 
 def test_initial_library_filter_rejects_incomplete_ai_decisions() -> None:
@@ -146,55 +121,48 @@ def test_initial_library_filter_records_explicit_removal_reason() -> None:
 
     assessments = validate_initial_library_filter(
         candidates,
-        {"decisions": ["remove_unusable"]},
+        {"decisions": ["remove_incomplete"]},
         PROFILE,
         "en",
     )
 
     assert assessments["k001"].approved is False
-    assert assessments["k001"].category == "remove_unusable"
+    assert assessments["k001"].category == "remove_incomplete"
     assert assessments["k001"].business_relevance == 0.0
 
 
-def test_initial_library_filter_requires_provider_evidence_for_entity_removal() -> None:
+def test_initial_library_filter_rejects_legacy_non_usability_category() -> None:
     candidates, _ = prepare_seed_candidates(
-        [RawKeyword(keyword="cloud reporting platform", source="labs_site")],
+        [RawKeyword(keyword="clear unrelated query", source="labs_site")],
+        PROFILE,
+        "en",
+    )
+
+    with pytest.raises(ValueError, match="invalid decision category"):
+        validate_initial_library_filter(
+            candidates,
+            {"decisions": ["remove_irrelevant"]},
+            PROFILE,
+            "en",
+        )
+
+
+def test_initial_library_filter_does_not_override_unusable_removal() -> None:
+    candidates, _ = prepare_seed_candidates(
+        [RawKeyword(keyword="candidate phrase", source="labs_site")],
         PROFILE,
         "en",
     )
 
     assessments = validate_initial_library_filter(
         candidates,
-        {"decisions": ["remove_entity"]},
+        {"decisions": ["remove_incomplete"]},
         PROFILE,
         "en",
     )
 
-    assert assessments["k001"].approved is True
-    assert assessments["k001"].category == "keep"
-
-
-def test_initial_library_filter_keeps_keywords_supported_across_profile_evidence() -> None:
-    profile = {
-        "business_type": "Analytics software",
-        "products_services": ["Mobile analytics"],
-        "content_topics": ["Reporting dashboards"],
-    }
-    candidates, _ = prepare_seed_candidates(
-        [RawKeyword(keyword="mobile reporting", source="labs_site")],
-        profile,
-        "en",
-    )
-
-    assessments = validate_initial_library_filter(
-        candidates,
-        {"decisions": ["remove_irrelevant"]},
-        profile,
-        "en",
-    )
-
-    assert assessments["k001"].approved is True
-    assert assessments["k001"].category == "keep"
+    assert assessments["k001"].approved is False
+    assert assessments["k001"].category == "remove_incomplete"
 
 
 def test_equal_volume_variants_are_deduplicated_deterministically() -> None:
@@ -2022,24 +1990,56 @@ def test_classification_does_not_filter_uncertain_keywords() -> None:
     assert candidate.included is True
 
 
-def test_priority_reweights_missing_metrics_instead_of_scoring_them_as_zero() -> None:
+def test_priority_scores_missing_metrics_as_zero_without_reweighting() -> None:
     candidate = MergedCandidate(
         keyword="solar panel installation",
         normalized_keyword="solar panel installation",
         rows=[],
-        relevance=1,
+        relevance=0.8,
         included=True,
     )
 
     score, confidence, details = priority_score(
         candidate,
-        metric=None,
+        metric={},
         profile=PROFILE,
         language="en",
-        volume_percentile=None,
+        volume_percentile=75,
     )
 
-    assert score > 0
-    assert 0 < confidence < 1
-    assert details["values"]["search_volume"] is None
+    assert score == 38.0
+    assert confidence == 0.5
+    assert details["values"]["search_volume"] == 75
     assert details["values"]["difficulty"] is None
+    assert details["values"]["intent"] is None
+
+
+def test_priority_v2_uses_demand_difficulty_relevance_and_intent_weights() -> None:
+    candidate = MergedCandidate(
+        keyword="solar panel installation",
+        normalized_keyword="solar panel installation",
+        rows=[],
+        relevance=0.8,
+        included=True,
+    )
+
+    score, confidence, details = priority_score(
+        candidate,
+        metric={"keyword_difficulty": 20, "intent": "transactional"},
+        profile=PROFILE,
+        language="en",
+        volume_percentile=90,
+    )
+
+    assert score == 87.0
+    assert confidence == 1.0
+    assert details == {
+        "rule_version": "priority-v3",
+        "values": {
+            "business_relevance": 80.0,
+            "search_volume": 90,
+            "difficulty": 80.0,
+            "intent": 100.0,
+        },
+        "available_weight": 100.0,
+    }

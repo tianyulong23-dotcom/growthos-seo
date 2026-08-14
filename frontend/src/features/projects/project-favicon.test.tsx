@@ -28,11 +28,11 @@ const project: Project = {
 }
 
 describe("ProjectFavicon", () => {
-  it("does not request or display a favicon before site understanding finishes", () => {
+  it("displays a globe before site understanding finishes", () => {
     const { container } = render(<ProjectFavicon project={project} />)
 
     expect(container.querySelector("img")).toBeNull()
-    expect(container.firstChild).toBeNull()
+    expect(container.querySelector("svg")).not.toBeNull()
   })
 
   it("displays only the favicon URL saved by the crawler", () => {

@@ -1,13 +1,22 @@
 from fastapi import APIRouter
 
 from app.api.routes.agents import router as agents_router
+from app.api.routes.ai_edits import router as ai_edits_router
+from app.api.routes.assets import router as assets_router
 from app.api.routes.audits import router as audits_router
 from app.api.routes.backlinks import router as backlinks_router
-from app.api.routes.content import content_plan_router, router as content_router
+from app.api.routes.content import (
+    content_governance_router,
+    content_plan_router,
+    router as content_router,
+)
 from app.api.routes.data_sources import router as data_sources_router
 from app.api.routes.health import router as health_router
 from app.api.routes.keywords import router as keywords_router
 from app.api.routes.projects import router as projects_router
+from app.api.routes.publications import preview_router as article_preview_router
+from app.api.routes.publications import router as publications_router
+from app.api.routes.performance import router as performance_router
 from app.api.routes.settings import router as settings_router
 from app.api.routes.service_connections import router as service_connections_router
 
@@ -22,4 +31,10 @@ api_router.include_router(data_sources_router)
 api_router.include_router(keywords_router)
 api_router.include_router(backlinks_router)
 api_router.include_router(content_router)
+api_router.include_router(ai_edits_router)
+api_router.include_router(content_governance_router)
 api_router.include_router(content_plan_router)
+api_router.include_router(publications_router)
+api_router.include_router(article_preview_router)
+api_router.include_router(assets_router)
+api_router.include_router(performance_router)

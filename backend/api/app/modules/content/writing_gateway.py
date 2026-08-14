@@ -4,13 +4,13 @@ import asyncio
 import json
 import socket
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Any, Generic, Literal, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from app.modules.content.prompts import BASE_RULES, CALL_INSTRUCTIONS, FORMAT_REPAIR
 from app.modules.settings.provider_privacy import apply_provider_privacy
 from app.modules.settings.service import (
     AIProviderConnectionError,
@@ -52,14 +52,14 @@ FAILURES_BEFORE_CIRCUIT_OPEN = 2
 
 
 class EvidenceClaim(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Older artifacts can contain the retired `supported` marker.
+    model_config = ConfigDict(extra="ignore")
 
     claim_id: str = Field(min_length=1, max_length=100)
     claim: str = Field(min_length=1, max_length=1000)
     source_url: str = Field(min_length=1, max_length=2000)
     source_title: str = Field(default="", max_length=500)
     quote: str = Field(default="", max_length=2000)
-    supported: bool = True
     section_id: str | None = Field(default=None, max_length=100)
 
 
@@ -70,7 +70,7 @@ class OutlineSection(BaseModel):
     heading: str = Field(min_length=1, max_length=300)
     objective: str = Field(min_length=1, max_length=1000)
     required_questions: list[str] = Field(default_factory=list, max_length=10)
-    claim_ids: list[str] = Field(default_factory=list, max_length=20)
+    claim_ids: list[str] = Field(default_factory=list)
     internal_urls: list[str] = Field(default_factory=list, max_length=10)
     coverage_points: list[str] = Field(default_factory=list, max_length=12)
     section_type: Literal[
@@ -92,13 +92,11 @@ class OutlineSection(BaseModel):
 
 
 class ContractSection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Older stored artifacts may still contain retired evidence-boundary fields.
+    model_config = ConfigDict(extra="ignore")
 
     section_id: str = Field(min_length=1, max_length=100)
     required_questions: list[str] = Field(default_factory=list, max_length=10)
-    allowed_claim_ids: list[str] = Field(default_factory=list, max_length=20)
-    allowed_source_urls: list[str] = Field(default_factory=list, max_length=20)
-    allowed_internal_urls: list[str] = Field(default_factory=list, max_length=10)
 
 
 class ArticleContract(BaseModel):
@@ -109,7 +107,41 @@ class ArticleContract(BaseModel):
     required_questions: list[str] = Field(default_factory=list, max_length=20)
     sections: list[ContractSection] = Field(min_length=1, max_length=12)
     faq_questions: list[str] = Field(default_factory=list, max_length=10)
-    unsupported_claim_boundaries: list[str] = Field(default_factory=list, max_length=20)
+
+
+class CriticalResearchGap(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    missing_information: str = Field(min_length=1, max_length=1000)
+    why_it_blocks_core_answer: str = Field(min_length=1, max_length=1000)
+    research_query: str = Field(min_length=1, max_length=1500)
+
+
+class ChartDataPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=120)
+    value: Decimal
+    unit: str = Field(default="", max_length=30)
+    claim_id: str = Field(min_length=1, max_length=100)
+
+
+class VisualPlanItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    visual_id: str = Field(min_length=1, max_length=100)
+    section_id: str = Field(min_length=1, max_length=100)
+    reader_job: Literal["explain", "demonstrate", "compare", "prove", "orient"]
+    source_strategy: Literal["project_asset", "screenshot", "chart", "stock", "ai"]
+    required: bool = False
+    title: str = Field(min_length=1, max_length=300)
+    prompt: str | None = Field(default=None, max_length=2000)
+    alt_instruction: str = Field(min_length=1, max_length=1000)
+    caption: str | None = Field(default=None, max_length=1000)
+    aspect_ratio: Literal["16:9", "4:3", "1:1"] = "16:9"
+    data_claim_ids: list[str] = Field(default_factory=list, max_length=20)
+    target_url: str | None = Field(default=None, max_length=2000)
+    chart_data: list[ChartDataPoint] = Field(default_factory=list, max_length=12)
 
 
 class ArticlePlan(BaseModel):
@@ -122,10 +154,15 @@ class ArticlePlan(BaseModel):
     meta_description: str = Field(min_length=1, max_length=500)
     slug: str = Field(min_length=1, max_length=200)
     total_word_target: int = Field(default=0, ge=0, le=12000)
-    gap_to_section_mapping: dict[str, str] = Field(default_factory=dict)
-    claims: list[EvidenceClaim] = Field(default_factory=list, max_length=100)
+    gap_to_section_mapping: dict[str, str | list[str]] = Field(default_factory=dict)
+    claims: list[EvidenceClaim] = Field(default_factory=list)
     sections: list[OutlineSection] = Field(min_length=1, max_length=12)
+    visuals: list[VisualPlanItem] = Field(default_factory=list, max_length=12)
     contract: ArticleContract | None = None
+    critical_research_gaps: list[CriticalResearchGap] = Field(
+        default_factory=list,
+        max_length=4,
+    )
 
 
 class SectionDraft(BaseModel):
@@ -213,7 +250,9 @@ class WritingGateway:
         self._consecutive_failures = 0
 
     async def configured_record(self) -> AIProviderSettingsRecord:
-        current = await build_ai_settings_service().effective_record()
+        current = (
+            await build_ai_settings_service().effective_record()
+        ).for_task("content")
         if not self.model_snapshot:
             return current
         return replace(
@@ -221,8 +260,15 @@ class WritingGateway:
             provider=str(
                 self.model_snapshot.get("provider") or current.provider
             ),
+            api_protocol=str(
+                self.model_snapshot.get("api_protocol") or current.api_protocol
+            ),
             base_url=str(self.model_snapshot.get("base_url") or current.base_url),
             model=str(self.model_snapshot.get("model") or current.model),
+            reasoning_effort=str(
+                self.model_snapshot.get("reasoning_effort")
+                or current.reasoning_effort
+            ),
             request_timeout_seconds=int(
                 self.model_snapshot.get("request_timeout_seconds")
                 or current.request_timeout_seconds
@@ -251,24 +297,21 @@ class WritingGateway:
             )
         output_schema = output_type.model_json_schema()
         messages = [
-            {"role": "system", "content": BASE_RULES},
-            {"role": "system", "content": CALL_INSTRUCTIONS[call_type]},
-            {
-                "role": "system",
-                "content": (
-                    "Required output JSON Schema:\n"
-                    + json.dumps(
-                        output_schema,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                ),
-            },
             {
                 "role": "user",
-                "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "content": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
             },
         ]
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": call_type,
+                "strict": False,
+                "schema": output_schema,
+            },
+        }
         usages: list[dict[str, int | float | str | None]] = []
         request_attempts = 0
         try:
@@ -277,6 +320,7 @@ class WritingGateway:
                     response = await self._request_with_retries(
                         record,
                         messages,
+                        response_format=response_format,
                         idempotency_key=(
                             f"{request_key}:{format_attempt}" if request_key else None
                         ),
@@ -323,28 +367,6 @@ class WritingGateway:
                             attempts=request_attempts,
                             format_attempts=2,
                         ) from exc
-                    previous = ""
-                    try:
-                        previous = str(response["choices"][0]["message"]["content"])
-                    except (KeyError, IndexError, TypeError):
-                        pass
-                    messages.extend(
-                        [
-                            {"role": "assistant", "content": previous[:50000]},
-                            {
-                                "role": "user",
-                                "content": (
-                                    FORMAT_REPAIR
-                                    + "\nRequired output JSON Schema:\n"
-                                    + json.dumps(
-                                        output_schema,
-                                        ensure_ascii=False,
-                                        separators=(",", ":"),
-                                    )
-                                ),
-                            },
-                        ]
-                    )
         except (WritingOutputError, WritingRequestError):
             self._register_failure()
             raise
@@ -359,13 +381,18 @@ class WritingGateway:
         record: AIProviderSettingsRecord,
         messages: list[dict[str, str]],
         *,
+        response_format: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         timeout_failures = 0
         for attempt in range(record.max_retries + 1):
             try:
                 return await asyncio.to_thread(
-                    self._request, record, messages, idempotency_key
+                    self._request,
+                    record,
+                    messages,
+                    idempotency_key,
+                    response_format,
                 )
             except WritingRequestError as exc:
                 if exc.code == "writing_provider_timeout":
@@ -390,18 +417,47 @@ class WritingGateway:
         record: AIProviderSettingsRecord,
         messages: list[dict[str, str]],
         idempotency_key: str | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        endpoint = (
-            record.base_url
-            if record.base_url.endswith("/chat/completions")
-            else record.base_url.rstrip("/") + "/chat/completions"
-        )
-        body = json.dumps(
-            apply_provider_privacy(record.base_url, {
+        if record.api_protocol == "responses":
+            endpoint = (
+                record.base_url
+                if record.base_url.endswith("/responses")
+                else record.base_url.rstrip("/") + "/responses"
+            )
+            selected_format = response_format or {"type": "json_object"}
+            if selected_format.get("type") == "json_schema" and isinstance(
+                selected_format.get("json_schema"), dict
+            ):
+                schema = selected_format["json_schema"]
+                text_format = {
+                    "type": "json_schema",
+                    "name": str(schema.get("name") or "writing_response"),
+                    "strict": bool(schema.get("strict", False)),
+                    "schema": schema.get("schema") or {},
+                }
+            else:
+                text_format = selected_format
+            request_payload = {
+                "model": record.model,
+                "input": messages,
+                "text": {"format": text_format},
+                "reasoning": {"effort": record.reasoning_effort},
+            }
+        else:
+            endpoint = (
+                record.base_url
+                if record.base_url.endswith("/chat/completions")
+                else record.base_url.rstrip("/") + "/chat/completions"
+            )
+            request_payload = {
                 "model": record.model,
                 "messages": messages,
-                "response_format": {"type": "json_object"},
-            })
+                "response_format": response_format or {"type": "json_object"},
+                "reasoning_effort": record.reasoning_effort,
+            }
+        body = json.dumps(
+            apply_provider_privacy(record.base_url, request_payload)
         ).encode("utf-8")
         headers = {
             "Authorization": "Bearer " + record.api_key,
@@ -449,6 +505,29 @@ class WritingGateway:
             raise WritingOutputError("writing_response_invalid") from exc
         if not isinstance(value, dict):
             raise WritingOutputError("writing_response_invalid")
+        if record.api_protocol == "responses":
+            text_parts: list[str] = []
+            output = value.get("output")
+            for item in output if isinstance(output, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                for part in content if isinstance(content, list) else []:
+                    if (
+                        isinstance(part, dict)
+                        and part.get("type") in {"output_text", "text"}
+                        and isinstance(part.get("text"), str)
+                    ):
+                        text_parts.append(part["text"])
+            if not text_parts:
+                raise WritingOutputError("writing_response_invalid")
+            value = {
+                **value,
+                "choices": [{
+                    "message": {"role": "assistant", "content": "".join(text_parts)},
+                    "finish_reason": value.get("status"),
+                }],
+            }
         return value
 
     def _circuit_is_open(self) -> bool:

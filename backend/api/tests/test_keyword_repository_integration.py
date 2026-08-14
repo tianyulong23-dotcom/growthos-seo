@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -243,6 +244,669 @@ async def test_initial_workflow_orphan_recovery_is_capped_atomically() -> None:
             await session.execute(
                 text("DELETE FROM projects WHERE id = :project_id"),
                 {"project_id": project_id},
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+async def test_not_configured_run_resumes_after_service_upgrade_with_existing_setting() -> None:
+    engine = create_async_engine(
+        _database_url(),
+        pool_pre_ping=True,
+        connect_args={
+            "server_settings": {
+                "search_path": "public, platform, crawling, audit",
+            }
+        },
+    )
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    repository = SQLAlchemyKeywordRepository(sessions)
+    token = uuid4().hex
+    organization_id = f"configuration-recovery-org-{token}"
+    project_id = f"configuration-recovery-project-{token}"
+    run_id = f"configuration-recovery-run-{token}"
+    workflow_id = f"keywords:build:{run_id}:blocked"
+    service_started_at = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO projects (
+                        id, organization_id, name, domain, country, language
+                    )
+                    VALUES (:project_id, :organization_id, 'Configuration recovery',
+                            :domain, 'US', 'en')
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "organization_id": organization_id,
+                    "domain": f"{token}.example.test",
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO dataforseo_provider_settings (
+                        organization_id, login, password_encrypted, updated_at
+                    )
+                    VALUES (:organization_id, 'saved-login', :password, :updated_at)
+                    """
+                ),
+                {
+                    "organization_id": organization_id,
+                    "password": b"plaintext:v1:saved-password",
+                    "updated_at": service_started_at - timedelta(hours=2),
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_build_runs (
+                        id, organization_id, project_id, kind, round_number,
+                        status, stage, gap_status, error_code, updated_at
+                    )
+                    VALUES (:run_id, :organization_id, :project_id, 'initial', 1,
+                            'blocked', 'waiting_for_configuration', 'not_requested',
+                            'dataforseo_not_configured', :updated_at)
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "updated_at": service_started_at - timedelta(hours=1),
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_workflow_dispatches (
+                        run_id, workflow_id, task_payload, status
+                    )
+                    VALUES (
+                        :run_id, :workflow_id, CAST(:task_payload AS jsonb), 'dispatched'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "workflow_id": workflow_id,
+                    "task_payload": json.dumps({"run_id": run_id}),
+                },
+            )
+            await session.commit()
+
+        resumed = await repository.resume_ready_blocked_runs(
+            organization_id,
+            service_started_at=service_started_at,
+            task_queue="keywords-python",
+            dataforseo_environment_configured=False,
+            ai_environment_configured=False,
+            limit=10,
+        )
+
+        assert resumed == 1
+        async with sessions() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT r.id, r.status, r.stage, d.status AS dispatch_status
+                        FROM keyword_build_runs AS r
+                        JOIN keyword_workflow_dispatches AS d ON d.run_id = r.id
+                        WHERE r.id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+            ).one()
+        assert row.id == run_id
+        assert row.status == "queued"
+        assert row.stage == "waiting_for_recovery"
+        assert row.dispatch_status == "pending"
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM dataforseo_provider_settings "
+                    "WHERE organization_id = :organization_id"
+                ),
+                {"organization_id": organization_id},
+            )
+            await session.execute(
+                text("DELETE FROM projects WHERE id = :project_id"),
+                {"project_id": project_id},
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+async def test_not_configured_run_resumes_after_keyword_worker_restart() -> None:
+    engine = create_async_engine(
+        _database_url(),
+        pool_pre_ping=True,
+        connect_args={
+            "server_settings": {
+                "search_path": "public, platform, crawling, audit",
+            }
+        },
+    )
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    repository = SQLAlchemyKeywordRepository(sessions)
+    token = uuid4().hex
+    organization_id = f"worker-recovery-org-{token}"
+    project_id = f"worker-recovery-project-{token}"
+    run_id = f"worker-recovery-run-{token}"
+    workflow_id = f"keywords:build:{run_id}:blocked"
+    task_queue = f"keywords-python-{token}"
+    run_failed_at = datetime.now(UTC) - timedelta(minutes=5)
+    try:
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO projects (
+                        id, organization_id, name, domain, country, language
+                    )
+                    VALUES (:project_id, :organization_id, 'Worker recovery',
+                            :domain, 'US', 'en')
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "organization_id": organization_id,
+                    "domain": f"{token}.example.test",
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO dataforseo_provider_settings (
+                        organization_id, login, password_encrypted, updated_at
+                    )
+                    VALUES (:organization_id, 'saved-login', :password, :updated_at)
+                    """
+                ),
+                {
+                    "organization_id": organization_id,
+                    "password": b"plaintext:v1:saved-password",
+                    "updated_at": run_failed_at - timedelta(hours=1),
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_build_runs (
+                        id, organization_id, project_id, kind, round_number,
+                        status, stage, gap_status, partial_failures,
+                        error_code, updated_at
+                    )
+                    VALUES (:run_id, :organization_id, :project_id, 'initial', 1,
+                            'blocked', 'waiting_for_configuration', 'not_requested',
+                            CAST(:partial_failures AS jsonb),
+                            'dataforseo_not_configured', :updated_at)
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "partial_failures": json.dumps(
+                        [
+                            {
+                                "source": "labs_site",
+                                "code": "dataforseo_not_configured",
+                                "message": "missing configuration",
+                            }
+                        ]
+                    ),
+                    "updated_at": run_failed_at,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_workflow_dispatches (
+                        run_id, workflow_id, task_payload, status
+                    )
+                    VALUES (
+                        :run_id, :workflow_id, CAST(:task_payload AS jsonb), 'dispatched'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "workflow_id": workflow_id,
+                    "task_payload": json.dumps({"run_id": run_id}),
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_worker_heartbeats (
+                        worker_id, task_queue, started_at, last_seen_at
+                    )
+                    VALUES (:worker_id, :task_queue, :started_at, :started_at)
+                    """
+                ),
+                {
+                    "worker_id": f"worker-{token}",
+                    "task_queue": task_queue,
+                    "started_at": run_failed_at + timedelta(minutes=1),
+                },
+            )
+            await session.commit()
+
+        resumed = await repository.resume_ready_blocked_runs(
+            organization_id,
+            service_started_at=run_failed_at - timedelta(hours=2),
+            task_queue=task_queue,
+            dataforseo_environment_configured=False,
+            ai_environment_configured=False,
+            limit=10,
+        )
+
+        assert resumed == 1
+        async with sessions() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT run.status, run.stage, run.partial_failures,
+                               dispatch.status AS dispatch_status
+                        FROM keyword_build_runs AS run
+                        JOIN keyword_workflow_dispatches AS dispatch
+                          ON dispatch.run_id = run.id
+                        WHERE run.id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+            ).one()
+        assert row.status == "queued"
+        assert row.stage == "waiting_for_recovery"
+        assert row.partial_failures == []
+        assert row.dispatch_status == "pending"
+        assert (
+            await repository.resume_ready_blocked_runs(
+                organization_id,
+                service_started_at=run_failed_at - timedelta(hours=2),
+                task_queue=task_queue,
+                dataforseo_environment_configured=False,
+                ai_environment_configured=False,
+                limit=10,
+            )
+            == 0
+        )
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM dataforseo_provider_settings "
+                    "WHERE organization_id = :organization_id"
+                ),
+                {"organization_id": organization_id},
+            )
+            await session.execute(
+                text("DELETE FROM projects WHERE id = :project_id"),
+                {"project_id": project_id},
+            )
+            await session.execute(
+                text("DELETE FROM keyword_worker_heartbeats WHERE worker_id = :worker_id"),
+                {"worker_id": f"worker-{token}"},
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["unsupported_country", "dataforseo_task_failed"],
+)
+async def test_provider_request_run_resumes_after_keyword_worker_upgrade(
+    error_code: str,
+) -> None:
+    engine = create_async_engine(
+        _database_url(),
+        pool_pre_ping=True,
+        connect_args={
+            "server_settings": {
+                "search_path": "public, platform, crawling, audit",
+            }
+        },
+    )
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    repository = SQLAlchemyKeywordRepository(sessions)
+    token = uuid4().hex
+    organization_id = f"country-recovery-org-{token}"
+    project_id = f"country-recovery-project-{token}"
+    run_id = f"country-recovery-run-{token}"
+    workflow_id = f"keywords:build:{run_id}:blocked"
+    task_queue = f"keywords-python-{token}"
+    run_failed_at = datetime.now(UTC) - timedelta(minutes=5)
+    try:
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO projects (
+                        id, organization_id, name, domain, country, language,
+                        updated_at
+                    )
+                    VALUES (:project_id, :organization_id, 'Country recovery',
+                            :domain, 'UNITED STATES', 'en', :updated_at)
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "organization_id": organization_id,
+                    "domain": f"{token}.example.test",
+                    "updated_at": run_failed_at - timedelta(minutes=1),
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_build_runs (
+                        id, organization_id, project_id, kind, round_number,
+                        status, stage, gap_status, partial_failures,
+                        error_code, updated_at
+                    )
+                    VALUES (:run_id, :organization_id, :project_id, 'initial', 1,
+                            'blocked', 'waiting_for_project_update', 'not_requested',
+                            CAST(:partial_failures AS jsonb),
+                            :error_code, :updated_at)
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "partial_failures": json.dumps(
+                        [
+                            {
+                                "source": "labs_site",
+                                "code": error_code,
+                                "message": "provider request failed",
+                            }
+                        ]
+                    ),
+                    "error_code": error_code,
+                    "updated_at": run_failed_at,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_workflow_dispatches (
+                        run_id, workflow_id, task_payload, status
+                    )
+                    VALUES (
+                        :run_id, :workflow_id, CAST(:task_payload AS jsonb), 'dispatched'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "workflow_id": workflow_id,
+                    "task_payload": json.dumps({"run_id": run_id}),
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_worker_heartbeats (
+                        worker_id, task_queue, started_at, last_seen_at
+                    )
+                    VALUES (:worker_id, :task_queue, :started_at, :started_at)
+                    """
+                ),
+                {
+                    "worker_id": f"worker-{token}",
+                    "task_queue": task_queue,
+                    "started_at": run_failed_at + timedelta(minutes=1),
+                },
+            )
+            await session.commit()
+
+        resumed = await repository.resume_ready_blocked_runs(
+            organization_id,
+            service_started_at=run_failed_at - timedelta(hours=2),
+            task_queue=task_queue,
+            dataforseo_environment_configured=False,
+            ai_environment_configured=False,
+            limit=10,
+        )
+
+        assert resumed == 1
+        async with sessions() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT run.status, run.stage, run.partial_failures,
+                               dispatch.status AS dispatch_status
+                        FROM keyword_build_runs AS run
+                        JOIN keyword_workflow_dispatches AS dispatch
+                          ON dispatch.run_id = run.id
+                        WHERE run.id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+            ).one()
+        assert row.status == "queued"
+        assert row.stage == "waiting_for_recovery"
+        assert row.partial_failures == []
+        assert row.dispatch_status == "pending"
+        assert (
+            await repository.resume_ready_blocked_runs(
+                organization_id,
+                service_started_at=run_failed_at - timedelta(hours=2),
+                task_queue=task_queue,
+                dataforseo_environment_configured=False,
+                ai_environment_configured=False,
+                limit=10,
+            )
+            == 0
+        )
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                text("DELETE FROM projects WHERE id = :project_id"),
+                {"project_id": project_id},
+            )
+            await session.execute(
+                text("DELETE FROM keyword_worker_heartbeats WHERE worker_id = :worker_id"),
+                {"worker_id": f"worker-{token}"},
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+async def test_failed_competitor_analysis_resumes_after_keyword_worker_restart() -> None:
+    engine = create_async_engine(
+        _database_url(),
+        pool_pre_ping=True,
+        connect_args={
+            "server_settings": {
+                "search_path": "public, platform, crawling, audit",
+            }
+        },
+    )
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    repository = SQLAlchemyKeywordRepository(sessions)
+    token = uuid4().hex
+    organization_id = f"competitor-config-recovery-org-{token}"
+    project_id = f"competitor-config-recovery-project-{token}"
+    run_id = f"competitor-config-recovery-run-{token}"
+    workflow_id = f"keywords:competitor-analysis:{run_id}:failed"
+    task_queue = f"keywords-python-{token}"
+    run_failed_at = datetime.now(UTC) - timedelta(minutes=5)
+    try:
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO projects (
+                        id, organization_id, name, domain, country, language
+                    )
+                    VALUES (:project_id, :organization_id, 'Competitor config recovery',
+                            :domain, 'US', 'en')
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "organization_id": organization_id,
+                    "domain": f"{token}.example.test",
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO dataforseo_provider_settings (
+                        organization_id, login, password_encrypted, updated_at
+                    )
+                    VALUES (:organization_id, 'saved-login', :password, :updated_at)
+                    """
+                ),
+                {
+                    "organization_id": organization_id,
+                    "password": b"plaintext:v1:saved-password",
+                    "updated_at": run_failed_at - timedelta(hours=1),
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_competitor_analysis_runs (
+                        id, organization_id, project_id, workflow_id,
+                        target_domain, country, language, status, stage,
+                        progress, competitor_limit, keyword_limit, error_code,
+                        error_detail, finished_at, updated_at
+                    )
+                    VALUES (
+                        :run_id, :organization_id, :project_id, :workflow_id,
+                        :domain, 'US', 'en', 'failed', 'failed', 100, 5, 100,
+                        'dataforseo_not_configured', 'missing configuration',
+                        :updated_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "workflow_id": workflow_id,
+                    "domain": f"{token}.example.test",
+                    "updated_at": run_failed_at,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_competitor_analysis_dispatches (
+                        run_id, workflow_id, task_payload, status, dispatched_at
+                    )
+                    VALUES (
+                        :run_id, :workflow_id, CAST(:payload AS jsonb),
+                        'dispatched', :updated_at
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "workflow_id": workflow_id,
+                    "payload": json.dumps(
+                        {
+                            "organization_id": organization_id,
+                            "project_id": project_id,
+                            "run_id": run_id,
+                        }
+                    ),
+                    "updated_at": run_failed_at,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_worker_heartbeats (
+                        worker_id, task_queue, started_at, last_seen_at
+                    )
+                    VALUES (:worker_id, :task_queue, :started_at, :started_at)
+                    """
+                ),
+                {
+                    "worker_id": f"worker-{token}",
+                    "task_queue": task_queue,
+                    "started_at": run_failed_at + timedelta(minutes=1),
+                },
+            )
+            await session.commit()
+
+        resumed = await repository.resume_ready_failed_competitor_analysis_runs(
+            organization_id,
+            task_queue=task_queue,
+            dataforseo_environment_configured=False,
+            ai_environment_configured=False,
+            limit=10,
+        )
+
+        assert resumed == 1
+        async with sessions() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT run.status, run.stage, run.error_code,
+                               run.finished_at, run.recovery_count, run.workflow_id,
+                               dispatch.status AS dispatch_status,
+                               dispatch.task_payload
+                        FROM keyword_competitor_analysis_runs AS run
+                        JOIN keyword_competitor_analysis_dispatches AS dispatch
+                          ON dispatch.run_id = run.id
+                        WHERE run.id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+            ).one()
+        assert row.status == "queued"
+        assert row.stage == "waiting_for_recovery"
+        assert row.error_code is None
+        assert row.finished_at is None
+        assert row.recovery_count == 1
+        assert row.dispatch_status == "pending"
+        assert row.task_payload["_recovery_count"] == 1
+        assert row.workflow_id != workflow_id
+        assert (
+            await repository.resume_ready_failed_competitor_analysis_runs(
+                organization_id,
+                task_queue=task_queue,
+                dataforseo_environment_configured=False,
+                ai_environment_configured=False,
+                limit=10,
+            )
+            == 0
+        )
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM dataforseo_provider_settings "
+                    "WHERE organization_id = :organization_id"
+                ),
+                {"organization_id": organization_id},
+            )
+            await session.execute(
+                text("DELETE FROM projects WHERE id = :project_id"),
+                {"project_id": project_id},
+            )
+            await session.execute(
+                text("DELETE FROM keyword_worker_heartbeats WHERE worker_id = :worker_id"),
+                {"worker_id": f"worker-{token}"},
             )
             await session.commit()
         await engine.dispose()
@@ -1333,15 +1997,249 @@ async def test_competitor_analysis_is_fixed_to_five_by_one_hundred_and_aggregate
             project_id,
             page=1,
             page_size=50,
+            opportunity_status="all",
         )
         empty_competitors = await repository.list_competitors(
             organization_id,
             project_id,
         )
-        assert empty_latest.run_id == queued_refresh.run_id
-        assert empty_latest.total == 0
-        assert empty_competitors.run_id == queued_refresh.run_id
-        assert empty_competitors.items == []
+        assert empty_latest.run_id == run.run_id
+        assert empty_latest.total == 1
+        assert empty_competitors.run_id == run.run_id
+        assert [item.domain for item in empty_competitors.items] == [
+            "competitor.example"
+        ]
+
+        manual_append = await repository.create_competitor_analysis(
+            organization_id,
+            project_id,
+            KeywordCompetitorAnalysisRequest(
+                mode="manual",
+                competitor_domains=["manual-appended.example"],
+            ),
+        )
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_competitors (
+                        id, organization_id, project_id, analysis_run_id,
+                        domain, provider_rank, status, keyword_count, cost_usd
+                    )
+                    VALUES (
+                        :competitor_id, :organization_id, :project_id, :run_id,
+                        'manual-appended.example', 1, 'completed', 1, 0
+                    )
+                    """
+                ),
+                {
+                    "competitor_id": f"manual-appended-{token}",
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "run_id": manual_append.run_id,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_competitor_opportunities (
+                        id, organization_id, project_id, analysis_run_id,
+                        keyword, normalized_keyword, competitor_count,
+                        opportunity_score, search_volume, metrics_fetched_at
+                    )
+                    VALUES (
+                        :opportunity_id, :organization_id, :project_id, :run_id,
+                        'manual opportunity', 'manual opportunity', 1,
+                        65, 700, now()
+                    )
+                    """
+                ),
+                {
+                    "opportunity_id": f"manual-opportunity-{token}",
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "run_id": manual_append.run_id,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    UPDATE keyword_competitor_analysis_runs
+                    SET status = 'completed', stage = 'completed',
+                        completed_competitors = 1, unique_keyword_count = 1,
+                        finished_at = now()
+                    WHERE id = :run_id
+                    """
+                ),
+                {"run_id": manual_append.run_id},
+            )
+            await session.commit()
+
+        appended_competitors = await repository.list_competitors(
+            organization_id,
+            project_id,
+        )
+        appended_opportunities = await repository.list_competitor_opportunities(
+            organization_id,
+            project_id,
+            page=1,
+            page_size=50,
+            opportunity_status="all",
+        )
+        assert {item.domain for item in appended_competitors.items} == {
+            "competitor.example",
+            "manual-appended.example",
+        }
+        assert {item.normalized_keyword for item in appended_opportunities.items} == {
+            "solar panel installation",
+            "manual opportunity",
+        }
+
+        empty_auto = await repository.create_competitor_analysis(
+            organization_id,
+            project_id,
+            KeywordCompetitorAnalysisRequest(mode="auto"),
+        )
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_competitors (
+                        id, organization_id, project_id, analysis_run_id,
+                        domain, provider_rank, status, keyword_count, cost_usd
+                    )
+                    VALUES (
+                        :competitor_id, :organization_id, :project_id, :run_id,
+                        'candidate-only.example', 1, 'pending', 0, 0
+                    )
+                    """
+                ),
+                {
+                    "competitor_id": f"candidate-only-{token}",
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "run_id": empty_auto.run_id,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    UPDATE keyword_competitor_analysis_runs
+                    SET status = 'completed', stage = 'completed',
+                        discovered_count = 25, completed_competitors = 0,
+                        unique_keyword_count = 0, finished_at = now()
+                    WHERE id = :run_id
+                    """
+                ),
+                {"run_id": empty_auto.run_id},
+            )
+            await session.commit()
+
+        after_empty_auto = await repository.list_competitors(
+            organization_id,
+            project_id,
+        )
+        opportunities_after_empty_auto = await repository.list_competitor_opportunities(
+            organization_id,
+            project_id,
+            page=1,
+            page_size=50,
+            opportunity_status="all",
+        )
+        assert {item.domain for item in after_empty_auto.items} == {
+            "competitor.example",
+            "manual-appended.example",
+        }
+        assert "candidate-only.example" not in {
+            item.domain for item in after_empty_auto.items
+        }
+        assert {
+            item.normalized_keyword for item in opportunities_after_empty_auto.items
+        } == {
+            "solar panel installation",
+            "manual opportunity",
+        }
+
+        replacement_auto = await repository.create_competitor_analysis(
+            organization_id,
+            project_id,
+            KeywordCompetitorAnalysisRequest(mode="auto"),
+        )
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_competitors (
+                        id, organization_id, project_id, analysis_run_id,
+                        domain, provider_rank, status, keyword_count, cost_usd
+                    )
+                    VALUES (
+                        :competitor_id, :organization_id, :project_id, :run_id,
+                        'replacement-auto.example', 1, 'completed', 1, 0
+                    )
+                    """
+                ),
+                {
+                    "competitor_id": f"replacement-auto-{token}",
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "run_id": replacement_auto.run_id,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO keyword_competitor_opportunities (
+                        id, organization_id, project_id, analysis_run_id,
+                        keyword, normalized_keyword, competitor_count,
+                        opportunity_score, search_volume, metrics_fetched_at
+                    )
+                    VALUES (
+                        :opportunity_id, :organization_id, :project_id, :run_id,
+                        'replacement opportunity', 'replacement opportunity', 1,
+                        80, 1200, now()
+                    )
+                    """
+                ),
+                {
+                    "opportunity_id": f"replacement-opportunity-{token}",
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "run_id": replacement_auto.run_id,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    UPDATE keyword_competitor_analysis_runs
+                    SET status = 'completed', stage = 'completed',
+                        completed_competitors = 1, unique_keyword_count = 1,
+                        finished_at = now()
+                    WHERE id = :run_id
+                    """
+                ),
+                {"run_id": replacement_auto.run_id},
+            )
+            await session.commit()
+
+        replaced_competitors = await repository.list_competitors(
+            organization_id,
+            project_id,
+        )
+        replaced_opportunities = await repository.list_competitor_opportunities(
+            organization_id,
+            project_id,
+            page=1,
+            page_size=50,
+        )
+        assert {item.domain for item in replaced_competitors.items} == {
+            "manual-appended.example",
+            "replacement-auto.example",
+        }
+        assert {item.normalized_keyword for item in replaced_opportunities.items} == {
+            "manual opportunity",
+            "replacement opportunity",
+        }
     finally:
         async with sessions() as session:
             await session.execute(

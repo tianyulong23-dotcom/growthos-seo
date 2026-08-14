@@ -29,7 +29,7 @@ def _database_url() -> str:
     return value.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
-async def test_postgres_coverage_uses_active_article_evidence_and_preserves_unknown() -> None:
+async def test_postgres_coverage_marks_only_active_article_keywords_as_covered() -> None:
     engine = create_async_engine(
         _database_url(),
         pool_pre_ping=True,
@@ -95,8 +95,8 @@ async def test_postgres_coverage_uses_active_article_evidence_and_preserves_unkn
 
         assert [item.status for item in response.results] == [
             "covered",
-            "unknown",
-            "unknown",
+            "uncovered",
+            "uncovered",
         ]
         assert response.results[0].relation_id == article_id
         assert response.results[1].relation_id is None

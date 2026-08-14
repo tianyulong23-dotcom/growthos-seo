@@ -9,7 +9,6 @@ from pydantic import (
     Field,
     StringConstraints,
     TypeAdapter,
-    model_validator,
 )
 
 
@@ -91,9 +90,25 @@ class AgentConversationCollection(BaseModel):
     page_size: int
 
 
+class AgentTimelineEventResponse(BaseModel):
+    id: str
+    event_key: str
+    conversation_id: str | None
+    sequence: int
+    kind: Literal["message", "task", "action"]
+    status: Literal["running", "waiting", "completed", "failed", "cancelled"]
+    title: str
+    content: str | None
+    action: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
 class AgentConversationDetail(BaseModel):
     conversation: AgentConversationResponse
     messages: list[AgentMessageResponse]
+    timeline: list[AgentTimelineEventResponse] = Field(default_factory=list)
     run: AgentRunResponse | None
     action: AgentActionResponse | None
 
@@ -106,7 +121,9 @@ class SendMessageResponse(BaseModel):
 
 class AgentRunStepResponse(BaseModel):
     sequence: int
-    step_type: Literal["model", "tool", "action", "execution", "verification", "cancellation"]
+    step_type: Literal[
+        "model", "tool", "action", "execution", "verification", "cancellation", "budget"
+    ]
     name: str
     label: str
     summary: str | None = None
@@ -231,36 +248,6 @@ class FinalDecision(BaseModel):
     answer: str = Field(min_length=1, max_length=8_000)
     evidence: list[Evidence] = Field(default_factory=list, max_length=20)
     research: ResearchUpdate | None = None
-
-
-class JudgeCriterion(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    requirement: str = Field(min_length=1, max_length=1_000)
-    status: Literal["completed", "partial", "failed", "blocked"]
-    evidence: str = Field(min_length=1, max_length=2_000)
-
-
-class JudgeDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    status: Literal["completed", "partial", "failed", "blocked"]
-    reason: str = Field(min_length=1, max_length=1_000)
-    criteria: list[JudgeCriterion] = Field(min_length=1, max_length=20)
-    remaining_work: list[
-        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1_000)]
-    ] = Field(default_factory=list, max_length=20)
-
-    @model_validator(mode="after")
-    def validate_completion_consistency(self) -> JudgeDecision:
-        all_completed = all(item.status == "completed" for item in self.criteria)
-        if self.status == "completed" and not all_completed:
-            raise ValueError("completed verdict requires every criterion to be completed")
-        if self.status != "completed" and all_completed:
-            raise ValueError("non-completed verdict requires an unfinished criterion")
-        if self.status == "completed" and self.remaining_work:
-            raise ValueError("completed verdict cannot contain remaining work")
-        if self.status != "completed" and not self.remaining_work:
-            raise ValueError("non-completed verdict requires remaining work")
-        return self
 
 
 ModelDecision = Annotated[ToolCallsDecision | FinalDecision, Field(discriminator="type")]

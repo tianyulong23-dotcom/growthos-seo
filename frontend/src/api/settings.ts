@@ -1,10 +1,24 @@
 import { apiRequest } from "@/api/client"
 
 export type SettingsSource = "database" | "environment" | "none"
+export type AIProviderName = "openai" | "anthropic" | "openrouter"
+export type AIReasoningEffort = "low" | "medium" | "high"
+export type AIAPIProtocol = "chat_completions" | "responses"
 
 export type AIProviderSettings = {
+  provider: AIProviderName
+  apiProtocol: AIAPIProtocol
   baseUrl: string
   model: string
+  businessModel: string | null
+  keywordModel: string | null
+  contentModel: string | null
+  agentModel: string | null
+  reasoningEffort: AIReasoningEffort
+  businessReasoningEffort: AIReasoningEffort | null
+  keywordReasoningEffort: AIReasoningEffort | null
+  contentReasoningEffort: AIReasoningEffort | null
+  agentReasoningEffort: AIReasoningEffort | null
   requestTimeoutSeconds: number
   maxRetries: number
   configured: boolean
@@ -14,16 +28,38 @@ export type AIProviderSettings = {
 }
 
 export type AIProviderSettingsInput = {
+  provider: AIProviderName
+  apiProtocol: AIAPIProtocol
   baseUrl: string
   model: string
+  businessModel: string | null
+  keywordModel: string | null
+  contentModel: string | null
+  agentModel: string | null
+  reasoningEffort: AIReasoningEffort
+  businessReasoningEffort: AIReasoningEffort | null
+  keywordReasoningEffort: AIReasoningEffort | null
+  contentReasoningEffort: AIReasoningEffort | null
+  agentReasoningEffort: AIReasoningEffort | null
   requestTimeoutSeconds: number
   maxRetries: number
   apiKey?: string
 }
 
 type AIProviderSettingsResponse = {
+  provider: AIProviderName
+  api_protocol?: AIAPIProtocol
   base_url: string
   model: string
+  business_model?: string | null
+  keyword_model?: string | null
+  content_model?: string | null
+  agent_model?: string | null
+  reasoning_effort?: AIReasoningEffort
+  business_reasoning_effort?: AIReasoningEffort | null
+  keyword_reasoning_effort?: AIReasoningEffort | null
+  content_reasoning_effort?: AIReasoningEffort | null
+  agent_reasoning_effort?: AIReasoningEffort | null
   request_timeout_seconds: number
   max_retries: number
   configured: boolean
@@ -38,10 +74,42 @@ type TestAIProviderSettingsResponse = {
   message: string
 }
 
+const taskConfigurationResponseFields = [
+  "business_model",
+  "api_protocol",
+  "keyword_model",
+  "content_model",
+  "agent_model",
+  "reasoning_effort",
+  "business_reasoning_effort",
+  "keyword_reasoning_effort",
+  "content_reasoning_effort",
+  "agent_reasoning_effort",
+] as const
+
+function supportsTaskConfiguration(
+  settings: AIProviderSettingsResponse
+): boolean {
+  return taskConfigurationResponseFields.every((field) =>
+    Object.prototype.hasOwnProperty.call(settings, field)
+  )
+}
+
 function mapSettings(settings: AIProviderSettingsResponse): AIProviderSettings {
   return {
+    provider: settings.provider,
+    apiProtocol: settings.api_protocol ?? "chat_completions",
     baseUrl: settings.base_url,
     model: settings.model,
+    businessModel: settings.business_model ?? null,
+    keywordModel: settings.keyword_model ?? null,
+    contentModel: settings.content_model ?? null,
+    agentModel: settings.agent_model ?? null,
+    reasoningEffort: settings.reasoning_effort ?? "medium",
+    businessReasoningEffort: settings.business_reasoning_effort ?? null,
+    keywordReasoningEffort: settings.keyword_reasoning_effort ?? null,
+    contentReasoningEffort: settings.content_reasoning_effort ?? null,
+    agentReasoningEffort: settings.agent_reasoning_effort ?? null,
     requestTimeoutSeconds: settings.request_timeout_seconds,
     maxRetries: settings.max_retries,
     configured: settings.configured,
@@ -53,8 +121,19 @@ function mapSettings(settings: AIProviderSettingsResponse): AIProviderSettings {
 
 function settingsBody(input: AIProviderSettingsInput) {
   return {
+    provider: input.provider,
+    api_protocol: input.apiProtocol,
     base_url: input.baseUrl,
     model: input.model,
+    business_model: input.businessModel,
+    keyword_model: input.keywordModel,
+    content_model: input.contentModel,
+    agent_model: input.agentModel,
+    reasoning_effort: input.reasoningEffort,
+    business_reasoning_effort: input.businessReasoningEffort,
+    keyword_reasoning_effort: input.keywordReasoningEffort,
+    content_reasoning_effort: input.contentReasoningEffort,
+    agent_reasoning_effort: input.agentReasoningEffort,
     request_timeout_seconds: input.requestTimeoutSeconds,
     max_retries: input.maxRetries,
     ...(input.apiKey ? { api_key: input.apiKey } : {}),
@@ -74,16 +153,20 @@ export async function updateAIProviderSettings(
   _projectId: string,
   input: AIProviderSettingsInput
 ): Promise<AIProviderSettings> {
-  return mapSettings(
-    await apiRequest<AIProviderSettingsResponse>(
-      "/api/v1/platform/settings/ai",
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settingsBody(input)),
-      }
-    )
+  const response = await apiRequest<AIProviderSettingsResponse>(
+    "/api/v1/platform/settings/ai",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settingsBody(input)),
+    }
   )
+  if (!supportsTaskConfiguration(response)) {
+    throw new Error(
+      "当前 API 服务仍是旧版本，任务模型和推理强度没有保存；请更新并重启后端服务"
+    )
+  }
+  return mapSettings(response)
 }
 
 export async function testAIProviderSettings(
@@ -290,6 +373,71 @@ export async function testDataForSEOSettings(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(dataForSEOSettingsBody(input)),
     }
+  )
+}
+
+export type GSCOAuthSettings = {
+  clientId: string
+  configured: boolean
+  clientSecretConfigured: boolean
+  oauthRedirectUri: string
+  source: SettingsSource
+  updatedAt: string | null
+}
+
+export type GSCOAuthSettingsInput = {
+  clientId: string
+  clientSecret?: string
+}
+
+type GSCOAuthSettingsResponse = {
+  client_id: string
+  configured: boolean
+  client_secret_configured: boolean
+  oauth_redirect_uri: string
+  source: SettingsSource
+  updated_at: string | null
+}
+
+function mapGSCOAuthSettings(
+  settings: GSCOAuthSettingsResponse
+): GSCOAuthSettings {
+  return {
+    clientId: settings.client_id,
+    configured: settings.configured,
+    clientSecretConfigured: settings.client_secret_configured,
+    oauthRedirectUri: settings.oauth_redirect_uri,
+    source: settings.source,
+    updatedAt: settings.updated_at,
+  }
+}
+
+export async function getGSCOAuthSettings(
+  _projectId: string
+): Promise<GSCOAuthSettings> {
+  return mapGSCOAuthSettings(
+    await apiRequest<GSCOAuthSettingsResponse>(
+      "/api/v1/platform/settings/gsc-oauth"
+    )
+  )
+}
+
+export async function updateGSCOAuthSettings(
+  _projectId: string,
+  input: GSCOAuthSettingsInput
+): Promise<GSCOAuthSettings> {
+  return mapGSCOAuthSettings(
+    await apiRequest<GSCOAuthSettingsResponse>(
+      "/api/v1/platform/settings/gsc-oauth",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: input.clientId,
+          ...(input.clientSecret ? { client_secret: input.clientSecret } : {}),
+        }),
+      }
+    )
   )
 }
 

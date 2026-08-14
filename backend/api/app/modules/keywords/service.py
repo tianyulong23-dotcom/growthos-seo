@@ -24,6 +24,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
@@ -289,8 +290,9 @@ def build_initial_keyword_bootstrap(
     organization_id: str,
     project_id: str,
     created_at: datetime,
+    run_id: str | None = None,
 ) -> KeywordBootstrapRecord:
-    run_id = str(uuid4())
+    run_id = run_id or str(uuid4())
     return KeywordBootstrapRecord(
         run_id=run_id,
         organization_id=organization_id,
@@ -467,6 +469,81 @@ class SQLAlchemyKeywordRepository:
                 pending_metrics_count=int(pending_metrics_count or 0),
                 result_version=int(result_version or 0),
             )
+
+    async def latest_run_billing(
+        self,
+        organization_id: str,
+        project_id: str,
+    ) -> dict[str, str | float | bool]:
+        async with self.sessions() as session:
+            await self._require_project(session, organization_id, project_id)
+            run = await session.scalar(
+                select(KeywordBuildRun)
+                .where(
+                    KeywordBuildRun.organization_id == organization_id,
+                    KeywordBuildRun.project_id == project_id,
+                )
+                .order_by(
+                    KeywordBuildRun.round_number.desc(),
+                    KeywordBuildRun.created_at.desc(),
+                )
+                .limit(1)
+            )
+            if run is None:
+                return {
+                    "run_id": "",
+                    "reported_cost_usd": 0.0,
+                    "complete": False,
+                }
+            return {
+                "run_id": run.id,
+                "reported_cost_usd": max(float(run.total_cost_usd or 0), 0),
+                "complete": run.status in {"partial", "completed", "failed"},
+            }
+
+    async def start_initial_build(
+        self,
+        organization_id: str,
+        project_id: str,
+        operation_id: str,
+    ) -> KeywordBuildRunResponse:
+        now = datetime.now(UTC)
+        async with self.sessions() as session:
+            await self._require_project(
+                session, organization_id, project_id, lock=True
+            )
+            existing = await session.scalar(
+                select(KeywordBuildRun)
+                .where(
+                    KeywordBuildRun.organization_id == organization_id,
+                    KeywordBuildRun.project_id == project_id,
+                    KeywordBuildRun.kind == "initial",
+                    or_(
+                        KeywordBuildRun.id == operation_id,
+                        KeywordBuildRun.round_number == 1,
+                    ),
+                )
+                .order_by(
+                    (KeywordBuildRun.id == operation_id).desc(),
+                    KeywordBuildRun.created_at,
+                )
+                .limit(1)
+                .with_for_update()
+            )
+            if existing is not None:
+                return build_run_response(existing)
+            bootstrap = build_initial_keyword_bootstrap(
+                organization_id=organization_id,
+                project_id=project_id,
+                created_at=now,
+                run_id=operation_id,
+            )
+            run = keyword_run_from_bootstrap(bootstrap)
+            session.add(run)
+            await session.flush()
+            session.add(keyword_dispatch_from_bootstrap(bootstrap))
+            await session.commit()
+            return build_run_response(run)
 
     async def cost_summary(
         self,
@@ -1140,20 +1217,50 @@ class SQLAlchemyKeywordRepository:
     ) -> KeywordCompetitorListResponse:
         async with self.sessions() as session:
             await self._require_project(session, organization_id, project_id)
-            run = await self._competitor_result_run(session, organization_id, project_id)
-            if run is None:
+            runs = await self._competitor_result_runs(session, organization_id, project_id)
+            if not runs:
                 return KeywordCompetitorListResponse()
-            rows = list(
+            run_ids = [run.id for run in runs]
+            result_run = max(runs, key=lambda item: (item.created_at, item.id))
+            result_rows = list(
                 (
-                    await session.scalars(
-                        select(KeywordCompetitor)
-                        .where(KeywordCompetitor.analysis_run_id == run.id)
-                        .order_by(KeywordCompetitor.provider_rank)
+                    await session.execute(
+                        select(
+                            KeywordCompetitor,
+                            KeywordCompetitorAnalysisRun.analysis_mode,
+                            KeywordCompetitorAnalysisRun.created_at,
+                        )
+                        .join(
+                            KeywordCompetitorAnalysisRun,
+                            KeywordCompetitorAnalysisRun.id
+                            == KeywordCompetitor.analysis_run_id,
+                        )
+                        .where(
+                            KeywordCompetitor.analysis_run_id.in_(run_ids),
+                            KeywordCompetitor.status == "completed",
+                            KeywordCompetitor.selected_for_gap.is_(True),
+                        )
+                        .order_by(
+                            case(
+                                (KeywordCompetitorAnalysisRun.analysis_mode == "manual", 0),
+                                else_=1,
+                            ),
+                            KeywordCompetitorAnalysisRun.created_at.desc(),
+                            KeywordCompetitor.provider_rank,
+                        )
                     )
                 ).all()
             )
+            rows: list[KeywordCompetitor] = []
+            seen_domains: set[str] = set()
+            for row, _analysis_mode, _created_at in result_rows:
+                normalized_domain = row.domain.casefold()
+                if normalized_domain in seen_domains:
+                    continue
+                seen_domains.add(normalized_domain)
+                rows.append(row)
             return KeywordCompetitorListResponse(
-                run_id=run.id,
+                run_id=result_run.id,
                 items=[
                     KeywordCompetitorResponse(
                         id=row.id,
@@ -1239,23 +1346,27 @@ class SQLAlchemyKeywordRepository:
     ) -> KeywordCompetitorOpportunityListResponse:
         async with self.sessions() as session:
             await self._require_project(session, organization_id, project_id)
-            run = await self._competitor_result_run(session, organization_id, project_id)
-            if run is None:
+            runs = await self._competitor_result_runs(session, organization_id, project_id)
+            if not runs:
                 return KeywordCompetitorOpportunityListResponse(
                     total=0, page=page, page_size=page_size
                 )
+            run_ids = [run.id for run in runs]
+            result_run = max(runs, key=lambda item: (item.created_at, item.id))
             library_match = exists().where(
                 Keyword.organization_id == organization_id,
                 Keyword.project_id == project_id,
-                Keyword.country == run.country,
-                Keyword.language == run.language,
+                Keyword.country == KeywordCompetitorAnalysisRun.country,
+                Keyword.language == KeywordCompetitorAnalysisRun.language,
                 Keyword.normalized_keyword == KeywordCompetitorOpportunity.normalized_keyword,
             )
             decision_join = and_(
                 KeywordCompetitorOpportunityDecision.organization_id == organization_id,
                 KeywordCompetitorOpportunityDecision.project_id == project_id,
-                KeywordCompetitorOpportunityDecision.country == run.country,
-                KeywordCompetitorOpportunityDecision.language == run.language,
+                KeywordCompetitorOpportunityDecision.country
+                == KeywordCompetitorAnalysisRun.country,
+                KeywordCompetitorOpportunityDecision.language
+                == KeywordCompetitorAnalysisRun.language,
                 KeywordCompetitorOpportunityDecision.normalized_keyword
                 == KeywordCompetitorOpportunity.normalized_keyword,
             )
@@ -1263,7 +1374,7 @@ class SQLAlchemyKeywordRepository:
                 KeywordCompetitorOpportunityDecision.status,
                 KeywordCompetitorOpportunity.status,
             )
-            filters: list[Any] = [KeywordCompetitorOpportunity.analysis_run_id == run.id]
+            filters: list[Any] = [KeywordCompetitorOpportunity.analysis_run_id.in_(run_ids)]
             normalized_search = search.strip()
             if normalized_search:
                 filters.append(
@@ -1289,23 +1400,13 @@ class SQLAlchemyKeywordRepository:
                         == KeywordCompetitorOpportunity.id,
                         KeywordCompetitorOpportunityRanking.competitor_id == KeywordCompetitor.id,
                         KeywordCompetitor.domain == competitor_domain,
+                        KeywordCompetitor.status == "completed",
+                        KeywordCompetitor.selected_for_gap.is_(True),
                     )
                     .correlate(KeywordCompetitorOpportunity)
                 )
 
-            total = int(
-                await session.scalar(
-                    select(func.count(KeywordCompetitorOpportunity.id))
-                    .select_from(KeywordCompetitorOpportunity)
-                    .outerjoin(
-                        KeywordCompetitorOpportunityDecision,
-                        decision_join,
-                    )
-                    .where(*filters)
-                )
-                or 0
-            )
-            result_rows = list(
+            all_result_rows = list(
                 (
                     await session.execute(
                         select(
@@ -1313,24 +1414,44 @@ class SQLAlchemyKeywordRepository:
                             KeywordCompetitorOpportunityDecision.status,
                             KeywordCompetitorOpportunityDecision.keyword_id,
                             KeywordCompetitorOpportunityDecision.updated_at,
+                            KeywordCompetitorAnalysisRun.analysis_mode,
+                            KeywordCompetitorAnalysisRun.created_at,
+                            KeywordCompetitorAnalysisRun.finished_at,
+                        )
+                        .join(
+                            KeywordCompetitorAnalysisRun,
+                            KeywordCompetitorAnalysisRun.id
+                            == KeywordCompetitorOpportunity.analysis_run_id,
                         )
                         .outerjoin(
                             KeywordCompetitorOpportunityDecision,
                             decision_join,
                         )
                         .where(*filters)
-                        .order_by(*competitor_opportunity_order(sort, order))
-                        .offset((page - 1) * page_size)
-                        .limit(page_size)
+                        .order_by(
+                            case(
+                                (KeywordCompetitorAnalysisRun.analysis_mode == "manual", 0),
+                                else_=1,
+                            ),
+                            KeywordCompetitorAnalysisRun.created_at.desc(),
+                            KeywordCompetitorOpportunity.updated_at.desc(),
+                        )
                     )
                 ).all()
             )
+            deduplicated_rows = {}
+            for result in all_result_rows:
+                deduplicated_rows.setdefault(result[0].normalized_keyword, result)
+            ordered_rows = sort_competitor_opportunity_result_rows(
+                list(deduplicated_rows.values()), sort, order
+            )
+            total = len(ordered_rows)
+            result_rows = ordered_rows[(page - 1) * page_size : page * page_size]
             rows = [result[0] for result in result_rows]
-            decision_by_normalized = {
-                result[0].normalized_keyword: (result[1], result[2], result[3])
+            decision_by_id = {
+                result[0].id: (result[1], result[2], result[3])
                 for result in result_rows
             }
-            opportunity_ids = [row.id for row in rows]
             normalized_keywords = [row.normalized_keyword for row in rows]
             ranking_rows = (
                 (
@@ -1338,23 +1459,44 @@ class SQLAlchemyKeywordRepository:
                         select(
                             KeywordCompetitorOpportunityRanking,
                             KeywordCompetitor.domain,
+                            KeywordCompetitorOpportunity.normalized_keyword,
+                        )
+                        .join(
+                            KeywordCompetitorOpportunity,
+                            KeywordCompetitorOpportunity.id
+                            == KeywordCompetitorOpportunityRanking.opportunity_id,
                         )
                         .join(
                             KeywordCompetitor,
                             KeywordCompetitor.id
                             == KeywordCompetitorOpportunityRanking.competitor_id,
                         )
+                        .join(
+                            KeywordCompetitorAnalysisRun,
+                            KeywordCompetitorAnalysisRun.id
+                            == KeywordCompetitorOpportunityRanking.analysis_run_id,
+                        )
                         .where(
-                            KeywordCompetitorOpportunityRanking.opportunity_id.in_(opportunity_ids)
+                            KeywordCompetitorOpportunityRanking.analysis_run_id.in_(run_ids),
+                            KeywordCompetitorOpportunity.normalized_keyword.in_(
+                                normalized_keywords
+                            ),
+                            KeywordCompetitor.status == "completed",
+                            KeywordCompetitor.selected_for_gap.is_(True),
                         )
                         .order_by(
-                            KeywordCompetitorOpportunityRanking.opportunity_id,
+                            KeywordCompetitorOpportunity.normalized_keyword,
+                            case(
+                                (KeywordCompetitorAnalysisRun.analysis_mode == "manual", 0),
+                                else_=1,
+                            ),
+                            KeywordCompetitorAnalysisRun.created_at.desc(),
                             KeywordCompetitorOpportunityRanking.competitor_rank.asc().nulls_last(),
                             KeywordCompetitor.provider_rank,
                         )
                     )
                 ).all()
-                if opportunity_ids
+                if normalized_keywords
                 else []
             )
             library_rows = (
@@ -1364,8 +1506,8 @@ class SQLAlchemyKeywordRepository:
                             select(Keyword).where(
                                 Keyword.organization_id == organization_id,
                                 Keyword.project_id == project_id,
-                                Keyword.country == run.country,
-                                Keyword.language == run.language,
+                                Keyword.country == result_run.country,
+                                Keyword.language == result_run.language,
                                 Keyword.normalized_keyword.in_(normalized_keywords),
                             )
                         )
@@ -1375,9 +1517,15 @@ class SQLAlchemyKeywordRepository:
                 else []
             )
 
-            rankings_by_opportunity: dict[str, list[KeywordCompetitorRankingResponse]] = {}
-            for ranking, domain in ranking_rows:
-                rankings_by_opportunity.setdefault(ranking.opportunity_id, []).append(
+            rankings_by_normalized: dict[str, list[KeywordCompetitorRankingResponse]] = {}
+            ranking_domains: dict[str, set[str]] = {}
+            for ranking, domain, normalized_keyword in ranking_rows:
+                normalized_domain = domain.casefold()
+                seen_domains = ranking_domains.setdefault(normalized_keyword, set())
+                if normalized_domain in seen_domains:
+                    continue
+                seen_domains.add(normalized_domain)
+                rankings_by_normalized.setdefault(normalized_keyword, []).append(
                     KeywordCompetitorRankingResponse(
                         competitor_id=ranking.competitor_id,
                         domain=domain,
@@ -1389,16 +1537,19 @@ class SQLAlchemyKeywordRepository:
             items = []
             for row in rows:
                 library_keyword = library_by_normalized.get(row.normalized_keyword)
-                decision_status, decision_keyword_id, decision_updated_at = decision_by_normalized[
-                    row.normalized_keyword
-                ]
+                decision_status, decision_keyword_id, decision_updated_at = decision_by_id[row.id]
+                row_result = next(result for result in result_rows if result[0].id == row.id)
+                rankings = rankings_by_normalized.get(row.normalized_keyword, [])
+                ranked_positions = [ranking.rank for ranking in rankings if ranking.rank is not None]
                 items.append(
                     KeywordCompetitorOpportunityResponse(
                         id=row.id,
                         keyword=row.keyword,
                         normalized_keyword=row.normalized_keyword,
-                        best_competitor_rank=row.best_competitor_rank,
-                        competitor_count=row.competitor_count,
+                        best_competitor_rank=(
+                            min(ranked_positions) if ranked_positions else row.best_competitor_rank
+                        ),
+                        competitor_count=len(rankings) if rankings else row.competitor_count,
                         opportunity_score=row.opportunity_score,
                         search_volume=row.search_volume,
                         cpc=row.cpc,
@@ -1415,14 +1566,14 @@ class SQLAlchemyKeywordRepository:
                             else decision_keyword_id or row.keyword_id
                         ),
                         in_library=library_keyword is not None,
-                        analyzed_at=run.finished_at or run.created_at,
+                        analyzed_at=row_result[6] or row_result[5],
                         updated_at=decision_updated_at or row.updated_at,
-                        rankings=rankings_by_opportunity.get(row.id, []),
+                        rankings=rankings,
                     )
                 )
             return KeywordCompetitorOpportunityListResponse(
-                run_id=run.id,
-                analyzed_at=run.finished_at or run.created_at,
+                run_id=result_run.id,
+                analyzed_at=result_run.finished_at or result_run.created_at,
                 items=items,
                 total=total,
                 page=page,
@@ -1824,23 +1975,40 @@ class SQLAlchemyKeywordRepository:
             .limit(1)
         )
 
-    async def _competitor_result_run(
+    async def _competitor_result_runs(
         self,
         session: AsyncSession,
         organization_id: str,
         project_id: str,
-    ) -> KeywordCompetitorAnalysisRun | None:
-        base = (
-            select(KeywordCompetitorAnalysisRun)
-            .where(
-                KeywordCompetitorAnalysisRun.organization_id == organization_id,
-                KeywordCompetitorAnalysisRun.project_id == project_id,
-                KeywordCompetitorAnalysisRun.status.in_(("completed", "partial")),
-            )
-            .order_by(KeywordCompetitorAnalysisRun.created_at.desc())
-            .limit(1)
+    ) -> list[KeywordCompetitorAnalysisRun]:
+        valid_competitor_exists = exists().where(
+            KeywordCompetitor.analysis_run_id == KeywordCompetitorAnalysisRun.id,
+            KeywordCompetitor.status == "completed",
+            KeywordCompetitor.selected_for_gap.is_(True),
         )
-        return await session.scalar(base)
+        rows = list(
+            (
+                await session.scalars(
+                    select(KeywordCompetitorAnalysisRun)
+                    .where(
+                        KeywordCompetitorAnalysisRun.organization_id == organization_id,
+                        KeywordCompetitorAnalysisRun.project_id == project_id,
+                        KeywordCompetitorAnalysisRun.status.in_(("completed", "partial")),
+                        valid_competitor_exists,
+                    )
+                    .order_by(KeywordCompetitorAnalysisRun.created_at.desc())
+                )
+            ).all()
+        )
+        effective_runs: list[KeywordCompetitorAnalysisRun] = []
+        auto_selected = False
+        for run in rows:
+            if run.analysis_mode == "manual":
+                effective_runs.append(run)
+            elif not auto_selected:
+                effective_runs.append(run)
+                auto_selected = True
+        return effective_runs
 
     async def retry_failed_initial_build(
         self,
@@ -2039,6 +2207,7 @@ class SQLAlchemyKeywordRepository:
         organization_id: str,
         *,
         service_started_at: datetime,
+        task_queue: str,
         dataforseo_environment_configured: bool,
         ai_environment_configured: bool,
         limit: int,
@@ -2050,10 +2219,26 @@ class SQLAlchemyKeywordRepository:
                 DataForSEOProviderSetting.updated_at > KeywordBuildRun.updated_at,
             )
         )
+        dataforseo_setting_exists = exists(
+            select(DataForSEOProviderSetting.organization_id).where(
+                DataForSEOProviderSetting.organization_id == organization_id,
+            )
+        )
         ai_setting_is_newer = exists(
             select(AIProviderSetting.organization_id).where(
                 AIProviderSetting.organization_id == organization_id,
                 AIProviderSetting.updated_at > KeywordBuildRun.updated_at,
+            )
+        )
+        ai_setting_exists = exists(
+            select(AIProviderSetting.organization_id).where(
+                AIProviderSetting.organization_id == organization_id,
+            )
+        )
+        worker_started_after_run = exists(
+            select(KeywordWorkerHeartbeat.worker_id).where(
+                KeywordWorkerHeartbeat.task_queue == task_queue,
+                KeywordWorkerHeartbeat.started_at > KeywordBuildRun.updated_at,
             )
         )
         project_is_newer = exists(
@@ -2065,15 +2250,35 @@ class SQLAlchemyKeywordRepository:
         dataforseo_ready = or_(
             dataforseo_setting_is_newer,
             and_(
+                dataforseo_setting_exists,
+                or_(
+                    KeywordBuildRun.updated_at < service_started_at,
+                    worker_started_after_run,
+                ),
+            ),
+            and_(
                 dataforseo_environment_configured,
-                KeywordBuildRun.updated_at < service_started_at,
+                or_(
+                    KeywordBuildRun.updated_at < service_started_at,
+                    worker_started_after_run,
+                ),
             ),
         )
         ai_ready = or_(
             ai_setting_is_newer,
             and_(
+                ai_setting_exists,
+                or_(
+                    KeywordBuildRun.updated_at < service_started_at,
+                    worker_started_after_run,
+                ),
+            ),
+            and_(
                 ai_environment_configured,
-                KeywordBuildRun.updated_at < service_started_at,
+                or_(
+                    KeywordBuildRun.updated_at < service_started_at,
+                    worker_started_after_run,
+                ),
             ),
         )
         async with self.sessions() as session:
@@ -2110,9 +2315,13 @@ class SQLAlchemyKeywordRepository:
                             ),
                             and_(
                                 KeywordBuildRun.error_code.in_(
-                                    ("unsupported_country", "unsupported_language")
+                                    (
+                                        "dataforseo_task_failed",
+                                        "unsupported_country",
+                                        "unsupported_language",
+                                    )
                                 ),
-                                project_is_newer,
+                                or_(project_is_newer, worker_started_after_run),
                             ),
                         ),
                     )
@@ -2129,6 +2338,7 @@ class SQLAlchemyKeywordRepository:
                 )
             ).all()
             for run, dispatch in rows:
+                recovered_error_code = run.error_code
                 task_payload = dict(dispatch.task_payload)
                 task_payload["_recovery_count"] = int(run.recovery_count or 0)
                 dispatch.workflow_id = (
@@ -2145,7 +2355,143 @@ class SQLAlchemyKeywordRepository:
                 run.status = "queued"
                 run.stage = "waiting_for_recovery"
                 run.message = "后台条件已恢复，正在继续创建关键词库"
+                run.partial_failures = [
+                    failure
+                    for failure in (run.partial_failures or [])
+                    if not (
+                        isinstance(failure, dict)
+                        and failure.get("code") == recovered_error_code
+                    )
+                ]
                 run.next_retry_at = None
+                run.finished_at = None
+                run.updated_at = now
+            await session.commit()
+            return len(rows)
+
+    async def resume_ready_failed_competitor_analysis_runs(
+        self,
+        organization_id: str,
+        *,
+        task_queue: str,
+        dataforseo_environment_configured: bool,
+        ai_environment_configured: bool,
+        limit: int,
+    ) -> int:
+        now = datetime.now(UTC)
+        dataforseo_setting_is_newer = exists(
+            select(DataForSEOProviderSetting.organization_id).where(
+                DataForSEOProviderSetting.organization_id == organization_id,
+                DataForSEOProviderSetting.updated_at
+                > KeywordCompetitorAnalysisRun.updated_at,
+            )
+        )
+        dataforseo_setting_exists = exists(
+            select(DataForSEOProviderSetting.organization_id).where(
+                DataForSEOProviderSetting.organization_id == organization_id,
+            )
+        )
+        ai_setting_is_newer = exists(
+            select(AIProviderSetting.organization_id).where(
+                AIProviderSetting.organization_id == organization_id,
+                AIProviderSetting.updated_at > KeywordCompetitorAnalysisRun.updated_at,
+            )
+        )
+        ai_setting_exists = exists(
+            select(AIProviderSetting.organization_id).where(
+                AIProviderSetting.organization_id == organization_id,
+            )
+        )
+        worker_started_after_run = exists(
+            select(KeywordWorkerHeartbeat.worker_id).where(
+                KeywordWorkerHeartbeat.task_queue == task_queue,
+                KeywordWorkerHeartbeat.started_at
+                > KeywordCompetitorAnalysisRun.updated_at,
+            )
+        )
+        dataforseo_ready = or_(
+            dataforseo_setting_is_newer,
+            and_(dataforseo_setting_exists, worker_started_after_run),
+            and_(dataforseo_environment_configured, worker_started_after_run),
+        )
+        ai_ready = or_(
+            ai_setting_is_newer,
+            and_(ai_setting_exists, worker_started_after_run),
+            and_(ai_environment_configured, worker_started_after_run),
+        )
+        active_run = aliased(KeywordCompetitorAnalysisRun)
+        another_run_is_active = exists(
+            select(active_run.id).where(
+                active_run.project_id == KeywordCompetitorAnalysisRun.project_id,
+                active_run.id != KeywordCompetitorAnalysisRun.id,
+                active_run.status.in_(("queued", "running")),
+            )
+        )
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        KeywordCompetitorAnalysisRun,
+                        KeywordCompetitorAnalysisDispatch,
+                    )
+                    .join(
+                        KeywordCompetitorAnalysisDispatch,
+                        KeywordCompetitorAnalysisDispatch.run_id
+                        == KeywordCompetitorAnalysisRun.id,
+                    )
+                    .where(
+                        KeywordCompetitorAnalysisRun.organization_id == organization_id,
+                        KeywordCompetitorAnalysisRun.status == "failed",
+                        or_(
+                            and_(
+                                KeywordCompetitorAnalysisRun.error_code
+                                == "dataforseo_not_configured",
+                                dataforseo_ready,
+                            ),
+                            and_(
+                                KeywordCompetitorAnalysisRun.error_code
+                                == "ai_not_configured",
+                                ai_ready,
+                            ),
+                        ),
+                        ~another_run_is_active,
+                    )
+                    .order_by(
+                        KeywordCompetitorAnalysisRun.updated_at,
+                        KeywordCompetitorAnalysisRun.id,
+                    )
+                    .limit(max(1, min(limit, 100)))
+                    .with_for_update(
+                        skip_locked=True,
+                        of=KeywordCompetitorAnalysisRun,
+                    )
+                )
+            ).all()
+            for run, dispatch in rows:
+                next_recovery_count = int(run.recovery_count or 0) + 1
+                workflow_id = (
+                    f"keywords:competitor-analysis:{run.id}:configuration:"
+                    f"{next_recovery_count}:{uuid4()}"
+                )
+                task_payload = dict(dispatch.task_payload)
+                task_payload["_recovery_count"] = next_recovery_count
+                dispatch.workflow_id = workflow_id
+                dispatch.task_payload = task_payload
+                dispatch.status = "pending"
+                dispatch.attempts = 0
+                dispatch.last_error = None
+                dispatch.next_attempt_at = now
+                dispatch.dispatched_at = None
+                dispatch.last_checked_at = None
+                dispatch.updated_at = now
+                run.workflow_id = workflow_id
+                run.status = "queued"
+                run.stage = "waiting_for_recovery"
+                run.message = "后台配置已生效，正在继续竞品分析"
+                run.progress = 0
+                run.recovery_count = next_recovery_count
+                run.error_code = None
+                run.error_detail = None
                 run.finished_at = None
                 run.updated_at = now
             await session.commit()
@@ -3163,6 +3509,14 @@ class KeywordService:
             project_id,
         )
 
+    async def keyword_library_billing(
+        self, project_id: str
+    ) -> dict[str, str | float | bool]:
+        return await self.repository.latest_run_billing(
+            self.settings.default_organization_id,
+            project_id,
+        )
+
     async def cost_summary(self, project_id: str) -> KeywordCostSummaryResponse:
         return await self.repository.cost_summary(
             self.settings.default_organization_id,
@@ -3319,6 +3673,19 @@ class KeywordService:
         await self.repository.resume_ready_blocked_runs(
             self.settings.default_organization_id,
             service_started_at=self.started_at,
+            task_queue=self.settings.keyword_task_queue,
+            dataforseo_environment_configured=bool(
+                self.settings.dataforseo_login and self.settings.dataforseo_password
+            ),
+            ai_environment_configured=bool(
+                self.settings.business_profile_ai_base_url
+                and self.settings.business_profile_ai_api_key
+            ),
+            limit=limit,
+        )
+        await self.repository.resume_ready_failed_competitor_analysis_runs(
+            self.settings.default_organization_id,
+            task_queue=self.settings.keyword_task_queue,
             dataforseo_environment_configured=bool(
                 self.settings.dataforseo_login and self.settings.dataforseo_password
             ),
@@ -3373,6 +3740,17 @@ class KeywordService:
             )
             dispatched += 1
         return dispatched
+
+    async def start_initial_build(
+        self, project_id: str, operation_id: str
+    ) -> KeywordBuildRunResponse:
+        run = await self.repository.start_initial_build(
+            self.settings.default_organization_id,
+            project_id,
+            operation_id,
+        )
+        await self.dispatch_pending_workflows(limit=10)
+        return run
 
     async def reconcile_active_runs(self, limit: int = 100) -> int:
         await self.repository.settle_stale_external_requests()
@@ -3746,24 +4124,27 @@ def keyword_order(sort: str, order: str):
     return nulls_last, direction(field), asc(Keyword.normalized_keyword)
 
 
-def competitor_opportunity_order(sort: str, order: str):
-    direction = asc if order == "asc" else desc
+def sort_competitor_opportunity_result_rows(
+    rows: list[Any], sort: str, order: str
+) -> list[Any]:
     fields = {
-        "keyword": KeywordCompetitorOpportunity.keyword,
-        "opportunity_score": KeywordCompetitorOpportunity.opportunity_score,
-        "search_volume": KeywordCompetitorOpportunity.search_volume,
-        "difficulty": KeywordCompetitorOpportunity.keyword_difficulty,
-        "best_rank": KeywordCompetitorOpportunity.best_competitor_rank,
-        "competitor_count": KeywordCompetitorOpportunity.competitor_count,
-        "updated_at": KeywordCompetitorOpportunity.updated_at,
+        "keyword": "keyword",
+        "opportunity_score": "opportunity_score",
+        "search_volume": "search_volume",
+        "difficulty": "keyword_difficulty",
+        "best_rank": "best_competitor_rank",
+        "competitor_count": "competitor_count",
+        "updated_at": "updated_at",
     }
-    field = fields.get(sort, KeywordCompetitorOpportunity.opportunity_score)
-    nulls_last = case((field.is_(None), 1), else_=0)
-    return (
-        nulls_last,
-        direction(field),
-        asc(KeywordCompetitorOpportunity.normalized_keyword),
+    field = fields.get(sort, "opportunity_score")
+    ordered = sorted(rows, key=lambda result: result[0].normalized_keyword)
+    non_null = [result for result in ordered if getattr(result[0], field) is not None]
+    null = [result for result in ordered if getattr(result[0], field) is None]
+    non_null.sort(
+        key=lambda result: getattr(result[0], field),
+        reverse=order != "asc",
     )
+    return non_null + null
 
 
 def escape_like(value: str) -> str:

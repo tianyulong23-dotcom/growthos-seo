@@ -30,8 +30,13 @@ import {
   type GSCConnection,
   type GSCSite,
 } from "@/api/settings"
+import { ApiError } from "@/api/client"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  keywordQueryClient,
+  keywordQueryKeys,
+} from "@/features/keywords/keyword-query-client"
 import {
   Dialog,
   DialogClose,
@@ -82,6 +87,16 @@ const emptyGSCConnection: GSCConnection = {
   siteUrl: null,
   connectedAccountEmail: null,
   requiresReconnect: false,
+}
+
+const gscConnectionRetryDelaysMs = [250, 750, 1_500, 3_000, 5_000, 8_000, 12_000]
+
+function isTransientGSCConnectionError(error: unknown): boolean {
+  return error instanceof ApiError && [502, 503, 504].includes(error.status)
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 }
 
 function normalizedHost(value: string): string {
@@ -149,6 +164,7 @@ function GSCConnectionCard({
   const [sites, setSites] = React.useState<GSCSite[]>([])
   const [selectedSite, setSelectedSite] = React.useState("")
   const [loading, setLoading] = React.useState(true)
+  const [connectionError, setConnectionError] = React.useState("")
   const [sitesLoading, setSitesLoading] = React.useState(false)
   const [sitesError, setSitesError] = React.useState("")
   const [busy, setBusy] = React.useState(false)
@@ -156,6 +172,17 @@ function GSCConnectionCard({
   const [disconnectOpen, setDisconnectOpen] = React.useState(false)
   const [feedback, setFeedback] = React.useState<Feedback>(oauthResultFeedback)
   const returnTo = safeReturnTo()
+
+  const updateConnection = React.useCallback(
+    (next: GSCConnection) => {
+      setConnection(next)
+      keywordQueryClient.setQueryData(
+        keywordQueryKeys.connection(projectId),
+        next
+      )
+    },
+    [projectId]
+  )
 
   const loadSites = React.useCallback(async () => {
     setSitesLoading(true)
@@ -167,7 +194,7 @@ function GSCConnectionCard({
       try {
         const latest = await getGSCConnection(projectId)
         if (latest.requiresReconnect) {
-          setConnection(latest)
+          updateConnection(latest)
           setSelectedSite(latest.siteUrl ?? "")
           setEditingProperty(false)
           return
@@ -183,11 +210,12 @@ function GSCConnectionCard({
     } finally {
       setSitesLoading(false)
     }
-  }, [projectId])
+  }, [projectId, updateConnection])
 
   const load = React.useCallback(async () => {
+    setConnectionError("")
     const next = await getGSCConnection(projectId)
-    setConnection(next)
+    updateConnection(next)
     setSelectedSite(next.siteUrl ?? "")
     setEditingProperty(!next.propertyConnected)
     if (next.grantConnected && !next.requiresReconnect) {
@@ -195,7 +223,22 @@ function GSCConnectionCard({
     } else {
       setSites([])
     }
-  }, [loadSites, projectId])
+  }, [loadSites, projectId, updateConnection])
+
+  const loadWithRecovery = React.useCallback(async () => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await load()
+        return
+      } catch (error) {
+        const retryDelay = gscConnectionRetryDelaysMs[attempt]
+        if (!isTransientGSCConnectionError(error) || retryDelay === undefined) {
+          throw error
+        }
+        await wait(retryDelay)
+      }
+    }
+  }, [load])
 
   React.useEffect(() => {
     if (!projectId) return
@@ -212,16 +255,14 @@ function GSCConnectionCard({
       )
     }
     void Promise.resolve()
-      .then(load)
+      .then(loadWithRecovery)
       .catch((error: unknown) => {
         if (active)
-          setFeedback({
-            kind: "error",
-            message:
-              error instanceof Error
-                ? error.message
-                : "读取 Search Console 连接失败",
-          })
+          setConnectionError(
+            error instanceof Error
+              ? error.message
+              : "读取 Search Console 连接失败"
+          )
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -229,7 +270,23 @@ function GSCConnectionCard({
     return () => {
       active = false
     }
-  }, [load, projectId])
+  }, [loadWithRecovery, projectId])
+
+  async function retryLoad() {
+    setLoading(true)
+    setConnectionError("")
+    try {
+      await loadWithRecovery()
+    } catch (error) {
+      setConnectionError(
+        error instanceof Error
+          ? error.message
+          : "读取 Search Console 连接失败"
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
 
   async function connect() {
     setBusy(true)
@@ -255,7 +312,7 @@ function GSCConnectionCard({
     setBusy(true)
     setFeedback(null)
     try {
-      setConnection(await selectGSCSite(projectId, selectedSite))
+      updateConnection(await selectGSCSite(projectId, selectedSite))
       setEditingProperty(false)
       setFeedback({
         kind: "success",
@@ -314,6 +371,15 @@ function GSCConnectionCard({
   const selectedSiteAvailable = selectableSites.some(
     (site) => site.siteUrl === selectedSite
   )
+  const connectionStatusLabel = connectionError
+    ? "读取失败"
+    : !connection.oauthConfigured
+      ? "OAuth 未配置"
+      : connection.propertyConnected
+        ? "已连接"
+        : connection.grantConnected
+          ? "待选择网站"
+          : "未授权"
 
   const propertyPicker = (
     <div className="space-y-3">
@@ -431,11 +497,36 @@ function GSCConnectionCard({
         name="Google Search Console"
         configured={connection.propertyConnected}
         source="none"
+        statusLabel={connectionStatusLabel}
       />
       {loading ? (
         <div className="flex h-20 items-center gap-2 text-sm text-muted-foreground">
           <LoaderCircle className="size-4 animate-spin" />
           正在读取
+        </div>
+      ) : connectionError ? (
+        <div
+          className="space-y-3 border-l-2 border-destructive pl-4"
+          role="alert"
+        >
+          <div>
+            <p className="text-sm font-medium text-destructive">
+              无法读取 Search Console 连接状态
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {connectionError}
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={loading}
+            onClick={() => void retryLoad()}
+            aria-label="重试 Search Console 连接状态"
+          >
+            <RefreshCw />
+            重试
+          </Button>
         </div>
       ) : !connection.oauthConfigured ? (
         <div className="space-y-4 border-l-2 border-amber-500 pl-4">
@@ -640,16 +731,18 @@ function ProviderHeading({
   name,
   configured,
   source,
+  statusLabel,
 }: {
   name: string
   configured: boolean
   source: SettingsSource
+  statusLabel?: string
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <h2 className="text-lg font-semibold">{name}</h2>
       <Badge variant={configured ? "outline" : "secondary"}>
-        {configured ? "已配置" : "未配置"}
+        {statusLabel ?? (configured ? "已配置" : "未配置")}
       </Badge>
       {source !== "none" && (
         <span className="text-xs text-muted-foreground">

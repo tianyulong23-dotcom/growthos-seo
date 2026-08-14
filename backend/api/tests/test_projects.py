@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -11,10 +12,6 @@ from app.api.routes.projects import get_project_service
 from app.core.config import Settings
 from app.main import app
 from app.modules.crawling.models import CrawlRun
-from app.modules.keywords.service import (
-    KeywordBootstrapRecord,
-    KeywordCompetitorAnalysisBootstrapRecord,
-)
 from app.modules.projects.schemas import (
     CreateProjectRequest,
     UpdateBusinessProfileRequest,
@@ -32,8 +29,13 @@ from app.modules.projects.service import (
 
 
 class FakeWorkflowLauncher:
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        error: Exception | None = None,
+        cancel_error: Exception | None = None,
+    ) -> None:
         self.error = error
+        self.cancel_error = cancel_error
         self.task: dict[str, Any] | None = None
         self.workflow_id = ""
         self.cancelled_workflow_ids: list[str] = []
@@ -46,6 +48,8 @@ class FakeWorkflowLauncher:
 
     async def cancel(self, workflow_id: str) -> None:
         self.cancelled_workflow_ids.append(workflow_id)
+        if self.cancel_error is not None:
+            raise self.cancel_error
 
 
 class FakeProjectRepository:
@@ -55,25 +59,19 @@ class FakeProjectRepository:
         self.dispatches: dict[str, WorkflowDispatchRecord] = {}
         self.dispatch_statuses: dict[str, str] = {}
         self.dispatch_errors: dict[str, str] = {}
-        self.keyword_bootstraps: dict[str, KeywordBootstrapRecord] = {}
-        self.competitor_bootstraps: dict[str, KeywordCompetitorAnalysisBootstrapRecord] = {}
         self.keyword_workflow_ids: list[str] = []
+        self.keyword_workflow_error: Exception | None = None
 
     async def create_with_understanding_run(
         self,
         project: ProjectRecord,
         run: CrawlRun,
         dispatch: WorkflowDispatchRecord,
-        keyword_bootstrap: KeywordBootstrapRecord,
-        competitor_bootstrap: KeywordCompetitorAnalysisBootstrapRecord | None = None,
     ) -> None:
         self.projects.append(project)
         self.runs[run.run_id] = run
         self.dispatches[dispatch.run_id] = dispatch
         self.dispatch_statuses[dispatch.run_id] = "pending"
-        self.keyword_bootstraps[keyword_bootstrap.run_id] = keyword_bootstrap
-        if competitor_bootstrap is not None:
-            self.competitor_bootstraps[competitor_bootstrap.run_id] = competitor_bootstrap
 
     async def mark_dispatch_succeeded(self, run_id: str) -> None:
         return None
@@ -210,6 +208,8 @@ class FakeProjectRepository:
         organization_id: str,
         project_id: str,
     ) -> list[str]:
+        if self.keyword_workflow_error is not None:
+            raise self.keyword_workflow_error
         return list(self.keyword_workflow_ids)
 
     async def delete(
@@ -257,17 +257,30 @@ class FakeProjectObjectCleaner:
             raise self.error
 
 
+class FakeOnboardingService:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.reconciled_project_ids: list[str] = []
+
+    async def reconcile_project(self, project_id: str) -> None:
+        self.reconciled_project_ids.append(project_id)
+        if self.error is not None:
+            raise self.error
+
+
 def build_service(
     *,
     launch_error: Exception | None = None,
+    cancel_error: Exception | None = None,
     object_cleaner: FakeProjectObjectCleaner | None = None,
+    onboarding_service: FakeOnboardingService | None = None,
 ) -> tuple[
     ProjectService,
     FakeWorkflowLauncher,
     FakeProjectRepository,
     FakeSiteIconReader,
 ]:
-    launcher = FakeWorkflowLauncher(launch_error)
+    launcher = FakeWorkflowLauncher(launch_error, cancel_error)
     repository = FakeProjectRepository()
     site_icon_reader = FakeSiteIconReader()
     return (
@@ -277,6 +290,7 @@ def build_service(
             repository=repository,
             site_icon_reader=site_icon_reader,
             object_cleaner=object_cleaner,
+            onboarding_service=onboarding_service,  # type: ignore[arg-type]
         ),
         launcher,
         repository,
@@ -319,15 +333,9 @@ def test_create_project_starts_site_understanding() -> None:
     assert response.understanding_started_at is None
     assert response.understanding_finished_at is None
     assert response.understanding_elapsed_seconds == 0
-    [keyword_bootstrap] = repository.keyword_bootstraps.values()
-    assert keyword_bootstrap.project_id == response.id
-    assert keyword_bootstrap.kind == "initial"
-    assert keyword_bootstrap.round_number == 1
-    assert keyword_bootstrap.task_payload["project_id"] == response.id
-    assert repository.competitor_bootstraps == {}
 
 
-def test_create_project_normalizes_competitor_for_the_parallel_keyword_task() -> None:
+def test_create_project_normalizes_competitor_without_starting_keywords() -> None:
     service, _, repository, _ = build_service()
 
     response = asyncio.run(
@@ -344,20 +352,7 @@ def test_create_project_normalizes_competitor_for_the_parallel_keyword_task() ->
     assert response.competitor_domain == "competitor.com"
     [project] = repository.projects
     assert project.competitor_domain == "competitor.com"
-    [keyword_bootstrap] = repository.keyword_bootstraps.values()
-    assert keyword_bootstrap.created_at == project.created_at
-    assert keyword_bootstrap.task_payload == {
-        "organization_id": project.organization_id,
-        "project_id": project.id,
-        "run_id": keyword_bootstrap.run_id,
-        "kind": "initial",
-        "round_number": 1,
-    }
-    [competitor_bootstrap] = repository.competitor_bootstraps.values()
-    assert competitor_bootstrap.analysis_mode == "manual"
-    assert competitor_bootstrap.competitor_domains == ["competitor.com"]
-    assert competitor_bootstrap.competitor_limit == 1
-    assert competitor_bootstrap.task_payload["analysis_mode"] == "manual"
+    assert repository.keyword_workflow_ids == []
 
 
 def test_sql_repository_flushes_project_before_keyword_run() -> None:
@@ -368,12 +363,15 @@ def test_sql_repository_flushes_project_before_keyword_run() -> None:
     project = repository.projects[0]
     run = repository.runs[project.understanding_run_id or ""]
     dispatch = repository.dispatches[run.run_id]
-    keyword_bootstrap = next(iter(repository.keyword_bootstraps.values()))
 
     class FlushOrderSession:
         def __init__(self) -> None:
             self.flush_count = 0
             self.committed = False
+            self.content_plan_settings: list[object] = []
+            self.agent_conversations: list[object] = []
+            self.onboarding_runs: list[object] = []
+            self.onboarding_steps: list[object] = []
 
         async def __aenter__(self) -> "FlushOrderSession":
             return self
@@ -382,8 +380,15 @@ def test_sql_repository_flushes_project_before_keyword_run() -> None:
             return None
 
         def add(self, instance: object) -> None:
-            if type(instance).__name__ == "KeywordBuildRun":
-                assert self.flush_count == 1
+            if type(instance).__name__ == "ContentPlanSettings":
+                self.content_plan_settings.append(instance)
+            if type(instance).__name__ == "AgentConversation":
+                self.agent_conversations.append(instance)
+            if type(instance).__name__ == "OnboardingRun":
+                self.onboarding_runs.append(instance)
+
+        def add_all(self, instances: list[object]) -> None:
+            self.onboarding_steps.extend(instances)
 
         async def flush(self) -> None:
             self.flush_count += 1
@@ -402,12 +407,35 @@ def test_sql_repository_flushes_project_before_keyword_run() -> None:
             project,
             run,
             dispatch,
-            keyword_bootstrap,
         )
     )
 
     assert session.flush_count == 2
     assert session.committed is True
+    [content_plan_settings] = session.content_plan_settings
+    assert content_plan_settings.project_id == project.id
+    assert content_plan_settings.cadence == "weekly_2_3"
+    assert content_plan_settings.timezone == "UTC"
+    assert content_plan_settings.cadence_anchor_week.weekday() == 0
+    [agent_conversation] = session.agent_conversations
+    assert agent_conversation.project_id == project.id
+    assert agent_conversation.created_by == "system"
+    assert agent_conversation.title == "网站初始化"
+    [onboarding_run] = session.onboarding_runs
+    assert onboarding_run.project_id == project.id
+    assert onboarding_run.agent_conversation_id == agent_conversation.id
+    assert [step.step_key for step in session.onboarding_steps] == [
+        "aris_welcome",
+        "site_understanding",
+        "business_confirmation",
+        "technical_audit",
+        "keyword_library",
+        "content_plan",
+        "first_article",
+        "second_article",
+    ]
+    assert session.onboarding_steps[1].status == "running"
+    assert session.onboarding_steps[4].status == "blocked"
 
 
 def test_create_project_remains_queued_when_workflow_cannot_start() -> None:
@@ -551,6 +579,34 @@ def test_list_projects_hides_legacy_www_duplicate_and_keeps_richer_project() -> 
     assert projects[0].id != first.id
 
 
+def test_list_projects_accepts_legacy_null_profile_lists() -> None:
+    service, _, repository, _ = build_service()
+    created = asyncio.run(
+        service.create(CreateProjectRequest(domain="example.com", country="US", language="en"))
+    )
+    repository.projects[0] = replace(
+        repository.projects[0],
+        understanding_status="completed",
+        understanding_stage="completed",
+        site_profile={
+            "business_name": "Example",
+            "business_type": "Software / SaaS",
+            "business_summary": "Example software.",
+            "content_topics": None,
+            "conversion_actions": None,
+            "confidence": 0.8,
+        },
+        site_profile_confidence=0.8,
+    )
+
+    [project] = asyncio.run(service.list())
+
+    assert project.id == created.id
+    assert project.site_profile is not None
+    assert project.site_profile.content_topics == []
+    assert project.site_profile.conversion_actions == []
+
+
 def test_project_response_uses_identified_business_name() -> None:
     service, _, repository, _ = build_service()
     created = asyncio.run(
@@ -647,6 +703,40 @@ def test_delete_project_route_removes_project_and_cancels_active_workflow() -> N
     assert cleaner.project_calls == [("test-org", created.id)]
 
 
+def test_delete_project_route_forces_removal_when_external_cleanup_fails() -> None:
+    cleaner = FakeProjectObjectCleaner(error=RuntimeError("storage unavailable"))
+    service, launcher, repository, _ = build_service(
+        cancel_error=RuntimeError("workflow unavailable"),
+        object_cleaner=cleaner,
+    )
+    created = asyncio.run(
+        service.create(CreateProjectRequest(domain="example.com", country="US", language="en"))
+    )
+    repository.keyword_workflow_error = RuntimeError("workflow lookup unavailable")
+    app.dependency_overrides[get_project_service] = lambda: service
+
+    async def request() -> tuple[int, int, int]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            deleted = await client.delete(f"/api/v1/projects/{created.id}")
+            loaded = await client.get(f"/api/v1/projects/{created.id}")
+            listed = await client.get("/api/v1/projects")
+            return deleted.status_code, loaded.status_code, len(listed.json())
+
+    try:
+        delete_status, get_status, project_count = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert delete_status == 204
+    assert get_status == 404
+    assert project_count == 0
+    assert launcher.cancelled_workflow_ids == [
+        f"crawler:site_understanding:{created.id}:{created.understanding_run_id}"
+    ]
+    assert cleaner.project_calls == [("test-org", created.id)]
+
+
 def test_update_business_profile_preserves_crawler_fields() -> None:
     service, _, repository, _ = build_service()
     created = asyncio.run(
@@ -710,6 +800,58 @@ def test_update_business_profile_preserves_crawler_fields() -> None:
     assert updated.site_profile.confirmed_at is not None
     assert updated.site_profile.business_type == "SaaS"
     assert updated.site_profile.evidence[0].source_url == "https://example.com"
+
+
+def test_update_business_profile_succeeds_when_onboarding_reconcile_is_deferred(
+    caplog,
+) -> None:
+    onboarding = FakeOnboardingService(RuntimeError("onboarding temporarily unavailable"))
+    service, _, repository, _ = build_service(onboarding_service=onboarding)
+    created = asyncio.run(
+        service.create(
+            CreateProjectRequest(domain="example.com", country="US", language="en")
+        )
+    )
+    onboarding.reconciled_project_ids.clear()
+    repository.projects[0] = replace(
+        repository.projects[0],
+        understanding_status="completed",
+        understanding_stage="completed",
+        site_profile={
+            "profile_version": 1,
+            "business_name": "Example",
+            "business_type": "SaaS",
+            "business_summary": "Original summary",
+            "confidence": 0.75,
+        },
+        site_profile_confidence=0.75,
+    )
+    caplog.set_level(logging.ERROR, logger="app.modules.projects.service")
+
+    updated = asyncio.run(
+        service.update_business_profile(
+            created.id,
+            UpdateBusinessProfileRequest(
+                business_name="Example",
+                business_type="SaaS",
+                business_summary="Confirmed summary",
+                target_audiences=["Teams"],
+                products_services=["Analytics"],
+                value_propositions=["Fast setup"],
+                ai_content_rules="",
+            ),
+        )
+    )
+
+    assert updated.site_profile is not None
+    assert updated.site_profile.business_summary == "Confirmed summary"
+    assert updated.site_profile.confirmed_at is not None
+    assert onboarding.reconciled_project_ids == [created.id]
+    assert any(
+        record.message == "Unable to reconcile onboarding after business profile update"
+        and record.project_id == created.id
+        for record in caplog.records
+    )
 
 
 def test_update_business_profile_route_persists_changes() -> None:

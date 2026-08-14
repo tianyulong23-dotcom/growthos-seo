@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,10 +9,13 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var plaintextAISettingsPrefix = []byte("plaintext:v1:")
 
 type PostgresCrawlRepository struct {
 	pool                    *pgxpool.Pool
@@ -27,9 +31,14 @@ func NewPostgresCrawlRepository(
 	if databaseURL == "" {
 		return nil, errors.New("CRAWLER_DATABASE_URL or DATABASE_URL is required")
 	}
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("configure PostgreSQL: %w", err)
+	}
+	poolConfig.ConnConfig.RuntimeParams["search_path"] = "public,platform,crawling,audit"
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		return nil, fmt.Errorf("configure PostgreSQL pool: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
@@ -40,19 +49,20 @@ func NewPostgresCrawlRepository(
 		ctx,
 		`
 		SELECT
-			to_regclass('public.projects') IS NOT NULL
-			AND to_regclass('public.crawl_runs') IS NOT NULL
-			AND to_regclass('public.pages') IS NOT NULL
-			AND to_regclass('public.page_snapshots') IS NOT NULL
-			AND to_regclass('public.link_edges') IS NOT NULL
-			AND to_regclass('public.backlink_checks') IS NOT NULL
-			AND to_regclass('public.site_profiles') IS NOT NULL
-			AND to_regclass('public.audit_issues') IS NOT NULL
-			AND to_regclass('public.crawl_checkpoints') IS NOT NULL
-			AND to_regclass('public.pagespeed_results') IS NOT NULL
-			AND to_regclass('public.external_resources') IS NOT NULL
+			to_regclass('platform.projects') IS NOT NULL
+			AND to_regclass('crawling.crawl_runs') IS NOT NULL
+			AND to_regclass('crawling.pages') IS NOT NULL
+			AND to_regclass('crawling.page_snapshots') IS NOT NULL
+			AND to_regclass('crawling.link_edges') IS NOT NULL
+			AND to_regclass('crawling.backlink_checks') IS NOT NULL
+			AND to_regclass('platform.site_profiles') IS NOT NULL
+			AND to_regclass('audit.audit_issues') IS NOT NULL
+			AND to_regclass('crawling.crawl_checkpoints') IS NOT NULL
+			AND to_regclass('audit.pagespeed_results') IS NOT NULL
+			AND to_regclass('crawling.external_resources') IS NOT NULL
 			AND to_regclass('public.ai_provider_settings') IS NOT NULL
 			AND to_regclass('public.site_profile_versions') IS NOT NULL
+			AND to_regclass('crawling.business_profile_ai_calls') IS NOT NULL
 		`,
 	).Scan(&schemaReady); err != nil {
 		pool.Close()
@@ -95,46 +105,30 @@ func (r *PostgresCrawlRepository) LoadAIProviderSettings(
 	ctx context.Context,
 	organizationID string,
 ) (AIProviderSettings, bool, error) {
-	if strings.TrimSpace(r.aiSettingsEncryptionKey) == "" {
-		var exists bool
-		if err := r.pool.QueryRow(
-			ctx,
-			"SELECT EXISTS (SELECT 1 FROM ai_provider_settings WHERE organization_id = $1)",
-			organizationID,
-		).Scan(&exists); err != nil {
-			return AIProviderSettings{}, false, fmt.Errorf(
-				"check AI provider settings: %w",
-				err,
-			)
-		}
-		if !exists {
-			return AIProviderSettings{}, false, nil
-		}
-		return AIProviderSettings{}, false, errors.New(
-			"AI_SETTINGS_ENCRYPTION_KEY is required to load AI provider settings",
-		)
-	}
-
 	var settings AIProviderSettings
+	var storedAPIKey []byte
 	var requestTimeoutSeconds int
 	err := r.pool.QueryRow(
 		ctx,
 		`
 		SELECT
+				provider,
 				base_url,
-				pgp_sym_decrypt(api_key_encrypted, $2),
-				model,
+				api_key_encrypted,
+				COALESCE(NULLIF(business_model, ''), model),
+				COALESCE(NULLIF(business_reasoning_effort, ''), reasoning_effort),
 				request_timeout_seconds,
 				max_retries
 		FROM ai_provider_settings
 		WHERE organization_id = $1
 		`,
 		organizationID,
-		r.aiSettingsEncryptionKey,
 	).Scan(
+		&settings.Provider,
 		&settings.BaseURL,
-		&settings.APIKey,
+		&storedAPIKey,
 		&settings.Model,
+		&settings.ReasoningEffort,
 		&requestTimeoutSeconds,
 		&settings.MaxRetries,
 	)
@@ -147,8 +141,100 @@ func (r *PostgresCrawlRepository) LoadAIProviderSettings(
 			err,
 		)
 	}
+	apiKey, plaintext, err := decodePlaintextAIAPIKey(storedAPIKey)
+	if err != nil {
+		return AIProviderSettings{}, false, err
+	}
+	if plaintext {
+		settings.APIKey = apiKey
+	} else {
+		if strings.TrimSpace(r.aiSettingsEncryptionKey) == "" {
+			return AIProviderSettings{}, false, errors.New(
+				"AI_SETTINGS_ENCRYPTION_KEY is required to load encrypted AI provider settings",
+			)
+		}
+		if err := r.pool.QueryRow(
+			ctx,
+			`SELECT pgp_sym_decrypt(api_key_encrypted, $2)
+			 FROM ai_provider_settings
+			 WHERE organization_id = $1`,
+			organizationID,
+			r.aiSettingsEncryptionKey,
+		).Scan(&settings.APIKey); err != nil {
+			return AIProviderSettings{}, false, fmt.Errorf(
+				"decrypt AI provider settings: %w",
+				err,
+			)
+		}
+	}
 	settings.RequestTimeout = time.Duration(requestTimeoutSeconds) * time.Second
 	return settings, true, nil
+}
+
+func (r *PostgresCrawlRepository) SaveAIProfileInvocation(
+	ctx context.Context,
+	task Task,
+	invocation AIProfileInvocation,
+) error {
+	_, err := r.pool.Exec(
+		ctx,
+		`
+		INSERT INTO crawling.business_profile_ai_calls (
+			organization_id, project_id, run_id, provider, base_url, model,
+			attempt, status, request_json, http_status, raw_response_json,
+			raw_response_body, raw_model_output, parsed_output_json,
+			elapsed_ms, prompt_tokens, completion_tokens, total_tokens,
+			cost_usd, error_type, error_message, created_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb,
+			$12, $13, $14::jsonb, $15, $16, $17, $18, $19, $20, $21, $22
+		)
+		`,
+		task.OrganizationID,
+		task.ProjectID,
+		task.RunID,
+		invocation.Provider,
+		invocation.BaseURL,
+		invocation.Model,
+		invocation.Attempt,
+		invocation.Status,
+		nullableJSON(invocation.RequestJSON),
+		nullableInt(invocation.HTTPStatus),
+		nullableJSON(invocation.RawResponseJSON),
+		nullableString(invocation.RawResponseBody),
+		nullableString(invocation.RawModelOutput),
+		nullableJSON(invocation.ParsedOutputJSON),
+		invocation.ElapsedMS,
+		nullableInt(invocation.PromptTokens),
+		nullableInt(invocation.CompletionTokens),
+		nullableInt(invocation.TotalTokens),
+		invocation.CostUSD,
+		nullableString(invocation.ErrorType),
+		nullableString(invocation.ErrorMessage),
+		invocation.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("save business profile AI invocation: %w", err)
+	}
+	return nil
+}
+
+func nullableJSON(value json.RawMessage) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return []byte(value)
+}
+
+func decodePlaintextAIAPIKey(stored []byte) (string, bool, error) {
+	if !bytes.HasPrefix(stored, plaintextAISettingsPrefix) {
+		return "", false, nil
+	}
+	apiKey := stored[len(plaintextAISettingsPrefix):]
+	if !utf8.Valid(apiKey) {
+		return "", true, errors.New("stored plaintext AI API key is not valid UTF-8")
+	}
+	return string(apiKey), true, nil
 }
 
 func (r *PostgresCrawlRepository) SaveProgress(

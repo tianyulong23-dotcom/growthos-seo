@@ -12,8 +12,6 @@ import httpx
 import pycountry
 
 from seo_workers.keywords.domain import (
-    INITIAL_LIBRARY_APPROVAL_SCORES,
-    INITIAL_LIBRARY_REJECTION_REASONS,
     RawKeyword,
     SEED_POOL_LIMIT,
     SEED_POOL_MAX_GROUP_SIZE,
@@ -34,7 +32,6 @@ LANGUAGE_ALIASES = {
     "pt-pt": "pt",
 }
 
-TOPIC_DEDUP_REASONING_EFFORT = "low"
 TOPIC_DEDUP_MAX_COMPLETION_TOKENS = 5000
 RETRYABLE_FAILURE = "retryable_failed"
 CHARGED_FAILURE = "charged_failed"
@@ -69,20 +66,32 @@ class AIProviderConfig:
     model: str
     timeout_seconds: int
     max_retries: int
-    initial_filter_model: str = ""
-    topic_dedup_model: str = ""
+    api_protocol: str = "chat_completions"
+    keyword_model: str = ""
+    business_model: str = ""
+    reasoning_effort: str = "medium"
+    keyword_reasoning_effort: str = ""
+    business_reasoning_effort: str = ""
 
     @property
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
 
     @property
-    def effective_initial_filter_model(self) -> str:
-        return self.initial_filter_model.strip() or self.model
+    def effective_keyword_model(self) -> str:
+        return self.keyword_model.strip() or self.model
 
     @property
-    def effective_topic_dedup_model(self) -> str:
-        return self.topic_dedup_model.strip() or self.model
+    def effective_business_model(self) -> str:
+        return self.business_model.strip() or self.model
+
+    @property
+    def effective_keyword_reasoning_effort(self) -> str:
+        return self.keyword_reasoning_effort.strip() or self.reasoning_effort
+
+    @property
+    def effective_business_reasoning_effort(self) -> str:
+        return self.business_reasoning_effort.strip() or self.reasoning_effort
 
 
 @dataclass(frozen=True)
@@ -288,12 +297,11 @@ def seed_topic_representatives_schema(
 
 
 def initial_library_filter_schema(candidates: list[SeedCandidate]) -> dict[str, Any]:
-    categories = [*INITIAL_LIBRARY_APPROVAL_SCORES, *INITIAL_LIBRARY_REJECTION_REASONS]
     return strict_object_schema(
         {
             "decisions": {
                 "type": "array",
-                "items": {"type": "string", "enum": categories},
+                "items": {"type": "string", "enum": ["keep", "remove_incomplete"]},
                 "minItems": len(candidates),
                 "maxItems": len(candidates),
             }
@@ -981,61 +989,40 @@ def build_initial_library_filter_prompt(
     candidate_payload = [
         [f"k{index:03d}", candidate.keyword] for index, candidate in enumerate(candidates, start=1)
     ]
-    profile_payload = compact_seed_profile(profile)
-    business_model = str(profile_payload.get("model") or "mixed")
-
     def compact_json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     return (
-        "You are a general SEO keyword usability filter.\n\n"
-        "Classify every candidate exactly once using only the supplied website business "
-        "information. Judge the complete search need, not isolated word overlap. The business "
-        "profile is evidence, not permission to infer broader offerings, capabilities, locations, "
-        "relationships, or content strategies.\n\n"
+        "You are a strict query-integrity gate for an SEO keyword library. Its only purpose is to "
+        "remove malformed, truncated, or semantically underdetermined query strings before they "
+        "enter the library. Prefer rejecting a questionable string over admitting an incomplete "
+        "one. Do not judge website relevance, industry fit, brand ownership, navigation intent, "
+        "commercial value, search volume, breadth, or whether a page should be created.\n\n"
+        "Each input is a search query rather than a sentence, so articles, punctuation, and other "
+        "non-core grammar may be omitted. The ordered terms must still directly form a recognizable "
+        "search topic: they must supply an identifiable topic or a complete action-object, "
+        "head-modifier, object-purpose, or other conventional semantic relationship.\n\n"
         "Allowed decisions:\n"
-        "- keep: the query has a clear connection to an evidenced offering, audience need, use "
-        "case, problem, solution, or suitable content topic and can serve as a meaningful SEO topic\n"
-        "- remove_irrelevant: the underlying search need is clearly outside the evidenced business "
-        "and target audience\n"
-        "- remove_entity: the useful meaning depends on a brand, company, person, product, platform, "
-        "publication, or other named entity that the business profile does not support\n"
-        "- remove_navigation: the user is trying to reach a specific site, login, account, contact, "
-        "support, official page, or other entity-specific destination\n"
-        "- remove_unusable: the phrase is broken, meaningless, or so incomplete that it has no "
-        "identifiable search need and cannot form a useful SEO topic\n\n"
-        "Universal rules:\n"
-        "- Keep broad or specific queries when they still express a clear, useful topic supported "
-        "by the business evidence\n"
-        "- Use keep only when the complete search need has affirmative support in the business "
-        "profile; industry proximity or a shared general word is not affirmative support\n"
-        "- If the phrase is understandable but its complete search need has no supported connection "
-        "to the business or target audience, use remove_irrelevant\n"
-        "- A mention, trial, demo, guide, comparison, compatibility statement, or partnership claim "
-        "supports only what it explicitly says; never expand narrow evidence into a broader claim\n"
-        "- Descriptive nouns such as app, service, software, store, product, provider, or platform "
-        "are not named entities by themselves\n"
-        "- Recognizable industry words do not make a broken or incomplete phrase usable; the full "
-        "query must express an identifiable subject or search need\n"
-        "- Do not remove a keyword because it is similar to another candidate, has low search "
-        "volume, or could have more than one intent\n"
-        "- Do not group, rank, rewrite, normalize, or deduplicate keywords in this step\n"
-        "- Apply the same rules to every website and industry; do not invent domain-specific rules\n\n"
-        "Decision order for every candidate:\n"
-        "1. Check whether the complete phrase is usable and meaningful.\n"
-        "2. Check navigation intent and unsupported named entities.\n"
-        "3. Check the complete search need against the supplied business evidence.\n"
-        "4. Use keep only after confirming an affirmative connection to the supplied evidence.\n\n"
+        "- keep: the ordered phrase itself forms a complete, conventional search topic without "
+        "supplying a missing core term, reordering terms, or inventing how the terms relate\n"
+        "- remove_incomplete: the phrase lacks a required topic, action, object, head, modifier "
+        "attachment, or semantic relationship, or its word order does not produce a recognizable "
+        "search topic as written\n\n"
+        "A plausible meaning that can be imagined after repairing, expanding, reordering, or freely "
+        "associating the terms is not enough to keep a candidate. Reject strings made only of "
+        "individually recognizable terms when their combined relationship is not explicit or "
+        "conventional. Keep short, broad, awkward, or multi-intent queries only when their ordered "
+        "terms still compose a complete recognizable topic. Do not use the website, industry, other "
+        "candidates, or external assumptions to complete a phrase. If any core relationship is "
+        "uncertain, return remove_incomplete.\n\n"
         "Output integrity:\n"
         "- Return one category string for each candidate, in the exact supplied candidate order\n"
         "- decisions item 1 classifies k001, item 2 classifies k002, and so on\n"
         "- decisions must contain exactly the same number of items as the candidate list\n"
         "- Never include candidate IDs, explanations, scores, or any additional fields\n\n"
         "Return JSON only:\n"
-        '{"decisions":["keep","remove_entity","remove_unusable"]}\n\n'
-        f"Website business model: {business_model}\n"
+        '{"decisions":["keep","remove_incomplete","keep"]}\n\n'
         f"Target country and language: {country}/{language}\n"
-        f"Website business information: {compact_json(profile_payload)}\n"
         "Candidate schema: [id, keyword]\n"
         f"Candidate keywords: {compact_json(candidate_payload)}"
     )
@@ -1638,6 +1625,8 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=5000,
+            model=self.config.effective_business_model,
+            reasoning_effort=self.config.effective_business_reasoning_effort,
             schema_name="keyword_business_profile",
             response_schema=fallback_profile_schema(),
         )
@@ -1728,7 +1717,7 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=8000,
-            model=self.config.effective_initial_filter_model,
+            model=self.config.effective_keyword_model,
             schema_name="initial_keyword_library_filter",
             response_schema=initial_library_filter_schema(candidates),
         )
@@ -1816,8 +1805,8 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=TOPIC_DEDUP_MAX_COMPLETION_TOKENS,
-            model=self.config.effective_topic_dedup_model,
-            reasoning_effort=TOPIC_DEDUP_REASONING_EFFORT,
+            model=self.config.effective_keyword_model,
+            reasoning_effort=self.config.effective_keyword_reasoning_effort,
             schema_name="keyword_seed_selection",
             response_schema=topic_selection_schema(topics, duplicate_pairs),
         )
@@ -1898,6 +1887,8 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=5000,
+            model=self.config.effective_business_model,
+            reasoning_effort=self.config.effective_business_reasoning_effort,
             schema_name="keyword_competitor_validation",
             response_schema=competitor_validation_schema(len(rows)),
         )
@@ -1939,6 +1930,8 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=5000,
+            model=self.config.effective_business_model,
+            reasoning_effort=self.config.effective_business_reasoning_effort,
             schema_name="competitive_market_queries",
             response_schema=competitive_query_selection_schema(len(candidates)),
         )
@@ -1991,6 +1984,8 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=8000,
+            model=self.config.effective_business_model,
+            reasoning_effort=self.config.effective_business_reasoning_effort,
             schema_name="competitive_domain_classification",
             response_schema=competitive_domain_classification_schema(len(competitors)),
         )
@@ -2022,6 +2017,8 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=4000,
+            model=self.config.effective_business_model,
+            reasoning_effort=self.config.effective_business_reasoning_effort,
             schema_name="competitive_backlink_validation",
             response_schema=backlink_validation_schema(len(competitors)),
         )
@@ -2056,6 +2053,8 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=16000,
+            model=self.config.effective_business_model,
+            reasoning_effort=self.config.effective_business_reasoning_effort,
             schema_name="competitive_landscape_summary",
             response_schema=competitive_landscape_summary_schema(
                 [str(row.get("domain") or "") for row in competitors]
@@ -2093,6 +2092,8 @@ class OpenAICompatibleClient:
         return await self._completion(
             prompt,
             max_tokens=16000,
+            model=self.config.effective_business_model,
+            reasoning_effort=self.config.effective_business_reasoning_effort,
             schema_name="competitive_landscape_summary_repair",
             response_schema=competitive_landscape_summary_schema(
                 [str(row.get("domain") or "") for row in competitors]
@@ -2109,13 +2110,15 @@ class OpenAICompatibleClient:
         schema_name: str | None = None,
         response_schema: dict[str, Any] | None = None,
     ) -> AIResult:
-        effective_model = (model or self.config.model).strip()
+        effective_model = (model or self.config.effective_keyword_model).strip()
         if not self.config.base_url or not self.config.api_key or not effective_model:
             raise ProviderError("ai_not_configured", "服务器尚未配置 AI 模型")
+        uses_responses = self.config.api_protocol == "responses"
+        endpoint_suffix = "/responses" if uses_responses else "/chat/completions"
         endpoint = (
             self.config.base_url
-            if self.config.base_url.endswith("/chat/completions")
-            else self.config.base_url.rstrip("/") + "/chat/completions"
+            if self.config.base_url.endswith(endpoint_suffix)
+            else self.config.base_url.rstrip("/") + endpoint_suffix
         )
         token_parameter = completion_token_parameter(effective_model)
         response_format: dict[str, Any]
@@ -2130,20 +2133,42 @@ class OpenAICompatibleClient:
             }
         else:
             response_format = {"type": "json_object"}
-        request_body: dict[str, Any] = {
-            "model": effective_model,
-            "messages": [
+        messages = [
                 {
                     "role": "system",
                     "content": "Return valid JSON only. Follow the schema exactly.",
                 },
                 {"role": "user", "content": prompt},
-            ],
-            "response_format": response_format,
-            token_parameter: max_tokens,
-        }
-        if reasoning_effort is not None:
-            request_body["reasoning_effort"] = reasoning_effort
+            ]
+        effective_effort = (
+            reasoning_effort or self.config.effective_keyword_reasoning_effort
+        )
+        if uses_responses:
+            if response_format.get("type") == "json_schema":
+                schema = response_format["json_schema"]
+                text_format = {
+                    "type": "json_schema",
+                    "name": schema["name"],
+                    "strict": schema["strict"],
+                    "schema": schema["schema"],
+                }
+            else:
+                text_format = response_format
+            request_body = {
+                "model": effective_model,
+                "input": messages,
+                "text": {"format": text_format},
+                "max_output_tokens": max_tokens,
+                "reasoning": {"effort": effective_effort},
+            }
+        else:
+            request_body = {
+                "model": effective_model,
+                "messages": messages,
+                "response_format": response_format,
+                token_parameter: max_tokens,
+                "reasoning_effort": effective_effort,
+            }
         payload, response = await self.http.request(
             "POST",
             endpoint,
@@ -2179,7 +2204,22 @@ class OpenAICompatibleClient:
         )
         cleaned = ""
         try:
-            content = payload["choices"][0]["message"]["content"]
+            if uses_responses:
+                output = payload.get("output")
+                content = "".join(
+                    str(part.get("text") or "")
+                    for item in (output if isinstance(output, list) else [])
+                    if isinstance(item, dict)
+                    for part in (
+                        item.get("content")
+                        if isinstance(item.get("content"), list)
+                        else []
+                    )
+                    if isinstance(part, dict)
+                    and part.get("type") in {"output_text", "text"}
+                )
+            else:
+                content = payload["choices"][0]["message"]["content"]
             if isinstance(content, list):
                 content = "".join(
                     str(part.get("text") or "") for part in content if isinstance(part, dict)
@@ -2292,7 +2332,7 @@ class DataForSEOClient:
                 "target": domain,
                 "target_type": "site",
                 "location_name": country_display_name(country),
-                "language_code": provider_language_code(language),
+                "language_name": provider_language_name(language),
                 "search_partners": False,
                 "include_adult_keywords": False,
                 "sort_by": "relevance",
@@ -3112,6 +3152,21 @@ def provider_language_code(language: str) -> str:
     return LANGUAGE_ALIASES.get(normalized, normalized.split("-", 1)[0])
 
 
+def provider_language_name(language: str) -> str:
+    code = provider_language_code(language)
+    record = pycountry.languages.get(alpha_2=code)
+    if record is None and len(code) == 3:
+        record = pycountry.languages.get(alpha_3=code)
+    if record is None:
+        try:
+            record = pycountry.languages.lookup(language.strip())
+        except LookupError:
+            record = None
+    if record is None:
+        raise ProviderError("unsupported_language", f"不支持语言 {language}")
+    return str(record.name)
+
+
 def completion_token_parameter(model: str) -> str:
     normalized = model.strip().casefold()
     if normalized.startswith(("gpt-5", "o1", "o3", "o4")):
@@ -3119,16 +3174,20 @@ def completion_token_parameter(model: str) -> str:
     return "max_tokens"
 
 
+def country_record(country: str) -> Any:
+    try:
+        return pycountry.countries.lookup(country.strip())
+    except LookupError as exc:
+        raise ProviderError("unsupported_country", f"不支持国家 {country}") from exc
+
+
 def country_display_name(country: str) -> str:
-    value = pycountry.countries.get(alpha_2=country.strip().upper())
-    if value is None:
-        raise ProviderError("unsupported_country", f"不支持国家 {country}")
-    return str(value.name)
+    return str(country_record(country).name)
 
 
 def country_location_code(country: str) -> int:
-    value = pycountry.countries.get(alpha_2=country.strip().upper())
-    if value is None or not value.numeric:
+    value = country_record(country)
+    if not value.numeric:
         raise ProviderError("unsupported_country", f"不支持国家 {country}")
     return 2000 + int(value.numeric)
 

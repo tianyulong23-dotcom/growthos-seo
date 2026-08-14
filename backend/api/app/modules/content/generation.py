@@ -4,11 +4,15 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.core.config import Settings
 from app.modules.content.collection import _collect_research
+from app.modules.content.document import document_to_markdown, normalize_document
 from app.modules.content.competitor_analysis import (
     analyze_competitor,
     build_competitor_blueprint,
@@ -19,15 +23,11 @@ from app.modules.content.quality import (
     article_markdown,
     deterministic_quality_check,
     project_domain_matches,
-    restore_link_only_claims,
-    sanitize_allowed_links,
-    sanitize_internal_links,
     sanitize_sections,
     sanitize_markdown_links,
 )
 from app.modules.content.repository import ContentRepository
 from app.modules.content.serp_analysis import analyze_serp, serp_analysis_needs_refresh
-from app.modules.content.source_verification import verify_source_claims
 from app.modules.content.writing_gateway import (
     ArticleContract,
     ArticlePlan,
@@ -37,7 +37,6 @@ from app.modules.content.writing_gateway import (
     RevisedSections,
     SectionDraft,
     SectionIssue,
-    SemanticQualityResult,
     UnifiedArticle,
     WritingGateway,
     WritingOutputError,
@@ -45,6 +44,14 @@ from app.modules.content.writing_gateway import (
     WritingResult,
     merge_usage,
 )
+
+
+MAX_PLANNING_SOURCES = 20
+MAX_PLANNING_CLAIMS_PER_SOURCE = 3
+MAX_PLAN_CLAIMS = 48
+MAX_SECTION_CLAIMS = 8
+MAX_SUPPLEMENTAL_RESEARCH_SECONDS = 180.0
+GENERATION_DEADLINE_RESERVE_SECONDS = 300.0
 
 
 def artifact_store(settings: Settings) -> S3ArtifactStore:
@@ -151,35 +158,90 @@ async def plan_article(
     usage: dict[str, Any] | None = None
     model_failure = None
     try:
+        planning_context = {
+            **context,
+            "model_snapshot": {
+                **dict(context.get("model_snapshot") or {}),
+                "max_retries": 0,
+            },
+        }
+        gateway = writing_gateway(planning_context)
+        project_role = _project_article_role(pack)
+        include_project_profile = project_role != "unrelated"
+        planning_goal = "Create an article plan that answers the reader's real question."
+        if include_project_profile:
+            planning_goal += " Use the available research and project information."
+        writing_brief = _article_writing_brief(pack)
         result = await cached_generate(
-            writing_gateway(context),
+            gateway,
             settings,
             context,
             "plan_article",
-            {"research_pack": pack},
+            {
+                "goal": planning_goal,
+                "writing_brief": writing_brief,
+                "research_decision": {
+                    "rule": (
+                        "After completing the outline, report a critical_research_gap only "
+                        "when missing information prevents a correct core answer. Optional "
+                        "statistics, examples, broader comparisons, freshness details, or "
+                        "nonessential brand details are not critical gaps."
+                    ),
+                    "when_sufficient": "Return critical_research_gaps as an empty array.",
+                    "when_blocked": (
+                        "For each real gap, explain why it blocks the core answer and provide "
+                        "one complete web-research query. Do not split one topic into several "
+                        "small questions."
+                    ),
+                },
+                "visual_planning": {
+                    "goal": "Suggest only images that help the reader understand, compare, verify, orient, or act.",
+                    "placement": "Bind each suggestion to one outline section_id.",
+                    "source_choice": "Prefer a relevant project asset or real screenshot for product state, and a sourced chart for data. Use stock or AI only for suitable illustrative material.",
+                    "screenshot_contract": "For screenshot, set target_url to an exact project or research source URL in the research pack.",
+                    "chart_contract": "For chart, provide chart_data label, numeric value, unit, and claim_id. Every value must appear in that cited claim, and data_claim_ids must list those claims.",
+                    "when_unhelpful": "Return visuals as an empty array.",
+                },
+                "research_pack": _planning_research_pack(
+                    pack,
+                    include_project_profile=include_project_profile,
+                ),
+            },
             ArticlePlan,
         )
         raw_plan = result.value
-        supplemental_queries = _supplemental_research_queries(raw_plan, pack)
-        if supplemental_queries:
-            try:
-                supplemental_warning, supplemental_count = await _collect_research(
-                    repo,
-                    settings,
-                    run_id,
-                    str(pack["keyword"]),
-                    dict(pack.get("project") or {}),
-                    supplemental_queries,
-                )
-                if supplemental_count:
-                    pack = await build_research_pack(repo, settings, context)
-            except Exception:
-                supplemental_warning = "research_unavailable"
-            if supplemental_warning:
+        supplemental_tasks = _critical_research_tasks(raw_plan)
+        if supplemental_tasks:
+            supplemental_warning: str | None = "research_unavailable"
+            supplemental_count = 0
+            supplemental_started = time.monotonic()
+            timeout_seconds = _supplemental_research_timeout_seconds(
+                context,
+                supplemental_started,
+            )
+            if timeout_seconds > 0:
+                try:
+                    supplemental_warning, supplemental_count = await asyncio.wait_for(
+                        _collect_research(
+                            repo,
+                            settings,
+                            run_id,
+                            str(pack["keyword"]),
+                            dict(pack.get("project") or {}),
+                            supplemental_tasks,
+                            model_snapshot=dict(context.get("model_snapshot") or {}),
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                    if supplemental_count:
+                        pack = await build_research_pack(repo, settings, context)
+                except Exception:
+                    supplemental_warning = "research_unavailable"
+            if supplemental_warning or not supplemental_count:
                 warnings.append(
                     _warning(
                         "supplemental_research_degraded",
-                        "关键事实补充研究暂不可用，已按现有证据边界继续生成完整稿",
+                        "关键资料补充研究暂不可用，已使用现有资料继续生成完整稿",
                     )
                 )
         plan = normalize_plan(raw_plan, pack)
@@ -216,7 +278,662 @@ async def plan_article(
     }
 
 
+def _article_writing_brief(pack: dict[str, Any]) -> dict[str, Any]:
+    keyword = str(pack.get("keyword") or "").strip()
+    country = str(pack.get("country") or "").strip()
+    requested_type = dict(pack.get("requested_article_type") or {})
+    locked_type = str(requested_type.get("value") or "").strip()
+    reader_questions = _unique(
+        [
+            str(item).strip()
+            for item in pack.get("required_questions") or []
+            if str(item).strip()
+        ]
+    )[:8]
+    recommended_type = _recommended_article_type(pack)
+    comparison_dimensions = _relevant_comparison_dimensions(pack)
+    project_article_role = _project_article_role(pack)
+    project_role = {
+        "core": (
+            "The project product is part of the reader's requested answer. Use it where it "
+            "materially answers the task, with a natural next action when available."
+        ),
+        "conversion": (
+            "The project product is a verified, relevant option but is not the article's core "
+            "answer and must not become the automatic winner. Keep the article neutral, mention "
+            "the product once where it naturally helps the decision, and use at most one CTA."
+        ),
+        "unrelated": (
+            "The project product is unrelated to this reader task. Do not mention it or add a CTA."
+        ),
+    }[project_article_role]
+    type_structures = {
+        "Guide": (
+            "Direct answer; H2s that explain the necessary background, key factors, reader "
+            "meaning or application, and only needed limits or unanswered FAQs."
+        ),
+        "How-To": (
+            "Direct answer and requirements; H2: Step-by-step process; H2: How to verify the "
+            "result; H2: Common mistakes or troubleshooting; unanswered FAQ and next action only "
+            "when useful."
+        ),
+        "Comparison": (
+            "Direct verdict and comparison table; H2s for consistent decision dimensions; "
+            "H2: Choose [option] if...; unanswered FAQ and conclusion only when useful."
+        ),
+        "Listicle / Best X": (
+            "Direct answer and top-picks comparison table; H2: Best for [scenario]: [item] for "
+            "each main option; H2: How we evaluated the options; H2: How to choose the right "
+            "option; unanswered FAQ and conclusion only when useful."
+        ),
+        "Review": (
+            "Direct verdict and key facts; H2s for who it suits, evidence basis, important use "
+            "cases, pros and cons, value, alternatives, and only unanswered FAQs."
+        ),
+        "Directory": (
+            "Data scope and provider list; H2s for selection method, choosing a provider, "
+            "verification checks, comparing quotes, and a practical next action."
+        ),
+    }
+    return {
+        "reader_task": (
+            f"Help a reader in {country} resolve the practical question behind '{keyword}'."
+            if country
+            else f"Resolve the reader's practical question behind '{keyword}'."
+        ),
+        "article_type": (
+            f"Use the locked article type: {locked_type}."
+            if locked_type and requested_type.get("policy") == "locked"
+            else (
+                "Choose the primary article type from the reader's task and research: guide, "
+                "how-to, comparison, listicle, review, or directory. Mix in other structures "
+                "only when they help answer the task."
+            )
+        ),
+        "recommended_article_type": recommended_type,
+        "article_type_structure": type_structures[recommended_type],
+        "opening": (
+            "Answer the main question in the first 1-3 sentences, state the important "
+            "conditions, and tell the reader what decision or action the article enables."
+        ),
+        "structure": (
+            "Build the outline around the reader's decision path. Use only useful modules; "
+            "introduction, quick answer, table, FAQ, conclusion, and CTA are optional. "
+            "Prefer 3-8 substantive H2 sections and never exceed 12 top-level sections."
+        ),
+        "heading_rule": (
+            "Write each H2 as the specific answer or choice the reader will see, not as an "
+            "instruction about what the writer should discuss. The direct-answer introduction "
+            "is a generation unit, not a visible H2. Put recurring comparison fields such as "
+            "price, devices, and limitations inside each option instead of making every field "
+            "a separate H2."
+        ),
+        "section_logic": (
+            "Each main section should lead with its answer or judgment, support it with the "
+            "available research, and explain what it means for the reader. End with a practical "
+            "choice, application, or next-step section when the topic calls for one."
+        ),
+        "scope_control": (
+            "Choose one primary reader question. Include a secondary intent only when it is "
+            "needed to solve that question; omit merely related meanings, repetitive FAQs, and "
+            "background that does not change the reader's understanding or action. Give every "
+            "section a distinct job."
+        ),
+        "worked_example": (
+            "For a practical, analytical, or process topic, plan one end-to-end worked example "
+            "or walkthrough that shows what the reader observes, how to interpret it, and what "
+            "to do next. Use the available material and avoid false precision."
+        ),
+        "reader_questions": reader_questions,
+        "comparison_dimensions": comparison_dimensions,
+        "project_role": project_role,
+    }
+
+
+def _recommended_article_type(pack: dict[str, Any]) -> str:
+    requested = dict(pack.get("requested_article_type") or {})
+    requested_value = str(requested.get("value") or "").casefold()
+    if requested.get("policy") == "locked" and requested_value:
+        if "list" in requested_value or "best" in requested_value:
+            return "Listicle / Best X"
+        if "how" in requested_value:
+            return "How-To"
+        if "compar" in requested_value or " vs " in f" {requested_value} ":
+            return "Comparison"
+        if "review" in requested_value:
+            return "Review"
+        if "director" in requested_value or "local" in requested_value:
+            return "Directory"
+        return "Guide"
+
+    text = " ".join(
+        [
+            str(pack.get("keyword") or ""),
+            *[str(item) for item in pack.get("required_questions") or []],
+        ]
+    ).casefold()
+    normalized = f" {_normalize_requirement(text)} "
+    if re.search(r"\b(best|top|options|alternatives)\b", normalized):
+        return "Listicle / Best X"
+    if re.search(r"\bhow to\b|\bsteps?\b|\bfix\b", normalized):
+        return "How-To"
+    if re.search(r"\bversus\b|\bvs\b|\bcompare\b|\bdifference\b", normalized):
+        return "Comparison"
+    if re.search(r"\breview\b|\bis it worth\b", normalized):
+        return "Review"
+    if re.search(r"\bnear me\b|\bproviders? in\b|\bcompanies in\b", normalized):
+        return "Directory"
+    return "Guide"
+
+
+def _canonical_article_type(value: str) -> str:
+    normalized = _normalize_requirement(value)
+    if ("listicle" in normalized and normalized != "listicle") or (
+        "best" in normalized and any(item in normalized for item in ("options", "list"))
+    ):
+        return "Listicle / Best X"
+    return value
+
+
+def _relevant_comparison_dimensions(pack: dict[str, Any]) -> list[str]:
+    candidates = _unique(
+        str(item).strip()
+        for item in (pack.get("competitor_blueprint") or {}).get(
+            "comparison_dimensions"
+        )
+        or []
+        if str(item).strip()
+    )
+    if not candidates:
+        return []
+    research_text = " ".join(
+        [
+            str(pack.get("keyword") or ""),
+            *[str(item) for item in pack.get("required_questions") or []],
+            *[
+                " ".join(
+                    [
+                        str(item.get("title") or ""),
+                        str(item.get("description") or ""),
+                    ]
+                )
+                for item in (pack.get("serp") or {}).get("organic_results") or []
+                if isinstance(item, dict)
+            ],
+            *[
+                _source_mapping_source_text(item)
+                for item in pack.get("authority_sources") or []
+                if isinstance(item, dict)
+            ],
+        ]
+    )
+    research_terms = {
+        _source_mapping_stem(item) for item in _source_mapping_words(research_text)
+    }
+    return [
+        dimension
+        for dimension in candidates
+        if {
+            _source_mapping_stem(item)
+            for item in _source_mapping_words(dimension)
+        }.intersection(research_terms)
+    ][:8]
+
+
+def _planning_research_pack(
+    pack: dict[str, Any], *, compact: bool = False, include_project_profile: bool = True
+) -> dict[str, Any]:
+    source_limit = 10 if compact else MAX_PLANNING_SOURCES
+    excerpt_limit = 500 if compact else 2000
+    claim_limit = 1 if compact else MAX_PLANNING_CLAIMS_PER_SOURCE
+    project_context = _project_answer_context(None, pack)
+    project_role = _project_article_role(pack) if include_project_profile else "unrelated"
+    project = dict(pack.get("project") or {})
+    project_profile = (
+        {
+            **dict(project.get("profile") or {}),
+            **{
+                key: value
+                for key, value in project_context.items()
+                if key
+                in {
+                    "business_name",
+                    "business_summary",
+                    "products_services",
+                    "value_propositions",
+                    "conversion_actions",
+                    "key_pages",
+                    "cta_targets",
+                    "product_evidence",
+                }
+            },
+        }
+        if project_role == "core"
+        else _conversion_project_profile(pack)
+        if project_role == "conversion"
+        else {}
+    )
+    ranked_sources = _rank_planning_sources(pack)
+    if project_role != "core":
+        ranked_sources = [
+            item for item in ranked_sources if not _source_is_project_owned(item, pack)
+        ]
+    all_authority_sources = [
+        _planning_authority_source(item, excerpt_limit, claim_limit)
+        for item in ranked_sources
+    ]
+    authority_sources = all_authority_sources[:source_limit]
+    competitor_blueprint = dict(pack.get("competitor_blueprint") or {})
+    if compact:
+        competitor_blueprint = {
+            key: list(competitor_blueprint.get(key) or [])[:4]
+            for key in (
+                "structure_to_match",
+                "must_fill_gaps",
+                "data_needed",
+                "outdated_to_update",
+            )
+        }
+    serp_results = [
+        {
+            "url": item.get("url"),
+            "title": item.get("title"),
+            "description": item.get("description"),
+        }
+        for item in list((pack.get("serp") or {}).get("organic_results") or [])[:10]
+    ]
+    competitor_articles = _competitor_reference_materials(pack, compact=compact)
+    if project_role != "core":
+        serp_results = _exclude_project_owned_sources(serp_results, pack)
+        competitor_articles = _exclude_project_owned_sources(competitor_articles, pack)
+    payload = {
+        "keyword": pack.get("keyword"),
+        "secondary_keywords": list(pack.get("secondary_keywords") or [])[ :10 if compact else None],
+        "planned_title": dict(pack.get("planned_title") or {}),
+        "writing_direction": dict(pack.get("writing_direction") or {}),
+        "requested_article_type": dict(pack.get("requested_article_type") or {}),
+        "country": pack.get("country"),
+        "language": pack.get("language"),
+        "project": (
+            {
+                "domain": project.get("domain"),
+                "role": project_role,
+                "profile": project_profile,
+            }
+            if project_role != "unrelated"
+            else {}
+        ),
+        "serp_results": serp_results,
+        "serp_observations": {
+            key: value
+            for key, value in dict(pack.get("serp_analysis") or {}).items()
+            if key not in {"dominant_content_type", "content_brief"}
+        },
+        "reader_questions": list(pack.get("required_questions") or [])[ :8 if compact else None],
+        "competitor_research": {
+            "observed_structures": competitor_blueprint.get("structure_to_match") or [],
+            "coverage_opportunities": competitor_blueprint.get("must_fill_gaps") or [],
+            "useful_data_topics": competitor_blueprint.get("data_needed") or [],
+            "possibly_outdated_topics": competitor_blueprint.get("outdated_to_update") or [],
+        },
+        "competitor_articles": competitor_articles,
+        "research_sources": authority_sources,
+        "internal_sources": (
+            [
+                {
+                    "url": item.get("url"),
+                    "title": item.get("title"),
+                    "description": str(item.get("description") or "")[:500],
+                }
+                for item in list(pack.get("internal_sources") or [])[ :10 if compact else None]
+            ]
+            if project_role == "core"
+            else [
+                {
+                    "url": item.get("url"),
+                    "title": item.get("title"),
+                    "description": str(item.get("description") or "")[:500],
+                }
+                for item in pack.get("internal_sources") or []
+                if str(item.get("url") or "")
+                in {
+                    str(target.get("url") or "")
+                    for target in project_profile.get("cta_targets") or []
+                }
+            ]
+            if project_role == "conversion"
+            else []
+        ),
+    }
+    if compact:
+        return {
+            key: value
+            for key, value in payload.items()
+            if value not in (None, "", [], {})
+        }
+    return payload
+
+
+def _planning_authority_source(
+    source: dict[str, Any], excerpt_limit: int | None, claim_limit: int | None
+) -> dict[str, Any]:
+    def text(value: Any) -> str:
+        output = str(value or "")
+        return output[:excerpt_limit] if excerpt_limit else output
+
+    verification_claims = [
+        {
+            "claim": text(item.get("claim")),
+            "evidence": text(item.get("evidence")),
+        }
+        for item in source.get("verification_claims") or []
+        if isinstance(item, dict)
+    ]
+    if claim_limit:
+        verification_claims = verification_claims[:claim_limit]
+    return {
+        "url": source.get("url"),
+        "title": source.get("title"),
+        "excerpt": text(source.get("excerpt")),
+        "research_answer": text(source.get("research_answer")),
+        "citation_excerpt": text(source.get("citation_excerpt")),
+        "research_claim": text(source.get("research_claim")),
+        "queries": list(source.get("queries") or []),
+        "verification_claims": verification_claims,
+    }
+
+
+def _writing_source_material(source: dict[str, Any]) -> dict[str, Any]:
+    material = {
+        "url": source.get("url"),
+        "title": source.get("title"),
+        "excerpt": source.get("excerpt"),
+        "research_answer": source.get("research_answer"),
+        "citation_excerpt": source.get("citation_excerpt"),
+        "research_claim": source.get("research_claim"),
+        "queries": list(source.get("queries") or []),
+        "verification_claims": [
+            {
+                "claim": item.get("claim"),
+                "evidence": item.get("evidence"),
+            }
+            for item in source.get("verification_claims") or []
+            if isinstance(item, dict)
+        ],
+    }
+    return {key: value for key, value in material.items() if value not in (None, "", [])}
+
+
+def _competitor_reference_materials(
+    pack: dict[str, Any], *, compact: bool
+) -> list[dict[str, Any]]:
+    competitors = [
+        deepcopy(item)
+        for item in pack.get("competitors") or []
+        if isinstance(item, dict)
+    ]
+    output: list[dict[str, Any]] = []
+    competitor_limit = 3 if compact else 5
+    content_limit = 1000 if compact else 2500
+    for item in competitors[:competitor_limit]:
+        analysis = dict(item.get("analysis") or item.get("summary") or {})
+        output.append(
+            {
+                "url": item.get("url"),
+                "title": item.get("title"),
+                "content_type": item.get("content_type"),
+                "word_count": item.get("word_count"),
+                "content": str(item.get("content") or "")[:content_limit],
+                "analysis": {
+                    "structure": list(analysis.get("structure") or [])[:10],
+                    "opening": str(analysis.get("opening") or "")[:500],
+                    "key_points": list(analysis.get("key_points") or [])[:8],
+                    "closing": str(analysis.get("closing") or "")[:500],
+                    "named_entities": list(analysis.get("named_entities") or [])[:10],
+                    "price_evidence": list(analysis.get("price_evidence") or [])[:10],
+                    "comparison_dimensions": list(
+                        analysis.get("comparison_dimensions") or []
+                    )[:10],
+                },
+            }
+        )
+    return output
+
+
+def _unique_source_records(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in sources:
+        url = str(source.get("url") or "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        output.append(source)
+    return output
+
+
+def _rank_planning_sources(pack: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(item) for item in pack.get("authority_sources") or []]
+
+
+def _full_article_material(
+    plan: ArticlePlan, pack: dict[str, Any]
+) -> dict[str, Any]:
+    sources_by_url = {
+        str(item.get("url") or ""): item
+        for item in _rank_planning_sources(pack)
+        if item.get("url")
+    }
+    claim_urls = {item.source_url for item in plan.claims}
+    selected_sources = [
+        _writing_source_material(source)
+        for url, source in sources_by_url.items()
+        if url in claim_urls
+    ]
+    if len(selected_sources) < 4:
+        selected_urls = {
+            str(item.get("url") or "") for item in selected_sources
+        }
+        selected_sources.extend(
+            _writing_source_material(source)
+            for url, source in sources_by_url.items()
+            if url not in selected_urls
+        )
+
+    competitor_articles = _competitor_reference_materials(pack, compact=False)
+    if not _project_answer_is_core(pack):
+        competitor_articles = _exclude_project_owned_sources(
+            competitor_articles, pack
+        )
+    return {
+        "sources": selected_sources[:10],
+        "competitors": competitor_articles[:3],
+        "project": _project_answer_context(plan, pack),
+    }
+
+
+def _locked_article_inputs(pack: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": dict(pack.get("planned_title") or {}),
+        "article_type": dict(pack.get("requested_article_type") or {}),
+        "writing_direction": dict(pack.get("writing_direction") or {}),
+    }
+
+
+def _full_article_writing_payload(
+    plan: ArticlePlan, pack: dict[str, Any]
+) -> dict[str, Any]:
+    material = _full_article_material(plan, pack)
+    return {
+        "task": "Write the complete article in one response from the approved plan.",
+        "keyword": pack.get("keyword"),
+        "language": pack.get("language"),
+        "country": pack.get("country"),
+        "primary_reader_task": plan.search_intent,
+        "article_plan": plan.model_dump(
+            mode="json", exclude={"critical_research_gaps", "visuals"}
+        ),
+        "relevant_research": material["sources"],
+        "relevant_competitor_observations": material["competitors"],
+        "project_information": material["project"],
+        "locked_inputs": _locked_article_inputs(pack),
+        "quality_target": {
+            "reader_outcome": (
+                "The reader should be able to complete the task or make the decision after "
+                "reading, not merely understand definitions and cautions."
+            ),
+            "worked_example": (
+                "When the topic is practical, use one complete example or walkthrough to show "
+                "observation or input, interpretation, and next action."
+            ),
+            "voice": (
+                "Prioritize the points that matter, make useful judgments, and vary the way "
+                "sections develop instead of repeating a definition-warning-summary pattern."
+            ),
+        },
+        "instructions": [
+            "Write the whole article now, not separate disconnected section drafts.",
+            "Keep one main reader task from beginning to end. Do not broaden into parallel interpretations of the keyword.",
+            "Answer the main question in the first 1-3 sentences and give the reader a useful next step.",
+            "Return every planned section exactly once, using its section_id and plan order.",
+            "Use each H2 as written in the plan. H3s may be added only where they make the answer easier to use.",
+            "Treat word targets as soft limits. Stop when the question is fully answered; do not pad sections.",
+            "Use project information only when it naturally serves the primary reader task. Do not make the project the subject merely because it was supplied.",
+            "When linking to a project page, make the anchor text and described action match that page's supplied title and description.",
+            "Write clear, natural prose with concrete answers. Remove generic setup, empty summaries, repeated advice, and SEO filler.",
+            "Explain a caveat once in the most useful place instead of repeating it in several sections.",
+            "For practical topics, carry one complete example or walkthrough through observation or input, interpretation, and next action.",
+            "Cite source URLs naturally where a sourced factual claim benefits the reader.",
+        ],
+    }
+
+
+def _full_article_editing_payload(
+    plan: ArticlePlan,
+    sections: list[SectionDraft],
+    pack: dict[str, Any],
+) -> dict[str, Any]:
+    material = _full_article_material(plan, pack)
+    return {
+        "task": (
+            "Read the entire draft as a senior editor, find meaning-level problems, "
+            "fix them in the same pass, and return the complete final article."
+        ),
+        "primary_reader_task": plan.search_intent,
+        "article_type": plan.article_type,
+        "section_responsibilities": [
+            {
+                "section_id": item.section_id,
+                "heading": item.heading,
+                "objective": item.objective,
+                "required_questions": item.required_questions,
+                "coverage_points": item.coverage_points,
+            }
+            for item in plan.sections
+        ],
+        "draft": {
+            "title": plan.title,
+            "meta_title": plan.meta_title,
+            "meta_description": plan.meta_description,
+            "slug": plan.slug,
+            "sections": [item.model_dump(mode="json") for item in sections],
+        },
+        "relevant_research": material["sources"],
+        "project_information": material["project"],
+        "locked_inputs": _locked_article_inputs(pack),
+        "editorial_checks": [
+            "Does the article clearly solve the primary reader task?",
+            "Did the draft replace the user's question with an easier or different one?",
+            "Are several keyword meanings incorrectly competing as equal storylines?",
+            "Does every section perform its assigned job and stay on topic?",
+            "Does the opening give a direct answer rather than delay it?",
+            "Is any material repetitive, generic, padded, or obvious without helping a decision or action?",
+            "Is the project included only where naturally relevant?",
+            "Does every project link accurately describe its supplied page title and description?",
+            "Can a general reader understand the article without unpacking long or abstract sentences?",
+            "Does the ending give a concrete next step rather than merely summarize?",
+        ],
+        "editorial_priorities": [
+            "Keep the strongest occurrence of a repeated point and delete the others.",
+            "Cut secondary intent, background, FAQs, and caveats that do not help solve the primary reader task.",
+            "For a practical topic, make sure one end-to-end example or walkthrough connects what the reader sees, how to interpret it, and what to do next.",
+            "Replace uniform definition-warning-summary sections with direct answers, useful judgment, demonstration, or decision guidance.",
+            "Prefer a shorter article with distinct reader value over a comprehensive article padded with obvious or repetitive material.",
+        ],
+        "editing_rules": [
+            "Fix every problem you find during this same call.",
+            "Preserve every section_id exactly once and keep plan order.",
+            "Keep useful specifics and remove tangents, filler, repetition, and artificial transitions.",
+            "Make substantive cuts and rewrites when needed; do not limit the pass to copyediting.",
+            "Prefer plain words, varied sentence lengths, and short paragraphs.",
+            "When linking to a project page, describe the action shown by its supplied title and description.",
+            "Do not introduce a new major topic during editing.",
+        ],
+    }
+
+
 async def write_article_sections(
+    repo: ContentRepository,
+    settings: Settings,
+    context: dict[str, Any],
+    policy: dict[str, bool],
+) -> dict[str, Any]:
+    del repo, policy
+    run_id = str(context["run_id"])
+    planning = await _required_stage_artifact(settings, context, "planning")
+    pack = await artifact_store(settings).read_json(str(planning["research_pack_ref"]))
+    plan = _ensure_article_contract(ArticlePlan.model_validate(planning["plan"]), pack)
+    allowed_sources, allowed_internal = allowed_urls(pack)
+    result = await cached_generate(
+        writing_gateway(context),
+        settings,
+        context,
+        "unify_article",
+        _full_article_writing_payload(plan, pack),
+        UnifiedArticle,
+    )
+    expected_section_ids = [item.section_id for item in plan.sections]
+    generated_section_ids = [item.section_id for item in result.value.sections]
+    if (
+        generated_section_ids != expected_section_ids
+        or any(not _has_section_prose(item.markdown) for item in result.value.sections)
+    ):
+        raise WritingOutputError("complete_article_missing_sections", attempts=1)
+    unified = normalize_unified(result.value, plan, [])
+    sections = sanitize_sections(
+        unified.sections,
+        plan,
+        allowed_source_urls=allowed_sources,
+        allowed_internal_urls=allowed_internal,
+    )
+    sections = _rebind_sections_to_markdown(
+        sections, plan, allowed_sources, allowed_internal
+    )
+    plan = plan.model_copy(
+        update={
+            "title": unified.title,
+            "meta_title": unified.meta_title,
+            "meta_description": unified.meta_description,
+            "slug": unified.slug,
+        }
+    )
+    artifact = article_artifact(plan, sections, pack)
+    output_ref = await artifact_store(settings).write_json(
+        f"article-runs/{run_id}/writing/draft.json.gz", artifact
+    )
+    return {
+        "output_ref": output_ref,
+        "warnings": [],
+        "summary": {
+            "section_count": len(sections),
+            "complete": True,
+            "model_failures": [],
+        },
+        "usage": result.usage,
+    }
+
+
+async def _write_article_sections_by_section(
     repo: ContentRepository,
     settings: Settings,
     context: dict[str, Any],
@@ -428,11 +1145,7 @@ async def _apply_content_quality_loop(
     list[dict[str, Any]],
 ]:
     current = _rebind_sections_to_markdown(sections, plan, allowed_sources, allowed_internal)
-    warnings: list[dict[str, str]] = []
-    model_failures: list[dict[str, Any]] = []
-    usages: list[dict[str, Any]] = []
     content_score_history = list(existing_history or [])
-    revision_count = existing_revision_count
     scorer = ContentScorer()
 
     def score_current(current_plan: ArticlePlan, current_sections: list[SectionDraft]) -> dict[str, Any]:
@@ -448,109 +1161,15 @@ async def _apply_content_quality_loop(
 
     score = score_current(plan, current)
     content_score_history.append({**score, "accepted": True, "candidate": "baseline"})
-    for revision_iteration in range(existing_revision_count + 1, 3):
-        if score["passed"] or not score["priority_fixes"]:
-            break
-        try:
-            result = await cached_generate(
-                gateway,
-                settings,
-                context,
-                "revise_quality",
-                {
-                    "iteration": revision_iteration,
-                    "article": {
-                        "title": plan.title,
-                        "meta_title": plan.meta_title,
-                        "meta_description": plan.meta_description,
-                        "slug": plan.slug,
-                        "sections": [item.model_dump(mode="json") for item in current],
-                    },
-                    "priority_fixes": score["priority_fixes"][:5],
-                    "locked_requirements": _locked_requirements(pack),
-                },
-                UnifiedArticle,
-            )
-            candidate = normalize_unified(
-                result.value,
-                plan,
-                current,
-                locked_title=_locked_title(pack),
-            )
-            candidate_plan = plan.model_copy(
-                update={
-                    "title": candidate.title,
-                    "meta_title": candidate.meta_title,
-                    "meta_description": candidate.meta_description,
-                    "slug": candidate.slug,
-                }
-            )
-            candidate_sections = sanitize_sections(
-                candidate.sections,
-                candidate_plan,
-                allowed_source_urls=allowed_sources,
-                allowed_internal_urls=allowed_internal,
-            )
-            candidate_sections = _rebind_sections_to_markdown(
-                candidate_sections, candidate_plan, allowed_sources, allowed_internal
-            )
-            usages.append(result.usage)
-            revision_count += 1
-            candidate_score = score_current(candidate_plan, candidate_sections)
-            accepted, reasons = _candidate_improves_article(
-                plan,
-                current,
-                score,
-                candidate_plan,
-                candidate_sections,
-                candidate_score,
-                allowed_sources,
-                allowed_internal,
-                _competitor_passages(pack),
-            )
-            content_score_history.append(
-                {
-                    **candidate_score,
-                    "accepted": accepted,
-                    "candidate": f"quality_revision_{revision_iteration}",
-                    "rejection_reasons": reasons,
-                }
-            )
-            if accepted:
-                plan = candidate_plan
-                current = candidate_sections
-                score = candidate_score
-        except Exception as exc:
-            model_failures.append(
-                {
-                    "mode": "quality_revision",
-                    "iteration": revision_iteration,
-                    **writing_failure(exc),
-                }
-            )
-            warnings.append(
-                _warning(
-                    "content_quality_revision_degraded",
-                    "内容质量修订暂不可用，已保留当前完整稿",
-                )
-            )
-            break
-    if not score["passed"]:
-        warnings.append(
-            _warning(
-                "content_quality_below_threshold",
-                "文章已保留完整稿；五维内容评分仍低于 70，已保存评分和自动修订结果",
-            )
-        )
     return (
         plan,
         current,
         score,
         content_score_history,
-        revision_count,
-        warnings,
-        model_failures,
-        usages,
+        existing_revision_count,
+        [],
+        [],
+        [],
     )
 
 
@@ -565,20 +1184,22 @@ def _rebind_sections_to_markdown(
 ) -> list[SectionDraft]:
     claims_by_section: dict[str, list[EvidenceClaim]] = {}
     for claim in plan.claims:
-        if claim.supported and claim.section_id and claim.source_url in allowed_sources:
+        if claim.section_id and claim.source_url in allowed_sources:
             claims_by_section.setdefault(claim.section_id, []).append(claim)
     rebound: list[SectionDraft] = []
     for section in sections:
         links = set(_MARKDOWN_LINK_PATTERN.findall(section.markdown))
         claims = claims_by_section.get(section.section_id, [])
-        source_urls = sorted({item.source_url for item in claims if item.source_url in links})
+        bound_claims = [item for item in claims if item.source_url in links]
         rebound.append(
             section.model_copy(
                 update={
-                    "used_claim_ids": [
-                        item.claim_id for item in claims if item.source_url in links
-                    ],
-                    "used_source_urls": source_urls,
+                    "used_claim_ids": _unique(
+                        [*section.used_claim_ids, *[item.claim_id for item in bound_claims]]
+                    )[:30],
+                    "used_source_urls": sorted(
+                        links.difference(links.intersection(allowed_internal))
+                    )[:30],
                     "used_internal_urls": sorted(links.intersection(allowed_internal)),
                 }
             )
@@ -614,15 +1235,10 @@ def _candidate_improves_article(
     allowed_internal: set[str],
     competitor_passages: list[str],
     *,
+    require_inline_citations: bool = True,
+    require_claim_bindings: bool = True,
     require_measurable_improvement: bool = True,
 ) -> tuple[bool, list[str]]:
-    baseline_report = deterministic_quality_check(
-        baseline_plan,
-        baseline_sections,
-        allowed_source_urls=allowed_sources,
-        allowed_internal_urls=allowed_internal,
-        competitor_passages=competitor_passages,
-    )
     candidate_report = deterministic_quality_check(
         candidate_plan,
         candidate_sections,
@@ -630,41 +1246,20 @@ def _candidate_improves_article(
         allowed_internal_urls=allowed_internal,
         competitor_passages=competitor_passages,
     )
-    baseline_links = {
-        url
-        for section in baseline_sections
-        for url in _MARKDOWN_LINK_PATTERN.findall(section.markdown)
-        if url in allowed_sources
-    }
-    candidate_links = {
-        url
-        for section in candidate_sections
-        for url in _MARKDOWN_LINK_PATTERN.findall(section.markdown)
-        if url in allowed_sources
-    }
-    baseline_claims = {
-        claim_id for section in baseline_sections for claim_id in section.used_claim_ids
-    }
-    candidate_claims = {
-        claim_id for section in candidate_sections for claim_id in section.used_claim_ids
-    }
-    baseline_present = int(baseline_report.checks.get("present_sections") or 0)
-    candidate_present = int(candidate_report.checks.get("present_sections") or 0)
-    reasons: list[str] = []
-    if not baseline_links.issubset(candidate_links):
-        reasons.append("citation_links_lost")
-    if not baseline_claims.issubset(candidate_claims):
-        reasons.append("claim_bindings_lost")
-    if candidate_present < baseline_present:
-        reasons.append("contract_coverage_reduced")
-    if len(candidate_report.issues) > len(baseline_report.issues):
-        reasons.append("hard_issues_increased")
-    hard_improved = len(candidate_report.issues) < len(baseline_report.issues)
-    score_improved = float(candidate_score.get("composite_score") or 0) > float(
-        baseline_score.get("composite_score") or 0
+    del (
+        baseline_plan,
+        baseline_sections,
+        baseline_score,
+        candidate_score,
+        require_inline_citations,
+        require_claim_bindings,
+        require_measurable_improvement,
     )
-    if require_measurable_improvement and not hard_improved and not score_improved:
-        reasons.append("no_quality_improvement")
+    reasons = [
+        item.code
+        for item in candidate_report.issues
+        if item.code in {"title_missing", "section_missing", "malformed_link"}
+    ]
     return not reasons, reasons
 
 
@@ -691,11 +1286,7 @@ async def unify_article(
             settings,
             context,
             "unify_article",
-            {
-                "plan": plan.model_dump(mode="json"),
-                "sections": [item.model_dump(mode="json") for item in current],
-                "locked_requirements": _locked_requirements(pack),
-            },
+            _full_article_editing_payload(plan, current, pack),
             UnifiedArticle,
         )
         candidate = normalize_unified(
@@ -738,6 +1329,9 @@ async def unify_article(
                 allowed_sources,
                 allowed_internal,
                 _competitor_passages(pack),
+                require_inline_citations=False,
+                require_claim_bindings=False,
+                require_measurable_improvement=False,
             )
             if accepted:
                 plan = candidate_plan
@@ -820,7 +1414,7 @@ async def check_article(
     context: dict[str, Any],
     policy: dict[str, bool],
 ) -> dict[str, Any]:
-    del repo
+    del repo, policy
     run_id = str(context["run_id"])
     input_step_key = str(context.get("input_step_key") or "editing")
     current = await _required_stage_artifact(settings, context, input_step_key)
@@ -828,10 +1422,6 @@ async def check_article(
     pack = await _pack_from_context(settings, context)
     plan = _ensure_article_contract(ArticlePlan.model_validate(current["plan"]), pack)
     allowed_sources, allowed_internal = allowed_urls(pack)
-    conversion_actions = list(
-        ((pack.get("project") or {}).get("profile") or {}).get("conversion_actions")
-        or []
-    )
     sections = sanitize_sections(
         sections,
         plan,
@@ -846,62 +1436,7 @@ async def check_article(
         competitor_passages=_competitor_passages(pack),
     )
     issues = list(deterministic.issues)
-    warnings: list[dict[str, str]] = []
-    usage = None
     check_status = "completed"
-    model_failure = None
-    expected_locked_requirements = _locked_requirements(pack)
-    locked_requirement_checks: list[dict[str, Any]] = []
-    try:
-        result = await cached_generate(
-            writing_gateway(context),
-            settings,
-            context,
-            "check_article",
-            {
-                "keyword": pack["keyword"],
-                "search_intent": plan.search_intent,
-                "required_questions": pack["required_questions"],
-                "plan": plan.model_dump(mode="json"),
-                "article_contract": plan.contract.model_dump(mode="json"),
-                "sections": [item.model_dump(mode="json") for item in sections],
-                "section_requirements": _section_requirements(plan.sections),
-                "conversion_actions": conversion_actions,
-                "locked_requirements": expected_locked_requirements,
-            },
-            SemanticQualityResult,
-        )
-        issues.extend(result.value.issues)
-        locked_requirement_checks = [
-            item.model_dump(mode="json")
-            for item in result.value.locked_requirement_checks
-        ]
-        checks_by_key = {
-            (item["field"], item["requirement"]): item
-            for item in locked_requirement_checks
-        }
-        for requirement in expected_locked_requirements:
-            check = checks_by_key.get(
-                (requirement["field"], requirement["requirement"])
-            )
-            if check is None or check["passed"] is not True:
-                issues.append(
-                    SectionIssue(
-                        section_id=plan.sections[0].section_id,
-                        code="locked_requirement_failed",
-                        message=(
-                            "The generated article did not satisfy the locked writing "
-                            "direction."
-                        ),
-                    )
-                )
-        usage = result.usage
-    except Exception as exc:
-        model_failure = writing_failure(exc)
-        check_status = "unavailable"
-        warnings.append(
-            _warning("checking_degraded", "检查服务暂不可用，已保留确定性检查结果")
-        )
     for section_id in current.get("degraded_section_ids") or []:
         issues.append(
             SectionIssue(
@@ -916,11 +1451,12 @@ async def check_article(
             for item in issues
         }.values()
     )
-    repairable_issues = [item for item in unique if item.repairable]
-    repair_scope = sorted(
-        {item.section_id for item in repairable_issues if item.section_id}
+    repairable_issues = [item for item in unique if item.code == "fallback_section"]
+    repair_scope = sorted({item.section_id for item in repairable_issues})
+    repairable = bool(repairable_issues)
+    blocking_issue_codes = sorted(
+        {item.code for item in unique if item.code == "fallback_section"}
     )
-    repairable = check_status == "completed" and bool(repair_scope)
     passed = check_status == "completed" and not unique
     issue_fingerprint = _issue_fingerprint(unique)
     repairable_issue_fingerprint = _issue_fingerprint(repairable_issues)
@@ -946,11 +1482,12 @@ async def check_article(
         "repairable_issue_fingerprint": repairable_issue_fingerprint,
         "repairable_issue_count": len(repairable_issues),
         "evidence_issue_count": evidence_issue_count,
+        "blocking_issue_codes": blocking_issue_codes,
         "issues": [item.model_dump(mode="json") for item in unique],
-        "locked_requirement_checks": locked_requirement_checks,
+        "locked_requirement_checks": [],
         "required_questions": {
-            "total": len(pack.get("required_questions", [])),
-            "covered": _covered_questions(pack.get("required_questions", []), sections),
+            "total": len(plan.contract.required_questions),
+            "covered": _covered_questions(plan.contract.required_questions, sections),
         },
     }
     content_score = current.get("content_score")
@@ -968,7 +1505,7 @@ async def check_article(
     )
     return {
         "output_ref": output_ref,
-        "warnings": warnings,
+        "warnings": [],
         "summary": {
             "issue_count": len(unique),
             "passed": passed,
@@ -979,10 +1516,11 @@ async def check_article(
             "repairable_issue_fingerprint": repairable_issue_fingerprint,
             "repairable_issue_count": len(repairable_issues),
             "evidence_issue_count": evidence_issue_count,
-            "model_failure": model_failure,
+            "blocking_issue_codes": blocking_issue_codes,
+            "model_failure": None,
             **content_score_summary,
         },
-        "usage": usage,
+        "usage": None,
     }
 
 
@@ -1047,10 +1585,6 @@ async def revise_article_sections(
     failed_claim_ids = {
         claim_id for item in failed_plans for claim_id in item.claim_ids
     }
-    conversion_actions = list(
-        ((pack.get("project") or {}).get("profile") or {}).get("conversion_actions")
-        or []
-    )
     warnings: list[dict[str, str]] = []
     usages: list[dict[str, Any]] = []
     model_failure = None
@@ -1062,27 +1596,22 @@ async def revise_article_sections(
             context,
             "revise_sections",
             {
-                "issues": issues,
-                "article_contract": plan.contract.model_dump(mode="json"),
+                "goal": "Improve these article sections for the reader.",
                 "sections": [
                     item.model_dump(mode="json")
                     for item in sections
                     if item.section_id in failed_ids
                 ],
-                "section_plans": [
-                    item.model_dump(mode="json") for item in failed_plans
-                ],
-                "section_contracts": [
-                    _section_contract_payload(plan, item.section_id)
+                "section_goals": [
+                    {
+                        "section_id": item.section_id,
+                        "heading": item.heading,
+                        "objective": item.objective,
+                        "coverage_points": item.coverage_points,
+                        "official_product": _section_project_context(plan, item, pack),
+                    }
                     for item in failed_plans
                 ],
-                "section_requirements": _section_requirements(failed_plans),
-                "conversion_actions": (
-                    conversion_actions
-                    if any(item.cta_type for item in failed_plans)
-                    else []
-                ),
-                "locked_requirements": _locked_requirements(pack),
                 "claims": [
                     item.model_dump(mode="json")
                     for item in plan.claims
@@ -1098,51 +1627,66 @@ async def revise_article_sections(
         }
         if not replacements:
             raise WritingOutputError("writing_revision_empty")
-        candidate_ids = set(replacements)
         baseline_sections = _rebind_sections_to_markdown(
             sections, plan, allowed_sources, allowed_internal
         )
-        candidate_sections = [
-            replacements.get(item.section_id, item) for item in baseline_sections
-        ]
-        candidate_sections = sanitize_sections(
-            candidate_sections,
-            plan,
-            allowed_source_urls=allowed_sources,
-            allowed_internal_urls=allowed_internal,
-        )
-        candidate_sections = _rebind_sections_to_markdown(
-            candidate_sections, plan, allowed_sources, allowed_internal
-        )
         scorer = ContentScorer()
-        baseline_score = _score_article_content(scorer, plan, baseline_sections, pack)
-        candidate_score = _score_article_content(scorer, plan, candidate_sections, pack)
-        accepted, rejection_reasons = _candidate_improves_article(
-            plan,
-            baseline_sections,
-            baseline_score,
-            plan,
-            candidate_sections,
-            candidate_score,
-            allowed_sources,
-            allowed_internal,
-            _competitor_passages(pack),
-            require_measurable_improvement=False,
-        )
-        if accepted:
-            sections = candidate_sections
-            revised_ids = candidate_ids
-        else:
-            sections = baseline_sections
-            revised_ids = set()
+        sections = baseline_sections
+        current_score = _score_article_content(scorer, plan, sections, pack)
+        revised_ids: set[str] = set()
+        rejected: list[dict[str, Any]] = []
+        for section in baseline_sections:
+            replacement = replacements.get(section.section_id)
+            if replacement is None:
+                continue
+            candidate_sections = [
+                replacement if item.section_id == section.section_id else item
+                for item in sections
+            ]
+            candidate_sections = sanitize_sections(
+                candidate_sections,
+                plan,
+                allowed_source_urls=allowed_sources,
+                allowed_internal_urls=allowed_internal,
+            )
+            candidate_sections = _rebind_sections_to_markdown(
+                candidate_sections, plan, allowed_sources, allowed_internal
+            )
+            candidate_score = _score_article_content(
+                scorer, plan, candidate_sections, pack
+            )
+            accepted, rejection_reasons = _candidate_improves_article(
+                plan,
+                sections,
+                current_score,
+                plan,
+                candidate_sections,
+                candidate_score,
+                allowed_sources,
+                allowed_internal,
+                _competitor_passages(pack),
+                require_measurable_improvement=False,
+            )
+            if accepted:
+                sections = candidate_sections
+                current_score = candidate_score
+                revised_ids.add(section.section_id)
+            else:
+                rejected.append(
+                    {
+                        "section_id": section.section_id,
+                        "reasons": rejection_reasons,
+                    }
+                )
+        if rejected:
             warnings.append(
                 _warning(
                     "revision_candidate_rejected",
-                    "Section revisions were discarded because they did not improve the protected draft.",
+                    "Some section revisions were discarded because they did not preserve the protected draft.",
                 )
             )
             quality_failures.append(
-                {"mode": "revision_candidate_rejected", "reasons": rejection_reasons}
+                {"mode": "revision_candidate_rejected", "sections": rejected}
             )
         usages.append(result.usage)
     except Exception as exc:
@@ -1163,11 +1707,11 @@ async def revise_article_sections(
         if section_id not in revised_ids
     ]
     if revised_ids:
-        content_score = candidate_score
+        content_score = current_score
         content_score_history = [
             *list(checked.get("content_score_history") or []),
             {
-                **candidate_score,
+                **content_score,
                 "accepted": True,
                 "candidate": "section_revision",
             },
@@ -1212,8 +1756,12 @@ async def revise_article_sections(
             "passed": False,
             "model_failure": model_failure,
             **(
+                {"model_failures": quality_failures}
+                if quality_failures
+                else {}
+            ),
+            **(
                 {
-                    "model_failures": quality_failures,
                     "content_score": content_score["composite_score"],
                     "content_score_passed": content_score["passed"],
                     "content_score_iterations": content_score_revision_count,
@@ -1256,7 +1804,11 @@ async def build_research_pack(
             *serp.get("related_searches", []),
         ]
     )[:20]
-    competitors = await _competitor_summaries(settings, source_groups["competitor"], 5)
+    competitors = await _competitor_summaries(
+        settings,
+        source_groups["competitor"],
+        len(source_groups["competitor"]),
+    )
     competitor_blueprint = build_competitor_blueprint(competitors)
     internal = _internal_link_candidates(source_groups["internal"], 30)
     authority = [
@@ -1265,12 +1817,6 @@ async def build_research_pack(
         if _authority_source_usable(item)
     ]
     authority = list({item["url"]: item for item in authority}.values())
-    evidence_capabilities = _build_evidence_capabilities(
-        competitor_blueprint=competitor_blueprint,
-        competitors=competitors,
-        authority_sources=authority,
-        internal_sources=internal,
-    )
     content_brief = dict(serp_analysis.get("content_brief") or {})
     secondary_keywords = [
         str(item.get("keyword"))
@@ -1281,11 +1827,15 @@ async def build_research_pack(
         content_brief["secondary_keywords"] = _unique(
             [*content_brief.get("secondary_keywords", []), *secondary_keywords]
         )
+    requested_article_type = dict(plan_input.get("article_type") or {})
+    if requested_article_type.get("value"):
+        content_brief["content_type"] = requested_article_type["value"]
     return {
         "keyword": context["primary_keyword"],
         "secondary_keywords": list(plan_input.get("secondary_keywords") or []),
         "planned_title": dict(plan_input.get("title") or {}),
         "writing_direction": dict(plan_input.get("writing_direction") or {}),
+        "requested_article_type": requested_article_type,
         "country": snapshot.get("country") or "US",
         "language": snapshot.get("language") or "en",
         "project": snapshot,
@@ -1298,7 +1848,6 @@ async def build_research_pack(
         "competitor_blueprint": competitor_blueprint,
         "authority_sources": authority,
         "internal_sources": internal,
-        "evidence_capabilities": evidence_capabilities,
     }
 
 
@@ -1419,6 +1968,7 @@ async def _competitor_summaries(
                 "title": source.get("title") or "",
                 "word_count": source_summary.get("word_count") or analysis["word_count"],
                 "content_type": analysis["content_type"],
+                "content": text,
                 "analysis": analysis,
                 "summary": analysis,
             }
@@ -1441,78 +1991,118 @@ def _competitor_source_rank(source: dict[str, Any]) -> tuple[int, int, str]:
     )
 
 
-_LOAD_BEARING_REQUIREMENT_PATTERNS = (
-    re.compile(r"\b(?:statistic|percentage|rate|survey|study|sample|dataset|price|cost)\b", re.I),
-    re.compile(r"(?:%|[$€£¥]|\b\d+(?:[.,]\d+)?\b)"),
-    re.compile(
-        r"\b(?:policy|legal|law|regulation|regulatory|compliance|tax credit|eligibility|standard)\b",
-        re.I,
-    ),
-    re.compile(
-        r"\b(?:product|platform|model|feature|availability|supports?|behavior|documentation)\b",
-        re.I,
-    ),
-    re.compile(r"\b(?:rank|ranking|compare|comparison|best|top|versus|\bvs\b)\b", re.I),
-    re.compile(r"\b(?:methodology|method|measured|measurement|research design)\b", re.I),
-    re.compile(r"\b(?:current|latest|fresh|today|now|recent|\b20\d{2}\b)\b", re.I),
-)
-
-
-def _supplemental_research_queries(
-    plan: ArticlePlan, pack: dict[str, Any]
-) -> list[str]:
-    keyword = str(pack.get("keyword") or "").strip()
-    country = str(pack.get("country") or "US").strip()
-    queries: list[str] = []
-    for section in plan.sections:
-        if map_authority_sources_to_section(plan, section, pack):
-            continue
-        for requirement in section.data_requirements:
-            normalized = " ".join(str(requirement).split())
-            if not normalized or not any(
-                pattern.search(normalized)
-                for pattern in _LOAD_BEARING_REQUIREMENT_PATTERNS
-            ):
-                continue
-            if normalized.endswith("?"):
-                query = normalized
-            else:
-                query = (
-                    f"What do current official or primary sources report about {normalized} "
-                    f"for {keyword} in {country}?"
+def _source_supports_requirement(source: dict[str, Any], requirement: str) -> bool:
+    source_text = " ".join(
+        [
+            _source_mapping_source_text(source),
+            *[
+                " ".join(
+                    [str(item.get("claim") or ""), str(item.get("evidence") or "")]
                 )
-            queries.append(query)
-            if len(_unique(queries)) >= 4:
-                return _unique(queries)[:4]
-    return _unique(queries)[:4]
+                for item in source.get("verification_claims") or []
+                if isinstance(item, dict)
+            ],
+        ]
+    )
+    requirement_stems = {
+        _source_mapping_stem(item) for item in _source_mapping_words(requirement)
+    }
+    source_stems = {
+        _source_mapping_stem(item) for item in _source_mapping_words(source_text)
+    }
+    if not requirement_stems or not source_stems:
+        return False
+    overlap = requirement_stems.intersection(source_stems)
+    return len(overlap) >= 2 and len(overlap) / len(requirement_stems) >= 0.5
+
+
+def _critical_research_tasks(plan: ArticlePlan) -> list[str]:
+    return _unique(
+        gap.research_query.strip()
+        for gap in plan.critical_research_gaps
+        if gap.research_query.strip()
+    )[:4]
+
+
+def _supplemental_research_timeout_seconds(
+    context: dict[str, Any], started_at: float
+) -> float:
+    elapsed = max(0.0, time.monotonic() - started_at)
+    remaining = MAX_SUPPLEMENTAL_RESEARCH_SECONDS - elapsed
+    hard_deadline = context.get("hard_deadline_at")
+    if isinstance(hard_deadline, datetime):
+        if hard_deadline.tzinfo is None:
+            hard_deadline = hard_deadline.replace(tzinfo=UTC)
+        deadline_remaining = (
+            hard_deadline.astimezone(UTC) - datetime.now(UTC)
+        ).total_seconds() - GENERATION_DEADLINE_RESERVE_SECONDS
+        remaining = min(remaining, deadline_remaining)
+    return max(0.0, remaining)
 
 
 def normalize_plan(plan: ArticlePlan, pack: dict[str, Any]) -> ArticlePlan:
-    source_urls, internal_urls = allowed_urls(pack)
-    evidence_by_url = {
-        str(item["url"]): str(item.get("excerpt") or "")
-        for item in pack.get("authority_sources", [])
-        if item.get("url")
-    }
     claims: list[EvidenceClaim] = []
     claim_id_map: dict[str, str] = {}
-    for index, claim in enumerate(plan.claims):
-        source_evidence = evidence_by_url.get(claim.source_url, "")
-        if (
-            not claim.supported
-            or claim.source_url not in source_urls
-            or not claim.quote.strip()
-            or not _evidence_contains_quote(source_evidence, claim.quote)
-            or verify_source_claims(claim.claim, claim.quote).status
-            not in {"verified", "paraphrase"}
-        ):
-            continue
+    for index, claim in enumerate(plan.claims[:MAX_PLAN_CLAIMS]):
         claim_id = f"claim-{index + 1}"
         claim_id_map[claim.claim_id] = claim_id
         claims.append(claim.model_copy(update={"claim_id": claim_id, "section_id": None}))
+    existing_claims = {
+        (claim.source_url, _normalize_requirement(claim.claim)) for claim in claims
+    }
+    imported_research_claim_ids: list[str] = []
+    project_claim_ids: list[str] = []
+    next_claim_number = len(claims) + 1
+    project_evidence = (
+        _project_article_evidence(pack)
+        if _project_article_role(pack) != "unrelated"
+        else []
+    )
+    for evidence in project_evidence:
+        if len(claims) >= MAX_PLAN_CLAIMS:
+            break
+        field = str(evidence.get("field") or "").strip()
+        claim_text = str(evidence.get("value") or "").strip()
+        quote = str(evidence.get("quote") or claim_text).strip()
+        source_url = str(evidence.get("source_url") or "").strip()
+        identity = (source_url, _normalize_requirement(claim_text))
+        if (
+            field == "conversion_actions"
+            or not claim_text
+            or not quote
+            or identity in existing_claims
+        ):
+            continue
+        existing_claims.add(identity)
+        claims.append(
+            EvidenceClaim(
+                claim_id=f"claim-{next_claim_number}",
+                claim=claim_text[:1000],
+                source_url=source_url,
+                source_title=str(
+                    _project_answer_context(None, pack).get("business_name") or ""
+                )[:500],
+                quote=quote[:2000],
+            )
+        )
+        project_claim_ids.append(f"claim-{next_claim_number}")
+        next_claim_number += 1
+    for item in _research_source_claims(pack):
+        if len(claims) >= MAX_PLAN_CLAIMS:
+            break
+        identity = (item["source_url"], _normalize_requirement(item["claim"]))
+        if identity in existing_claims:
+            continue
+        existing_claims.add(identity)
+        claim_id = f"claim-{next_claim_number}"
+        next_claim_number += 1
+        claims.append(EvidenceClaim(claim_id=claim_id, **item))
+        imported_research_claim_ids.append(claim_id)
     sections: list[OutlineSection] = []
-    for index, section in enumerate(plan.sections[:10]):
+    section_id_map: dict[str, str] = {}
+    for index, section in enumerate(plan.sections[:12]):
         section_id = f"section-{index + 1}"
+        section_id_map[section.section_id] = section_id
         sections.append(
             section.model_copy(
                 update={
@@ -1521,70 +2111,207 @@ def normalize_plan(plan: ArticlePlan, pack: dict[str, Any]) -> ArticlePlan:
                         claim_id_map[item]
                         for item in section.claim_ids
                         if item in claim_id_map
-                    ],
-                    "internal_urls": _unique(
-                        [item for item in section.internal_urls if item in internal_urls]
-                    )[:1],
+                    ][:MAX_SECTION_CLAIMS],
+                    "internal_urls": _unique(section.internal_urls)[:10],
                 }
             )
         )
     if not sections:
         return fallback_plan(pack)
-    assigned_claims: list[EvidenceClaim] = []
-    for claim in claims:
-        section_id = next(
-            (item.section_id for item in sections if claim.claim_id in item.claim_ids), None
-        )
-        if section_id is not None:
-            assigned_claims.append(claim.model_copy(update={"section_id": section_id}))
-    dominant_content_type = str(
-        (pack.get("serp_analysis") or {}).get("dominant_content_type") or plan.article_type
-    )
-    capabilities = _evidence_capabilities(pack)
-    if _commercial_article_type(dominant_content_type) and int(
-        capabilities.get("named_product_count") or 0
-    ) < 3:
-        dominant_content_type = "Selection Guide"
-    sections = _align_sections_with_content_brief(sections, pack, dominant_content_type)
-    sections = _align_sections_with_competitor_blueprint(sections, pack)
+    sections = _ensure_project_answer_plan_section(sections, pack)[:12]
     sections = _finalize_section_plans(sections, pack)
-    sections = assign_internal_links_to_sections(sections, pack)
-    sections = [_constrain_section_to_evidence(item, capabilities) for item in sections]
-    gap_mapping = _gap_to_section_mapping(sections)
-    title = _locked_title(pack) or _constrain_metadata_to_evidence(
-        plan.title, str(pack["keyword"]), capabilities
+    sections = _assign_research_claims(
+        sections,
+        claims,
+        [*project_claim_ids, *imported_research_claim_ids],
+        pack,
+        require_relevance_claim_ids=set(project_claim_ids),
     )
-    meta_title = _constrain_metadata_to_evidence(
-        plan.meta_title, str(pack["keyword"]), capabilities
+    valid_section_ids = {section.section_id for section in sections}
+    valid_claim_ids = {claim.claim_id for claim in claims}
+    permitted_visual_urls = _permitted_visual_urls(pack)
+    chart_claim_ids = {
+        claim.claim_id
+        for claim in claims
+        if claim.source_url in permitted_visual_urls
+    }
+    visuals = []
+    used_visual_ids: set[str] = set()
+    used_visual_sections: set[str] = set()
+    for visual in plan.visuals[:12]:
+        section_id = section_id_map.get(visual.section_id)
+        if section_id not in valid_section_ids or section_id in used_visual_sections:
+            continue
+        if visual.source_strategy == "ai" and visual.reader_job == "prove":
+            continue
+        if (
+            visual.source_strategy == "screenshot"
+            and visual.target_url not in permitted_visual_urls
+        ):
+            continue
+        data_claim_ids = [
+            claim_id_map[item]
+            for item in visual.data_claim_ids
+            if item in claim_id_map
+            and claim_id_map[item] in valid_claim_ids
+            and claim_id_map[item] in chart_claim_ids
+        ]
+        chart_data = [
+            item.model_copy(update={"claim_id": claim_id_map[item.claim_id]})
+            for item in visual.chart_data
+            if item.claim_id in claim_id_map
+            and claim_id_map[item.claim_id] in data_claim_ids
+        ]
+        if visual.source_strategy == "chart" and (not data_claim_ids or not chart_data):
+            continue
+        visual_id = f"visual-{len(visuals) + 1}"
+        if visual_id in used_visual_ids:
+            continue
+        used_visual_ids.add(visual_id)
+        used_visual_sections.add(section_id)
+        visuals.append(
+            visual.model_copy(
+                update={
+                    "visual_id": visual_id,
+                    "section_id": section_id,
+                    "required": False,
+                    "data_claim_ids": data_claim_ids,
+                    "chart_data": chart_data,
+                }
+            )
+        )
+    requested_article_type = dict(pack.get("requested_article_type") or {})
+    article_type = str(
+        requested_article_type.get("value")
+        if requested_article_type.get("policy") == "locked"
+        else _canonical_article_type(plan.article_type)
     )
-    meta_description = _constrain_metadata_to_evidence(
-        plan.meta_description, str(pack["keyword"]), capabilities
-    )
+    normalized_claims = [
+        claim.model_copy(
+            update={
+                "section_id": next(
+                    (
+                        section.section_id
+                        for section in sections
+                        if claim.claim_id in section.claim_ids
+                    ),
+                    None,
+                )
+            }
+        )
+        for claim in claims
+    ]
     normalized = plan.model_copy(
         update={
-            "title": title,
-            "meta_title": meta_title,
-            "meta_description": meta_description,
+            "title": _locked_title(pack) or plan.title,
             "slug": normalize_slug(plan.slug, str(pack["keyword"])),
-            "article_type": dominant_content_type,
-            "claims": assigned_claims,
+            "article_type": article_type,
+            "claims": normalized_claims,
             "sections": sections,
+            "visuals": visuals,
             "total_word_target": sum(item.word_target for item in sections),
-            "gap_to_section_mapping": gap_mapping,
+            "gap_to_section_mapping": _gap_to_section_mapping(sections),
         }
     )
     return normalized.model_copy(update={"contract": _build_article_contract(normalized, pack)})
 
 
+def _permitted_visual_urls(pack: dict[str, Any]) -> set[str]:
+    source_urls, internal_urls = allowed_urls(pack)
+    result = {*source_urls, *internal_urls}
+    project_domain = str((pack.get("project") or {}).get("domain") or "").strip()
+    normalized = (
+        project_domain.removeprefix("https://").removeprefix("http://").strip("/")
+    )
+    if normalized:
+        result.update({f"https://{normalized}", f"https://{normalized}/"})
+    return result
+
+
+def _ensure_project_answer_plan_section(
+    sections: list[OutlineSection], pack: dict[str, Any]
+) -> list[OutlineSection]:
+    if not _project_answer_is_core(pack):
+        return sections
+    context = _project_answer_context(None, pack)
+    business_name = str(context.get("business_name") or "").strip()
+    keyword = str(pack.get("keyword") or "").strip()
+    if not business_name:
+        return sections
+    facts = _unique(
+        [
+            str(context.get("business_summary") or "").strip(),
+            *[str(item).strip() for item in context.get("products_services") or []],
+            *[str(item).strip() for item in context.get("value_propositions") or []],
+        ]
+    )
+    facts = [item for item in facts if item]
+    project_domain = str((pack.get("project") or {}).get("domain") or "")
+    cta = next(
+        (
+            item
+            for item in context.get("cta_targets") or []
+            if project_domain_matches(str(item.get("url") or ""), project_domain)
+        ),
+        None,
+    )
+    cta_url = str((cta or {}).get("url") or "")
+    business_key = _normalize_requirement(business_name)
+    answer_index = next(
+        (
+            index
+            for index, section in enumerate(sections)
+            if business_key
+            in _normalize_requirement(
+                " ".join([section.heading, section.objective, *section.coverage_points])
+            )
+        ),
+        None,
+    )
+    if answer_index is None:
+        answer = OutlineSection(
+            section_id="project-answer",
+            heading=f"{business_name}: {keyword}",
+            objective=f"Explain how {business_name} answers the reader's question about {keyword}.",
+            coverage_points=facts[:12],
+            internal_urls=[cta_url] if cta_url else [],
+            cta_type="strong" if cta_url else None,
+        )
+        return [answer, *sections[:11]]
+    answer = sections[answer_index]
+    updated = answer.model_copy(
+        update={
+            "coverage_points": _unique([*answer.coverage_points, *facts])[:12],
+            "internal_urls": _unique(
+                [*answer.internal_urls, *([cta_url] if cta_url else [])]
+            )[:10],
+            "cta_type": "strong" if cta_url else answer.cta_type,
+        }
+    )
+    return [
+        updated if index == answer_index else section
+        for index, section in enumerate(sections)
+    ]
+
+
 def assign_internal_links_to_sections(
     sections: list[OutlineSection], pack: dict[str, Any], max_links: int = 5
 ) -> list[OutlineSection]:
+    cta_assignment = _select_cta_assignment(sections, pack)
+    assigned: dict[str, str] = {}
+    used_urls: set[str] = set()
+    if cta_assignment is not None and max_links > 0:
+        cta_section_id, cta_url = cta_assignment
+        assigned[cta_section_id] = cta_url
+        used_urls.add(cta_url)
+
     candidates = {
         str(item.get("url") or ""): item
         for item in pack.get("internal_sources") or []
         if item.get("url")
+        and str(item.get("url") or "") not in used_urls
     }
-    if not candidates or max_links <= 0:
+    if max_links <= 0:
         return [section.model_copy(update={"internal_urls": []}) for section in sections]
 
     eligible_types = {
@@ -1595,6 +2322,8 @@ def assign_internal_links_to_sections(
     }
     ranked_pairs: list[tuple[int, int, int, int, str, str]] = []
     for section_index, section in enumerate(sections):
+        if section.section_id in assigned:
+            continue
         preferred_urls = set(section.internal_urls)
         for url, candidate in candidates.items():
             if section.section_type not in eligible_types and url not in preferred_urls:
@@ -1613,8 +2342,6 @@ def assign_internal_links_to_sections(
                 )
             )
 
-    used_urls: set[str] = set()
-    assigned: dict[str, str] = {}
     for _, _, _, _, url, section_id in sorted(ranked_pairs, reverse=True):
         if section_id in assigned or url in used_urls:
             continue
@@ -1687,9 +2414,12 @@ def _internal_link_terms(value: str) -> set[str]:
 
 
 def _build_article_contract(plan: ArticlePlan, pack: dict[str, Any]) -> ArticleContract:
-    claims_by_id = {item.claim_id: item for item in plan.claims if item.supported}
+    del pack
     required_questions = _unique(
-        [str(item).strip() for item in pack.get("required_questions") or [] if str(item).strip()]
+        question
+        for section in plan.sections
+        for question in section.required_questions
+        if question
     )[:20]
     faq_questions = _unique(
         [
@@ -1702,38 +2432,18 @@ def _build_article_contract(plan: ArticlePlan, pack: dict[str, Any]) -> ArticleC
     )[:10]
     sections = []
     for section in plan.sections:
-        section_claims = [
-            claims_by_id[claim_id]
-            for claim_id in section.claim_ids
-            if claim_id in claims_by_id
-        ]
-        mapped_urls = [
-            str(item["url"])
-            for item in map_authority_sources_to_section(plan, section, pack)
-            if item.get("url")
-        ]
         sections.append(
             ContractSection(
                 section_id=section.section_id,
                 required_questions=_unique(section.required_questions)[:10],
-                allowed_claim_ids=[item.claim_id for item in section_claims],
-                allowed_source_urls=_unique(
-                    [*[item.source_url for item in section_claims], *mapped_urls]
-                )[:20],
-                allowed_internal_urls=_unique(section.internal_urls)[:10],
             )
         )
-    capabilities = _evidence_capabilities(pack)
-    boundaries = _unique(
-        [str(item) for item in capabilities.get("unsupported_promises") or [] if item]
-    )[:20]
     return ArticleContract(
         article_type=plan.article_type,
         search_intent=plan.search_intent,
         required_questions=required_questions,
         sections=sections,
         faq_questions=faq_questions,
-        unsupported_claim_boundaries=boundaries,
     )
 
 
@@ -1746,10 +2456,6 @@ def _ensure_article_contract(plan: ArticlePlan, pack: dict[str, Any]) -> Article
 def _source_evidence_excerpt(source: dict[str, Any]) -> str:
     summary_value = source.get("summary")
     summary = dict(summary_value) if isinstance(summary_value, dict) else {}
-    metadata_value = source.get("metadata")
-    metadata = dict(metadata_value) if isinstance(metadata_value, dict) else {}
-    if metadata.get("source") == "web_research":
-        return str(summary.get("research_excerpt") or "").strip()[:6000]
     for field in (
         "research_excerpt",
         "citation_excerpt",
@@ -1759,25 +2465,13 @@ def _source_evidence_excerpt(source: dict[str, Any]) -> str:
         excerpt = str(summary.get(field) or "").strip()
         if excerpt:
             return excerpt[:6000]
-    if metadata.get("provider") == "dataforseo" and metadata.get("source") == "featured_snippet":
-        return str(summary.get("research_answer") or "").strip()[:6000]
     return ""
 
 
 def _authority_source_usable(source: dict[str, Any]) -> bool:
-    if source.get("status") != "available" or not _source_evidence_excerpt(source):
-        return False
-    metadata_value = source.get("metadata")
-    metadata = dict(metadata_value) if isinstance(metadata_value, dict) else {}
-    if metadata.get("source") != "web_research":
-        return False
-    status = metadata.get("verification_status")
-    summary_value = source.get("summary")
-    summary = dict(summary_value) if isinstance(summary_value, dict) else {}
-    return (
-        status in {"verified", "paraphrase"}
-        and bool(str(summary.get("research_excerpt") or "").strip())
-        and metadata.get("independent_source") is not False
+    return bool(
+        str(source.get("url") or "").strip()
+        and _source_evidence_excerpt(source)
     )
 
 
@@ -1786,228 +2480,112 @@ def _authority_pack_item(source: dict[str, Any]) -> dict[str, Any]:
     summary = dict(summary_value) if isinstance(summary_value, dict) else {}
     metadata_value = source.get("metadata")
     metadata = dict(metadata_value) if isinstance(metadata_value, dict) else {}
-    web_research = metadata.get("source") == "web_research"
     verification_claims = [
         dict(item)
         for item in summary.get("verification_claims") or []
-        if isinstance(item, dict) and item.get("status") in {"verified", "paraphrase"}
+        if isinstance(item, dict)
     ]
-    verified_claim_text = "\n".join(
-        dict.fromkeys(
-            str(item.get("claim") or "").strip()
-            for item in verification_claims
-            if str(item.get("claim") or "").strip()
-        )
-    )
     return {
         "url": source["url"],
         "title": source.get("title") or "",
         "excerpt": _source_evidence_excerpt(source),
-        "research_answer": "" if web_research else str(summary.get("research_answer") or "")[:12000],
-        "citation_excerpt": "" if web_research else str(summary.get("citation_excerpt") or "")[:4000],
-        "research_claim": (
-            verified_claim_text
-            if web_research
-            else str(summary.get("research_claim") or "")
-        ),
-        "verification_status": metadata.get("verification_status") or "legacy_available",
-        "verification_method": metadata.get("verification_method") or "",
-        "source_tier": metadata.get("source_tier") or "",
+        "research_answer": str(summary.get("research_answer") or "")[:12000],
+        "citation_excerpt": str(summary.get("citation_excerpt") or "")[:4000],
+        "research_claim": str(summary.get("research_claim") or ""),
         "provider": metadata.get("provider") or "",
         "model": metadata.get("model") or "",
         "queries": list(metadata.get("queries") or []),
         "failed_queries": list(metadata.get("failed_queries") or []),
         "cached": bool(metadata.get("cached")),
-        "verified_url": metadata.get("verified_url") or source["url"],
-        "echo_cluster_id": metadata.get("echo_cluster_id") or "",
-        "independent_source": metadata.get("independent_source"),
         "verification_claims": verification_claims,
-        "crawler": dict(metadata.get("crawler") or {}),
     }
 
 
-def _build_evidence_capabilities(
-    *,
-    competitor_blueprint: dict[str, Any],
-    competitors: list[dict[str, Any]],
-    authority_sources: list[dict[str, Any]],
-    internal_sources: list[dict[str, Any]],
-) -> dict[str, Any]:
-    named_entities = list(competitor_blueprint.get("named_entities") or [])
-    authority_text = " ".join(
-        f"{item.get('title', '')} {item.get('excerpt', '')}"
-        for item in authority_sources
-    )
-    price_pattern = re.compile(
-        r"(?:[$€£¥]\s?\d+(?:[,.]\d{1,2})?|\d+(?:[,.]\d{1,2})?\s?(?:USD|EUR|GBP|CNY))",
-        re.IGNORECASE,
-    )
-    source_tiers = {
-        str(item.get("source_tier") or "") for item in authority_sources
-    }
-    verified_claim_count = sum(
-        max(1, len(item.get("verification_claims") or []))
-        for item in authority_sources
-        if item.get("research_claim") or item.get("verification_claims")
-    )
-    named_products = [
+def _select_cta_assignment(
+    sections: list[OutlineSection], pack: dict[str, Any]
+) -> tuple[str, str] | None:
+    project_role = _project_article_role(pack)
+    if project_role == "unrelated":
+        return None
+    project_domain = str((pack.get("project") or {}).get("domain") or "")
+    context = _project_answer_context(None, pack)
+    cta_targets = [
         item
-        for item in named_entities
-        if item.get("entity_type") == "product_or_brand" and item.get("name")
+        for item in context["cta_targets"]
+        if project_domain_matches(str(item.get("url") or ""), project_domain)
     ]
-    supported_dimensions = list(
-        competitor_blueprint.get("comparison_dimensions") or []
-    )
-    price_available = bool(price_pattern.search(authority_text))
-    professional_available = any(
-        any(term in f"{item.get('title', '')} {item.get('excerpt', '')}".casefold()
-            for term in ("professional", "specialist", "technician", "clinician", "engineer"))
-        for item in authority_sources
-    )
-    unsupported_promises: list[str] = []
-    if len(named_products) < 3:
-        unsupported_promises.extend(["fixed product count", "ranking", "winner"])
-    if not price_available:
-        unsupported_promises.append("current prices")
-    if not professional_available:
-        unsupported_promises.append("professional recommendation")
-    unsupported_promises.extend(["hands-on test", "award"])
-    return {
-        "verified_claim_count": verified_claim_count,
-        "verified_source_count": len(authority_sources),
-        "competitor_count": len(competitors),
-        "internal_source_count": len(internal_sources),
-        "named_entities": named_products[:30],
-        "named_product_count": len(named_products),
-        "price_evidence_available": price_available,
-        "professional_source_available": professional_available,
-        "official_source_available": any(tier.startswith("tier_1") for tier in source_tiers),
-        "supported_comparison_dimensions": supported_dimensions,
-        "unsupported_promises": _unique(unsupported_promises),
-    }
+    if not sections or not cta_targets:
+        return None
 
+    profile = dict((pack.get("project") or {}).get("profile") or {})
 
-def _evidence_capabilities(pack: dict[str, Any]) -> dict[str, Any]:
-    capabilities = pack.get("evidence_capabilities")
-    if isinstance(capabilities, dict):
-        return dict(capabilities)
-    # Old stored packs predate capability tracking; preserve their plans on replay.
-    return {
-        "named_product_count": 100,
-        "price_evidence_available": True,
-        "professional_source_available": True,
-        "unsupported_promises": [],
-    }
-
-
-def _commercial_article_type(article_type: str) -> bool:
-    normalized = article_type.casefold()
-    return any(
-        item in normalized
-        for item in ("listicle", "comparison", "review", "product", "best")
-    )
-
-
-UNSUPPORTED_PROMISE_PATTERNS = (
-    re.compile(r"\b(?:top|best)\s+\d+\b", re.IGNORECASE),
-    re.compile(r"\b\d+\s+(?:best|top)\b", re.IGNORECASE),
-    re.compile(r"\b\d+\s+(?:products?|models?|options?|picks?)\b", re.IGNORECASE),
-    re.compile(r"(?:最佳\s*\d+|\d+\s*款最佳|\d+\s*(?:款|个)(?:产品|型号|选择))"),
-)
-UNVERIFIED_EVALUATION_PATTERN = re.compile(
-    r"\b(?:winners?|award(?:ed)?|rank(?:ed|ing)?|hands-on tests?|we tested|tested)\b|"
-    r"(?:获胜者|冠军|获奖|排名|实测|我们测试了)",
-    re.IGNORECASE,
-)
-BEST_PROMISE_PATTERN = re.compile(r"\bbest\b|最佳", re.IGNORECASE)
-PRICE_PROMISE_PATTERN = re.compile(
-    r"\b(?:current|exact|latest|live)\s+(?:price|pricing|cost)s?\b|"
-    r"(?:当前|准确|最新|实时)(?:价格|定价|成本)",
-    re.IGNORECASE,
-)
-PROFESSIONAL_PROMISE_PATTERN = re.compile(
-    r"\b(?:professional|expert|specialist)\s+(?:pick|choice|recommendation|recommended)\b|"
-    r"\b(?:our\s+)?experts?\b|"
-    r"(?:专业人士|专家)(?:选择|推荐)",
-    re.IGNORECASE,
-)
-
-
-def _constrain_metadata_to_evidence(
-    value: str, keyword: str, capabilities: dict[str, Any]
-) -> str:
-    constrained = UNVERIFIED_EVALUATION_PATTERN.sub("evaluated", value)
-    if int(capabilities.get("named_product_count") or 0) < 3:
-        for pattern in UNSUPPORTED_PROMISE_PATTERNS:
-            constrained = pattern.sub("selection guide", constrained)
-        constrained = BEST_PROMISE_PATTERN.sub("suitable", constrained)
-    if not capabilities.get("price_evidence_available"):
-        constrained = PRICE_PROMISE_PATTERN.sub("budget considerations", constrained)
-    if not capabilities.get("professional_source_available"):
-        constrained = PROFESSIONAL_PROMISE_PATTERN.sub("practical guidance", constrained)
-    constrained = re.sub(r"\s+", " ", constrained).strip(" -:|")
-    return constrained or f"{keyword} selection guide"
-
-
-def _constrain_requirement_to_evidence(
-    value: str, capabilities: dict[str, Any]
-) -> str:
-    constrained = _constrain_metadata_to_evidence(value, "", capabilities)
-    if int(capabilities.get("named_product_count") or 0) < 3:
-        constrained = re.sub(
-            r"\b(?:recommend|rank|compare)\s+(?:the\s+)?(?:top|best)?\s*\d*\s*(?:products?|models?|options?)\b",
-            "explain selection criteria and suitable option types",
-            constrained,
-            flags=re.IGNORECASE,
-        )
-    if not capabilities.get("price_evidence_available"):
-        constrained = re.sub(
-            r"\b(?:add|include|show|compare|provide)\s+(?:current\s+)?(?:prices?|pricing)\b",
-            "explain budget factors without quoting unsupported prices",
-            constrained,
-            flags=re.IGNORECASE,
-        )
-    return constrained.strip()
-
-
-def _constrain_section_to_evidence(
-    section: OutlineSection, capabilities: dict[str, Any]
-) -> OutlineSection:
-    heading = _constrain_requirement_to_evidence(section.heading, capabilities)
-    objective = _constrain_requirement_to_evidence(section.objective, capabilities)
-    coverage_points = _unique(
-        [
-            constrained
-            for item in section.coverage_points
-            if (constrained := _constrain_requirement_to_evidence(item, capabilities))
-        ]
-    )[:12]
-    competitor_gaps = _unique(
-        [
-            constrained
-            for item in section.competitor_gaps
-            if (constrained := _constrain_requirement_to_evidence(item, capabilities))
-        ]
-    )[:10]
-    data_requirements = _unique(
-        [
-            constrained
-            for item in section.data_requirements
-            if (constrained := _constrain_requirement_to_evidence(item, capabilities))
-        ]
-    )[:10]
-    return section.model_copy(
-        update={
-            "heading": heading or "Selection criteria",
-            "objective": objective or "Explain practical selection criteria",
-            "coverage_points": coverage_points,
-            "competitor_gaps": competitor_gaps,
-            "data_requirements": data_requirements,
-            "strategic_angle": _constrain_requirement_to_evidence(
-                section.strategic_angle, capabilities
+    def candidate(target: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **target,
+            "description": " ".join(
+                [
+                    str(target.get("description") or ""),
+                    str(profile.get("business_summary") or ""),
+                    *[str(item) for item in profile.get("products_services") or []],
+                    *[str(item) for item in profile.get("value_propositions") or []],
+                ]
             ),
         }
+
+    project_is_core = project_role == "core"
+    targets_by_url = {str(item["url"]): item for item in cta_targets}
+    explicit = next(
+        (
+            (section.section_id, url)
+            for section in sections
+            for url in section.internal_urls
+            if url in targets_by_url
+            and (
+                project_is_core
+                or _internal_link_section_score(section, candidate(targets_by_url[url]))
+                >= 1
+            )
+        ),
+        None,
     )
+    if explicit is not None:
+        return explicit
+
+    prompted = next(
+        (section for section in reversed(sections) if section.cta_type == "strong"),
+        next((section for section in reversed(sections) if section.cta_type), None),
+    )
+    if prompted is not None:
+        prompted_targets = sorted(
+            (
+                (_internal_link_section_score(prompted, candidate(target)), target)
+                for target in cta_targets
+            ),
+            key=lambda item: (item[0], str(item[1].get("url") or "")),
+            reverse=True,
+        )
+        prompted_score, prompted_target = prompted_targets[0]
+        if project_is_core or prompted_score >= 1:
+            return prompted.section_id, str(prompted_target["url"])
+
+    ranked = sorted(
+        (
+            (
+                _internal_link_section_score(section, candidate(target)),
+                index,
+                section,
+                target,
+            )
+            for index, section in enumerate(sections)
+            for target in cta_targets
+        ),
+        key=lambda item: (item[0], item[1], str(item[3].get("url") or "")),
+        reverse=True,
+    )
+    score, _, selected, selected_target = ranked[0]
+    if score < 1 and not project_is_core:
+        return None
+    return selected.section_id, str(selected_target["url"])
 
 
 def _evidence_contains_quote(evidence: str, quote: str) -> bool:
@@ -2019,19 +2597,14 @@ def _evidence_contains_quote(evidence: str, quote: str) -> bool:
 def fallback_plan(pack: dict[str, Any]) -> ArticlePlan:
     keyword = str(pack["keyword"])
     questions = list(pack.get("required_questions") or [])
-    content_brief = dict(pack.get("content_brief") or {})
-    article_type = str(content_brief.get("content_type") or "guide")
-    recommendations = list(content_brief.get("structure_recommendations") or [])
-    headings = (
-        [(str(item), f"Cover the required {article_type} element: {item}") for item in recommendations]
-        if recommendations
-        else [
-            (f"Understanding {keyword}", "Explain the topic and the user's core intent"),
-            ("Key considerations", "Cover the practical factors that affect the decision"),
-            ("A practical process", "Give a clear step-by-step approach"),
-            ("Common questions", "Answer the remaining user questions directly"),
-        ]
-    )
+    requested_article_type = dict(pack.get("requested_article_type") or {})
+    article_type = str(requested_article_type.get("value") or "guide")
+    headings = [
+        (f"Understanding {keyword}", "Explain the topic and the user's core intent"),
+        ("Key considerations", "Cover the practical factors that affect the decision"),
+        ("A practical process", "Give a clear step-by-step approach"),
+        ("Common questions", "Answer the remaining user questions directly"),
+    ]
     sections = [
         OutlineSection(
             section_id=f"section-{index + 1}",
@@ -2042,226 +2615,381 @@ def fallback_plan(pack: dict[str, Any]) -> ArticlePlan:
         )
         for index, (heading, objective) in enumerate(headings)
     ]
-    sections = _align_sections_with_content_brief(sections, pack, article_type)
-    sections = _align_sections_with_competitor_blueprint(sections, pack)
+    sections = _ensure_project_answer_plan_section(sections, pack)
     sections = _finalize_section_plans(sections, pack)
     sections = assign_internal_links_to_sections(sections, pack)
-    capabilities = _evidence_capabilities(pack)
-    sections = [_constrain_section_to_evidence(item, capabilities) for item in sections]
-    if _commercial_article_type(article_type) and int(
-        capabilities.get("named_product_count") or 0
-    ) < 3:
-        article_type = "Selection Guide"
+    title = _fallback_title(pack, sections)
     plan = ArticlePlan(
-        title=_locked_title(pack) or keyword,
+        title=title,
         search_intent=f"Understand and act on {keyword}",
         article_type=article_type,
-        meta_title=keyword,
-        meta_description=f"A practical guide to {keyword}, including key considerations and next steps.",
+        meta_title=title,
+        meta_description=f"Find practical options and next steps for {keyword}.",
         slug=normalize_slug(keyword, keyword),
         sections=sections,
         total_word_target=sum(item.word_target for item in sections),
         gap_to_section_mapping=_gap_to_section_mapping(sections),
     )
+    plan = _bind_fallback_evidence(plan, pack)
     return plan.model_copy(update={"contract": _build_article_contract(plan, pack)})
 
 
-def _align_sections_with_content_brief(
-    sections: list[OutlineSection], pack: dict[str, Any], article_type: str
-) -> list[OutlineSection]:
-    content_brief = dict(pack.get("content_brief") or {})
-    capabilities = _evidence_capabilities(pack)
-    recommendations = _unique(
-        [
-            constrained
-            for item in content_brief.get("structure_recommendations") or []
-            if (constrained := _constrain_requirement_to_evidence(str(item), capabilities))
-        ]
-    )[:10]
-    must_have = _unique(
-        [
-            constrained
-            for item in content_brief.get("must_have_elements") or []
-            if (constrained := _constrain_requirement_to_evidence(str(item), capabilities))
-        ]
+def _fallback_title(pack: dict[str, Any], sections: list[OutlineSection]) -> str:
+    locked = _locked_title(pack)
+    if locked:
+        return locked
+    keyword = str(pack.get("keyword") or "").strip()
+    display_keyword = " ".join(
+        item.upper() if item.casefold() in {"ai", "api", "pc", "seo", "tv", "vpn"}
+        else item.capitalize()
+        for item in keyword.split()
     )
-    feature_targets = _unique(
-        list(content_brief.get("serp_features_to_target") or [])
+    business_name = str(
+        ((pack.get("project") or {}).get("profile") or {}).get("business_name") or ""
+    ).strip()
+    project_is_core = bool(
+        business_name
+        and any(business_name.casefold() in section.heading.casefold() for section in sections)
     )
-    aligned = list(sections[:10])
+    if project_is_core:
+        return f"{business_name}: {display_keyword}"
+    return f"{display_keyword}: What to Know and How to Get Started"
 
-    for index, recommendation in enumerate(recommendations):
-        requirement = f"SERP structure: {recommendation}"
-        if index < len(aligned):
-            section = aligned[index]
-            aligned[index] = section.model_copy(
-                update={
-                    "coverage_points": _unique(
-                        [requirement, *section.coverage_points]
-                    )[:12]
+
+def _bind_fallback_evidence(plan: ArticlePlan, pack: dict[str, Any]) -> ArticlePlan:
+    source_by_url = {
+        str(item.get("url") or ""): dict(item)
+        for item in _rank_planning_sources(pack)
+        if item.get("url") and item.get("excerpt")
+        and (
+            _project_answer_is_core(pack)
+            or not _source_is_project_owned(item, pack)
+        )
+    }
+    claims: list[EvidenceClaim] = []
+    seen: set[tuple[str, str]] = set()
+    for source_url, source in source_by_url.items():
+        candidates = [
+            dict(item)
+            for item in source.get("verification_claims") or []
+            if isinstance(item, dict)
+        ]
+        if not candidates:
+            candidates = [
+                {
+                    "claim": source.get("research_claim") or source.get("excerpt"),
+                    "evidence": source.get("excerpt"),
                 }
-            )
-            continue
-        aligned.append(
-            OutlineSection(
-                section_id=f"section-{index + 1}",
-                heading=recommendation,
-                objective=(
-                    f"Cover the required {article_type} structure: {recommendation}"
-                ),
-                coverage_points=[requirement],
-            )
-        )
-
-    for index, element in enumerate(must_have):
-        if not aligned:
-            break
-        target = index % len(aligned)
-        section = aligned[target]
-        aligned[target] = section.model_copy(
-            update={
-                "coverage_points": _unique(
-                    [f"Required element: {element}", *section.coverage_points]
-                )[:12]
-            }
-        )
-    for index, target_requirement in enumerate(feature_targets):
-        if not aligned:
-            break
-        target = index % len(aligned)
-        section = aligned[target]
-        aligned[target] = section.model_copy(
-            update={
-                "coverage_points": _unique(
-                    [
-                        f"SERP feature target: {target_requirement}",
-                        *section.coverage_points,
-                    ]
-                )[:12]
-            }
-        )
-    return aligned
-
-
-def _align_sections_with_competitor_blueprint(
-    sections: list[OutlineSection], pack: dict[str, Any]
-) -> list[OutlineSection]:
-    blueprint = dict(pack.get("competitor_blueprint") or {})
-    capabilities = _evidence_capabilities(pack)
-    aligned = list(sections[:12])
-    if not aligned:
-        return aligned
-
-    for item in blueprint.get("structure_to_match") or []:
-        heading = _constrain_requirement_to_evidence(
-            str(item.get("heading") or "").strip(), capabilities
-        )
-        if not heading:
-            continue
-        target = _best_section_index(aligned, heading)
-        requirement = f"Common competitor structure: {heading}"
-        if target is None and len(aligned) < 12:
-            aligned.append(
-                OutlineSection(
-                    section_id=f"section-{len(aligned) + 1}",
-                    heading=heading,
-                    objective=f"Cover the structure shared by ranking competitors: {heading}",
-                    coverage_points=[requirement],
+            ]
+        for candidate in candidates:
+            if len(claims) >= MAX_PLAN_CLAIMS:
+                break
+            claim_text = str(candidate.get("claim") or "").strip()
+            evidence = str(candidate.get("evidence") or "").strip()
+            excerpt = str(source.get("excerpt") or "").strip()
+            quote = evidence if _evidence_contains_quote(excerpt, evidence) else excerpt
+            identity = (source_url, claim_text.casefold())
+            if not claim_text or not quote or identity in seen:
+                continue
+            seen.add(identity)
+            claims.append(
+                EvidenceClaim(
+                    claim_id=f"claim-{len(claims) + 1}",
+                    claim=claim_text[:1000],
+                    source_url=source_url,
+                    source_title=str(source.get("title") or "")[:500],
+                    quote=quote[:2000],
                 )
             )
-        elif target is not None:
-            section = aligned[target]
-            aligned[target] = section.model_copy(
-                update={
-                    "coverage_points": _unique([requirement, *section.coverage_points])[:12]
-                }
-            )
+    if not claims:
+        return plan
 
-    for item in blueprint.get("must_fill_gaps") or []:
-        gap = dict(item)
-        requirement = _constrain_requirement_to_evidence(
-            str(gap.get("opportunity") or gap.get("description") or "").strip(),
-            capabilities,
-        )
-        location = str(gap.get("location") or "").strip()
-        if not requirement:
-            continue
-        target = _ensure_relevant_section(aligned, location, requirement)
-        if target is None:
-            continue
-        section = aligned[target]
-        aligned[target] = section.model_copy(
+    claim_ids_by_section = {section.section_id: [] for section in plan.sections}
+    assigned_claims: list[EvidenceClaim] = []
+    body_indexes = [
+        index
+        for index, section in enumerate(plan.sections)
+        if section.section_type not in {"intro", "conclusion"}
+    ] or list(range(len(plan.sections)))
+    for index, claim in enumerate(claims):
+        source = source_by_url[claim.source_url]
+        scores = [
+            (
+                _source_semantic_score(section, source)
+                + _source_keyword_score(section, source, pack),
+                section_index,
+            )
+            for section_index, section in enumerate(plan.sections)
+        ]
+        best_score, section_index = max(scores, key=lambda item: (item[0], -item[1]))
+        if best_score <= 0:
+            section_index = body_indexes[index % len(body_indexes)]
+        section_id = plan.sections[section_index].section_id
+        claim_ids_by_section[section_id].append(claim.claim_id)
+        assigned_claims.append(claim.model_copy(update={"section_id": section_id}))
+    sections = [
+        section.model_copy(
             update={
-                "competitor_gaps": _unique([requirement, *section.competitor_gaps])[:10],
-                "coverage_points": _unique(
-                    [f"Competitor opportunity: {requirement}", *section.coverage_points]
-                )[:12]
+                "claim_ids": _unique(
+                    [*section.claim_ids, *claim_ids_by_section[section.section_id]]
+                )[:MAX_SECTION_CLAIMS]
             }
         )
-
-    for item in blueprint.get("data_needed") or []:
-        value = dict(item)
-        topic = str(value.get("topic") or "Article").strip()
-        reason = str(value.get("reason") or "Supporting evidence is needed").strip()
-        requirement = _constrain_requirement_to_evidence(
-            f"Verify with a current named source or express qualitatively: {topic} ({reason})",
-            capabilities,
-        )
-        if not requirement:
-            continue
-        target = _ensure_relevant_section(aligned, topic, requirement)
-        if target is not None:
-            section = aligned[target]
-            aligned[target] = section.model_copy(
-                update={
-                    "data_requirements": _unique(
-                        [requirement, *section.data_requirements]
-                    )[:10]
-                }
-            )
-
-    for item in blueprint.get("outdated_to_update") or []:
-        value = dict(item)
-        location = str(value.get("location") or "Article").strip()
-        quote = str(value.get("quote") or value.get("year") or "old information").strip()
-        requirement = f"Replace with current sourced information or omit: {quote[:240]}"
-        target = _ensure_relevant_section(aligned, location, requirement)
-        if target is not None:
-            section = aligned[target]
-            aligned[target] = section.model_copy(
-                update={
-                    "data_requirements": _unique(
-                        [requirement, *section.data_requirements]
-                    )[:10]
-                }
-            )
-    return aligned
+        for section in plan.sections
+    ]
+    return plan.model_copy(update={"claims": assigned_claims, "sections": sections})
 
 
-def _ensure_relevant_section(
-    sections: list[OutlineSection], location: str, requirement: str
-) -> int | None:
-    target = _best_section_index(sections, location or requirement)
-    if target is not None:
-        return target
-    if len(sections) >= 12:
-        return None
-    generic = _normalize_requirement(location) in {
-        "",
-        "article",
-        "article structure",
-        "introduction",
-    }
-    heading = "Evidence and current information" if generic else location
-    sections.append(
-        OutlineSection(
-            section_id=f"section-{len(sections) + 1}",
-            heading=heading,
-            objective=requirement,
-            coverage_points=[f"Competitor opportunity: {requirement}"],
+def _project_answer_is_core(pack: dict[str, Any]) -> bool:
+    context = _project_answer_context(None, pack)
+    business_name = str(context.get("business_name") or "").strip()
+    keyword = str(context.get("keyword") or "").strip()
+    if not business_name or not keyword:
+        return False
+    business_key = _normalize_requirement(business_name)
+    keyword_key = _normalize_requirement(keyword)
+    locked_title_key = _normalize_requirement(_locked_title(pack) or "")
+    return business_key in keyword_key or bool(
+        locked_title_key and business_key in locked_title_key
+    )
+
+
+def _project_article_role(pack: dict[str, Any]) -> str:
+    if _project_answer_is_core(pack):
+        return "core"
+    context = _project_answer_context(None, pack)
+    if not context.get("cta_targets"):
+        return "unrelated"
+    topic_terms = _internal_link_terms(
+        " ".join(
+            [
+                str(pack.get("keyword") or ""),
+                *[str(item) for item in pack.get("required_questions") or []],
+            ]
         )
     )
-    return len(sections) - 1
+    evidence_terms: set[str] = set()
+    for item in context.get("product_evidence") or []:
+        if str(item.get("field") or "") == "conversion_actions":
+            continue
+        evidence_terms.update(
+            _internal_link_terms(
+                " ".join(
+                    [
+                        str(item.get("value") or ""),
+                        str(item.get("quote") or ""),
+                    ]
+                )
+            )
+        )
+    return "conversion" if topic_terms.intersection(evidence_terms) else "unrelated"
+
+
+def _conversion_project_profile(pack: dict[str, Any]) -> dict[str, Any]:
+    context = _project_answer_context(None, pack)
+    topic_terms = _internal_link_terms(
+        " ".join(
+            [
+                str(pack.get("keyword") or ""),
+                *[str(item) for item in pack.get("required_questions") or []],
+            ]
+        )
+    )
+    relevant_evidence = [
+        item
+        for item in context.get("product_evidence") or []
+        if str(item.get("field") or "") != "conversion_actions"
+        and topic_terms.intersection(
+            _internal_link_terms(
+                " ".join(
+                    [
+                        str(item.get("value") or ""),
+                        str(item.get("quote") or ""),
+                    ]
+                )
+            )
+        )
+    ]
+    cta_targets = list(context.get("cta_targets") or [])[:1]
+    cta_urls = {str(item.get("url") or "") for item in cta_targets}
+    cta_evidence = [
+        item
+        for item in context.get("product_evidence") or []
+        if str(item.get("field") or "") == "conversion_actions"
+        and str(item.get("source_url") or "") in cta_urls
+    ]
+    fields: dict[str, list[str]] = {}
+    for item in relevant_evidence:
+        field = str(item.get("field") or "")
+        fields.setdefault(field, []).append(str(item.get("value") or ""))
+    return {
+        "business_name": context.get("business_name") or "",
+        "products_services": _unique(fields.get("products_services") or []),
+        "value_propositions": _unique(fields.get("value_propositions") or []),
+        "conversion_actions": [
+            str(item.get("label") or "") for item in cta_targets if item.get("label")
+        ],
+        "key_pages": [
+            item
+            for item in context.get("key_pages") or []
+            if str(item.get("url") or "") in cta_urls
+        ],
+        "cta_targets": cta_targets,
+        "product_evidence": [*relevant_evidence, *cta_evidence],
+    }
+
+
+def _source_is_project_owned(source: dict[str, Any], pack: dict[str, Any]) -> bool:
+    project = dict(pack.get("project") or {})
+    project_domain = str(project.get("domain") or "").strip()
+    source_url = str(source.get("url") or "").strip()
+    if project_domain_matches(source_url, project_domain):
+        return True
+    business_name = str(
+        _project_answer_context(None, pack).get("business_name") or ""
+    ).strip()
+    business_key = _normalize_requirement(business_name)
+    if not business_key:
+        return False
+    source_identity = _normalize_requirement(
+        " ".join(
+            [
+                str(source.get("title") or ""),
+                urlsplit(source_url).netloc,
+            ]
+        )
+    )
+    return f" {business_key} " in f" {source_identity} "
+
+
+def _exclude_project_owned_sources(
+    sources: list[dict[str, Any]], pack: dict[str, Any]
+) -> list[dict[str, Any]]:
+    return [item for item in sources if not _source_is_project_owned(item, pack)]
+
+
+def _plan_has_unrequested_project_focus(
+    plan: ArticlePlan, pack: dict[str, Any]
+) -> bool:
+    if _project_answer_is_core(pack):
+        return False
+    business_name = str(
+        _project_answer_context(None, pack).get("business_name") or ""
+    ).strip()
+    if not business_name:
+        return False
+
+    business_key = _normalize_requirement(business_name)
+
+    def mentions_business(value: str) -> bool:
+        normalized = _normalize_requirement(value)
+        return bool(
+            business_key
+            and f" {business_key} " in f" {normalized} "
+        )
+
+    if mentions_business(plan.title) or mentions_business(plan.search_intent):
+        return True
+    focused_sections = sum(
+        mentions_business(" ".join([section.heading, section.objective]))
+        for section in plan.sections
+    )
+    return bool(plan.sections) and focused_sections > len(plan.sections) / 2
+
+
+def _project_article_evidence(pack: dict[str, Any]) -> list[dict[str, str]]:
+    context = _project_answer_context(None, pack)
+    if _project_article_role(pack) == "conversion":
+        return list(_conversion_project_profile(pack).get("product_evidence") or [])
+    return [
+        item
+        for item in context["product_evidence"]
+        if str(item.get("field") or "").strip() != "conversion_actions"
+        and str(item.get("value") or "").strip()
+        and str(item.get("source_url") or "").strip()
+    ]
+
+
+def _research_source_claims(pack: dict[str, Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    project_role = _project_article_role(pack)
+    conversion_urls = {
+        str(item.get("source_url") or "")
+        for item in _project_article_evidence(pack)
+    }
+    for source in pack.get("authority_sources") or []:
+        if (
+            project_role != "core"
+            and _source_is_project_owned(source, pack)
+            and str(source.get("url") or "") not in conversion_urls
+        ):
+            continue
+        source_url = str(source.get("url") or "").strip()
+        if not source_url:
+            continue
+        for item in source.get("verification_claims") or []:
+            if not isinstance(item, dict):
+                continue
+            claim = str(item.get("claim") or "").strip()
+            evidence = str(item.get("evidence") or "").strip()
+            if not claim:
+                continue
+            output.append(
+                {
+                    "claim": claim[:1000],
+                    "source_url": source_url,
+                    "source_title": str(source.get("title") or "")[:500],
+                    "quote": (evidence or claim)[:2000],
+                }
+            )
+    return output
+
+
+def _assign_research_claims(
+    sections: list[OutlineSection],
+    claims: list[EvidenceClaim],
+    claim_ids: list[str],
+    pack: dict[str, Any],
+    *,
+    require_relevance_claim_ids: set[str] | None = None,
+) -> list[OutlineSection]:
+    if not sections:
+        return sections
+    claims_by_id = {item.claim_id: item for item in claims}
+    sources_by_url = {
+        str(item.get("url") or ""): dict(item)
+        for item in _evidence_sources(pack)
+        if item.get("url")
+    }
+    assigned = {section.section_id: list(section.claim_ids) for section in sections}
+    for claim_id in claim_ids:
+        claim = claims_by_id[claim_id]
+        source = sources_by_url.get(claim.source_url, {})
+        claim_source = {
+            **source,
+            "research_claim": claim.claim,
+            "excerpt": claim.quote,
+        }
+        target = max(
+            sections,
+            key=lambda section: (
+                _source_semantic_score(section, claim_source),
+                -sections.index(section),
+            ),
+        )
+        if (
+            claim.claim_id in (require_relevance_claim_ids or set())
+            and not _project_answer_is_core(pack)
+            and _source_semantic_score(target, claim_source) < 0.1
+        ):
+            continue
+        assigned[target.section_id] = _unique(
+            [*assigned[target.section_id], claim_id]
+        )[:MAX_SECTION_CLAIMS]
+    return [
+        section.model_copy(update={"claim_ids": assigned[section.section_id]})
+        for section in sections
+    ]
 
 
 def _best_section_index(sections: list[OutlineSection], requirement: str) -> int | None:
@@ -2339,21 +3067,18 @@ def _semantic_terms(value: str) -> set[str]:
 def _finalize_section_plans(
     sections: list[OutlineSection], pack: dict[str, Any]
 ) -> list[OutlineSection]:
-    blueprint = dict(pack.get("competitor_blueprint") or {})
-    common_structure = list(blueprint.get("structure_to_match") or [])
-    conversions = list(
-        ((pack.get("project") or {}).get("profile") or {}).get("conversion_actions")
-        or []
-    )
     section_count = min(len(sections), 12)
-    cta_locations = (
-        ("soft", min(2, section_count)),
-        ("medium", section_count // 2 + 1),
-        ("strong", section_count),
-    )
     output: list[OutlineSection] = []
-    for index, section in enumerate(sections[:12]):
-        section_type = _classify_section_type(section.heading, index)
+    for index, section in enumerate(sections[:section_count]):
+        inferred_section_type = _classify_section_type(section.heading, index)
+        section_type = section.section_type
+        if section_type == "body_explanation" or (
+            section_type == "conclusion"
+            and inferred_section_type
+            in {"body_how_to", "body_comparison", "body_list"}
+            and not _is_explicit_conclusion_heading(section.heading)
+        ):
+            section_type = inferred_section_type
         required_questions = (
             _faq_questions(section, pack)
             if section_type == "faq"
@@ -2368,24 +3093,8 @@ def _finalize_section_plans(
             "faq": 250,
             "conclusion": 200,
         }[section_type]
-        competitor_average = _competitor_average_word_count(section, common_structure)
-        word_target = max(base_target, int(competitor_average * 1.1))
-        if section.competitor_gaps:
-            word_target = max(word_target, int(base_target * 1.3))
+        word_target = section.word_target or base_target
         strategic_angle = section.strategic_angle.strip() or section.objective
-        if section.competitor_gaps:
-            strategic_angle = "Resolve documented competitor gaps: " + "; ".join(
-                section.competitor_gaps[:2]
-            )
-        section_number = index + 1
-        cta_type = (
-            next(
-                (cta for cta, location in cta_locations if location == section_number),
-                None,
-            )
-            if conversions
-            else None
-        )
         featured_snippet = (
             section.featured_snippet_target
             or section_type in {"faq", "body_explanation"}
@@ -2401,12 +3110,65 @@ def _finalize_section_plans(
                     "strategic_angle": strategic_angle,
                     "engagement_hook": section.engagement_hook.strip()
                     or _engagement_hook(section_type),
-                    "cta_type": cta_type,
+                    "cta_type": section.cta_type,
                     "featured_snippet_target": featured_snippet,
                 }
             )
         )
-    return output
+    deduplicated = _deduplicate_section_requirements(output)
+    if pack.get("required_questions"):
+        deduplicated = [
+            section
+            for section in deduplicated
+            if section.section_type != "faq" or section.required_questions
+        ]
+    return deduplicated
+
+
+def _deduplicate_section_requirements(
+    sections: list[OutlineSection],
+) -> list[OutlineSection]:
+    seen_questions: set[str] = set()
+    output: list[OutlineSection] = []
+    for section in sections:
+        questions: list[str] = []
+        for question in section.required_questions:
+            normalized = _normalize_requirement(question)
+            if not normalized or normalized in seen_questions:
+                continue
+            seen_questions.add(normalized)
+            questions.append(question)
+        output.append(
+            section.model_copy(
+                update={
+                    "required_questions": questions,
+                    "coverage_points": _unique(section.coverage_points),
+                    "competitor_gaps": _unique(section.competitor_gaps),
+                    "data_requirements": _unique(section.data_requirements),
+                }
+            )
+        )
+    cta_index = next(
+        (
+            index
+            for index in range(len(output) - 1, -1, -1)
+            if output[index].cta_type == "strong"
+        ),
+        next(
+            (
+                index
+                for index in range(len(output) - 1, -1, -1)
+                if output[index].cta_type
+            ),
+            None,
+        ),
+    )
+    return [
+        item.model_copy(update={"cta_type": None})
+        if cta_index is not None and index != cta_index
+        else item
+        for index, item in enumerate(output)
+    ]
 
 
 def _faq_questions(section: OutlineSection, pack: dict[str, Any]) -> list[str]:
@@ -2426,36 +3188,15 @@ def _faq_questions(section: OutlineSection, pack: dict[str, Any]) -> list[str]:
     return _unique([*selected, *available])[:target_count]
 
 
-def _competitor_average_word_count(
-    section: OutlineSection, common_structure: list[dict[str, Any]]
-) -> int:
-    section_text = " ".join(
-        [section.heading, section.objective, *section.coverage_points]
-    )
-    normalized_section = _normalize_requirement(section_text)
-    section_terms = _semantic_terms(section_text)
-    best_score = 0
-    best_average = 0
-    for item in common_structure:
-        heading = str(item.get("heading") or "").strip()
-        average = int(item.get("average_word_count") or 0)
-        if not heading or average <= 0:
-            continue
-        normalized_heading = _normalize_requirement(heading)
-        score = len(section_terms.intersection(_semantic_terms(heading)))
-        if normalized_heading in normalized_section:
-            score += 5
-        if score > best_score:
-            best_score = score
-            best_average = average
-    return best_average
-
-
 def _classify_section_type(heading: str, index: int) -> str:
     normalized = _normalize_requirement(heading)
     normalized_tokens = set(normalized.split())
     section_type = "body_explanation"
-    if any(
+    if normalized_tokens.intersection({"intro", "introduction"}) or any(
+        item in normalized for item in ("direct answer", "opening answer")
+    ):
+        section_type = "intro"
+    elif any(
         item in normalized
         for item in (
             "how to",
@@ -2463,6 +3204,10 @@ def _classify_section_type(heading: str, index: int) -> str:
             "guide",
             "tutorial",
             "process",
+            "choose",
+            "choice",
+            "select",
+            "selection",
             "步骤",
             "指南",
             "教程",
@@ -2536,14 +3281,17 @@ def _classify_section_type(heading: str, index: int) -> str:
     ):
         section_type = "conclusion"
 
-    if index == 0:
-        section_type = "intro"
     if (
         normalized_tokens.intersection({"faq", "question", "questions"})
         or any(item in normalized for item in ("常见问题", "问答"))
     ):
         section_type = "faq"
     return section_type
+
+
+def _is_explicit_conclusion_heading(heading: str) -> bool:
+    normalized = _normalize_requirement(heading)
+    return normalized.startswith(("conclusion", "summary", "final thoughts", "结论", "总结"))
 
 
 def _engagement_hook(section_type: str) -> str:
@@ -2554,7 +3302,7 @@ def _engagement_hook(section_type: str) -> str:
         "body_explanation": "Begin with a plain-language answer before adding detail.",
         "body_list": "Explain how the items were selected before listing them consistently.",
         "faq": "Answer each real user question directly before adding context.",
-        "conclusion": "Turn the main findings into specific next steps without adding new facts.",
+        "conclusion": "Turn the main findings into specific next steps.",
     }[section_type]
 
 
@@ -2578,44 +3326,286 @@ def section_payload(
     *,
     compact: bool,
 ) -> dict[str, Any]:
-    mapped_sources = map_authority_sources_to_section(plan, section, pack)
-    mapped_urls = {str(item.get("url") or "") for item in mapped_sources}
+    mapped_sources = _unique_source_records(
+        map_authority_sources_to_section(plan, section, pack)
+    )
     claims = [
-        item
-        for item in plan.claims
-        if item.claim_id in section.claim_ids and item.source_url in mapped_urls
-    ]
+        item for item in plan.claims if item.claim_id in section.claim_ids
+    ][:MAX_SECTION_CLAIMS]
     internal = [
         item for item in pack.get("internal_sources", []) if item.get("url") in section.internal_urls
     ]
-    conversions = list(
-        ((pack.get("project") or {}).get("profile") or {}).get("conversion_actions")
-        or []
-    )
+    project_answer_context = _section_project_context(plan, section, pack)
+    competitor_articles = _competitor_reference_materials(pack, compact=compact)
+    serp_results = [
+        {
+            "url": item.get("url"),
+            "title": item.get("title"),
+            "description": item.get("description"),
+        }
+        for item in list((pack.get("serp") or {}).get("organic_results") or [])[:10]
+    ]
+    if not _project_answer_is_core(pack):
+        competitor_articles = _exclude_project_owned_sources(competitor_articles, pack)
+        serp_results = _exclude_project_owned_sources(serp_results, pack)
     return {
+        "goal": "Write this section as part of the article and make it useful to the reader.",
         "language": pack["language"],
         "keyword": pack["keyword"],
-        "title": plan.title,
-        "article_type": plan.article_type,
-        "article_contract": plan.contract.model_dump(mode="json") if plan.contract else None,
-        "section_contract": _section_contract_payload(plan, section.section_id),
-        "section": section.model_dump(mode="json"),
-        "writing_requirements": _section_writing_requirements(section),
-        "universal_editing_checks": list(SECTION_EDITING_CHECKS),
-        "section_specific_checks": list(
-            SECTION_SPECIFIC_EDITING_CHECKS[section.section_type]
-        ),
-        "ai_phrases_to_remove": list(AI_PHRASES_TO_REMOVE[:8]),
-        "vague_words_to_replace": dict(list(VAGUE_WORD_REPLACEMENTS.items())[:6]),
-        "supported_claims": [item.model_dump(mode="json") for item in claims],
-        "authority_sources": mapped_sources,
+        "article_title": plan.title,
+        "section": {
+            "section_id": section.section_id,
+            "heading": section.heading,
+            "objective": section.objective,
+            "coverage_points": section.coverage_points,
+            "word_target": section.word_target,
+        },
+        "facts": [item.model_dump(mode="json") for item in claims],
+        "sources": [_writing_source_material(item) for item in mapped_sources],
+        "competitor_articles": competitor_articles,
+        "serp_results": serp_results,
         "internal_links": internal,
-        "conversion_actions": conversions if section.cta_type else [],
+        "official_product": project_answer_context,
         "previous_section_summaries": previous_summaries,
-        "project_writing_rules": (pack.get("project") or {}).get("profile", {}),
-        "locked_requirements": _locked_requirements(pack),
-        "target": "complete concise section" if compact else "complete useful section",
+        "length": "concise" if compact else "complete",
     }
+
+
+def _section_project_context(
+    plan: ArticlePlan, section: OutlineSection, pack: dict[str, Any]
+) -> dict[str, Any]:
+    context = _project_answer_context(plan, pack)
+    cta_assignment = _select_cta_assignment(plan.sections, pack)
+    section_cta_targets = [
+        item
+        for item in context["cta_targets"]
+        if cta_assignment == (section.section_id, str(item.get("url") or ""))
+    ]
+    project_domain = str((pack.get("project") or {}).get("domain") or "")
+    section_claims = [
+        item for item in plan.claims if item.claim_id in section.claim_ids
+    ]
+    project_relevant = _project_answer_is_core(pack) or bool(section_cta_targets) or any(
+        project_domain_matches(item.source_url, project_domain) for item in section_claims
+    )
+    return {
+        **(context if project_relevant else {}),
+        "conversion_actions": [
+            str(item["label"])
+            for item in section_cta_targets
+            if item.get("label")
+        ],
+        "cta_targets": section_cta_targets,
+    }
+
+
+def _project_answer_context(
+    plan: ArticlePlan | None, pack: dict[str, Any]
+) -> dict[str, Any]:
+    project = dict(pack.get("project") or {})
+    profile = dict(project.get("profile") or {})
+    product_evidence = [
+        {
+            "field": str(item.get("field") or "").strip(),
+            "value": str(item.get("value") or "").strip(),
+            "quote": str(item.get("quote") or "").strip(),
+            "source_url": str(item.get("source_url") or "").strip(),
+        }
+        for item in profile.get("evidence") or []
+        if isinstance(item, dict)
+        and str(item.get("field") or "").strip()
+        and str(item.get("value") or "").strip()
+        and _real_web_url(str(item.get("source_url") or ""))
+    ]
+    key_pages = [
+        {
+            "url": str(item.get("url") or "").strip(),
+            "title": str(item.get("title") or "").strip(),
+            "description": str(item.get("description") or "").strip(),
+        }
+        for item in profile.get("key_pages") or []
+        if isinstance(item, dict) and _real_web_url(str(item.get("url") or ""))
+    ]
+    evidence_actions = [
+        {
+            "label": str(item.get("value") or "").strip(),
+            "url": str(item.get("source_url") or "").strip(),
+            "description": str(item.get("quote") or "").strip(),
+        }
+        for item in profile.get("evidence") or []
+        if isinstance(item, dict)
+        and item.get("field") == "conversion_actions"
+        and str(item.get("value") or "").strip()
+        and _real_web_url(str(item.get("source_url") or ""))
+    ]
+    actions = _unique(
+        [
+            *[
+                str(item).strip()
+                for item in profile.get("conversion_actions") or []
+                if str(item).strip()
+            ],
+            *[item["label"] for item in evidence_actions],
+        ]
+    )
+    for item in evidence_actions:
+        if any(page["url"] == item["url"] for page in key_pages):
+            continue
+        key_pages.append(
+            {
+                "url": item["url"],
+                "title": item["label"],
+                "description": item["description"],
+            }
+        )
+    cta_targets: list[dict[str, str]] = []
+    used_urls: set[str] = set()
+    for action in sorted(actions, key=len, reverse=True):
+        evidence_match = next(
+            (
+                item
+                for item in evidence_actions
+                if item["label"] == action and item["url"] not in used_urls
+            ),
+            None,
+        )
+        if evidence_match is not None:
+            candidates = [
+                item for item in key_pages if item["url"] not in used_urls
+            ]
+            if not any(item["url"] == evidence_match["url"] for item in candidates):
+                candidates.append(
+                    {
+                    "url": evidence_match["url"],
+                    "title": evidence_match["label"],
+                    "description": evidence_match["description"],
+                    }
+                )
+            page = max(
+                candidates,
+                key=lambda item: (_cta_page_score(action, item), item["url"]),
+            )
+            used_urls.add(page["url"])
+            cta_targets.append(
+                {
+                    "label": action,
+                    "url": page["url"],
+                    "title": page["title"],
+                    "description": page["description"],
+                }
+            )
+            continue
+        ranked = sorted(
+            (
+                (_cta_page_score(action, page), page)
+                for page in key_pages
+                if page["url"] not in used_urls
+            ),
+            key=lambda item: (item[0], item[1]["url"]),
+            reverse=True,
+        )
+        if not ranked or ranked[0][0] <= 0:
+            continue
+        page = ranked[0][1]
+        used_urls.add(page["url"])
+        cta_targets.append(
+            {
+                "label": action,
+                "url": page["url"],
+                "title": page["title"],
+                "description": page["description"],
+            }
+        )
+    return {
+        "profile": profile,
+        "keyword": str(pack.get("keyword") or ""),
+        "original_intent": plan.search_intent if plan else str(pack.get("keyword") or ""),
+        "business_name": str(profile.get("business_name") or ""),
+        "business_summary": str(profile.get("business_summary") or ""),
+        "products_services": list(profile.get("products_services") or []),
+        "value_propositions": list(profile.get("value_propositions") or []),
+        "conversion_actions": actions,
+        "key_pages": key_pages,
+        "cta_targets": cta_targets,
+        "product_evidence": product_evidence,
+    }
+
+
+def _project_evidence_sources(pack: dict[str, Any]) -> list[dict[str, Any]]:
+    context = _project_answer_context(None, pack)
+    business_name = str(context.get("business_name") or "Project website").strip()
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for evidence in context.get("product_evidence") or []:
+        if not isinstance(evidence, dict) or evidence.get("field") == "conversion_actions":
+            continue
+        source_url = str(evidence.get("source_url") or "").strip()
+        claim = str(evidence.get("value") or "").strip()
+        quote = str(evidence.get("quote") or claim).strip()
+        if not source_url or not claim or not quote:
+            continue
+        grouped.setdefault(source_url, []).append(
+            {"claim": claim, "evidence": quote}
+        )
+    return [
+        {
+            "url": source_url,
+            "title": business_name,
+            "excerpt": " ".join(
+                dict.fromkeys(item["evidence"] for item in claims)
+            )[:4000],
+            "research_claim": claims[0]["claim"],
+            "verification_claims": claims[:8],
+        }
+        for source_url, claims in grouped.items()
+    ]
+
+
+def _evidence_sources(pack: dict[str, Any]) -> list[dict[str, Any]]:
+    by_url = {
+        str(item.get("url") or ""): dict(item)
+        for item in pack.get("authority_sources") or []
+        if item.get("url")
+    }
+    for source in _project_evidence_sources(pack):
+        by_url.setdefault(str(source["url"]), source)
+    return list(by_url.values())
+
+
+def _real_web_url(value: str) -> bool:
+    parsed = urlsplit(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _cta_page_score(action: str, page: dict[str, str]) -> int:
+    action_terms = _semantic_terms(action)
+    page_terms = _semantic_terms(
+        " ".join([page.get("url", ""), page.get("title", ""), page.get("description", "")])
+    )
+    score = len(action_terms.intersection(page_terms)) * 3
+    action_text = action.casefold()
+    page_text = " ".join(page.values()).casefold()
+    for term in (
+        "download",
+        "install",
+        "register",
+        "signup",
+        "sign up",
+        "trial",
+        "buy",
+        "purchase",
+        "contact",
+        "book",
+        "demo",
+        "下载",
+        "安装",
+        "注册",
+        "试用",
+        "购买",
+        "联系",
+    ):
+        if term in action_text and term in page_text:
+            score += 8
+    return score
 
 
 _SOURCE_MAPPING_STOP_WORDS = {
@@ -2654,10 +3644,20 @@ _SOURCE_MAPPING_SUFFIXES = (
 def map_authority_sources_to_section(
     plan: ArticlePlan, section: OutlineSection, pack: dict[str, Any]
 ) -> list[dict[str, Any]]:
+    direct_claim_urls = {
+        claim.source_url
+        for claim in plan.claims
+        if claim.claim_id in section.claim_ids
+    }
     sources = [
         dict(item)
-        for item in pack.get("authority_sources") or []
+        for item in _evidence_sources(pack)
         if item.get("url") and item.get("excerpt")
+        and (
+            _project_answer_is_core(pack)
+            or not _source_is_project_owned(item, pack)
+            or str(item.get("url") or "") in direct_claim_urls
+        )
     ]
     if not sources:
         return []
@@ -2666,8 +3666,7 @@ def map_authority_sources_to_section(
         [
             claim.source_url
             for claim in plan.claims
-            if claim.supported
-            and claim.claim_id in section.claim_ids
+            if claim.claim_id in section.claim_ids
             and claim.source_url in by_url
         ]
     )
@@ -2859,258 +3858,6 @@ def _source_contextual_score(
     return min(1.0, score + min(0.3, intent_score))
 
 
-SECTION_EDITING_CHECKS = [
-    "Remove AI phrases from the removal list",
-    "Replace vague words with specific data/examples",
-    "Ensure no paragraph exceeds 4 sentences",
-    "Mix short sentences (5-10 words) with longer ones (15-25 words)",
-    "Add contractions for natural voice",
-    "Use active voice (target 80%+)",
-    "Add parenthetical asides or questions for engagement",
-    "Verify brand voice consistency",
-]
-
-SECTION_SPECIFIC_EDITING_CHECKS = {
-    "intro": [
-        "Hook is compelling (not generic)",
-        "APP formula present",
-        "Primary keyword in first 100 words",
-        "Trust signal included",
-    ],
-    "body_how_to": [
-        "Steps are numbered",
-        "Each step is actionable",
-        "Specific tools/platforms named",
-        "Outcomes are clear",
-    ],
-    "body_comparison": [
-        "Comparison is fair",
-        "Specific data points present",
-        "'Best for' recommendations included",
-        "Not overly promotional",
-    ],
-    "body_explanation": [
-        "Complexity builds appropriately",
-        "Analogies/examples present",
-        "Technical terms defined",
-    ],
-    "body_list": [
-        "Items are consistently formatted",
-        "Each item has explanation",
-        "Order is logical",
-    ],
-    "faq": [
-        "Questions are authentic",
-        "Answers are 40-60 words",
-        "Direct answer first in each",
-    ],
-    "conclusion": [
-        "More than summary",
-        "Specific action items",
-        "Strong CTA present",
-        "Empowering tone",
-    ],
-}
-
-AI_PHRASES_TO_REMOVE = [
-    "In today's",
-    "When it comes to",
-    "It's important to note",
-    "It's worth noting",
-    "In the world of",
-    "At the end of the day",
-    "Moving forward",
-    "In order to",
-    "First and foremost",
-    "Last but not least",
-    "Without further ado",
-    "Needless to say",
-    "As mentioned earlier",
-    "It goes without saying",
-    "In conclusion",
-    "To summarize",
-]
-
-VAGUE_WORD_REPLACEMENTS = {
-    "many": "specific number or percentage",
-    "some": "specific count",
-    "various": "list specific examples",
-    "numerous": "specific number",
-    "significant": "specific percentage or amount",
-    "substantial": "specific quantity",
-    "a lot of": "specific number",
-    "several": "exact count",
-    "often": "specific frequency",
-    "usually": "percentage of time",
-    "sometimes": "specific scenarios",
-    "things": "specific items",
-    "stuff": "specific items",
-    "good": "specific benefit",
-    "bad": "specific drawback",
-    "nice": "specific quality",
-    "great": "specific advantage",
-}
-
-
-def _section_contract_payload(plan: ArticlePlan, section_id: str) -> dict[str, Any]:
-    if plan.contract is None:
-        return {}
-    section = next(
-        (item for item in plan.contract.sections if item.section_id == section_id), None
-    )
-    return section.model_dump(mode="json") if section is not None else {}
-
-
-def _section_writing_requirements(section: OutlineSection) -> dict[str, list[str]]:
-    requirements: dict[str, dict[str, list[str]]] = {
-        "intro": {
-            "must": [
-                "Open with a concrete reader situation or direct answer in the first two sentences",
-                "Acknowledge the problem, promise the value, and preview what follows",
-                "Use the primary keyword naturally near the opening",
-            ],
-            "do": [
-                "Establish trust only with supplied project facts or supported evidence",
-                "Make clear what the reader will learn or be able to decide",
-            ],
-            "avoid": [
-                "Dictionary definitions and generic scene-setting",
-                "Openings such as 'when it comes to', 'in today's world', or 'welcome to'",
-            ],
-            "checks": [
-                "The hook is specific and the promised value is clear",
-                "No unsupported trust signal or statistic was added",
-            ],
-        },
-        "body_how_to": {
-            "must": [
-                "Present sequential work as numbered steps",
-                "Make every step actionable and state the expected outcome",
-                "Include prerequisites, substeps, and common mistakes when relevant",
-            ],
-            "do": [
-                "Start steps with action verbs",
-                "Name tools or platforms only when supplied by the evidence or project data",
-            ],
-            "avoid": [
-                "Vague instructions or skipped dependencies",
-                "Invented time estimates, tool behavior, or success claims",
-            ],
-            "checks": [
-                "Steps are in a usable order and can be followed without guessing",
-                "Outcomes are explicit",
-            ],
-        },
-        "body_comparison": {
-            "must": [
-                "State the decision criteria before comparing options",
-                "Give a fair, balanced comparison and clear best-for recommendations",
-                "Use a compact table when comparing three or more options and evidence supports it",
-            ],
-            "do": [
-                "Acknowledge meaningful strengths and drawbacks",
-                "Use prices, features, and measurements only from supported claims",
-            ],
-            "avoid": [
-                "Unsupported superiority claims or promotional dismissal of alternatives",
-                "Specific comparison data that is not in the supplied evidence",
-            ],
-            "checks": [
-                "The reader can make a decision from the stated criteria",
-                "Every concrete comparison claim is supported",
-            ],
-        },
-        "body_explanation": {
-            "must": [
-                "Start with a plain-language answer and build from simple to advanced",
-                "Define necessary technical terms",
-                "Use concrete examples only when they can be grounded in supplied information",
-            ],
-            "do": [
-                "Connect the explanation to the reader's practical decision",
-                "Use an analogy only when it clarifies rather than replaces the explanation",
-            ],
-            "avoid": [
-                "Unexplained jargon and abstract filler",
-                "Fabricated people, case studies, outcomes, or examples presented as real",
-            ],
-            "checks": [
-                "A beginner can understand the answer without losing necessary detail",
-                "Examples do not introduce unsupported facts",
-            ],
-        },
-        "body_list": {
-            "must": [
-                "Use a numbered or bulleted list with a consistent item structure",
-                "Explain each item instead of naming it only",
-                "Order items by importance, sequence, or another stated criterion",
-            ],
-            "do": [
-                "Keep items scannable and use parallel phrasing",
-                "Explain why each item matters to the reader",
-            ],
-            "avoid": [
-                "An unexplained list or inconsistent item depth",
-                "Arbitrary rankings that are not supported by supplied evidence",
-            ],
-            "checks": [
-                "Every item has useful explanation and the ordering makes sense",
-                "The list does not repeat the same point in different words",
-            ],
-        },
-        "faq": {
-            "must": [
-                "Use the supplied real user questions and format them as clear question-answer pairs",
-                "Answer four to six questions when at least four supplied questions are available; otherwise answer every supplied question",
-                "Give the direct answer first, followed by only necessary context",
-                "Keep each answer about 40-60 words when the language permits for featured-snippet extraction",
-            ],
-            "do": [
-                "Prefer questions not already fully answered by another section",
-                "Use supported evidence for concrete facts in answers",
-            ],
-            "avoid": [
-                "Manufactured questions when supplied user questions are available",
-                "Essay-length answers or unsupported yes/no claims",
-            ],
-            "checks": [
-                "Each question is answered immediately and without repetition",
-                "Concrete answers remain evidence-grounded",
-            ],
-        },
-        "conclusion": {
-            "must": [
-                "Turn the main findings into three to five concrete next steps",
-                "Add no new factual claims",
-                "Include a CTA only when conversion_actions are supplied",
-            ],
-            "do": [
-                "Help the reader choose or act based on the article",
-                "Use the primary keyword naturally when it fits",
-            ],
-            "avoid": [
-                "A paragraph that merely repeats the introduction",
-                "A forced CTA, new evidence, or generic encouragement",
-            ],
-            "checks": [
-                "The reader knows what to do next",
-                "Any CTA matches one of the supplied conversion actions",
-            ],
-        },
-    }
-    selected = requirements[section.section_type]
-    return {key: list(values) for key, values in selected.items()}
-
-
-def _section_requirements(
-    sections: list[OutlineSection],
-) -> dict[str, dict[str, list[str]]]:
-    return {
-        section.section_id: _section_writing_requirements(section)
-        for section in sections
-    }
-
-
 def fallback_section(
     section: OutlineSection,
     language: str,
@@ -3119,76 +3866,91 @@ def fallback_section(
 ) -> SectionDraft:
     pack = pack or {}
     keyword = str(pack.get("keyword") or (plan.title if plan else section.heading))
+    answer_context = _project_answer_context(plan, pack)
     coverage = _unique(
         [section.objective, *section.coverage_points, *section.competitor_gaps]
     )[:5]
-    questions = _unique(section.required_questions)[:4]
     claims = [
         claim
         for claim in (plan.claims if plan else [])
-        if claim.claim_id in section.claim_ids and claim.supported
+        if claim.claim_id in section.claim_ids
     ][:3]
+    sources = (
+        map_authority_sources_to_section(plan, section, pack)[:3]
+        if plan
+        else list(pack.get("authority_sources") or [])[:3]
+    )
+    business_name = str(answer_context.get("business_name") or "").strip()
+    business_summary = str(answer_context.get("business_summary") or "").strip()
+    products = [str(item) for item in answer_context.get("products_services") or []]
+    values = [str(item) for item in answer_context.get("value_propositions") or []]
+    cta_targets = list(answer_context.get("cta_targets") or [])
     if language.lower().startswith("zh"):
         paragraphs = [
             f"## {section.heading}",
-            f"围绕“{keyword}”，这一部分先解决读者最需要判断的问题：{section.objective.rstrip('。')}。"
-            "应先区分已经由资料支持的结论、项目自身信息和仍需谨慎表达的判断，避免把推测写成事实。",
+            f"{section.objective.rstrip('。')}。"
+            + (f"{business_name}：{business_summary}" if business_summary else ""),
         ]
+        if products or values:
+            details = [*products[:3], *values[:3]]
+            paragraphs.append("可以直接参考：\n" + "\n".join(f"- {item}" for item in details))
         if coverage:
             paragraphs.append(
-                "实际处理时可以按以下顺序核对：\n"
+                f"处理“{keyword}”时，重点看这些内容：\n"
                 + "\n".join(f"- {item.rstrip('。')}" for item in coverage)
-            )
-        if questions:
-            paragraphs.append(
-                "读者关心的问题应直接回答：\n"
-                + "\n".join(
-                    f"- **{question}** 当前资料不足以支持具体数字时，应给出判断方法和适用条件，而不是编造结论。"
-                    for question in questions
-                )
             )
         if claims:
             paragraphs.append(
-                "当前可引用的事实依据包括：\n"
+                "相关资料：\n"
                 + "\n".join(
                     f"- [{claim.claim}]({claim.source_url})" for claim in claims
                 )
             )
-        paragraphs.append(
-            "执行时先核对自身条件，再按上述要点逐项判断；没有可靠来源的价格、比例、日期或效果承诺不应写入结论。"
-        )
+        elif sources:
+            paragraphs.append(
+                "相关资料：\n"
+                + "\n".join(
+                    f"- [{str(item.get('title') or item.get('url'))}]({item.get('url')})："
+                    f"{str(item.get('excerpt') or '')[:350]}"
+                    for item in sources
+                )
+            )
+        if cta_targets:
+            target = cta_targets[0]
+            paragraphs.append(f"[{target['label']}]({target['url']})")
     else:
         paragraphs = [
             f"## {section.heading}",
-            f"For {keyword}, this section focuses on the reader's practical decision: "
-            f"{section.objective.rstrip('.')}. Separate supported evidence, project information, "
-            "and judgment calls so assumptions are not presented as facts.",
+            f"{section.objective.rstrip('.')}. "
+            + (f"{business_name}: {business_summary}" if business_summary else ""),
         ]
+        if products or values:
+            details = [*products[:3], *values[:3]]
+            paragraphs.append("What is available:\n" + "\n".join(f"- {item}" for item in details))
         if coverage:
             paragraphs.append(
-                "Use this sequence to evaluate the topic:\n"
+                f"For {keyword}, focus on:\n"
                 + "\n".join(f"- {item.rstrip('.')}" for item in coverage)
-            )
-        if questions:
-            paragraphs.append(
-                "Address the reader's questions directly:\n"
-                + "\n".join(
-                    f"- **{question}** When the supplied evidence does not support a specific "
-                    "figure, explain the decision method and conditions instead of inventing one."
-                    for question in questions
-                )
             )
         if claims:
             paragraphs.append(
-                "The available factual support includes:\n"
+                "Related sources:\n"
                 + "\n".join(
                     f"- [{claim.claim}]({claim.source_url})" for claim in claims
                 )
             )
-        paragraphs.append(
-            "Check the reader's situation first, work through the relevant factors, and leave out "
-            "prices, percentages, dates, or performance promises that the supplied sources do not verify."
-        )
+        elif sources:
+            paragraphs.append(
+                "Related sources:\n"
+                + "\n".join(
+                    f"- [{str(item.get('title') or item.get('url'))}]({item.get('url')}): "
+                    f"{str(item.get('excerpt') or '')[:350]}"
+                    for item in sources
+                )
+            )
+        if cta_targets:
+            target = cta_targets[0]
+            paragraphs.append(f"[{target['label']}]({target['url']})")
     return SectionDraft(
         section_id=section.section_id,
         markdown="\n\n".join(paragraphs),
@@ -3239,12 +4001,45 @@ def normalize_unified(
             slug=plan.slug,
             sections=fallback,
         )
+    aligned_sections = [by_id[item.section_id] for item in plan.sections]
     return unified.model_copy(
         update={
             "title": locked_title or unified.title,
             "slug": normalize_slug(unified.slug, plan.slug),
-            "sections": [by_id[item.section_id] for item in plan.sections],
+            "sections": aligned_sections,
         }
+    )
+
+
+def _align_unified_section_heading(
+    section: SectionDraft,
+    expected: OutlineSection,
+    article_title: str,
+) -> SectionDraft:
+    lines = section.markdown.strip().splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if lines:
+        first_heading = re.fullmatch(r"#{1,2}\s+(.+?)\s*", lines[0].strip())
+        if (
+            first_heading
+            and _normalize_requirement(first_heading.group(1))
+            == _normalize_requirement(article_title)
+            and _normalize_requirement(article_title)
+            != _normalize_requirement(expected.heading)
+        ):
+            lines.pop(0)
+            while lines and not lines[0].strip():
+                lines.pop(0)
+    markdown = "\n".join(lines).strip()
+    if re.search(r"(?m)^##\s+", markdown):
+        markdown = re.sub(
+            r"(?m)^##\s+.*$", f"## {expected.heading}", markdown, count=1
+        )
+    else:
+        markdown = f"## {expected.heading}\n\n{markdown}"
+    return section.model_copy(
+        update={"section_id": expected.section_id, "markdown": markdown}
     )
 
 
@@ -3255,21 +4050,8 @@ def _has_section_prose(markdown: str) -> bool:
     )
 
 
-NON_REPAIRABLE_EVIDENCE_CODES = {
-    "missing_authority_evidence",
-    "authority_evidence_missing",
-    "missing_product_evidence",
-    "product_evidence_missing",
-    "missing_price_evidence",
-    "price_evidence_missing",
-    "missing_professional_source",
-    "professional_source_missing",
-    "no_internal_source",
-    "internal_source_missing",
-    "required_claim_unsupported",
-    "research_gap",
-}
 FORMAT_ISSUE_CODES = {
+    "malformed_link",
     "invalid_heading_hierarchy",
     "how_to_steps_missing",
     "list_structure_missing",
@@ -3280,42 +4062,11 @@ STRUCTURE_ISSUE_CODES = {
     "section_missing",
     "duplicate_section",
     "section_too_short",
-    "competitor_copy",
-}
-EVIDENCE_ISSUE_CODES = {
-    "unsupported_number",
-    "unsupported_strong_claim",
-    "source_not_assigned_to_section",
-    "invalid_link",
 }
 
 
 def _classify_quality_issue(issue: SectionIssue) -> SectionIssue:
     code = issue.code.casefold()
-    message = issue.message.casefold()
-    missing_evidence = (
-        code in NON_REPAIRABLE_EVIDENCE_CODES
-        or (
-            any(term in code for term in ("missing", "unavailable", "not_found", "gap"))
-            and any(
-                term in f"{code} {message}"
-                for term in (
-                    "evidence",
-                    "source",
-                    "research",
-                    "product",
-                    "price",
-                    "internal",
-                    "authority",
-                    "citation",
-                )
-            )
-        )
-    )
-    if missing_evidence:
-        return issue.model_copy(update={"category": "evidence", "repairable": False})
-    if code in EVIDENCE_ISSUE_CODES:
-        return issue.model_copy(update={"category": "evidence", "repairable": True})
     if code in FORMAT_ISSUE_CODES:
         return issue.model_copy(update={"category": "format", "repairable": True})
     if code in STRUCTURE_ISSUE_CODES:
@@ -3355,88 +4106,215 @@ def article_artifact(
     }
 
 
+def _ensure_project_cta(
+    plan: ArticlePlan,
+    sections: list[SectionDraft],
+    pack: dict[str, Any],
+) -> tuple[ArticlePlan, list[SectionDraft]]:
+    project_context = _project_answer_context(plan, pack)
+    assignment = _select_cta_assignment(plan.sections, pack)
+    if assignment is None:
+        return plan, sections
+    cta_section_id, target_url = assignment
+    target = next(
+        (
+            item
+            for item in project_context["cta_targets"]
+            if str(item.get("url") or "") == target_url
+        ),
+        None,
+    )
+    if target is None or not plan.sections or not sections:
+        return plan, sections
+
+    target_label = str(target.get("label") or target.get("title") or target_url)
+    cta_plan = next(
+        item for item in plan.sections if item.section_id == cta_section_id
+    )
+    updated_plan_sections = [
+        item.model_copy(
+            update={
+                "internal_urls": _unique(
+                    [*item.internal_urls, *([target_url] if item.section_id == cta_plan.section_id else [])]
+                )[:10]
+            }
+        )
+        for item in plan.sections
+    ]
+    updated_sections = []
+    for section in sections:
+        if section.section_id != cta_plan.section_id or target_url in section.markdown:
+            updated_sections.append(section)
+            continue
+        updated_sections.append(
+            section.model_copy(
+                update={
+                    "markdown": f"{section.markdown.rstrip()}\n\n[{target_label}]({target_url})",
+                    "used_internal_urls": _unique(
+                        [*section.used_internal_urls, target_url]
+                    )[:20],
+                }
+            )
+        )
+    return plan.model_copy(update={"sections": updated_plan_sections}), updated_sections
+
+
+_STRONG_MARKER_PATTERN = re.compile(r"(?<![\\*])\*\*(?!\*)")
+
+
+def _remove_unmatched_strong_markers(markdown: str) -> tuple[str, int]:
+    parts = re.split(r"(\n\s*\n)", markdown)
+    removed = 0
+    for index in range(0, len(parts), 2):
+        paragraph = parts[index]
+        matches = list(_STRONG_MARKER_PATTERN.finditer(paragraph))
+        if len(matches) % 2 == 0:
+            continue
+        unmatched = matches[-1]
+        parts[index] = (
+            paragraph[: unmatched.start()] + paragraph[unmatched.end() :]
+        )
+        removed += 1
+    return "".join(parts), removed
+
+
+def _repair_generated_markdown(markdown: str) -> tuple[str, int, int]:
+    repaired = 0
+    fragments_removed = 0
+    normalized = markdown
+    mojibake_replacements = {
+        "\u00e2\u0080\u0098": "'",
+        "\u00e2\u0080\u0099": "'",
+        "\u00e2\u0080\u009c": '"',
+        "\u00e2\u0080\u009d": '"',
+        "\u00e2\u0080\u0093": "-",
+        "\u00e2\u0080\u0094": "-",
+        "\u00e2\u0086\u0092": "->",
+        "\u00c2\u00a0": " ",
+    }
+    for damaged, replacement in mojibake_replacements.items():
+        count = normalized.count(damaged)
+        if count:
+            normalized = normalized.replace(damaged, replacement)
+            repaired += count
+    normalized, bold_repairs = re.subn(
+        r"\*\*([^\n*]*?\S)\s+\*\*", r"**\1**", normalized
+    )
+    repaired += bold_repairs
+    adjacent_repairs = 0
+
+    def space_strong(match: re.Match[str]) -> str:
+        nonlocal adjacent_repairs
+        prefix = match.group("prefix") or ""
+        suffix = match.group("suffix") or ""
+        adjacent_repairs += bool(prefix) + bool(suffix)
+        return f"{prefix}{' ' if prefix else ''}{match.group('strong')}{' ' if suffix else ''}{suffix}"
+
+    normalized = re.sub(
+        r"(?P<prefix>[A-Za-z0-9'])?(?P<strong>\*\*[^*\n]+\*\*)(?P<suffix>[A-Za-z0-9])?",
+        space_strong,
+        normalized,
+    )
+    repaired += adjacent_repairs
+
+    lines = normalized.splitlines()
+    index = 0
+    while index < len(lines):
+        if not _markdown_table_line(lines[index]):
+            index += 1
+            continue
+        end = index
+        while end < len(lines) and _markdown_table_line(lines[end]):
+            end += 1
+        block = lines[index:end]
+        expected_columns = len(_markdown_table_cells(block[0]))
+        if expected_columns >= 2:
+            for row_index, line in enumerate(block):
+                cells = _markdown_table_cells(line)
+                if len(cells) == expected_columns:
+                    continue
+                cells = (cells + [""] * expected_columns)[:expected_columns]
+                lines[index + row_index] = "| " + " | ".join(cells) + " |"
+                repaired += 1
+        index = end
+    normalized = "\n".join(lines)
+    normalized, fragments_removed = re.subn(
+        r"(?i)\bFor example,\s*[a-z]\.\s*(?=(?:See|Read|Visit)\b)",
+        "",
+        normalized,
+    )
+    return normalized, repaired, fragments_removed
+
+
+def _markdown_table_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 3
+
+
+def _markdown_table_cells(line: str) -> list[str]:
+    return [item.strip() for item in line.strip().strip("|").split("|")]
+
+
 def finalize_article_artifact(
     artifact: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     finalized = deepcopy(artifact)
-    globally_allowed_source_urls = {
-        str(url) for url in finalized.get("source_urls") or [] if url
-    }
-    globally_allowed_internal_urls = {
-        str(url) for url in finalized.get("internal_urls") or [] if url
-    }
-    globally_allowed_urls = {
+    known_urls = {
         str(url)
         for key in ("source_urls", "internal_urls")
         for url in finalized.get(key) or []
         if url
     }
-    plan = ArticlePlan.model_validate(finalized.get("plan") or {})
-    claim_urls_by_section: dict[str, set[str]] = {}
-    for claim in plan.claims:
-        if claim.supported and claim.section_id and claim.source_url in globally_allowed_urls:
-            claim_urls_by_section.setdefault(claim.section_id, set()).add(claim.source_url)
-    internal_urls_by_section = {
-        section.section_id: set(section.internal_urls).intersection(globally_allowed_urls)
-        for section in plan.sections
-    }
     malformed_count = 0
-    removed_internal_count = 0
-    seen_internal_urls: set[str] = set()
+    markdown_repair_count = 0
+    broken_fragment_count = 0
+    unmatched_marker_count = 0
     sections: list[dict[str, Any]] = []
+    all_urls: set[str] = set()
+    internal_urls = {str(url) for url in finalized.get("internal_urls") or [] if url}
     for raw_section in finalized.get("sections") or []:
         section = dict(raw_section)
-        section_id = str(section.get("section_id") or "")
-        section_urls = claim_urls_by_section.get(section_id, set()).union(
-            internal_urls_by_section.get(section_id, set())
-        )
-        section["markdown"], removed = sanitize_markdown_links(
-            str(section.get("markdown") or ""), section_urls
-        )
+        markdown = str(section.get("markdown") or "")
+        markdown, repaired, fragments_removed = _repair_generated_markdown(markdown)
+        markdown_repair_count += repaired
+        broken_fragment_count += fragments_removed
+        markdown, markers_removed = _remove_unmatched_strong_markers(markdown)
+        unmatched_marker_count += markers_removed
+        markdown, removed = sanitize_markdown_links(markdown, known_urls)
         malformed_count += removed
-        raw_urls = _MARKDOWN_LINK_PATTERN.findall(section["markdown"])
-        removed_internal_count += sum(
-            1
-            for url in raw_urls
-            if url in globally_allowed_internal_urls
-            and url not in internal_urls_by_section.get(section_id, set())
-        )
-        section["markdown"] = sanitize_allowed_links(section["markdown"], section_urls)
-        section["markdown"], used_internal_urls, removed_internal = sanitize_internal_links(
-            section["markdown"],
-            internal_urls_by_section.get(section_id, set()),
-            seen_internal_urls,
-            remaining=max(0, 5 - len(seen_internal_urls)),
-        )
-        removed_internal_count += removed_internal
-        used_claim_ids = set(section.get("used_claim_ids") or [])
-        used_claims = [
-            claim
-            for claim in plan.claims
-            if claim.claim_id in used_claim_ids
-            and claim.section_id == section_id
-            and claim.source_url in section_urls
-        ]
-        section["markdown"], _ = restore_link_only_claims(
-            section["markdown"], used_claims
-        )
-        markdown_urls = set(_MARKDOWN_LINK_PATTERN.findall(section["markdown"]))
-        section["used_source_urls"] = sorted(
-            markdown_urls.intersection(globally_allowed_source_urls)
-        )
-        section["used_internal_urls"] = sorted(used_internal_urls)
+        markdown_urls = set(_MARKDOWN_LINK_PATTERN.findall(markdown))
+        all_urls.update(markdown_urls)
+        section["markdown"] = markdown
+        section["used_source_urls"] = sorted(markdown_urls.difference(internal_urls))
+        section["used_internal_urls"] = sorted(markdown_urls.intersection(internal_urls))
         sections.append(section)
     finalized["sections"] = sections
     if sections:
-        finalized["markdown"] = article_markdown(
-            str(finalized.get("title") or ""),
-            [SectionDraft.model_validate(section) for section in sections],
+        finalized["markdown"] = (
+            "\n\n".join(
+                str(section.get("markdown") or "").strip()
+                for section in sections
+                if str(section.get("markdown") or "").strip()
+            )
+            + "\n"
         )
     else:
-        finalized["markdown"], removed = sanitize_markdown_links(
-            str(finalized.get("markdown") or ""), set()
+        markdown, repaired, fragments_removed = _repair_generated_markdown(
+            str(finalized.get("markdown") or "")
         )
-        malformed_count += removed
+        markdown_repair_count += repaired
+        broken_fragment_count += fragments_removed
+        markdown, markers_removed = _remove_unmatched_strong_markers(markdown)
+        unmatched_marker_count += markers_removed
+        finalized["markdown"], malformed_count = sanitize_markdown_links(markdown, known_urls)
+        all_urls.update(_MARKDOWN_LINK_PATTERN.findall(finalized["markdown"]))
+    finalized["source_urls"] = sorted(
+        set(finalized.get("source_urls") or []).union(all_urls.difference(internal_urls))
+    )
+    if isinstance(finalized.get("document"), dict):
+        document = normalize_document(finalized["document"])
+        finalized["document"] = document
+        finalized["markdown"] = document_to_markdown(document)
     warnings = []
     if malformed_count:
         warnings.append(
@@ -3445,11 +4323,19 @@ def finalize_article_artifact(
                 "最终正文中的残缺链接已移除，并保留了可见文字",
             )
         )
-    if removed_internal_count:
+    if markdown_repair_count:
+        warnings.append(
+            _warning("generated_markdown_repaired", "Common generated Markdown damage was repaired.")
+        )
+    if broken_fragment_count:
+        warnings.append(
+            _warning("broken_sentence_fragments_removed", "Broken sentence fragments were removed.")
+        )
+    if unmatched_marker_count:
         warnings.append(
             _warning(
-                "invalid_internal_links_removed",
-                "未按章节分配、重复或超量的内链已移除，并保留了锚文本",
+                "unmatched_markdown_markers_removed",
+                "最终正文中未配对的 Markdown 粗体标记已移除",
             )
         )
     return finalized, warnings
@@ -3482,7 +4368,7 @@ async def recover_generation_stage(
         f"{stage_kind}_degraded",
         {
             "planning": "大纲增强暂不可用，已使用基础结构继续",
-            "writing": "部分章节已按可验证资料生成降级稿",
+            "writing": "部分章节已生成备用稿",
             "editing": "全文编辑暂不可用，已保留合并后的完整稿",
             "checking": "检查服务暂不可用，已保留完整稿并记录未完成检查",
             "revising": "局部修订暂不可用，已保留修订前完整稿",
@@ -3507,12 +4393,6 @@ async def recover_generation_stage(
                 "competitor_blueprint": {},
                 "authority_sources": [],
                 "internal_sources": [],
-                "evidence_capabilities": _build_evidence_capabilities(
-                    competitor_blueprint={},
-                    competitors=[],
-                    authority_sources=[],
-                    internal_sources=[],
-                ),
             }
         plan = fallback_plan(pack)
         pack["search_intent"] = plan.search_intent
@@ -3645,13 +4525,25 @@ async def recover_generation_stage(
                 (item["section_id"], item["code"]): item for item in issues
             }.values()
         )
-        repairable_issues = [item for item in unique_issues if item.get("repairable")]
+        repairable_issues = [
+            item for item in unique_issues if item.get("code") == "fallback_section"
+        ]
+        repair_scope = sorted(
+            {
+                str(item["section_id"])
+                for item in repairable_issues
+                if item.get("section_id")
+            }
+        )
+        blocking_issue_codes = sorted(
+            {str(item["code"]) for item in repairable_issues if item.get("code")}
+        )
         artifact["quality"] = {
             **report.to_dict(),
             "passed": False,
             "check_status": "unavailable",
-            "repairable": False,
-            "repair_scope": [],
+            "repairable": bool(repairable_issues),
+            "repair_scope": repair_scope,
             "issues": unique_issues,
             "issue_fingerprint": sorted(
                 f"{item['category']}:{item['section_id']}:{item['code']}"
@@ -3662,6 +4554,7 @@ async def recover_generation_stage(
                 for item in repairable_issues
             ),
             "repairable_issue_count": len(repairable_issues),
+            "blocking_issue_codes": blocking_issue_codes,
             "evidence_issue_count": sum(
                 1
                 for item in unique_issues
@@ -3672,9 +4565,10 @@ async def recover_generation_stage(
             "issue_count": len(artifact["quality"]["issues"]),
             "passed": False,
             "check_status": "unavailable",
-            "repairable": False,
+            "repairable": artifact["quality"]["repairable"],
             "repair_scope": artifact["quality"]["repair_scope"],
             "repairable_issue_count": artifact["quality"]["repairable_issue_count"],
+            "blocking_issue_codes": artifact["quality"]["blocking_issue_codes"],
             "evidence_issue_count": artifact["quality"]["evidence_issue_count"],
         }
         content_score = artifact.get("content_score")
@@ -3697,8 +4591,7 @@ async def recover_generation_stage(
 def allowed_urls(pack: dict[str, Any]) -> tuple[set[str], set[str]]:
     source_urls = {
         str(item["url"])
-        for group in ("authority_sources", "competitors")
-        for item in pack.get(group, [])
+        for item in [*_evidence_sources(pack), *list(pack.get("competitors") or [])]
         if item.get("url")
     }
     internal_urls = {
@@ -3707,6 +4600,13 @@ def allowed_urls(pack: dict[str, Any]) -> tuple[set[str], set[str]]:
         if item.get("url")
         and project_domain_matches(str(item["url"]), str((pack.get("project") or {}).get("domain") or ""))
     }
+    project_domain = str((pack.get("project") or {}).get("domain") or "")
+    internal_urls.update(
+        str(item["url"])
+        for item in _project_answer_context(None, pack)["cta_targets"]
+        if item.get("url")
+        and project_domain_matches(str(item["url"]), project_domain)
+    )
     return source_urls, internal_urls
 
 

@@ -13,6 +13,7 @@ from app.modules.keywords import models as keyword_models  # noqa: F401
 from app.modules.projects import models as project_models  # noqa: F401
 from app.modules.settings import models as settings_models  # noqa: F401
 from app.modules.agent import models as agent_models  # noqa: F401
+from app.modules.performance import models as performance_models  # noqa: F401
 
 config = context.config
 database_url = get_settings().database_url.replace(

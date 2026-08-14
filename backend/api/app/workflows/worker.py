@@ -107,6 +107,9 @@ class LocalCrawlerWorkerLauncher:
                 ),
                 "SITE_UNDERSTANDING_MAX_RETRIES": str(self.settings.site_understanding_max_retries),
                 "BUSINESS_PROFILE_AI_MODEL": self.settings.business_profile_ai_model,
+                "BUSINESS_PROFILE_AI_API_PROTOCOL": (
+                    self.settings.business_profile_ai_api_protocol
+                ),
                 "BUSINESS_PROFILE_AI_TIMEOUT": self.settings.business_profile_ai_timeout,
                 "BUSINESS_PROFILE_AI_MAX_RETRIES": str(
                     self.settings.business_profile_ai_max_retries
@@ -124,6 +127,9 @@ class LocalCrawlerWorkerLauncher:
             "S3_SECRET_ACCESS_KEY": self.settings.s3_secret_access_key,
             "GOOGLE_PAGESPEED_API_KEY": self.settings.google_pagespeed_api_key,
             "BUSINESS_PROFILE_AI_BASE_URL": self.settings.business_profile_ai_base_url,
+            "BUSINESS_PROFILE_AI_API_PROTOCOL": (
+                self.settings.business_profile_ai_api_protocol
+            ),
             "BUSINESS_PROFILE_AI_API_KEY": self.settings.business_profile_ai_api_key,
             "AI_SETTINGS_ENCRYPTION_KEY": self.settings.ai_settings_encryption_key,
         }

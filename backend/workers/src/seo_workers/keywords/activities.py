@@ -69,19 +69,10 @@ from seo_workers.keywords.repository import (
 )
 
 SEED_CANDIDATE_LIMIT = 500
-MIN_INITIAL_LIBRARY_KEYWORDS = 50
-LABS_SITE_LIMIT = 500
-FALLBACK_KEYWORD_IDEAS_LIMIT = 500
-FALLBACK_QUERY_SEED_LIMIT = 20
 KEYWORD_IDEAS_BROAD_LIMIT = 400
 KEYWORD_IDEAS_CLOSE_LIMIT = 300
 LEGACY_EXPANSION_SEED_LIMIT = 20
-DISCOVERY_SOURCES = (
-    "labs_site",
-    "google_ads_site",
-    DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE,
-    DataForSEOClient.KEYWORD_IDEAS_CLOSE_SOURCE,
-)
+DISCOVERY_SOURCES = ("google_ads_site",)
 KEYWORD_IDEAS_SOURCES = (
     "keyword_ideas",
     DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE,
@@ -99,9 +90,9 @@ COMPLETE_METRIC_SOURCES = frozenset(
     }
 )
 GAP_LIMIT = 200
-AI_CLASSIFICATION_BATCH = 100
+AI_CLASSIFICATION_BATCH = 50
 AI_CLASSIFICATION_CONCURRENCY = 3
-SEED_TOPIC_PROMPT_VERSION = "initial-library-general-filter-v20-single-request"
+SEED_TOPIC_PROMPT_VERSION = "initial-library-query-integrity-v26"
 SEED_TOPIC_SELECTION_PROMPT_VERSION = "topic-duplicate-confirmation-v14-all-pairs"
 COMPETITOR_PROBE_BATCH_SIZE = 5
 
@@ -262,25 +253,6 @@ class KeywordActivities:
             "正在发现相关关键词",
             8,
         )
-        labs_rows = await self.repository.request_ideas(context.run_id, "labs_site")
-        try:
-            if not labs_rows:
-                labs_rows = await self._labs_site_request(context)
-        except ApplicationError as exc:
-            labs_rows = []
-            await self.repository.record_partial_failure(
-                context.run_id,
-                source="labs_site",
-                code=application_error_code(exc),
-                message=str(exc),
-            )
-        if labs_rows:
-            return {
-                "source": "labs_site",
-                "count": len(labs_rows),
-                "fallback": False,
-            }
-
         ads_rows = await self.repository.request_ideas(
             context.run_id,
             "google_ads_site",
@@ -291,12 +263,10 @@ class KeywordActivities:
             return {
                 "source": "none",
                 "count": 0,
-                "fallback": True,
             }
         return {
             "source": "google_ads_site",
             "count": len(ads_rows),
-            "fallback": True,
         }
 
     @activity.defn(name="keyword_acquire_business_profile")
@@ -378,76 +348,6 @@ class KeywordActivities:
                 limit=SEED_CANDIDATE_LIMIT,
                 domain=context.domain,
             )
-        google_ads_supplemented = False
-        current_sources = {idea.source for idea in ideas}
-        if not candidates and "google_ads_site" not in current_sources:
-            try:
-                ads_rows = await self._google_ads_site_request(context)
-            except ApplicationError as exc:
-                ads_rows = []
-                await self.repository.record_partial_failure(
-                    context.run_id,
-                    source="seed_discovery_supplement",
-                    code=application_error_code(exc),
-                    message=str(exc),
-                )
-            current_sources.add("google_ads_site")
-            if ads_rows:
-                google_ads_supplemented = True
-                ideas = await self.repository.load_ideas(
-                    context.run_id,
-                    list(DISCOVERY_SOURCES),
-                )
-                candidates, excluded = prepare_seed_candidates(
-                    ideas,
-                    context.profile,
-                    context.language,
-                    limit=SEED_CANDIDATE_LIMIT,
-                    domain=context.domain,
-                )
-        fallback_keyword_ideas_used = False
-        should_supplement_keyword_ideas = (
-            not candidates and DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE not in current_sources
-        )
-        if should_supplement_keyword_ideas:
-            query_seeds = fallback_query_seeds(
-                context.profile,
-                context.domain,
-                limit=FALLBACK_QUERY_SEED_LIMIT,
-            )
-            if query_seeds:
-                source = DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE
-                try:
-                    fallback_rows, _ = await self._keyword_ideas_request(
-                        context,
-                        keywords=query_seeds,
-                        closely_variants=False,
-                        limit=FALLBACK_KEYWORD_IDEAS_LIMIT,
-                        request_scope="discovery-fallback",
-                    )
-                except ApplicationError as exc:
-                    fallback_rows = []
-                    await self.repository.record_partial_failure(
-                        context.run_id,
-                        source=f"keyword_discovery_fallback:{source}",
-                        code=application_error_code(exc),
-                        message=str(exc),
-                    )
-                current_sources.add(source)
-                if fallback_rows:
-                    fallback_keyword_ideas_used = True
-                if fallback_keyword_ideas_used:
-                    ideas = await self.repository.load_ideas(
-                        context.run_id,
-                        list(DISCOVERY_SOURCES),
-                    )
-                    candidates, excluded = prepare_seed_candidates(
-                        ideas,
-                        context.profile,
-                        context.language,
-                        limit=SEED_CANDIDATE_LIMIT,
-                        domain=context.domain,
-                    )
         if not candidates:
             raise ApplicationError(
                 "所有网站关键词来源完成后仍没有可用候选词",
@@ -465,134 +365,36 @@ class KeywordActivities:
         try:
             client = OpenAICompatibleClient(http, config)
             request_scope = "primary"
-            all_topic_reused = True
-            all_selection_reused = True
-            decisions = []
-            reviewed_decisions = {}
-            while True:
-                (
-                    topics,
-                    assessments,
-                    resolution,
-                    deterministic_pairs,
-                    review_pairs,
-                    topic_reused,
-                    selection_reused,
-                ) = await self._review_seed_candidates(
-                    context,
+            (
+                topics,
+                assessments,
+                resolution,
+                deterministic_pairs,
+                review_pairs,
+                topic_reused,
+                selection_reused,
+            ) = await self._review_seed_candidates(
+                context,
+                candidates,
+                client,
+                request_scope=request_scope,
+            )
+            decisions = (
+                build_topic_seed_decisions(
                     candidates,
-                    client,
-                    request_scope=request_scope,
+                    topics,
+                    resolution,
+                    assessments,
                 )
-                all_topic_reused = all_topic_reused and topic_reused
-                all_selection_reused = all_selection_reused and selection_reused
-                decisions = (
-                    build_topic_seed_decisions(
-                        candidates,
-                        topics,
-                        resolution,
-                        assessments,
-                    )
-                    if resolution is not None
-                    else []
-                )
-                reviewed_decisions.update(
-                    {decision.candidate.normalized_keyword: decision for decision in decisions}
-                )
-                usable_seed_count = sum(decision.selected for decision in decisions)
-                if usable_seed_count >= MIN_INITIAL_LIBRARY_KEYWORDS:
-                    break
-
-                supplemental_rows: list[RawKeyword] = []
-                supplemental_scope = ""
-                while not supplemental_rows:
-                    if "google_ads_site" not in current_sources:
-                        current_sources.add("google_ads_site")
-                        supplemental_scope = "after-google-ads"
-                        try:
-                            supplemental_rows = await self._google_ads_site_request(context)
-                        except ApplicationError as exc:
-                            await self.repository.record_partial_failure(
-                                context.run_id,
-                                source="seed_count_supplement:google_ads_site",
-                                code=application_error_code(exc),
-                                message=str(exc),
-                            )
-                        if supplemental_rows:
-                            google_ads_supplemented = True
-                        continue
-
-                    ideas_source = DataForSEOClient.KEYWORD_IDEAS_BROAD_SOURCE
-                    if ideas_source not in current_sources:
-                        current_sources.add(ideas_source)
-                        supplemental_scope = "after-keyword-ideas"
-                        query_seeds = fallback_query_seeds(
-                            context.profile,
-                            context.domain,
-                            limit=FALLBACK_QUERY_SEED_LIMIT,
-                        )
-                        if query_seeds:
-                            try:
-                                supplemental_rows, _ = await self._keyword_ideas_request(
-                                    context,
-                                    keywords=query_seeds,
-                                    closely_variants=False,
-                                    limit=FALLBACK_KEYWORD_IDEAS_LIMIT,
-                                    request_scope="low-final-count",
-                                )
-                            except ApplicationError as exc:
-                                await self.repository.record_partial_failure(
-                                    context.run_id,
-                                    source=f"seed_count_supplement:{ideas_source}",
-                                    code=application_error_code(exc),
-                                    message=str(exc),
-                                )
-                        if supplemental_rows:
-                            fallback_keyword_ideas_used = True
-                        continue
-                    break
-
-                if not supplemental_rows:
-                    break
-
-                retained_candidates = [
-                    decision.candidate for decision in decisions if decision.selected
-                ]
-                retained_normalized = {
-                    candidate.normalized_keyword for candidate in retained_candidates
-                }
-                new_candidates, new_excluded = prepare_seed_candidates(
-                    [
-                        row
-                        for row in supplemental_rows
-                        if normalize_keyword(row.keyword) not in retained_normalized
-                    ],
-                    context.profile,
-                    context.language,
-                    limit=max(
-                        SEED_CANDIDATE_LIMIT - len(retained_candidates),
-                        0,
-                    ),
-                    domain=context.domain,
-                )
-                excluded.update(new_excluded)
-                if not new_candidates:
-                    continue
-                candidates = [
-                    replace(candidate, rank=index)
-                    for index, candidate in enumerate(
-                        [*retained_candidates, *new_candidates],
-                        start=1,
-                    )
-                ]
-                request_scope = supplemental_scope
+                if resolution is not None
+                else []
+            )
 
             if not decisions or not any(decision.selected for decision in decisions):
                 raise ApplicationError(
                     "所有关键词来源都没有找到与网站业务相关的候选词",
                     type="seed_candidates_empty",
                 )
-            decisions = list(reviewed_decisions.values())
         finally:
             await http.close()
 
@@ -612,13 +414,12 @@ class KeywordActivities:
             "duplicate_topic_count": duplicate_topic_count,
             "usable_seed_count": usable_seed_count,
             "selected_topic_count": len(seeds),
-            "google_ads_supplemented": google_ads_supplemented,
-            "fallback_keyword_ideas_used": fallback_keyword_ideas_used,
+            "source": "google_ads_site",
             "competitor_supplemented": False,
             "competitor_status": "not_requested",
-            "topic_reused": all_topic_reused,
-            "selection_reused": all_selection_reused,
-            "reused": all_topic_reused and all_selection_reused,
+            "topic_reused": topic_reused,
+            "selection_reused": selection_reused,
+            "reused": topic_reused and selection_reused,
         }
 
     async def _review_seed_candidates(
@@ -701,12 +502,26 @@ class KeywordActivities:
         *,
         request_scope: str = "primary",
     ) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
-        decisions, reused = await self._filter_seed_candidates(
-            context,
-            candidates,
-            client,
-            request_scope=request_scope,
+        batches = [
+            candidates[start : start + AI_CLASSIFICATION_BATCH]
+            for start in range(0, len(candidates), AI_CLASSIFICATION_BATCH)
+        ]
+        semaphore = asyncio.Semaphore(AI_CLASSIFICATION_CONCURRENCY)
+
+        async def filter_one(batch_index: int, batch: list[SeedCandidate]) -> tuple[list[str], bool]:
+            async with semaphore:
+                return await self._filter_seed_candidates(
+                    context,
+                    batch,
+                    client,
+                    request_scope=f"{request_scope}-batch-{batch_index}",
+                )
+
+        batch_results = await asyncio.gather(
+            *(filter_one(batch_index, batch) for batch_index, batch in enumerate(batches, start=1))
         )
+        decisions = [decision for batch_decisions, _ in batch_results for decision in batch_decisions]
+        reused = all(batch_reused for _, batch_reused in batch_results)
         assessments = validate_initial_library_filter(
             candidates,
             {"decisions": decisions},
@@ -736,7 +551,8 @@ class KeywordActivities:
             "profile": context.profile,
             "country": context.country,
             "language": context.language,
-            "model": client.config.effective_initial_filter_model,
+            "model": client.config.effective_keyword_model,
+            "reasoning_effort": client.config.effective_keyword_reasoning_effort,
             "provider_base_url": client.config.base_url,
             "prompt_version": SEED_TOPIC_PROMPT_VERSION,
             "request_scope": request_scope,
@@ -757,7 +573,7 @@ class KeywordActivities:
         cached_payload = request.response_metadata.get("payload")
         payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
-        model = client.config.effective_initial_filter_model
+        model = client.config.effective_keyword_model
         cost_usd = 0.0
         try:
             if isinstance(cached_payload, dict):
@@ -806,18 +622,7 @@ class KeywordActivities:
             )
             if isinstance(exc, ProviderError) and should_retry_paid_request(exc):
                 raise provider_application_error(exc) from exc
-            decisions = [
-                (
-                    "keep"
-                    if strong_seed_business_evidence(
-                        candidate,
-                        context.profile,
-                        context.language,
-                    )
-                    else "remove_irrelevant"
-                )
-                for candidate in candidates
-            ]
+            decisions = ["keep"] * len(candidates)
             await self.repository.record_partial_failure(
                 context.run_id,
                 source="seed_topic_ai",
@@ -869,7 +674,8 @@ class KeywordActivities:
             "profile": context.profile,
             "country": context.country,
             "language": context.language,
-            "model": client.config.effective_topic_dedup_model,
+            "model": client.config.effective_keyword_model,
+            "reasoning_effort": client.config.effective_keyword_reasoning_effort,
             "provider_base_url": client.config.base_url,
             "prompt_version": SEED_TOPIC_SELECTION_PROMPT_VERSION,
         }
@@ -888,7 +694,7 @@ class KeywordActivities:
         cached_payload = request.response_metadata.get("payload")
         payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
-        model = client.config.effective_topic_dedup_model
+        model = client.config.effective_keyword_model
         cost_usd = 0.0
         try:
             if isinstance(cached_payload, dict):
@@ -1271,7 +1077,8 @@ class KeywordActivities:
                 "profile": landscape_profile,
                 "country": context.country,
                 "language": context.language,
-                "model": ai_config.model,
+                "model": ai_config.effective_business_model,
+                "reasoning_effort": ai_config.effective_business_reasoning_effort,
             }
 
             async def select_queries() -> AIResult:
@@ -1705,7 +1512,8 @@ class KeywordActivities:
                     "country": context.country,
                     "language": context.language,
                     "site_verifications": ai_site_verifications,
-                    "model": ai_config.model,
+                    "model": ai_config.effective_business_model,
+                    "reasoning_effort": ai_config.effective_business_reasoning_effort,
                 }
 
                 async def classify_domains() -> AIResult:
@@ -1843,7 +1651,8 @@ class KeywordActivities:
                 backlink_assessment_request = {
                     "competitors": enriched,
                     "profile": landscape_profile,
-                    "model": ai_config.model,
+                    "model": ai_config.effective_business_model,
+                    "reasoning_effort": ai_config.effective_business_reasoning_effort,
                 }
 
                 async def assess_backlinks() -> AIResult:
@@ -1921,7 +1730,8 @@ class KeywordActivities:
                 "serp_snapshots": serp_snapshots,
                 "directional": directional,
                 "profile": landscape_profile,
-                "model": ai_config.model,
+                "model": ai_config.effective_business_model,
+                "reasoning_effort": ai_config.effective_business_reasoning_effort,
             }
 
             async def synthesize_landscape() -> AIResult:
@@ -2212,7 +2022,8 @@ class KeywordActivities:
             "gaps": [row.keyword for row in rows[:100]],
             "country": context.country,
             "language": context.language,
-            "model": config.model,
+            "model": config.effective_business_model,
+            "reasoning_effort": config.effective_business_reasoning_effort,
             "provider_base_url": config.base_url,
             "prompt_version": "competitor-validation-v1",
         }
@@ -2226,7 +2037,7 @@ class KeywordActivities:
         )
         payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
-        model = config.model
+        model = config.effective_business_model
         cost_usd = 0.0
         try:
             cached_payload = request.response_metadata.get("payload")
@@ -3233,76 +3044,6 @@ class KeywordActivities:
             message=detail,
         )
 
-    async def _labs_site_request(
-        self,
-        context: KeywordRunContext,
-    ) -> list[RawKeyword]:
-        request_payload = {
-            "target": context.domain,
-            "country": context.country,
-            "language": context.language,
-            "limit": LABS_SITE_LIMIT,
-        }
-        request_key = f"keyword:{context.run_id}:dataforseo:labs-site:v2-500"
-        config = await require_dataforseo_config(
-            self.repository,
-            context.organization_id,
-        )
-        request = await self.repository.begin_external_request(
-            context=context,
-            request_key=request_key,
-            provider="dataforseo",
-            endpoint=DataForSEOClient.LABS_SITE_PATH,
-            request_hash=stable_hash(request_payload),
-        )
-        if request.reusable:
-            cached = await self.repository.request_ideas(
-                request.build_run_id,
-                "labs_site",
-            )
-            if request.build_run_id != context.run_id and cached:
-                await self.repository.save_ideas(context, cached)
-            return cached
-        if not request.should_execute:
-            raise provider_application_error(external_request_error(request))
-        await submit_external_request(self.repository, request)
-        http = JsonHttpClient(
-            timeout_seconds=self.settings.keyword_http_timeout_seconds,
-            max_retries=self.settings.keyword_http_max_retries,
-        )
-        try:
-            rows, billing = await DataForSEOClient(
-                config,
-                http,
-            ).labs_keywords_for_site(
-                domain=context.domain,
-                country=context.country,
-                language=context.language,
-                limit=LABS_SITE_LIMIT,
-            )
-            await persist_ideas_response(
-                self.repository,
-                context,
-                rows,
-                request=request,
-                metadata={"path": billing.path, "limit": LABS_SITE_LIMIT},
-                cost_usd=billing.cost_usd,
-                expires_at=datetime.now(UTC) + timedelta(days=30),
-            )
-            return rows
-        except asyncio.CancelledError:
-            await mark_cancelled_external_request(self.repository, request)
-            raise
-        except ProviderError as exc:
-            await fail_external_request(
-                self.repository,
-                request,
-                error=exc,
-            )
-            raise provider_application_error(exc) from exc
-        finally:
-            await http.close()
-
     async def _google_ads_site_request(
         self,
         context: KeywordRunContext,
@@ -3380,7 +3121,7 @@ class KeywordActivities:
     ) -> dict[str, Any]:
         candidates = await self.repository.load_ideas(
             context.run_id,
-            ["labs_site", "google_ads_site"],
+            ["google_ads_site"],
         )
         config = await require_ai_config(
             self.repository,
@@ -3394,7 +3135,8 @@ class KeywordActivities:
             if candidates
             else [],
             "page_hints": page_hints[:10],
-            "model": config.model,
+            "model": config.effective_business_model,
+            "reasoning_effort": config.effective_business_reasoning_effort,
             "provider_base_url": config.base_url,
             "prompt_version": "domain-profile-fallback-v1",
         }
@@ -3410,7 +3152,7 @@ class KeywordActivities:
         used_deterministic_fallback = False
         payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
-        model = config.model
+        model = config.effective_business_model
         cost_usd = 0.0
         try:
             if isinstance(cached_payload, dict):
@@ -3524,7 +3266,8 @@ class KeywordActivities:
             "profile_version": context.profile_version,
             "country": context.country,
             "language": context.language,
-            "model": config.model,
+            "model": config.effective_keyword_model,
+            "reasoning_effort": config.effective_keyword_reasoning_effort,
             "provider_base_url": config.base_url,
             "prompt_version": "keyword-classification-v2",
         }
@@ -3539,7 +3282,7 @@ class KeywordActivities:
         cached_payload = request.response_metadata.get("payload")
         payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
-        model = config.model
+        model = config.effective_keyword_model
         cost_usd = 0.0
         try:
             if isinstance(cached_payload, dict):

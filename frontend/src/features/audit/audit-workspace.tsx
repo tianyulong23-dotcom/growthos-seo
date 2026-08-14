@@ -59,6 +59,7 @@ import {
 } from "@/api/audits"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
 import {
   Card,
   CardAction,
@@ -1859,13 +1860,13 @@ function HistoryView({
           <div className="text-sm font-medium">审计历史</div>
           <div className="text-xs text-muted-foreground">共 {total} 次审计</div>
         </div>
-        <label className="flex items-center gap-2 text-sm">
+        <Label className="flex items-center gap-2 text-sm">
           <Switch
             checked={includeArchived}
             onCheckedChange={onIncludeArchived}
           />
           包含已归档
-        </label>
+        </Label>
       </div>
       <TableToolbar search={search} onSearch={onSearchChange}>
         <Select

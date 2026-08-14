@@ -99,6 +99,13 @@ class BusinessContext:
         }
 
 
+@dataclass(frozen=True)
+class TopicClassificationInput:
+    topic_id: str
+    seed_keyword: str
+    candidates: tuple[CandidateClassification, ...]
+
+
 class SeedDecisionGateway(Protocol):
     async def decide(
         self,
@@ -179,8 +186,8 @@ class ContentPlanD3Service:
         classification_gateway: ClassificationGateway,
         coverage_query: CoverageQuery,
         fallback_gateway: FallbackGateway | None = None,
-        seed_decision_version: str = "content-plan-seed-v2",
-        classifier_version: str = "content-plan-classifier-v2",
+        seed_decision_version: str = "content-plan-seed-v3",
+        classifier_version: str = "content-plan-classifier-v3",
         fallback_version: str = "content-plan-fallback-v2",
         external_request_max_attempts: int = 3,
     ) -> None:
@@ -278,10 +285,10 @@ class ContentPlanD3Service:
             batch = await self._sync_completed_supplement_round(batch)
             invalid = await self._invalid_current_preparations(batch.id)
             while invalid and batch.supplement_round < 2:
-                replacements = await self._select_seeds(
+                replacements = await self._select_replacement_seeds(
                     batch,
                     business_context,
-                    required=len(invalid),
+                    invalid,
                 )
                 if not replacements:
                     break
@@ -309,8 +316,42 @@ class ContentPlanD3Service:
                 invalid = await self._invalid_current_preparations(batch.id)
 
             if invalid:
-                if not any(row.source_round == "ai_fallback" for row in invalid):
-                    await self._run_fallback(batch, invalid, business_context)
+                fallback_eligible = [
+                    row for row in invalid if row.preparation_version <= 3
+                ]
+                if fallback_eligible:
+                    await self._run_fallback(
+                        batch,
+                        fallback_eligible,
+                        business_context,
+                    )
+
+            invalid = await self._invalid_current_preparations(batch.id)
+            final_refill_count = 0
+            final_refill_pool_exhausted = False
+            while invalid and final_refill_count < batch.target_count:
+                remaining_attempts = batch.target_count - final_refill_count
+                replacements = await self._select_replacement_seeds(
+                    batch,
+                    business_context,
+                    invalid[:remaining_attempts],
+                )
+                if not replacements:
+                    final_refill_pool_exhausted = True
+                    break
+                await self._replace_invalid_preparations(
+                    batch,
+                    invalid,
+                    replacements,
+                    2,
+                )
+                final_refill_count += len(replacements)
+                await self._expand_current(batch)
+                await self._build_current_packages(batch, business_context)
+                technical = await self._technical_current_preparations(batch.id)
+                if technical:
+                    return await self._technical_failure_result(batch, technical)
+                invalid = await self._invalid_current_preparations(batch.id)
 
             preparations = await self.repository.get_current_preparations(batch.id)
             pack_count = sum(row.state == "pack_ready" for row in preparations)
@@ -318,9 +359,14 @@ class ContentPlanD3Service:
             if technical:
                 return await self._technical_failure_result(batch, technical)
             if pack_count != batch.target_count:
+                error_code = (
+                    "candidate_pool_exhausted"
+                    if final_refill_pool_exhausted
+                    else "final_refill_limit_exhausted"
+                )
                 return await self._needs_attention(
                     batch,
-                    "pack_shortage",
+                    error_code,
                     f"关键词包只完成 {pack_count}/{batch.target_count}",
                 )
             await self.repository.finalize_current_preparation_orders(batch.id)
@@ -387,6 +433,78 @@ class ContentPlanD3Service:
                 result.preparation.error_detail or "没有找到有效的信息型文章选题",
             )
         return result.preparation
+
+    async def replenish_serp_exhausted_packages(self, batch_id: str) -> D3BatchResult:
+        batch = await self._require_batch(batch_id)
+        if batch.source != "automatic":
+            raise ValueError("SERP package replenishment requires an automatic batch")
+        business_context = self._require_business_context(batch)
+        replacement_count = 0
+        target_plan_orders: set[int] | None = None
+
+        while replacement_count < batch.target_count:
+            preparations = await self.repository.get_current_preparations(batch.id)
+            if target_plan_orders is None:
+                target_plan_orders = {
+                    row.plan_order
+                    for row in preparations
+                    if row.state == "invalid"
+                    and row.error_code == "serp_primary_candidates_exhausted"
+                }
+            exhausted = [
+                row
+                for row in preparations
+                if row.plan_order in target_plan_orders and row.state == "invalid"
+            ]
+            if not exhausted:
+                ready_count = sum(
+                    row.state in {"pack_ready", "preview_ready"}
+                    for row in preparations
+                )
+                if ready_count == batch.target_count:
+                    await self.repository.update_batch_progress(
+                        batch.id,
+                        status="building_previews",
+                        stage="d4_serp_refill_ready",
+                    )
+                    return D3BatchResult(batch.id, "pack_ready", ready_count)
+                return D3BatchResult(batch.id, "not_needed", ready_count)
+
+            replacements = await self._select_replacement_seeds(
+                batch,
+                business_context,
+                exhausted[: batch.target_count - replacement_count],
+            )
+            if not replacements:
+                return await self._needs_attention(
+                    batch,
+                    "candidate_pool_exhausted",
+                    "No eligible seed keyword remains after a SERP package was exhausted",
+                    missing_count=len(exhausted),
+                )
+            await self._replace_invalid_preparations(
+                batch,
+                exhausted,
+                replacements,
+                2,
+            )
+            replacement_count += len(replacements)
+            await self.repository.update_batch_progress(
+                batch.id,
+                status="supplementing",
+                stage="d3_serp_refill",
+            )
+            await self._expand_current(batch)
+            await self._build_current_packages(batch, business_context)
+            technical = await self._technical_current_preparations(batch.id)
+            if technical:
+                return await self._technical_failure_result(batch, technical)
+
+        return await self._needs_attention(
+            batch,
+            "final_refill_limit_exhausted",
+            "SERP package replacement limit exhausted",
+        )
 
     async def validate_secondary_keywords(
         self,
@@ -514,6 +632,8 @@ class ContentPlanD3Service:
         *,
         required: int,
     ) -> list[ContentPlanCandidate]:
+        if required <= 0:
+            return []
         retained = await self.repository.get_retained_candidates(batch.id)
         available = [row for row in retained if row.selected_plan_order is None]
         if available:
@@ -612,6 +732,52 @@ class ContentPlanD3Service:
                 break
         return available[:required]
 
+    async def _select_replacement_seeds(
+        self,
+        batch: ContentPlanBatch,
+        business_context: BusinessContext,
+        invalid: Sequence[ContentPlanPreparation],
+    ) -> list[ContentPlanCandidate]:
+        selected_by_order = {
+            int(candidate.selected_plan_order): candidate
+            for candidate in await self.repository.get_selected_candidates(batch.id)
+            if candidate.selected_plan_order is not None
+        }
+        recovered = {
+            preparation.id: selected_by_order[preparation.plan_order]
+            for preparation in invalid
+            if preparation.plan_order in selected_by_order
+            and selected_by_order[preparation.plan_order].id
+            != preparation.candidate_id
+        }
+        await self.repository.drop_unavailable_candidates(
+            batch.id,
+            {
+                preparation.candidate_id: (
+                    f"preparation_{preparation.error_code or 'invalid'}"
+                )
+                for preparation in invalid
+                if preparation.candidate_id is not None
+                and preparation.id not in recovered
+            },
+        )
+        fresh = iter(
+            await self._select_seeds(
+                batch,
+                business_context,
+                required=len(invalid) - len(recovered),
+            )
+        )
+        replacements: list[ContentPlanCandidate] = []
+        for preparation in invalid:
+            candidate = recovered.get(preparation.id)
+            if candidate is None:
+                candidate = next(fresh, None)
+            if candidate is None:
+                break
+            replacements.append(candidate)
+        return replacements
+
     async def _ensure_initial_preparations(self, batch: ContentPlanBatch) -> None:
         if await self.repository.get_current_preparations(batch.id):
             return
@@ -646,6 +812,10 @@ class ContentPlanD3Service:
         for preparation in preparations:
             round_number = self._preparation_round(preparation)
             request_key = (
+                f"related:{batch.id}:{round_number}:{preparation.id}:"
+                f"{preparation.preparation_version}"
+            )
+            legacy_request_key = (
                 f"related:{batch.id}:{round_number}:{preparation.plan_order}:"
                 f"{preparation.preparation_version}"
             )
@@ -665,7 +835,9 @@ class ContentPlanD3Service:
                 endpoint="related_keywords/live",
                 request_hash=request_hash,
                 round_number=round_number,
+                legacy_request_key=legacy_request_key,
             )
+            request_key = request.request_key
             if request.status == "completed":
                 await self._restore_completed_expansion(preparation, request.response_metadata_json)
                 continue
@@ -853,21 +1025,186 @@ class ContentPlanD3Service:
         *,
         exclude_item_id: str | None = None,
     ) -> None:
+        reserved_primary_keywords: set[str] = set()
         for preparation in preparations:
-            if preparation.state == "pack_ready" or preparation.state != "expanded":
+            if preparation.state not in {"pack_ready", "preview_ready"}:
                 continue
             bundle = await self.repository.get_preparation_bundle(preparation.id)
-            assert bundle is not None
-            candidates = [self._domain_candidate(row) for row in bundle.keywords]
-            try:
-                decisions_by_id = await self._classify_with_repair(
-                    batch,
-                    business_context,
-                    preparation,
-                    preparation.seed_keyword,
-                    candidates,
+            if bundle is None:
+                continue
+            reserved_primary_keywords.update(
+                row.normalized_keyword
+                for row in bundle.keywords
+                if row.selected_role == "primary"
+            )
+
+        pending = []
+        for preparation in preparations:
+            if preparation.state == "expanded":
+                bundle = await self.repository.get_preparation_bundle(preparation.id)
+                assert bundle is not None
+                pending.append(
+                    (
+                        preparation,
+                        bundle.keywords,
+                        tuple(self._domain_candidate(row) for row in bundle.keywords),
+                    )
                 )
-            except (ValueError, TypeError, AttributeError) as exc:
+
+        bulk_decisions: dict[str, dict[str, ClassificationDecision]] = {}
+        bulk_classifier_version = "content-plan-classifier-bulk-v1"
+        bulk_classify = getattr(self.classification_gateway, "classify_topics", None)
+        if callable(bulk_classify):
+            for request in await self.repository.get_completed_external_requests(
+                batch.id,
+                "content_plan/classification_bulk",
+            ):
+                output = request.response_metadata_json.get("output")
+                if not isinstance(output, list):
+                    continue
+                for preparation, _keyword_rows, candidates in pending:
+                    if preparation.id in bulk_decisions:
+                        continue
+                    topic_rows = [
+                        row
+                        for row in output
+                        if isinstance(row, dict)
+                        and row.get("topic_id") == preparation.id
+                        and row.get("preparation_version")
+                        == preparation.preparation_version
+                        and row.get("package_version") == preparation.package_version
+                    ]
+                    try:
+                        bulk_decisions[preparation.id] = (
+                            self._validated_classification_decisions(
+                                candidates,
+                                topic_rows,
+                            )
+                        )
+                    except (ValueError, TypeError, AttributeError, KeyError):
+                        continue
+
+        unresolved = [
+            item for item in pending if item[0].id not in bulk_decisions
+        ]
+        if len(unresolved) > 1 and callable(bulk_classify):
+            topics = [
+                TopicClassificationInput(
+                    topic_id=preparation.id,
+                    seed_keyword=preparation.seed_keyword,
+                    candidates=candidates,
+                )
+                for preparation, _keyword_rows, candidates in unresolved
+            ]
+            request_input = {
+                "business_context": business_context.to_payload(),
+                "country": batch.country,
+                "language": batch.language,
+                "topics": [
+                    {
+                        "topic_id": topic.topic_id,
+                        "seed_keyword": topic.seed_keyword,
+                        "preparation_version": preparation.preparation_version,
+                        "package_version": preparation.package_version,
+                        "candidates": [
+                            self._classification_candidate_json(candidate)
+                            for candidate in topic.candidates
+                        ],
+                    }
+                    for topic, (preparation, _keyword_rows, _candidates) in zip(
+                        topics, unresolved, strict=True
+                    )
+                ],
+            }
+            fingerprint = self._hash(
+                {
+                    "topics": [
+                        {
+                            "topic_id": topic.topic_id,
+                            "preparation_version": preparation.preparation_version,
+                            "package_version": preparation.package_version,
+                        }
+                        for topic, (preparation, _keyword_rows, _candidates) in zip(
+                            topics, unresolved, strict=True
+                        )
+                    ]
+                }
+            )[:16]
+            raw_bulk_decisions = await self._run_ai_request(
+                batch=batch,
+                preparation_id=None,
+                request_key=(
+                    f"ai:classification_bulk:{bulk_classifier_version}:"
+                    f"{batch.id}:{fingerprint}"
+                ),
+                endpoint="content_plan/classification_bulk",
+                prompt_version=bulk_classifier_version,
+                request_input=request_input,
+                round_number=max(
+                    (
+                        self._preparation_round(preparation)
+                        for preparation, _, _ in unresolved
+                    ),
+                    default=0,
+                ),
+                structural_attempt=1,
+                validation_error=None,
+                invoke=lambda: bulk_classify(
+                    topics,
+                    business_context=business_context,
+                    country=batch.country,
+                    language=batch.language,
+                ),
+                encode_output=lambda output: self._bulk_classification_output_json(
+                    output,
+                    topic_versions={
+                        preparation.id: (
+                            preparation.preparation_version,
+                            preparation.package_version,
+                        )
+                        for preparation, _keyword_rows, _candidates in unresolved
+                    },
+                ),
+            )
+            for topic in topics:
+                topic_rows = [
+                    row
+                    for row in raw_bulk_decisions
+                    if row.get("topic_id") == topic.topic_id
+                ]
+                try:
+                    bulk_decisions[topic.topic_id] = self._validated_classification_decisions(
+                        topic.candidates,
+                        topic_rows,
+                    )
+                except (ValueError, TypeError, AttributeError, KeyError):
+                    continue
+
+        for preparation, keyword_rows, candidates_tuple in pending:
+            candidates = list(candidates_tuple)
+            try:
+                decisions_by_id = bulk_decisions.get(preparation.id)
+                if decisions_by_id is None:
+                    decisions_by_id = await self._classify_with_repair(
+                        batch,
+                        business_context,
+                        preparation,
+                        preparation.seed_keyword,
+                        candidates,
+                    )
+            except D3ProcessingError as exc:
+                replaceable = exc.code in {
+                    "ai_request_outcome_unknown",
+                    "ai_request_retry_exhausted",
+                }
+                await self.repository.set_preparation_state(
+                    preparation.id,
+                    state="invalid" if replaceable else "classification_failed",
+                    error_code=exc.code,
+                    error_detail=exc.detail,
+                )
+                continue
+            except (ValueError, TypeError, AttributeError, KeyError) as exc:
                 await self.repository.set_preparation_state(
                     preparation.id,
                     state="classification_failed",
@@ -894,6 +1231,7 @@ class ContentPlanD3Service:
             occupied = await self.repository.occupied_normalized_keywords(
                 batch.project_id, exclude_item_id=exclude_item_id
             )
+            occupied.update(reserved_primary_keywords)
             package = build_keyword_package(
                 candidates,
                 list(decisions_by_id.values()),
@@ -902,11 +1240,23 @@ class ContentPlanD3Service:
             )
             await self._persist_package(
                 preparation,
-                bundle.keywords,
+                keyword_rows,
                 decisions_by_id,
                 coverage_results,
                 package,
+                classifier_version=(
+                    bulk_classifier_version
+                    if preparation.id in bulk_decisions
+                    else self.classifier_version
+                ),
             )
+            if package.status == "pack_ready" and package.primary_candidate_id is not None:
+                primary = next(
+                    candidate
+                    for candidate in candidates
+                    if candidate.candidate_id == package.primary_candidate_id
+                )
+                reserved_primary_keywords.add(primary.normalized_keyword)
 
     async def _build_fixed_primary_package(
         self,
@@ -1064,7 +1414,10 @@ class ContentPlanD3Service:
         decisions: dict[str, ClassificationDecision],
         coverage_results: dict[str, Any],
         package: Any,
+        *,
+        classifier_version: str | None = None,
     ) -> None:
+        effective_classifier_version = classifier_version or self.classifier_version
         rows_by_candidate = {row.candidate_id: row for row in rows}
         secondary_ids = set(package.secondary_candidate_ids)
         keyword_values = []
@@ -1087,7 +1440,7 @@ class ContentPlanD3Service:
                     "keyword_type": decision.keyword_type,
                     "primary_fit": decision.primary_fit,
                     "reason_code": decision.reason_code,
-                    "classifier_version": self.classifier_version,
+                    "classifier_version": effective_classifier_version,
                     "coverage_status": coverage.status if coverage else "unknown",
                     "coverage_relation_id": coverage.relation_id if coverage else None,
                     "covered_url": coverage.covered_url if coverage else None,
@@ -1105,7 +1458,7 @@ class ContentPlanD3Service:
                         "id": f"relation-{uuid4().hex}",
                         "primary_candidate_id": rows_by_candidate[decision.candidate_id].id,
                         "secondary_candidate_id": rows_by_candidate[secondary_id].id,
-                        "classifier_version": self.classifier_version,
+                            "classifier_version": effective_classifier_version,
                     }
                 )
         selected_primary_id = (
@@ -1130,24 +1483,14 @@ class ContentPlanD3Service:
         replacements: Sequence[ContentPlanCandidate],
         round_number: int,
     ) -> None:
-        for old, candidate in zip(invalid, replacements, strict=False):
-            await self.repository.replace_seed_for_plan_order(
-                batch.id,
-                plan_order=old.plan_order,
-                replacement_candidate_id=candidate.id,
-            )
-            await self.repository.create_replacement_preparation(
+        replaced = list(zip(invalid, replacements, strict=False))
+        for old, candidate in replaced:
+            await self.repository.replace_preparation_seed(
                 preparation_id=f"preparation-{uuid4().hex}",
                 old_preparation_id=old.id,
-                candidate_id=candidate.id,
-                seed_keyword_id=candidate.keyword_id,
-                seed_keyword=candidate.keyword,
-                normalized_seed_keyword=candidate.normalized_keyword,
+                replacement_candidate_id=candidate.id,
                 source_round=f"refill_{round_number}",
-                workflow_id=(
-                    f"content-plan:{batch.id}:prepare:{old.plan_order}:"
-                    f"{old.preparation_version + 1}"
-                ),
+                workflow_id=f"content-plan:{batch.id}:replace:{old.id}",
             )
 
     async def _run_fallback(
@@ -1167,6 +1510,18 @@ class ContentPlanD3Service:
                     old.seed_keyword,
                     language=batch.language,
                 )
+            except D3ProcessingError as exc:
+                replaceable = exc.code in {
+                    "ai_request_outcome_unknown",
+                    "ai_request_retry_exhausted",
+                }
+                await self.repository.set_preparation_state(
+                    old.id,
+                    state="invalid" if replaceable else "classification_failed",
+                    error_code=exc.code,
+                    error_detail=exc.detail,
+                )
+                continue
             except (ValueError, TypeError) as exc:
                 await self.repository.set_preparation_state(
                     old.id,
@@ -1185,10 +1540,7 @@ class ContentPlanD3Service:
                 seed_keyword=old.seed_keyword,
                 normalized_seed_keyword=old.normalized_seed_keyword,
                 source_round="ai_fallback",
-                workflow_id=(
-                    f"content-plan:{batch.id}:prepare:{old.plan_order}:"
-                    f"{old.preparation_version + 1}"
-                ),
+                workflow_id=f"content-plan:{batch.id}:fallback:{old.id}",
                 state="expanded",
             )
             candidates = [
@@ -1294,18 +1646,7 @@ class ContentPlanD3Service:
             "country": batch.country,
             "language": batch.language,
             "seed_keyword": seed_keyword,
-            "candidates": [
-                {
-                    "candidate_id": row.candidate_id,
-                    "keyword": row.keyword,
-                    "source": row.source,
-                    "provider_position": row.provider_position,
-                    "search_volume": row.search_volume,
-                    "keyword_difficulty": row.keyword_difficulty,
-                    "provider_intent": row.provider_intent,
-                }
-                for row in candidates
-            ],
+            "candidates": [self._classification_candidate_json(row) for row in candidates],
         }
         for attempt in range(1, 3):
             raw_decisions = await self._run_ai_request(
@@ -1314,7 +1655,8 @@ class ContentPlanD3Service:
                 request_key=(
                     f"ai:classification:{self.classifier_version}:{batch.id}:"
                     f"{preparation.id}:"
-                    f"{preparation.preparation_version}:{attempt}"
+                    f"{preparation.preparation_version}:"
+                    f"{preparation.package_version}:{attempt}"
                 ),
                 endpoint="content_plan/classification",
                 prompt_version=self.classifier_version,
@@ -1333,11 +1675,74 @@ class ContentPlanD3Service:
                 encode_output=self._classification_output_json,
             )
             try:
-                decisions = [ClassificationDecision(**row) for row in raw_decisions]
-                return validate_classification_decisions(candidates, decisions)
-            except (ValueError, TypeError, AttributeError) as exc:
+                return self._validated_classification_decisions(candidates, raw_decisions)
+            except (ValueError, TypeError, AttributeError, KeyError) as exc:
                 validation_error = str(exc)
         raise ValueError(validation_error or "classification output is invalid")
+
+    @staticmethod
+    def _classification_candidate_json(
+        candidate: CandidateClassification,
+    ) -> dict[str, Any]:
+        return {
+            "candidate_id": candidate.candidate_id,
+            "keyword": candidate.keyword,
+            "source": candidate.source,
+            "provider_position": candidate.provider_position,
+            "search_volume": candidate.search_volume,
+            "keyword_difficulty": candidate.keyword_difficulty,
+            "provider_intent": candidate.provider_intent,
+        }
+
+    @staticmethod
+    def _validated_classification_decisions(
+        candidates: Sequence[CandidateClassification],
+        raw_decisions: Sequence[Any],
+    ) -> dict[str, ClassificationDecision]:
+        decisions = []
+        for row in raw_decisions:
+            if isinstance(row, ClassificationDecision):
+                decisions.append(row)
+                continue
+            decisions.append(
+                ClassificationDecision(
+                    candidate_id=row["candidate_id"],
+                    relevance=row["relevance"],
+                    keyword_type=row["keyword_type"],
+                    primary_fit=row["primary_fit"],
+                    secondary_candidate_ids=tuple(row["secondary_candidate_ids"]),
+                    reason_code=row["reason_code"],
+                )
+            )
+        candidate_ids = {candidate.candidate_id for candidate in candidates}
+        relevance_by_id = {
+            decision.candidate_id: decision.relevance for decision in decisions
+        }
+        cleaned = []
+        for decision in decisions:
+            secondary_ids = []
+            seen_secondary_ids: set[str] = set()
+            for secondary_id in decision.secondary_candidate_ids:
+                if (
+                    secondary_id not in candidate_ids
+                    or secondary_id == decision.candidate_id
+                    or secondary_id in seen_secondary_ids
+                    or relevance_by_id.get(secondary_id) != "same_topic"
+                ):
+                    continue
+                seen_secondary_ids.add(secondary_id)
+                secondary_ids.append(secondary_id)
+            cleaned.append(
+                ClassificationDecision(
+                    candidate_id=decision.candidate_id,
+                    relevance=decision.relevance,
+                    keyword_type=decision.keyword_type,
+                    primary_fit=decision.primary_fit,
+                    secondary_candidate_ids=tuple(secondary_ids),
+                    reason_code=decision.reason_code,
+                )
+            )
+        return validate_classification_decisions(candidates, cleaned)
 
     async def _fallback_candidates_with_repair(
         self,
@@ -1571,6 +1976,32 @@ class ContentPlanD3Service:
             )
         return rows
 
+    @classmethod
+    def _bulk_classification_output_json(
+        cls,
+        output: Sequence[Any],
+        *,
+        topic_versions: dict[str, tuple[int, int]],
+    ) -> list[dict[str, Any]]:
+        rows = []
+        for row in output:
+            if not isinstance(row, dict):
+                raise TypeError("bulk classification output rows must be objects")
+            [decision] = cls._classification_output_json([row])
+            preparation_version, package_version = topic_versions.get(
+                row["topic_id"],
+                (0, 0),
+            )
+            rows.append(
+                {
+                    "topic_id": row["topic_id"],
+                    "preparation_version": preparation_version,
+                    "package_version": package_version,
+                    **decision,
+                }
+            )
+        return rows
+
     async def _sync_completed_supplement_round(
         self, batch: ContentPlanBatch
     ) -> ContentPlanBatch:
@@ -1648,6 +2079,10 @@ class ContentPlanD3Service:
             row
             for row in await self.repository.get_current_preparations(batch_id)
             if row.state == "invalid"
+            or (
+                row.state == "expansion_failed"
+                and row.error_code == "external_request_outcome_unknown"
+            )
         ]
 
     async def _technical_current_preparations(
@@ -1661,6 +2096,10 @@ class ContentPlanD3Service:
                 "classification_failed",
                 "coverage_check_failed",
             }
+            and not (
+                row.state == "expansion_failed"
+                and row.error_code == "external_request_outcome_unknown"
+            )
         ]
 
     async def _technical_failure_result(
