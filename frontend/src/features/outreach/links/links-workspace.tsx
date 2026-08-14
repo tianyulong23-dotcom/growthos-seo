@@ -1,20 +1,29 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
-  CircleHelp,
   Eye,
   ExternalLink,
+  FileUp,
   FileKey2,
   ListRestart,
+  Plus,
   RefreshCw,
   ShieldAlert,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Sheet,
   SheetContent,
@@ -23,8 +32,15 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  backlinksProjectQueries,
+  createProjectQueryKey,
+} from "@/features/outreach/api/project-query"
+import { isOutreachOffline } from "@/features/outreach/shared/outreach-network-state"
+import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
 
 import { isLinksApiStatus, linksApi } from "./api"
+import { BacklinkProfilePanel } from "./backlink-profile-panel"
 import type {
   LifecycleEventsPage,
   LinkDetail,
@@ -33,13 +49,15 @@ import type {
   LinkPlacement,
   LinksClient,
   LinksPage,
+  OpportunityListItem,
   PlacementEvidence,
   PlacementLinkDetail,
   PlacementReverifyResult,
   ValidationEvidence,
 } from "./types"
 
-type LoadState = "loading" | "ready" | "empty" | "error" | "forbidden" | "conflict"
+type LoadState =
+  "loading" | "ready" | "empty" | "error" | "forbidden" | "conflict" | "offline"
 type DetailState =
   | "idle"
   | "loading"
@@ -47,8 +65,10 @@ type DetailState =
   | "error"
   | "forbidden"
   | "conflict"
+  | "offline"
   | "not-found"
-type ResourceState = "idle" | "loading" | "ready" | "error" | "forbidden" | "conflict"
+type ResourceState =
+  "idle" | "loading" | "ready" | "error" | "forbidden" | "conflict" | "offline"
 type CommandState =
   | "idle"
   | "submitting"
@@ -56,7 +76,16 @@ type CommandState =
   | "error"
   | "forbidden"
   | "conflict"
+  | "offline"
   | "not-found"
+type EntryState =
+  | "idle"
+  | "submitting"
+  | "success"
+  | "error"
+  | "forbidden"
+  | "conflict"
+  | "offline"
 
 const pageSize = 25
 const eventPageSize = 10
@@ -79,9 +108,95 @@ const dateTime = (value: string) =>
     timeStyle: "short",
   }).format(new Date(value))
 
+type PlacementCsvRow = {
+  opportunityId?: string
+  sourcePageUrl: string
+  targetUrl: string
+  rowNumber: number
+}
+
+const existingLinkOption = "__existing-link__"
+
+function parseCsvLine(line: string): string[] {
+  const values: string[] = []
+  let value = ""
+  let quoted = false
+
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index]
+    if (character === '"') {
+      if (quoted && line[index + 1] === '"') {
+        value += '"'
+        index += 1
+      } else {
+        quoted = !quoted
+      }
+    } else if (character === "," && !quoted) {
+      values.push(value.trim())
+      value = ""
+    } else {
+      value += character
+    }
+  }
+  if (quoted) throw new Error("CSV 引号未闭合")
+  values.push(value.trim())
+  return values
+}
+
+function parsePlacementCsv(
+  source: string,
+  fallbackOpportunityId: string
+): PlacementCsvRow[] {
+  const lines = source
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/u)
+    .filter((line) => line.trim().length > 0)
+  if (lines.length < 2) throw new Error("CSV 没有可导入的数据行")
+
+  const headers = parseCsvLine(lines[0] ?? "").map((header) =>
+    header.toLowerCase().replace(/[\s_-]/gu, "")
+  )
+  const indexOf = (...names: string[]) =>
+    headers.findIndex((header) => names.includes(header))
+  const opportunityIndex = indexOf("opportunityid", "opportunity")
+  const sourceIndex = indexOf("sourcepageurl", "sourceurl", "source")
+  const targetIndex = indexOf("targeturl", "target")
+  if (sourceIndex < 0 || targetIndex < 0) {
+    throw new Error("CSV 必须包含 sourcePageUrl 和 targetUrl 列")
+  }
+
+  return lines.slice(1).map((line, index) => {
+    const values = parseCsvLine(line)
+    const opportunityId =
+      (opportunityIndex < 0 ? "" : values[opportunityIndex])?.trim() ||
+      fallbackOpportunityId
+    const sourcePageUrl = values[sourceIndex]?.trim() ?? ""
+    const targetUrl = values[targetIndex]?.trim() ?? ""
+    if (!sourcePageUrl || !targetUrl) {
+      throw new Error(`CSV 第 ${index + 2} 行缺少必填值`)
+    }
+    return {
+      ...(opportunityId ? { opportunityId } : {}),
+      sourcePageUrl,
+      targetUrl,
+      rowNumber: index + 2,
+    }
+  })
+}
+
+function entryErrorState(
+  error: unknown
+): Exclude<EntryState, "idle" | "submitting" | "success"> {
+  if (isOutreachOffline()) return "offline"
+  if (isLinksApiStatus(error, 403)) return "forbidden"
+  if (isLinksApiStatus(error, 409)) return "conflict"
+  return "error"
+}
+
 const resourceErrorState = (
   error: unknown
 ): Exclude<ResourceState, "idle" | "loading" | "ready"> => {
+  if (isOutreachOffline()) return "offline"
   if (isLinksApiStatus(error, 403)) return "forbidden"
   if (isLinksApiStatus(error, 409)) return "conflict"
   return "error"
@@ -90,6 +205,7 @@ const resourceErrorState = (
 const detailErrorState = (
   error: unknown
 ): Exclude<DetailState, "idle" | "loading" | "ready"> => {
+  if (isOutreachOffline()) return "offline"
   if (isLinksApiStatus(error, 403)) return "forbidden"
   if (isLinksApiStatus(error, 404)) return "not-found"
   if (isLinksApiStatus(error, 409)) return "conflict"
@@ -99,14 +215,16 @@ const detailErrorState = (
 const commandErrorState = (
   error: unknown
 ): Exclude<CommandState, "idle" | "submitting" | "accepted"> => {
+  if (isOutreachOffline()) return "offline"
   if (isLinksApiStatus(error, 403)) return "forbidden"
   if (isLinksApiStatus(error, 404)) return "not-found"
   if (isLinksApiStatus(error, 409)) return "conflict"
   return "error"
 }
 
-const isJobRunning = (status: PlacementLinkDetail["latestMonitorRun"]["status"]) =>
-  status === "scheduled" || status === "running" || status === "retry_wait"
+const isJobRunning = (
+  status: PlacementLinkDetail["latestMonitorRun"]["status"]
+) => status === "scheduled" || status === "running" || status === "retry_wait"
 
 function StateBadge({ state }: { state: LinkDisplayState }) {
   const variant =
@@ -120,6 +238,162 @@ function StateBadge({ state }: { state: LinkDisplayState }) {
   return <Badge variant={variant}>{state}</Badge>
 }
 
+function PlacementEntryPanel({
+  opportunities,
+  opportunitiesState,
+  selectedOpportunityId,
+  sourcePageUrl,
+  targetUrl,
+  entryState,
+  entryMessage,
+  setSelectedOpportunityId,
+  setSourcePageUrl,
+  setTargetUrl,
+  submitManual,
+  importCsv,
+}: {
+  opportunities: OpportunityListItem[]
+  opportunitiesState: ResourceState
+  selectedOpportunityId: string
+  sourcePageUrl: string
+  targetUrl: string
+  entryState: EntryState
+  entryMessage: string
+  setSelectedOpportunityId: (value: string) => void
+  setSourcePageUrl: (value: string) => void
+  setTargetUrl: (value: string) => void
+  submitManual: () => void
+  importCsv: (file: File) => void
+}) {
+  const busy = entryState === "submitting"
+  const unavailable = opportunitiesState === "loading"
+
+  return (
+    <section className="mt-4 border" aria-labelledby="placement-entry-title">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+        <div>
+          <h3 className="text-sm font-semibold" id="placement-entry-title">
+            登记已有外链
+          </h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            已有链接可直接验证；外联新链接可绑定真实 Opportunity
+          </p>
+        </div>
+        <Badge variant="outline">直接验证</Badge>
+      </div>
+
+      <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+        <label className="grid gap-1.5 text-xs font-medium lg:col-span-3">
+          Opportunity（新获外链可选）
+          <Select
+            disabled={unavailable || busy}
+            value={selectedOpportunityId || existingLinkOption}
+            onValueChange={(value) => {
+              if (typeof value === "string") {
+                setSelectedOpportunityId(
+                  value === existingLinkOption ? "" : value
+                )
+              }
+            }}
+          >
+            <SelectTrigger className="w-full rounded-md border-border bg-background">
+              <SelectValue>
+                {(value) => {
+                  const opportunity = opportunities.find(
+                    (item) => item.id === value
+                  )
+                  return opportunity
+                    ? `${opportunity.targetHostAscii} · ${opportunity.businessStage}`
+                    : "已有外链（不绑定 Opportunity）"
+                }}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={existingLinkOption}>
+                已有外链（不绑定 Opportunity）
+              </SelectItem>
+              {opportunities.map((opportunity) => (
+                <SelectItem key={opportunity.id} value={opportunity.id}>
+                  {opportunity.targetHostAscii} · {opportunity.businessStage}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </label>
+
+        <label className="grid gap-1.5 text-xs font-medium">
+          Source page URL
+          <Input
+            className="rounded-md border-border bg-background"
+            disabled={busy}
+            placeholder="https://publisher.example/article"
+            type="url"
+            value={sourcePageUrl}
+            onChange={(event) => setSourcePageUrl(event.target.value)}
+          />
+        </label>
+        <label className="grid gap-1.5 text-xs font-medium">
+          Target URL
+          <Input
+            className="rounded-md border-border bg-background"
+            disabled={busy}
+            placeholder="https://client.example/page"
+            type="url"
+            value={targetUrl}
+            onChange={(event) => setTargetUrl(event.target.value)}
+          />
+        </label>
+        <Button
+          className="self-end"
+          disabled={
+            busy ||
+            !sourcePageUrl.trim() ||
+            !targetUrl.trim()
+          }
+          onClick={submitManual}
+        >
+          <Plus data-icon="inline-start" />
+          登记并验证
+        </Button>
+      </div>
+
+      <div className="flex flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-xs text-muted-foreground">
+          CSV: sourcePageUrl, targetUrl, opportunityId（新获外链可选）
+        </div>
+        <label className="inline-flex">
+          <Input
+            accept=".csv,text/csv"
+            className="max-w-sm rounded-md border-border bg-background"
+            disabled={busy}
+            type="file"
+            onChange={(event) => {
+              const file = event.target.files?.[0]
+              if (file) importCsv(file)
+              event.target.value = ""
+            }}
+          />
+          <span className="sr-only">
+            <FileUp />
+            导入外链 CSV
+          </span>
+        </label>
+      </div>
+
+      {entryState !== "idle" ? (
+        <div
+          className="border-t px-4 py-3 text-xs"
+          role={entryState === "success" ? "status" : "alert"}
+        >
+          {entryState === "submitting"
+            ? "正在提交真实验证任务"
+            : entryMessage}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 function StateNotice({
   state,
   retry,
@@ -127,56 +401,29 @@ function StateNotice({
   state: Exclude<LoadState, "ready">
   retry?: () => void
 }) {
-  if (state === "loading") {
-    return (
-      <div className="space-y-3 p-4" aria-label="Links 加载中">
-        <Skeleton className="h-14 w-full rounded-md" />
-        <Skeleton className="h-14 w-full rounded-md" />
-        <Skeleton className="h-14 w-full rounded-md" />
-      </div>
-    )
-  }
-
-  const forbidden = state === "forbidden"
-  const conflict = state === "conflict"
-  const empty = state === "empty"
   return (
-    <div
-      className="flex min-h-48 flex-col items-center justify-center px-4 py-8 text-center"
-      role={empty ? "status" : "alert"}
-    >
-      {forbidden ? (
-        <ShieldAlert className="mb-3 size-5 text-destructive" />
-      ) : empty ? (
-        <CircleHelp className="mb-3 size-5 text-muted-foreground" />
-      ) : (
-        <AlertTriangle className="mb-3 size-5 text-destructive" />
-      )}
-      <div className="text-sm font-medium">
-        {forbidden
-          ? "没有读取此项目 Links 的权限"
-          : conflict
-            ? "Links 状态发生冲突"
-            : empty
-              ? "当前状态下没有记录"
-              : "Links 请求失败"}
-      </div>
-      <div className="mt-1 max-w-md text-xs leading-5 text-muted-foreground">
-        {forbidden
-          ? "服务端返回 403；不会回退到其他项目或缓存数据。"
-          : conflict
-            ? "服务端返回 409；请刷新后重新读取，不会将冲突推断为成功。"
-            : empty
-              ? "可切换状态或等待服务端同步。Candidate 不是成功状态。"
-              : "结果保持未知。请重试读取。"}
-      </div>
-      {retry && !empty ? (
-        <Button className="mt-4" size="sm" variant="outline" onClick={retry}>
-          <RefreshCw data-icon="inline-start" />
-          重试
-        </Button>
-      ) : null}
-    </div>
+    <OutreachStandardStateView
+      state={state}
+      title={
+        state === "loading"
+          ? "Links 加载中"
+          : state === "forbidden"
+            ? "没有读取此项目 Links 的权限"
+            : state === "conflict"
+              ? "Links 状态发生冲突"
+              : state === "empty"
+                ? "当前状态下没有记录"
+                : state === "offline"
+                  ? "Links 当前离线"
+                  : "Links 请求失败"
+      }
+      description={
+        state === "empty"
+          ? "可切换状态或等待服务端同步。Candidate 不是成功状态。"
+          : "结果保持未知，不会回退到其他项目或本地推断。"
+      }
+      onRetry={state === "loading" || state === "empty" ? undefined : retry}
+    />
   )
 }
 
@@ -200,7 +447,10 @@ function DetailNotice({
   const forbidden = state === "forbidden"
   const missing = state === "not-found"
   return (
-    <div className="flex min-h-64 flex-col items-center justify-center px-6 text-center" role="alert">
+    <div
+      className="flex min-h-64 flex-col items-center justify-center px-6 text-center"
+      role="alert"
+    >
       {forbidden ? (
         <ShieldAlert className="mb-3 size-5 text-destructive" />
       ) : (
@@ -247,7 +497,10 @@ function ResourceNotice({
 
   const forbidden = state === "forbidden"
   return (
-    <div className="mt-3 flex items-start gap-2 text-xs leading-5 text-muted-foreground" role="alert">
+    <div
+      className="mt-3 flex items-start gap-2 text-xs leading-5 text-muted-foreground"
+      role="alert"
+    >
       {forbidden ? (
         <ShieldAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
       ) : (
@@ -279,13 +532,7 @@ function ResourceNotice({
   )
 }
 
-function UrlValue({
-  label,
-  value,
-}: {
-  label: string
-  value: string | null
-}) {
+function UrlValue({ label, value }: { label: string; value: string | null }) {
   return (
     <div className="min-w-0">
       <div className="text-xs font-medium text-muted-foreground">{label}</div>
@@ -336,13 +583,15 @@ function ValidationEvidenceBlock({
           ) : null}
           <div className="sm:col-span-2">
             <dt className="text-muted-foreground">不可变快照哈希</dt>
-            <dd className="mt-1 break-all font-mono text-[11px]">
+            <dd className="mt-1 font-mono text-[11px] break-all">
               {evidence.evidenceSnapshotHash}
             </dd>
           </div>
           <div>
             <dt className="text-muted-foreground">证据契约</dt>
-            <dd className="mt-1 break-all">{evidence.evidenceContractVersion}</dd>
+            <dd className="mt-1 break-all">
+              {evidence.evidenceContractVersion}
+            </dd>
           </div>
           <div>
             <dt className="text-muted-foreground">证据 schema</dt>
@@ -358,17 +607,15 @@ function ValidationEvidenceBlock({
   )
 }
 
-function EvidenceReadBlock({
-  evidence,
-}: {
-  evidence: PlacementEvidence
-}) {
+function EvidenceReadBlock({ evidence }: { evidence: PlacementEvidence }) {
   return (
     <dl className="mt-3 grid gap-3 border-t pt-4 text-xs sm:grid-cols-2">
       <div>
         <dt className="text-muted-foreground">不可变性 / 哈希校验</dt>
         <dd className="mt-1">
-          {evidence.immutable && evidence.hashVerified ? "immutable · hash verified" : "服务端未确认"}
+          {evidence.immutable && evidence.hashVerified
+            ? "immutable · hash verified"
+            : "服务端未确认"}
         </dd>
       </div>
       <div>
@@ -377,22 +624,78 @@ function EvidenceReadBlock({
       </div>
       <div className="sm:col-span-2">
         <dt className="text-muted-foreground">哈希</dt>
-        <dd className="mt-1 break-all font-mono text-[11px]">{evidence.hash}</dd>
+        <dd className="mt-1 font-mono text-[11px] break-all">
+          {evidence.hash}
+        </dd>
       </div>
       <div>
         <dt className="text-muted-foreground">抓取模式 / HTTP</dt>
         <dd className="mt-1">
-          {evidence.source.fetchMode} · {evidence.source.httpStatus ?? "服务端未提供"}
+          {evidence.source.fetchMode} ·{" "}
+          {evidence.source.httpStatus ?? "服务端未提供"}
         </dd>
       </div>
       <div>
         <dt className="text-muted-foreground">链接出现次数</dt>
-        <dd className="mt-1">{evidence.link.occurrenceCount ?? "服务端未提供"}</dd>
+        <dd className="mt-1">
+          {evidence.link.occurrenceCount ?? "服务端未提供"}
+        </dd>
+      </div>
+      <div>
+        <dt className="text-muted-foreground">X-Robots-Tag</dt>
+        <dd className="mt-1">
+          {evidence.source.xRobotsTag ?? "服务端未提供"}
+        </dd>
+      </div>
+      <div>
+        <dt className="text-muted-foreground">Meta robots</dt>
+        <dd className="mt-1">
+          {evidence.link.robotsDirectives.length > 0
+            ? evidence.link.robotsDirectives.join(", ")
+            : "无"}
+        </dd>
       </div>
       <div className="sm:col-span-2">
         <dt className="text-muted-foreground">最终 URL</dt>
-        <dd className="mt-1 break-all">{evidence.source.finalUrl ?? "服务端未提供"}</dd>
+        <dd className="mt-1 break-all">
+          {evidence.source.finalUrl ?? "服务端未提供"}
+        </dd>
       </div>
+      <div className="sm:col-span-2">
+        <dt className="text-muted-foreground">重定向链</dt>
+        <dd className="mt-1 break-all">
+          {evidence.source.redirectChain.length > 0
+            ? evidence.source.redirectChain.join(" → ")
+            : "无"}
+        </dd>
+      </div>
+      <div className="sm:col-span-2">
+        <dt className="text-muted-foreground">Canonical</dt>
+        <dd className="mt-1 break-all">
+          {evidence.link.canonicalUrl ?? "服务端未提供"}
+        </dd>
+      </div>
+      {evidence.link.occurrences.map((occurrence, index) => (
+        <div
+          className="border-t pt-3 sm:col-span-2"
+          key={`${occurrence.resolvedHref}-${index}`}
+        >
+          <dt className="text-muted-foreground">
+            Link occurrence {index + 1}
+          </dt>
+          <dd className="mt-1 grid gap-1">
+            <span className="break-all">{occurrence.resolvedHref}</span>
+            <span>anchor: {occurrence.anchorText || "空文本"}</span>
+            <span>
+              rel: {occurrence.rel.length > 0 ? occurrence.rel.join(", ") : "无"}
+            </span>
+            <span>
+              nofollow {String(occurrence.nofollow)} · sponsored{" "}
+              {String(occurrence.sponsored)} · ugc {String(occurrence.ugc)}
+            </span>
+          </dd>
+        </div>
+      ))}
     </dl>
   )
 }
@@ -410,7 +713,10 @@ function LatestObservationBlock({
 }) {
   const observation = detail.latestObservation
   return (
-    <section className="border-t px-6 py-5" aria-labelledby="latest-observation-title">
+    <section
+      className="border-t px-6 py-5"
+      aria-labelledby="latest-observation-title"
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold" id="latest-observation-title">
@@ -451,7 +757,9 @@ function LatestObservationBlock({
                 {observation.evidence.freshness === "stale" ? (
                   <Badge variant="destructive">stale</Badge>
                 ) : (
-                  <Badge variant="outline">{observation.evidence.freshness}</Badge>
+                  <Badge variant="outline">
+                    {observation.evidence.freshness}
+                  </Badge>
                 )}
               </dd>
             </div>
@@ -459,12 +767,14 @@ function LatestObservationBlock({
               <dt className="text-muted-foreground">监控失败</dt>
               <dd className="mt-1">
                 {observation.failure.status}
-                {observation.failure.code ? ` · ${observation.failure.code}` : ""}
+                {observation.failure.code
+                  ? ` · ${observation.failure.code}`
+                  : ""}
               </dd>
             </div>
             <div className="sm:col-span-2">
               <dt className="text-muted-foreground">不可变证据哈希</dt>
-              <dd className="mt-1 break-all font-mono text-[11px]">
+              <dd className="mt-1 font-mono text-[11px] break-all">
                 {observation.evidence.hash}
               </dd>
             </div>
@@ -503,14 +813,18 @@ function EventTimeline({
   retry: () => void
 }) {
   return (
-    <section className="border-t px-6 py-5" aria-labelledby="event-history-title">
+    <section
+      className="border-t px-6 py-5"
+      aria-labelledby="event-history-title"
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold" id="event-history-title">
             状态变化和恢复事件
           </h3>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            读取 Placement 生命周期事件。Recovered 只来自服务端 `placement.recovered` 或 `placement.restored` 事件。
+            读取 Placement 生命周期事件。Recovered 只来自服务端
+            `placement.recovered` 或 `placement.restored` 事件。
           </p>
         </div>
         <ListRestart className="size-4 text-muted-foreground" />
@@ -522,23 +836,39 @@ function EventTimeline({
               {events.items.map((event) => (
                 <li className="border-l-2 pl-3 text-xs" key={event.eventId}>
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant={event.eventType.includes("lost") ? "destructive" : "outline"}>
+                    <Badge
+                      variant={
+                        event.eventType.includes("lost")
+                          ? "destructive"
+                          : "outline"
+                      }
+                    >
                       {event.eventType}
                     </Badge>
-                    <span className="text-muted-foreground">{dateTime(event.occurredAt)}</span>
+                    <span className="text-muted-foreground">
+                      {dateTime(event.occurredAt)}
+                    </span>
                   </div>
                   <div className="mt-1">
-                    {event.previousHealthStatus ?? "未提供"} → {event.nextHealthStatus ?? "未提供"} · v
+                    {event.previousHealthStatus ?? "未提供"} →{" "}
+                    {event.nextHealthStatus ?? "未提供"} · v
                     {event.placementVersion}
                   </div>
                   {event.reason ? (
-                    <div className="mt-1 text-muted-foreground">{event.reason}</div>
+                    <div className="mt-1 text-muted-foreground">
+                      {event.reason}
+                    </div>
                   ) : null}
                 </li>
               ))}
             </ol>
             {events.hasMore && events.nextCursor ? (
-              <Button className="mt-4" size="sm" variant="outline" onClick={loadMore}>
+              <Button
+                className="mt-4"
+                size="sm"
+                variant="outline"
+                onClick={loadMore}
+              >
                 加载更多事件
               </Button>
             ) : null}
@@ -574,14 +904,18 @@ function ReverifyControl({
   const accepted = commandState === "accepted"
   const currentRun = isPlacement ? detail.latestMonitorRun : null
   return (
-    <section className="border-t px-6 py-5" aria-labelledby="verification-control-title">
+    <section
+      className="border-t px-6 py-5"
+      aria-labelledby="verification-control-title"
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold" id="verification-control-title">
             服务器授权重新验证
           </h3>
           <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
-            仅 Placement 调用冻结的 reverify 命令，并提交当前服务端版本和幂等键。客户端不执行 Browser 抓取。
+            仅 Placement 调用冻结的 reverify
+            命令，并提交当前服务端版本和幂等键。客户端不执行 Browser 抓取。
           </p>
         </div>
         <Button
@@ -602,7 +936,9 @@ function ReverifyControl({
         <div className="mt-4 border-t pt-4 text-xs">
           <div className="font-medium">最新监控任务</div>
           <div className="mt-1 text-muted-foreground">
-            {isJobRunning(currentRun.status) ? "job-running" : currentRun.status}
+            {isJobRunning(currentRun.status)
+              ? "job-running"
+              : currentRun.status}
             {currentRun.monitorRunId ? ` · ${currentRun.monitorRunId}` : ""}
           </div>
           {currentRun.scheduledFor ? (
@@ -610,37 +946,57 @@ function ReverifyControl({
               计划时间 {dateTime(currentRun.scheduledFor)}
             </div>
           ) : null}
+          {isJobRunning(currentRun.status) ? (
+            <OutreachStandardStateView
+              state="job-running"
+              title="Placement 重验任务运行中"
+              description="状态来自共享监控任务，不启动第二套 Browser Worker。"
+              compact
+              className="mt-3"
+            />
+          ) : null}
         </div>
       ) : null}
 
       {accepted && result ? (
         <div className="mt-4 border-t pt-4 text-xs" role="status">
           <div className="font-medium">
-            {result.accepted ? "服务端已接受重新验证" : "服务端返回现有重新验证任务"}
+            {result.accepted
+              ? "服务端已接受重新验证"
+              : "服务端返回现有重新验证任务"}
           </div>
           <div className="mt-1 text-muted-foreground">
-            {isJobRunning(result.monitorRun.status) ? "job-running" : result.monitorRun.status}
+            {isJobRunning(result.monitorRun.status)
+              ? "job-running"
+              : result.monitorRun.status}
             {" · "}
             {result.monitorRun.monitorRunId}
             {" · "}
             {dateTime(result.monitorRun.scheduledFor)}
           </div>
           <div className="mt-1 text-muted-foreground">
-            replayed: {String(result.replayed)} · browserFallbackAllowed: false
+            replayed: {String(result.replayed)} · browserFallbackAllowed:{" "}
+            {String(result.browserFallbackAllowed)}
           </div>
         </div>
       ) : null}
 
-      {commandState === "forbidden" || commandState === "conflict" || commandState === "error" || commandState === "not-found" ? (
+      {commandState === "forbidden" ||
+      commandState === "conflict" ||
+      commandState === "offline" ||
+      commandState === "error" ||
+      commandState === "not-found" ? (
         <div className="mt-4 border-t pt-4 text-xs" role="alert">
           <div className="font-medium">
             {commandState === "forbidden"
               ? "服务端拒绝重新验证权限"
               : commandState === "conflict"
                 ? "重新验证与服务端版本或幂等键冲突"
-                : commandState === "not-found"
-                  ? "Placement 已不存在"
-                  : "重新验证命令失败"}
+                : commandState === "offline"
+                  ? "重新验证请求当前离线"
+                  : commandState === "not-found"
+                    ? "Placement 已不存在"
+                    : "重新验证命令失败"}
           </div>
           <div className="mt-1 text-muted-foreground">
             {commandState === "conflict"
@@ -704,20 +1060,60 @@ function DetailContent({
         <div className="grid gap-3 text-xs sm:grid-cols-2">
           <div>
             <div className="text-muted-foreground">URL 规范化版本</div>
-            <div className="mt-1 break-all">{detail.urlNormalizationVersion}</div>
+            <div className="mt-1 break-all">
+              {detail.urlNormalizationVersion}
+            </div>
           </div>
           <div>
             <div className="text-muted-foreground">Opportunity</div>
-            <div className="mt-1 break-all">{detail.opportunityId || "服务端未提供"}</div>
+            <div className="mt-1 break-all">
+              {detail.opportunityId || "已有外链（未绑定 Opportunity）"}
+            </div>
           </div>
+          {!isCandidate ? (
+            <>
+              <div>
+                <div className="text-muted-foreground">当前健康状态</div>
+                <div className="mt-1">{detail.healthStatus}</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">最后检查</div>
+                <div className="mt-1">
+                  {detail.latestObservation
+                    ? dateTime(detail.latestObservation.observedAt)
+                    : "尚无 Observation"}
+                </div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">连续异常</div>
+                <div className="mt-1">{detail.consecutiveAnomalies}</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">下次监控</div>
+                <div className="mt-1">{dateTime(detail.nextCheckAt)}</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">Browser 回退</div>
+                <div className="mt-1">
+                  {detail.browserFallbackEnabled ? "enabled" : "disabled"}
+                </div>
+              </div>
+            </>
+          ) : null}
         </div>
       </section>
 
       {isCandidate ? (
-        <ValidationEvidenceBlock title="最新验证" evidence={detail.latestValidation} />
+        <ValidationEvidenceBlock
+          title="最新验证"
+          evidence={detail.latestValidation}
+        />
       ) : (
         <>
-          <ValidationEvidenceBlock title="首次验证" evidence={detail.initialValidation} />
+          <ValidationEvidenceBlock
+            title="首次验证"
+            evidence={detail.initialValidation}
+          />
           <LatestObservationBlock
             detail={detail}
             evidence={evidence}
@@ -752,7 +1148,7 @@ function ListRows({
 }) {
   return (
     <div className="overflow-x-auto">
-      <table className="min-w-[760px] w-full text-left text-sm">
+      <table className="w-full min-w-[760px] text-left text-sm">
         <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
           <tr>
             <th className="px-4 py-3 font-medium">状态</th>
@@ -765,7 +1161,10 @@ function ListRows({
         </thead>
         <tbody className="divide-y">
           {items.map((item) => {
-            const itemId = item.recordType === "candidate" ? item.candidateId : item.placementId
+            const itemId =
+              item.recordType === "candidate"
+                ? item.candidateId
+                : item.placementId
             const status =
               item.recordType === "candidate"
                 ? `${item.validationStatus} · ${item.matchStatus}`
@@ -776,16 +1175,20 @@ function ListRows({
                   <div className="flex flex-col items-start gap-1">
                     <StateBadge state={item.displayState} />
                     {item.countsTowardKpi ? null : (
-                      <span className="text-[11px] text-muted-foreground">不计成功 KPI</span>
+                      <span className="text-[11px] text-muted-foreground">
+                        不计成功 KPI
+                      </span>
                     )}
                   </div>
                 </td>
                 <td className="max-w-72 px-4 py-3 text-xs break-all">
                   {item.sourcePageUrl || "服务端未提供"}
                 </td>
-                <td className="max-w-72 px-4 py-3 text-xs break-all">{item.targetUrl}</td>
+                <td className="max-w-72 px-4 py-3 text-xs break-all">
+                  {item.targetUrl}
+                </td>
                 <td className="px-4 py-3 text-xs">{status}</td>
-                <td className="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">
+                <td className="px-4 py-3 text-xs whitespace-nowrap text-muted-foreground">
                   {dateTime(item.createdAt)}
                 </td>
                 <td className="px-4 py-3">
@@ -828,8 +1231,33 @@ export function LinksWorkspace({
   const [evidence, setEvidence] = useState<PlacementEvidence | null>(null)
   const [evidenceState, setEvidenceState] = useState<ResourceState>("idle")
   const [commandState, setCommandState] = useState<CommandState>("idle")
-  const [reverifyResult, setReverifyResult] = useState<PlacementReverifyResult | null>(null)
+  const [reverifyResult, setReverifyResult] =
+    useState<PlacementReverifyResult | null>(null)
+  const [opportunities, setOpportunities] = useState<OpportunityListItem[]>([])
+  const [opportunitiesState, setOpportunitiesState] =
+    useState<ResourceState>("loading")
+  const [selectedOpportunityId, setSelectedOpportunityId] = useState("")
+  const [sourcePageUrl, setSourcePageUrl] = useState("")
+  const [targetUrl, setTargetUrl] = useState("")
+  const [entryState, setEntryState] = useState<EntryState>("idle")
+  const [entryMessage, setEntryMessage] = useState("")
   const currentCursor = cursors[pageIndex]
+  const listRequest = useRef(0)
+  const detailRequest = useRef(0)
+  const eventsRequest = useRef(0)
+  const evidenceRequest = useRef(0)
+  const listKey = useMemo(
+    () =>
+      createProjectQueryKey(
+        websiteProjectKey,
+        "links",
+        "list",
+        view,
+        pageSize,
+        currentCursor ?? null
+      ),
+    [currentCursor, view, websiteProjectKey]
+  )
 
   const successCount = useMemo(
     () =>
@@ -839,7 +1267,44 @@ export function LinksWorkspace({
     [page]
   )
 
+  useEffect(() => {
+    const controller = new AbortController()
+    const loadTimer = window.setTimeout(() => {
+      setOpportunities([])
+      setOpportunitiesState("loading")
+      setSelectedOpportunityId("")
+      void client
+        .listOpportunities(websiteProjectKey, controller.signal)
+        .then((response) => {
+          setOpportunities(response.items)
+          setOpportunitiesState("ready")
+        })
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === "AbortError") {
+            return
+          }
+          setOpportunitiesState(resourceErrorState(error))
+        })
+    }, 0)
+    return () => {
+      window.clearTimeout(loadTimer)
+      controller.abort()
+    }
+  }, [client, websiteProjectKey])
+
   const resetDetailResources = () => {
+    eventsRequest.current += 1
+    evidenceRequest.current += 1
+    backlinksProjectQueries.invalidate([
+      "backlinks",
+      websiteProjectKey,
+      "link-events",
+    ])
+    backlinksProjectQueries.invalidate([
+      "backlinks",
+      websiteProjectKey,
+      "link-evidence",
+    ])
     setEvents(null)
     setEventsState("idle")
     setEvidence(null)
@@ -848,79 +1313,118 @@ export function LinksWorkspace({
     setReverifyResult(null)
   }
 
-  const loadPage = async () => {
-    setState("loading")
-    setPage(null)
-    try {
-      const response = await client.listLinks(websiteProjectKey, {
-        view,
-        limit: pageSize,
-        cursor: currentCursor,
-      })
-      setPage(response)
-      setState(response.items.length === 0 ? "empty" : "ready")
-    } catch (error) {
+  const loadPage = useCallback(
+    async (force = false) => {
+      const request = ++listRequest.current
+      if (force) backlinksProjectQueries.invalidate(listKey)
+      setState("loading")
       setPage(null)
-      setState(resourceErrorState(error))
-    }
-  }
-
-  useEffect(() => {
-    let active = true
-    queueMicrotask(() => {
-      if (active) {
-        setState("loading")
-        setPage(null)
-      }
-    })
-
-    void client
-      .listLinks(websiteProjectKey, {
-        view,
-        limit: pageSize,
-        cursor: currentCursor,
-      })
-      .then((response) => {
-        if (!active) return
+      try {
+        const response = await backlinksProjectQueries.fetch(
+          listKey,
+          (signal) =>
+            client.listLinks(
+              websiteProjectKey,
+              {
+                view,
+                limit: pageSize,
+                cursor: currentCursor,
+              },
+              signal
+            )
+        )
+        if (request !== listRequest.current) return
         setPage(response)
         setState(response.items.length === 0 ? "empty" : "ready")
-      })
-      .catch((error: unknown) => {
-        if (!active) return
+      } catch (error) {
+        if (request !== listRequest.current) return
+        if (error instanceof DOMException && error.name === "AbortError") return
         setPage(null)
         setState(resourceErrorState(error))
-      })
+      }
+    },
+    [client, currentCursor, listKey, view, websiteProjectKey]
+  )
 
+  useEffect(() => {
+    queueMicrotask(() => void loadPage())
     return () => {
-      active = false
+      listRequest.current += 1
+      backlinksProjectQueries.invalidate(listKey)
     }
-  }, [client, currentCursor, view, websiteProjectKey])
+  }, [listKey, loadPage])
 
-  const loadPlacementEvents = async (placementId: string, cursor?: string, append = false) => {
+  const loadPlacementEvents = async (
+    placementId: string,
+    cursor?: string,
+    append = false
+  ) => {
+    const request = ++eventsRequest.current
+    const eventsKey = createProjectQueryKey(
+      websiteProjectKey,
+      "link-events",
+      placementId,
+      eventPageSize,
+      cursor ?? null
+    )
+    if (!append) {
+      backlinksProjectQueries.invalidate([
+        "backlinks",
+        websiteProjectKey,
+        "link-events",
+      ])
+    }
     setEventsState("loading")
     if (!append) setEvents(null)
     try {
-      const response = await client.listPlacementEvents(websiteProjectKey, placementId, {
-        limit: eventPageSize,
-        cursor,
-      })
+      const response = await backlinksProjectQueries.fetch(
+        eventsKey,
+        (signal) =>
+          client.listPlacementEvents(
+            websiteProjectKey,
+            placementId,
+            {
+              limit: eventPageSize,
+              cursor,
+            },
+            signal
+          )
+      )
+      if (request !== eventsRequest.current) return
       setEvents((current) =>
         append && current
           ? {
               items: [...current.items, ...response.items],
               hasMore: response.hasMore,
               nextCursor: response.nextCursor,
+              meta: response.meta,
             }
           : response
       )
       setEventsState("ready")
     } catch (error) {
+      if (request !== eventsRequest.current) return
+      if (error instanceof DOMException && error.name === "AbortError") return
       if (!append) setEvents(null)
       setEventsState(resourceErrorState(error))
     }
   }
 
   const openDetail = async (item: LinkListItem) => {
+    const request = ++detailRequest.current
+    const itemId =
+      item.recordType === "candidate" ? item.candidateId : item.placementId
+    const detailKey = createProjectQueryKey(
+      websiteProjectKey,
+      "link-detail",
+      item.recordType,
+      itemId
+    )
+    backlinksProjectQueries.invalidate([
+      "backlinks",
+      websiteProjectKey,
+      "link-detail",
+    ])
     setSelected(item)
     setDetail(null)
     setDetailState("loading")
@@ -928,27 +1432,60 @@ export function LinksWorkspace({
     try {
       const response =
         item.recordType === "candidate"
-          ? await client.getCandidateLink(websiteProjectKey, item.candidateId)
-          : await client.getPlacementLink(websiteProjectKey, item.placementId)
+          ? await backlinksProjectQueries.fetch(detailKey, (signal) =>
+              client.getCandidateLink(
+                websiteProjectKey,
+                item.candidateId,
+                signal
+              )
+            )
+          : await backlinksProjectQueries.fetch(detailKey, (signal) =>
+              client.getPlacementLink(
+                websiteProjectKey,
+                item.placementId,
+                signal
+              )
+            )
+      if (request !== detailRequest.current) return
       setDetail(response)
       setDetailState("ready")
       if (response.recordType === "placement") {
         void loadPlacementEvents(response.placementId)
       }
     } catch (error) {
+      if (request !== detailRequest.current) return
+      if (error instanceof DOMException && error.name === "AbortError") return
       setDetail(null)
       setDetailState(detailErrorState(error))
     }
   }
 
   const readEvidence = async (evidenceId: string) => {
+    const request = ++evidenceRequest.current
+    const evidenceKey = createProjectQueryKey(
+      websiteProjectKey,
+      "link-evidence",
+      evidenceId
+    )
+    backlinksProjectQueries.invalidate([
+      "backlinks",
+      websiteProjectKey,
+      "link-evidence",
+    ])
     setEvidence(null)
     setEvidenceState("loading")
     try {
-      const response = await client.getPlacementEvidence(websiteProjectKey, evidenceId)
+      const response = await backlinksProjectQueries.fetch(
+        evidenceKey,
+        (signal) =>
+          client.getPlacementEvidence(websiteProjectKey, evidenceId, signal)
+      )
+      if (request !== evidenceRequest.current) return
       setEvidence(response)
       setEvidenceState("ready")
     } catch (error) {
+      if (request !== evidenceRequest.current) return
+      if (error instanceof DOMException && error.name === "AbortError") return
       setEvidence(null)
       setEvidenceState(resourceErrorState(error))
     }
@@ -958,14 +1495,158 @@ export function LinksWorkspace({
     setCommandState("submitting")
     setReverifyResult(null)
     try {
-      const response = await client.reverifyPlacement(websiteProjectKey, placement.placementId, {
-        expectedVersion: placement.version,
-        idempotencyKey: crypto.randomUUID(),
-      })
+      const response = await client.reverifyPlacement(
+        websiteProjectKey,
+        placement.placementId,
+        {
+          expectedVersion: placement.version,
+          idempotencyKey: crypto.randomUUID(),
+        }
+      )
+      if (
+        !response.accepted ||
+        response.placementId !== placement.placementId
+      ) {
+        throw new Error("Placement reverify response was not accepted")
+      }
+      backlinksProjectQueries.invalidate([
+        "backlinks",
+        websiteProjectKey,
+        "links",
+      ])
+      backlinksProjectQueries.invalidate([
+        "backlinks",
+        websiteProjectKey,
+        "link-detail",
+      ])
+      backlinksProjectQueries.invalidate([
+        "backlinks",
+        websiteProjectKey,
+        "link-events",
+      ])
       setReverifyResult(response)
       setCommandState("accepted")
     } catch (error) {
       setCommandState(commandErrorState(error))
+    }
+  }
+
+  const submitManualPlacement = async () => {
+    const opportunityId = selectedOpportunityId
+    const source = sourcePageUrl.trim()
+    const target = targetUrl.trim()
+    if (!source || !target) {
+      setEntryState("error")
+      setEntryMessage("Source page URL 和 Target URL 均为必填")
+      return
+    }
+
+    setEntryState("submitting")
+    setEntryMessage("")
+    try {
+      const response = await client.createPlacementCandidate(
+        websiteProjectKey,
+        {
+          sourceType: "manual",
+          ...(opportunityId ? { opportunityId } : {}),
+          sourcePageUrl: source,
+          targetUrl: target,
+          evidence: {
+            contractVersion: "placement.user-entry.v1",
+            schemaVersion: 1,
+            evidenceId: crypto.randomUUID(),
+            observedAt: new Date().toISOString(),
+            sourceRef: "links-ui:manual",
+            payload: { entryMode: "manual" },
+          },
+          idempotencyKey: crypto.randomUUID(),
+        }
+      )
+      if (
+        response.status !== "PENDING_VALIDATION" ||
+        (
+          opportunityId
+            ? response.opportunityId !== opportunityId
+            : response.opportunityId !== undefined
+        )
+      ) {
+        throw new Error("Placement candidate was not queued for validation")
+      }
+      setEntryState("success")
+      setEntryMessage(`Candidate ${response.candidateId} 已进入直接验证`)
+      setSourcePageUrl("")
+      if (view === "candidate") {
+        void loadPage(true)
+      } else {
+        changeView("candidate")
+      }
+    } catch (error) {
+      setEntryState(entryErrorState(error))
+      setEntryMessage(
+        error instanceof Error ? error.message : "Placement 登记失败"
+      )
+    }
+  }
+
+  const importPlacementCsv = async (file: File) => {
+    let imported = 0
+    setEntryState("submitting")
+    setEntryMessage("")
+    try {
+      const rows = parsePlacementCsv(
+        await file.text(),
+        selectedOpportunityId
+      )
+      for (const row of rows) {
+        const response = await client.createPlacementCandidate(
+          websiteProjectKey,
+          {
+            sourceType: "import",
+            ...(row.opportunityId
+              ? { opportunityId: row.opportunityId }
+              : {}),
+            sourceExternalId: `csv:${file.name}:${row.rowNumber}`,
+            sourcePageUrl: row.sourcePageUrl,
+            targetUrl: row.targetUrl,
+            evidence: {
+              contractVersion: "placement.user-entry.v1",
+              schemaVersion: 1,
+              evidenceId: crypto.randomUUID(),
+              observedAt: new Date().toISOString(),
+              sourceRef: `links-ui:csv:${file.name}:${row.rowNumber}`,
+              payload: {
+                entryMode: "csv",
+                fileName: file.name,
+                rowNumber: row.rowNumber,
+              },
+            },
+            idempotencyKey: crypto.randomUUID(),
+          }
+        )
+        if (
+          response.status !== "PENDING_VALIDATION" ||
+          (
+            row.opportunityId
+              ? response.opportunityId !== row.opportunityId
+              : response.opportunityId !== undefined
+          )
+        ) {
+          throw new Error(`CSV 第 ${row.rowNumber} 行未进入直接验证`)
+        }
+        imported += 1
+      }
+      setEntryState("success")
+      setEntryMessage(`${imported} 条外链已进入直接验证`)
+      if (view === "candidate") {
+        void loadPage(true)
+      } else {
+        changeView("candidate")
+      }
+    } catch (error) {
+      setEntryState(entryErrorState(error))
+      const reason =
+        error instanceof Error ? error.message : "Placement CSV 导入失败"
+      setEntryMessage(imported > 0 ? `已提交 ${imported} 条；${reason}` : reason)
     }
   }
 
@@ -1015,7 +1696,8 @@ export function LinksWorkspace({
             <Badge variant="outline">BL-AI-159</Badge>
           </div>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-            项目隔离的链接候选、确认和监控状态。Candidate 只表示候选，不是成功状态，且不计入成功 KPI。
+            项目隔离的链接候选、确认和监控状态。Candidate
+            只表示候选，不是成功状态，且不计入成功 KPI。
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs">
@@ -1031,6 +1713,27 @@ export function LinksWorkspace({
           </Button>
         </div>
       </div>
+
+      <BacklinkProfilePanel
+        key={websiteProjectKey}
+        client={client}
+        websiteProjectKey={websiteProjectKey}
+      />
+
+      <PlacementEntryPanel
+        entryMessage={entryMessage}
+        entryState={entryState}
+        importCsv={(file) => void importPlacementCsv(file)}
+        opportunities={opportunities}
+        opportunitiesState={opportunitiesState}
+        selectedOpportunityId={selectedOpportunityId}
+        setSelectedOpportunityId={setSelectedOpportunityId}
+        setSourcePageUrl={setSourcePageUrl}
+        setTargetUrl={setTargetUrl}
+        sourcePageUrl={sourcePageUrl}
+        submitManual={() => void submitManualPlacement()}
+        targetUrl={targetUrl}
+      />
 
       <div
         className="mt-4 flex max-w-full gap-1 overflow-x-auto pb-1"
@@ -1061,7 +1764,10 @@ export function LinksWorkspace({
         {state === "ready" ? (
           page ? (
             <>
-              <ListRows items={page.items} openDetail={(item) => void openDetail(item)} />
+              <ListRows
+                items={page.items}
+                openDetail={(item) => void openDetail(item)}
+              />
               <div className="flex flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="text-xs text-muted-foreground">
                   第 {pageIndex + 1} 页 · seek pagination
@@ -1122,12 +1828,17 @@ export function LinksWorkspace({
                 evidenceState={evidenceState}
                 loadMoreEvents={() => {
                   if (selectedPlacementId && events?.nextCursor) {
-                    void loadPlacementEvents(selectedPlacementId, events.nextCursor, true)
+                    void loadPlacementEvents(
+                      selectedPlacementId,
+                      events.nextCursor,
+                      true
+                    )
                   }
                 }}
                 readEvidence={(evidenceId) => void readEvidence(evidenceId)}
                 reloadEvents={() => {
-                  if (selectedPlacementId) void loadPlacementEvents(selectedPlacementId)
+                  if (selectedPlacementId)
+                    void loadPlacementEvents(selectedPlacementId)
                 }}
                 requestReverify={(placement) => void requestReverify(placement)}
                 reverifyResult={reverifyResult}

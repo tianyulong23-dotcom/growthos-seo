@@ -35,6 +35,15 @@ const values = z.object({
   reportingTimezone: nonBlank,
   reportLookbackDays: z.number().int().min(1).max(366),
   exportExpiryHours: z.number().int().min(1).max(168),
+  discoveryTargetAudiences: z.array(
+    z.string().trim().min(1).max(2_048),
+  ).max(100).default([]),
+  discoveryPartnershipGoals: z.array(
+    z.string().trim().min(1).max(2_048),
+  ).max(100).default([]),
+  discoveryExplicitCompetitorDomains: z.array(
+    z.string().trim().min(1).max(253),
+  ).max(100).default([]),
 }).strict();
 const switchLayer = z.enum(["project", "provider"]);
 const switchSourceLayer = z.enum([
@@ -87,6 +96,38 @@ type SettingsValues = z.output<typeof values>;
 type KillSwitchView = z.output<typeof killSwitch>;
 type GovernanceView = z.output<typeof viewResponse>;
 
+export type BacklinksSettingsGovernanceService = Readonly<{
+  getView(scope: Readonly<{
+    organizationId: string;
+    workspaceId: string;
+    websiteProjectId: string;
+  }>): Promise<GovernanceView>;
+  updateSettings(input: Readonly<{
+    scope: Readonly<{
+      organizationId: string;
+      workspaceId: string;
+      websiteProjectId: string;
+    }>;
+    expectedVersion: number;
+    values: SettingsValues;
+    actorId: string;
+  }>): Promise<z.output<typeof settings>>;
+  updateKillSwitch(input: Readonly<{
+    scope: Readonly<{
+      organizationId: string;
+      workspaceId: string;
+      websiteProjectId: string;
+    }>;
+    expectedVersion: number;
+    layer: "project" | "provider";
+    capability: string;
+    provider: string | null;
+    blocked: boolean;
+    reason: string;
+    actorId: string;
+  }>): Promise<KillSwitchView>;
+}>;
+
 function sendError(
   error: FastifyError,
   request: FastifyRequest,
@@ -109,37 +150,7 @@ export function registerBacklinksSettingsGovernanceRoutes(
   app: FastifyInstance,
   options: Readonly<{
     projectContext: ProjectContextPort;
-    service: Readonly<{
-      getView(scope: Readonly<{
-        organizationId: string;
-        workspaceId: string;
-        websiteProjectId: string;
-      }>): Promise<GovernanceView>;
-      updateSettings(input: Readonly<{
-        scope: Readonly<{
-          organizationId: string;
-          workspaceId: string;
-          websiteProjectId: string;
-        }>;
-        expectedVersion: number;
-        values: SettingsValues;
-        actorId: string;
-      }>): Promise<z.output<typeof settings>>;
-      updateKillSwitch(input: Readonly<{
-        scope: Readonly<{
-          organizationId: string;
-          workspaceId: string;
-          websiteProjectId: string;
-        }>;
-        expectedVersion: number;
-        layer: "project" | "provider";
-        capability: string;
-        provider: string | null;
-        blocked: boolean;
-        reason: string;
-        actorId: string;
-      }>): Promise<KillSwitchView>;
-    }>;
+    service: BacklinksSettingsGovernanceService;
   }>,
 ): void {
   const typed = app.withTypeProvider<ZodTypeProvider>();
@@ -165,11 +176,12 @@ export function registerBacklinksSettingsGovernanceRoutes(
         actor: request.actor,
         websiteProjectKey: request.params.websiteProjectKey,
       });
-      return options.service.getView({
+      const view = await options.service.getView({
         organizationId: context.tenant.organizationId,
         workspaceId: context.tenant.workspaceId,
         websiteProjectId: context.project.websiteProjectId,
       });
+      return viewResponse.parse(view);
     },
   );
 
@@ -209,7 +221,7 @@ export function registerBacklinksSettingsGovernanceRoutes(
         values: request.body.values,
         actorId: request.actor.userId,
       });
-      return { settings: updated };
+      return settingsResponse.parse({ settings: updated });
     },
   );
 

@@ -7,28 +7,38 @@ import { fileURLToPath } from "node:url"
 const dirname = path.dirname(fileURLToPath(import.meta.url))
 const read = (file) => readFile(path.join(dirname, file), "utf8")
 
-test("BL-AI-161..177 reports consume frozen Metric Snapshot and Report Revision DTOs", async () => {
+test("BL-AI-188 reports use generated frozen DTOs and operations", async () => {
   const api = await read("api.ts")
   const types = await read("types.ts")
   const workspace = await read("reports-workspace.tsx")
 
-  assert.match(api, /from "@\/api\/client"/)
-  assert.match(api, /\/backlinks\/metrics\/dashboard/)
-  assert.match(api, /\/backlinks\/reports/)
-  assert.match(api, /\/backlinks\/report-exports/)
-  assert.match(types, /metricDefinitionVersion/)
-  assert.match(types, /snapshotId/)
-  assert.match(types, /numerator/)
-  assert.match(types, /denominator/)
-  assert.match(types, /inputSnapshotIds/)
+  assert.match(api, /requestBacklinks/)
+  for (const operationId of [
+    "backlinksGetMetricDashboardV1",
+    "backlinksListPublishedReportsV1",
+    "backlinksRequestReportExportV1",
+    "backlinksGetReportExportV1",
+    "backlinksAuthorizeReportExportDownloadV1",
+  ]) {
+    assert.match(api, new RegExp(operationId))
+  }
+  assert.doesNotMatch(api, /from "@\/api\/client"|\/api\/v1/)
+  assert.match(types, /BacklinksResponse/)
+  assert.match(types, /BacklinksRequest/)
+  assert.match(workspace, /backlinksProjectQueries\.fetch/)
+  assert.match(workspace, /createProjectQueryKey/)
+  assert.match(workspace, /AbortError/)
   assert.match(workspace, /Candidate 不计入成功 Placement KPI/)
+  assert.match(workspace, /dashboardResponse\.dashboard\.trends/)
+  assert.match(workspace, /metric\.snapshotVersion/)
+  assert.match(workspace, /report\.inputSnapshotIds\.map/)
   assert.doesNotMatch(
     `${api}\n${types}\n${workspace}`,
     /accessToken|refreshToken|authorizationCode|providerPayload|emailBody/
   )
 })
 
-test("reports expose explicit window, timezone, stale, empty, forbidden, and export lifecycle states", async () => {
+test("reports expose required read and export lifecycle states", async () => {
   const workspace = await read("reports-workspace.tsx")
 
   for (const state of [
@@ -49,11 +59,17 @@ test("reports expose explicit window, timezone, stale, empty, forbidden, and exp
   assert.match(workspace, /workspaceTimezone/)
   assert.doesNotMatch(workspace, /resolvedOptions\(\)\.timeZone/)
   assert.match(workspace, /status !== "expired"/)
+  assert.match(
+    workspace,
+    /item\.status === "completed" && item\.object !== null/
+  )
   assert.match(workspace, /authorizeExportDownload/)
   assert.match(workspace, /PDF_EXPORT_DISABLED/)
+  assert.match(workspace, /error\.status === 409/)
+  assert.match(workspace, /导出状态已变化/)
 })
 
-test("reports never calculate formal metrics from frontend state or fabricate files", async () => {
+test("reports never calculate formal metrics or fabricate export files", async () => {
   const workspace = await read("reports-workspace.tsx")
   const api = await read("api.ts")
 
@@ -63,4 +79,47 @@ test("reports never calculate formal metrics from frontend state or fabricate fi
   assert.match(workspace, /metric\.value/)
   assert.match(workspace, /metric\.numerator/)
   assert.match(workspace, /metric\.denominator/)
+})
+
+test("reports expose frozen metric keys without frontend recomputation", async () => {
+  const workspace = await read("reports-workspace.tsx")
+
+  for (const metricKey of [
+    "draft_approval_count",
+    "send_count",
+    "reply_rate",
+    "negotiation_conversion_rate",
+    "link_acquisition_rate",
+    "gained_placement_count",
+    "active_placement_count",
+    "suspected_lost_placement_count",
+    "lost_placement_count",
+    "recovered_placement_count",
+  ]) {
+    assert.match(workspace, new RegExp(metricKey))
+  }
+  assert.doesNotMatch(
+    workspace,
+    /draft_created_count|send_accepted_count|reply_received_count|placement_success_rate|placement_monitoring_health_rate/
+  )
+  assert.match(workspace, /trend\.points\.map/)
+  assert.match(workspace, /point\.value/)
+  assert.match(workspace, /point\.numerator/)
+  assert.match(workspace, /point\.denominator/)
+})
+
+test("Backlinks stays within its registered module routes", async () => {
+  const manifest = await read("../manifest.ts")
+  const registration = await read("../registration.ts")
+  const platformNavigation = await read("../../../app/platform-navigation.ts")
+
+  assert.doesNotMatch(manifest, /\{ id: "reports"/)
+  assert.match(registration, /id: "backlinks"/)
+  assert.match(registration, /navigation: \[backlinksNavigation\]/)
+  assert.doesNotMatch(platformNavigation, /指标与报告|ReportsWorkspace/)
+})
+
+test("legacy Reports manual preview is absent", async () => {
+  await assert.rejects(() => read("manual-preview.tsx"), /ENOENT/)
+  await assert.rejects(() => read("manual-preview.html"), /ENOENT/)
 })

@@ -33,6 +33,13 @@ export type DueMonitoringPlacement = Readonly<{
   projectContextSnapshotVersion: number;
 }>;
 
+export type DueMonitoringInventoryItem = Readonly<{
+  monitorPolicyId: string;
+  placementId: string;
+  policyVersion: "inventory-monitoring-v1";
+  nextCheckAt: Date;
+}>;
+
 function validateListInput(input: ListDueMonitoringInput): void {
   if (
     !Number.isFinite(input.dueAt.getTime()) ||
@@ -105,23 +112,14 @@ export function createMonitoringScheduleRepository(
            AND NOT EXISTS (
              SELECT 1
                FROM backlink_monitor_runs run
-              WHERE (
-                run.organization_id,
-                run.workspace_id,
-                run.website_project_id,
-                run.placement_id,
-                run.scheduled_for,
-                run.policy_version,
-                run.execution_mode
-              )=(
-                policy.organization_id,
-                policy.workspace_id,
-                policy.website_project_id,
-                policy.placement_id,
-                policy.next_check_at,
-                policy.policy_version,
-                'static'
-              )
+               WHERE run.organization_id=policy.organization_id
+                 AND run.workspace_id=policy.workspace_id
+                 AND run.website_project_id=policy.website_project_id
+                 AND run.placement_id=policy.placement_id
+                 AND date_trunc('milliseconds',run.scheduled_for)
+                   =date_trunc('milliseconds',policy.next_check_at)
+                 AND run.policy_version=policy.policy_version
+                 AND run.execution_mode='static'
            )
          ORDER BY policy.next_check_at, policy.placement_id,
                   policy.policy_version
@@ -134,6 +132,66 @@ export function createMonitoringScheduleRepository(
         input.limit,
       ]);
       return result.rows as readonly DueMonitoringPlacement[];
+    },
+  };
+}
+
+export function createInventoryMonitoringScheduleRepository(
+  client: MonitoringScheduleQueryClient,
+) {
+  return {
+    async listDue(
+      input: ListDueMonitoringInput,
+    ): Promise<readonly DueMonitoringInventoryItem[]> {
+      validateListInput(input);
+      const result = await client.query(`
+        WITH current_project AS (
+          SELECT project_status
+            FROM backlink_project_context_snapshots
+           WHERE organization_id=$1 AND workspace_id=$2
+             AND website_project_id=$3
+           ORDER BY snapshot_version DESC
+           LIMIT 1
+        )
+        SELECT policy.id "monitorPolicyId",
+               policy.inventory_item_id "placementId",
+               policy.policy_version "policyVersion",
+               policy.next_check_at "nextCheckAt"
+          FROM backlink_inventory_monitor_policies policy
+          JOIN current_project project ON project.project_status='ACTIVE'
+         WHERE policy.organization_id=$1 AND policy.workspace_id=$2
+           AND policy.website_project_id=$3
+           AND policy.monitoring_status='enabled'
+           AND policy.next_check_at<=$4
+           AND NOT EXISTS (
+             SELECT 1
+               FROM backlink_inventory_monitor_runs run
+              WHERE run.organization_id=policy.organization_id
+                AND run.workspace_id=policy.workspace_id
+                AND run.website_project_id=policy.website_project_id
+                AND run.inventory_item_id=policy.inventory_item_id
+                AND date_trunc('milliseconds',run.scheduled_for)
+                  =date_trunc('milliseconds',policy.next_check_at)
+                AND run.policy_version=policy.policy_version
+                AND run.execution_mode='static'
+           )
+         ORDER BY policy.next_check_at,policy.inventory_item_id
+         LIMIT $5
+      `, [
+        input.organizationId,
+        input.workspaceId,
+        input.websiteProjectId,
+        input.dueAt,
+        input.limit,
+      ]);
+      return result.rows.map((row) => ({
+        monitorPolicyId: String(row.monitorPolicyId),
+        placementId: String(row.placementId),
+        policyVersion: "inventory-monitoring-v1" as const,
+        nextCheckAt: row.nextCheckAt instanceof Date
+          ? row.nextCheckAt
+          : new Date(String(row.nextCheckAt)),
+      }));
     },
   };
 }

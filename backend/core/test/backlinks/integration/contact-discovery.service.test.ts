@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ContactDiscoveryService } from "../../../src/modules/backlinks/application/services/contact-discovery.service.js";
+import { reassessStoredContactEvidence } from "../../../src/modules/backlinks/application/services/contact-evidence-reassessment.service.js";
 import { createContactDiscoveryRepository } from "../../../src/modules/backlinks/db/repositories/contact-discovery.repository.js";
 import type { SafeFetchPort, SafeFetchResult } from "../../../src/modules/backlinks/ports/safe-fetch.port.js";
 import { startBacklinksPostgresHarness, type BacklinksPostgresHarness } from "./harness/postgresql-container.js";
@@ -58,9 +59,21 @@ describe("BL-AI-072 contact discovery", () => {
       "../../../../database/roles/0001_growthos_schema_roles.sql", import.meta.url,
     ), "utf8"));
     for (const name of ["0005_backlink_schema_role_ownership.sql",
-      "0011_backlink_contact_purpose_correction.sql"]) {
+      "0011_backlink_contact_purpose_correction.sql",
+      "0038_backlink_contact_enrichment.sql"]) {
       await client.query(await readFile(migration(name), "utf8"));
     }
+    await client.query(`
+      ALTER TABLE backlinks.backlink_contact_candidates
+        DROP CONSTRAINT backlink_contact_candidate_purpose_check,
+        ADD CONSTRAINT backlink_contact_candidate_purpose_check CHECK (
+          inferred_purpose IN (
+            'press','editorial','partnerships','advertising','business',
+            'marketing','site_owner','general','support','privacy','legal',
+            'abuse','security','billing','jobs','no_reply','unknown'
+          )
+        )
+    `);
     await client.query("SET search_path = backlinks, pg_catalog");
     await client.query(`
       INSERT INTO backlink_prospects (
@@ -107,7 +120,7 @@ describe("BL-AI-072 contact discovery", () => {
     `)).rows[0]).toEqual({
       email: "editor@example.com", relation: "same_registrable_domain", confidence: 90,
       observedRole: "editor", inferredPurpose: "editorial", purposeConfidence: 98,
-      purposeRuleVersion: "contact-purpose-rules.v1",
+      purposeRuleVersion: "contact-purpose-rules.v4",
       purposeEvidence: [expect.objectContaining({
         tier: "high", field: "email_local_part", matchedToken: "editor",
         ruleId: "editorial.editor",
@@ -115,15 +128,21 @@ describe("BL-AI-072 contact discovery", () => {
         tier: "high", field: "mailto_label", matchedToken: "editor",
         ruleId: "editorial.editor",
       }), expect.objectContaining({
+        tier: "medium", field: "nearby_text", matchedToken: "editor",
+        ruleId: "editorial.editor",
+      }), expect.objectContaining({
         tier: "low", field: "page_title", matchedToken: "contact",
+        ruleId: "general.contact",
+      }), expect.objectContaining({
+        tier: "low", field: "page_url", matchedToken: "contact",
         ruleId: "general.contact",
       })],
       evidenceCount: 1, sourceUrl: input.targetUrl, method: "mailto",
-      snippet: "editor@example.com", contacts: 0,
+      snippet: "editor@example.com mailto:editor@example.com", contacts: 0,
     });
   });
 
-  it("retains an unknown verified email as a candidate without promotion", async () => {
+  it("retains a restricted verified email as a candidate without promotion", async () => {
     expect(await service({ fetch: async () => unknownPage }).discover(input)).toEqual({
       candidateCount: 1, evidenceInserted: 1, evidenceMerged: 0,
     });
@@ -133,7 +152,54 @@ describe("BL-AI-072 contact discovery", () => {
         (SELECT count(*)::int FROM backlink_contacts) contacts
       FROM backlink_contact_candidates
     `)).rows[0]).toEqual({
-      email: "legal@elephtv.com", purpose: "unknown", confidence: 0, contacts: 0,
+      email: "legal@elephtv.com", purpose: "legal", confidence: 98, contacts: 0,
+    });
+  });
+
+  it("reassesses valid stored evidence under the current generic rules", async () => {
+    const externalPage: SafeFetchResult = {
+      ...page,
+      body: new TextEncoder().encode(
+        "<title>Publisher</title><body><a href='mailto:molly@vraidigital.com'>Molly</a></body>",
+      ),
+    };
+    await service({ fetch: async () => externalPage }).discover(input);
+    await client.query(`
+      UPDATE backlink_contact_candidates
+         SET confidence=75,inferred_purpose='unknown',purpose_confidence=0,
+             observed_role=NULL,purpose_rule_version='contact-purpose-rules.v3',
+             purpose_evidence='[]'::jsonb
+    `);
+    await client.query(`
+      UPDATE backlink_contact_evidence
+         SET confidence=75,rule_version='contact-purpose-rules.v3'
+    `);
+
+    expect(await reassessStoredContactEvidence(client, {
+      organizationId,
+      workspaceId,
+      websiteProjectId,
+      recommendationContextVersionId,
+      prospectId,
+      actorId: "test",
+    })).toEqual({ candidatesUpdated: 1, evidenceUpdated: 1 });
+    expect((await client.query(`
+      SELECT candidate.confidence,
+             candidate.inferred_purpose purpose,
+             candidate.purpose_confidence "purposeConfidence",
+             candidate.purpose_rule_version "purposeRuleVersion",
+             evidence.confidence "evidenceConfidence",
+             evidence.rule_version "evidenceRuleVersion"
+        FROM backlink_contact_candidates candidate
+        JOIN backlink_contact_evidence evidence
+          ON evidence.candidate_id=candidate.id
+    `)).rows[0]).toEqual({
+      confidence: 80,
+      purpose: "general",
+      purposeConfidence: 72,
+      purposeRuleVersion: "contact-purpose-rules.v4",
+      evidenceConfidence: 80,
+      evidenceRuleVersion: "contact-evidence-confidence.v2",
     });
   });
 });

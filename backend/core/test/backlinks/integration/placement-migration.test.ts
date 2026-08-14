@@ -151,6 +151,7 @@ describe("BL-AI-144 Placement persistence", () => {
       "0013_backlink_drafts.sql",
       "0014_backlink_send_intents.sql",
       "0028_backlink_placements.sql",
+      "0040_backlink_existing_placements.sql",
     ]) {
       await client.query(await readFile(migration(name), "utf8"));
     }
@@ -224,9 +225,12 @@ describe("BL-AI-144 Placement persistence", () => {
       ),
     ).toEqual(expect.arrayContaining([
       "backlink_placement_candidate_opportunity_fk",
+      "backlink_placement_validation_candidate_identity_fk",
       "backlink_placement_validation_candidate_fk",
+      "backlink_placement_candidate_identity_fk",
       "backlink_placement_candidate_fk",
       "backlink_placement_opportunity_fk",
+      "backlink_placement_initial_validation_identity_fk",
       "backlink_placement_initial_validation_fk",
     ]));
   });
@@ -486,6 +490,95 @@ describe("BL-AI-144 Placement persistence", () => {
       placementId,
       monitoringOutboxEventId: outboxId,
     });
+  });
+
+  it("records a manually entered existing link without an Opportunity", async () => {
+    const candidateId = id(490);
+    const validationRunId = id(590);
+    const placementId = id(690);
+    const outboxId = id(790);
+    const sourceHash = "0".repeat(64);
+    const targetHash = "d".repeat(64);
+    await client.query(`
+      INSERT INTO backlink_placement_candidates (
+        id,organization_id,workspace_id,website_project_id,opportunity_id,
+        source_type,source_external_id,source_page_url,normalized_source_url,
+        normalized_source_url_hash,target_url,normalized_target_url,
+        normalized_target_url_hash,url_normalization_version,status,
+        match_status,initial_validation_status,discovery_evidence_snapshot,
+        discovery_evidence_hash,evidence_contract_version,
+        evidence_schema_version,created_by,updated_by
+      ) VALUES (
+        '${candidateId}',${identity},NULL,'manual','existing-link-490',
+        'https://existing.example/article',
+        'https://existing.example/article','${sourceHash}',
+        'https://owner.example/existing',
+        'https://owner.example/existing','${targetHash}',
+        'whatwg-tldts-v1','PENDING_VALIDATION','UNMATCHED','PENDING',
+        '{"source":"manual-existing-link"}','${"b".repeat(64)}',
+        'placement.user-entry.v1',1,'test','test'
+      )
+    `);
+    const repository = createPlacementInitialValidationRepository(client);
+
+    expect(await repository.getCandidate({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      candidateId,
+    })).toMatchObject({
+      state: "ready",
+      candidate: {
+        candidateId,
+        opportunityId: null,
+        sourceType: "manual",
+      },
+    });
+
+    expect(await repository.record({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      candidateId,
+      expectedCandidateVersion: 1,
+      validationRunId,
+      placementId,
+      monitoringOutboxEventId: outboxId,
+      placementLifecycleEventId: id(890),
+      status: "VALID",
+      evidenceSnapshot: {
+        policyVersion: "placement-initial-validation.static.v1",
+        result: { status: "VALID", reasonCode: "TARGET_LINK_FOUND" },
+      },
+      evidenceSnapshotHash: "c".repeat(64),
+      evidenceContractVersion: "placement.initial-validation.v1",
+      evidenceSchemaVersion: 1,
+      evidenceObservedAt: new Date("2026-08-04T01:00:00.000Z"),
+      verifiedAt: new Date("2026-08-04T01:00:01.000Z"),
+      verifiedBy: "placement-validator",
+      auditEventId: "audit-placement-490",
+      initialEvidenceRef: `placement-validation:${validationRunId}`,
+    })).toEqual({
+      state: "recorded",
+      candidateId,
+      validationRunId,
+      status: "VALID",
+      placementId,
+      monitoringOutboxEventId: outboxId,
+    });
+
+    expect((await client.query(`
+      SELECT p.opportunity_id AS "opportunityId",
+        e.payload->'opportunityId' AS "outboxOpportunityId"
+      FROM backlink_placements p
+      JOIN backlink_outbox_events e
+        ON e.aggregate_id=p.id
+       AND e.event_type='backlinks.placement-monitoring.requested.v1'
+      WHERE p.id='${placementId}'
+    `)).rows).toEqual([{
+      opportunityId: null,
+      outboxOpportunityId: null,
+    }]);
   });
 
   it("retains INVALID evidence and Candidate without creating Placement facts", async () => {

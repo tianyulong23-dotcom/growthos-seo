@@ -35,6 +35,7 @@ export type PlacementStaticMonitorActivityInput = Readonly<{
   websiteProjectId: string;
   sourcePageUrl: string;
   targetUrl: string;
+  browserFallbackAllowed?: boolean;
   previousSuccessfulObservation:
     PreviousSuccessfulMonitorObservation | null;
 }>;
@@ -99,8 +100,25 @@ function fetchEvidence(page: SafeFetchResult): Readonly<
     redirectChain: Object.freeze([...page.redirectChain]),
     resolvedIps: Object.freeze([...page.resolvedIps]),
     fetchedAt: page.fetchedAt,
-    xRobotsTag: null,
+    xRobotsTag: page.xRobotsTag ?? null,
   });
+}
+
+const decoder = new TextDecoder("utf-8", { fatal: false });
+
+function hasDynamicRenderingSignals(page: SafeFetchResult): boolean {
+  const html = decoder.decode(page.body);
+  const text = html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, " ")
+    .replace(/<[^>]+>/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return (
+    /(?:id=["'](?:__next|__nuxt|root|app)["']|data-reactroot|ng-version|data-v-app)/iu
+      .test(html)
+    || (text.length < 300 && /<script\b[^>]+src=/iu.test(html))
+  );
 }
 
 function inaccessibleDecision(
@@ -236,6 +254,7 @@ function decideHtml(
   ) && previous.evidenceFingerprint !== evidenceFingerprint;
   if (
     evidence.noindex
+    || /\bnoindex\b/iu.test(page.xRobotsTag ?? "")
     || canonicalElsewhere
     || remainsChanged
     || changedFromPrevious
@@ -297,17 +316,34 @@ function decideFailure(
 export async function executePlacementStaticMonitorActivity(
   input: PlacementStaticMonitorActivityInput,
   safeFetch: SafeFetchPort,
+  browserFetch?: SafeFetchPort,
 ): Promise<PlacementStaticMonitorActivityResult> {
   let decision: StaticDecision;
+  let fetchMode = "safe_fetch_static";
   try {
-    decision = decideHtml(input, await safeFetch.fetch({
+    const request = {
       url: input.sourcePageUrl,
-      purpose: "placement-check",
+      purpose: "placement-check" as const,
       workspaceId: input.workspaceId,
       websiteProjectId: input.websiteProjectId,
       maxBytes: 2_000_000,
       maxRedirects: 5,
-    }));
+    };
+    const staticPage = await safeFetch.fetch(request);
+    decision = decideHtml(input, staticPage);
+    if (
+      browserFetch !== undefined
+      && input.browserFallbackAllowed === true
+      && decision.reasonCode === "TARGET_LINK_ABSENT"
+      && hasDynamicRenderingSignals(staticPage)
+    ) {
+      fetchMode = "shared_browser_worker";
+      try {
+        decision = decideHtml(input, await browserFetch.fetch(request));
+      } catch (error) {
+        decision = decideFailure(input, error, new Date());
+      }
+    }
   } catch (error) {
     decision = decideFailure(input, error, new Date());
   }
@@ -316,7 +352,7 @@ export async function executePlacementStaticMonitorActivity(
     contractVersion: placementMonitorObservationContractVersion,
     schemaVersion: placementMonitorObservationSchemaVersion,
     policyVersion: placementStaticMonitorPolicyVersion,
-    fetchMode: "safe_fetch_static",
+    fetchMode,
     sourcePageUrl: input.sourcePageUrl,
     targetUrl: input.targetUrl,
     fetch: decision.fetch,
@@ -342,9 +378,10 @@ export async function executePlacementStaticMonitorActivity(
 
 export function createPlacementStaticMonitorActivity(
   safeFetch: SafeFetchPort,
+  browserFetch?: SafeFetchPort,
 ): PlacementStaticMonitorActivity {
   return {
     execute: async (input) =>
-      executePlacementStaticMonitorActivity(input, safeFetch),
+      executePlacementStaticMonitorActivity(input, safeFetch, browserFetch),
   };
 }

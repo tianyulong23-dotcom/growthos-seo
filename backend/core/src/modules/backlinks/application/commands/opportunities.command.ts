@@ -10,7 +10,8 @@ import type { ResolvedProjectContext } from "../../ports/project-context.port.js
 
 export type CreateOpportunityCommand = Readonly<{
   context: ResolvedProjectContext; recommendationId: string;
-  expectedVersion: number; idempotencyKey: string; requestId: string;
+  contactCandidateId: string; expectedVersion: number;
+  idempotencyKey: string; requestId: string;
 }>;
 export type CreateOpportunityResult = OpportunityCreation &
   Readonly<{ replayed: boolean }>;
@@ -46,16 +47,19 @@ export function createOpportunityCommands(repository: OpportunityRepository) {
     ): Promise<CreateOpportunityResult> {
       authorize(input.context);
       const requestHash = digest({ recommendationId: input.recommendationId,
+        contactCandidateId: input.contactCandidateId,
         expectedVersion: input.expectedVersion });
       const row = await repository.createFromRecommendation({
         organizationId: input.context.tenant.organizationId,
         workspaceId: input.context.tenant.workspaceId,
         websiteProjectId: input.context.project.websiteProjectId,
         actorId: input.context.actor.userId, recommendationId: input.recommendationId,
+        contactCandidateId: input.contactCandidateId,
         expectedVersion: input.expectedVersion, idempotencyKey: input.idempotencyKey,
         requestHash, requestId: input.requestId, idempotencyRecordId: randomUUID(),
         opportunityId: randomUUID(), cycleId: randomUUID(),
         lifecycleEventId: randomUUID(), auditEventId: randomUUID(),
+        contactId: randomUUID(),
       });
       if (row.requestHash !== requestHash)
         throw conflict("Idempotency key is already bound to a different request.");
@@ -64,6 +68,12 @@ export function createOpportunityCommands(repository: OpportunityRepository) {
           message: "Recommendation was not found." });
       if (row.state === "version_conflict")
         throw conflict("ExpectedVersion does not match the current recommendation.");
+      if (row.state === "contact_required")
+        throw conflict(
+          "The selected public contact is no longer eligible for this recommendation.",
+        );
+      if (row.state === "duplicate")
+        throw conflict("An Opportunity already exists for this domain.");
       if (row.responseBody === undefined)
         throw conflict("The idempotent command is already in progress.");
       return { ...row.responseBody, replayed: row.state === "replay" };

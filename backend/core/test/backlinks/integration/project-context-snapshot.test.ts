@@ -30,12 +30,21 @@ describe("BL-AI-037 Project Context Snapshot Repository", () => {
     await harness.migrate();
     client = new Client({ connectionString: harness.connectionString });
     await client.connect();
+    await client.query(`
+      ALTER TABLE backlink_project_context_snapshots
+        ADD COLUMN target_market text NOT NULL DEFAULT '',
+        ADD COLUMN products jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN keywords jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN target_urls jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN target_audiences jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN partnership_goals jsonb NOT NULL DEFAULT '[]'::jsonb
+    `);
     repository = createProjectContextSnapshotRepository(client);
   }, 120_000);
   afterAll(async () => {
     await client?.end();
     await harness?.stop();
-  });
+  }, 120_000);
   const snapshot = (
     version: number,
     projectStatus: AppendProjectContextSnapshotInput["projectStatus"],
@@ -47,8 +56,14 @@ describe("BL-AI-037 Project Context Snapshot Repository", () => {
     canonicalDomain: version === 1 ? "example.com" : "new.example.com",
     locale: "en-US",
     countryCode: "US",
+    targetMarket: "United States home cinema",
     profileVersionId: `profile-version-${version}`,
     promotionTargetVersionId: `target-version-${version}`,
+    products: [`Product ${version}`],
+    keywords: [`keyword ${version}`],
+    targetUrls: [`https://example.com/target-${version}`],
+    targetAudiences: [`Audience ${version}`],
+    partnershipGoals: [`Goal ${version}`],
     actorId: "user-037",
   });
   it("appends versions without changing history and represents pause/delete", async () => {
@@ -70,17 +85,33 @@ describe("BL-AI-037 Project Context Snapshot Repository", () => {
     const stored = await client.query(`
       SELECT snapshot_version AS "snapshotVersion",
              project_status AS "projectStatus",
-             canonical_domain AS "canonicalDomain"
+             canonical_domain AS "canonicalDomain",
+             target_market AS "targetMarket",
+             products, keywords, target_urls AS "targetUrls",
+             target_audiences AS "targetAudiences",
+             partnership_goals AS "partnershipGoals"
         FROM backlink_project_context_snapshots
        ORDER BY snapshot_version
     `);
     expect(stored.rows).toEqual([
       { snapshotVersion: 1, projectStatus: "ACTIVE",
-        canonicalDomain: "example.com" },
+        canonicalDomain: "example.com",
+        targetMarket: "United States home cinema", products: ["Product 1"],
+        keywords: ["keyword 1"],
+        targetUrls: ["https://example.com/target-1"],
+        targetAudiences: ["Audience 1"], partnershipGoals: ["Goal 1"] },
       { snapshotVersion: 2, projectStatus: "PAUSED",
-        canonicalDomain: "new.example.com" },
+        canonicalDomain: "new.example.com",
+        targetMarket: "United States home cinema", products: ["Product 2"],
+        keywords: ["keyword 2"],
+        targetUrls: ["https://example.com/target-2"],
+        targetAudiences: ["Audience 2"], partnershipGoals: ["Goal 2"] },
       { snapshotVersion: 3, projectStatus: "DELETED",
-        canonicalDomain: "new.example.com" },
+        canonicalDomain: "new.example.com",
+        targetMarket: "United States home cinema", products: ["Product 3"],
+        keywords: ["keyword 3"],
+        targetUrls: ["https://example.com/target-3"],
+        targetAudiences: ["Audience 3"], partnershipGoals: ["Goal 3"] },
     ]);
   });
   it("enforces fixed states, positive versions, and tenant RLS metadata", async () => {

@@ -109,6 +109,7 @@ describe("BL-AI-128 PostgreSQL Initial Mail Sync Repository", () => {
       "0014_backlink_send_intents.sql",
       "0015_backlink_gmail_sync_capabilities.sql",
       "0016_backlink_mail_sync.sql",
+      "0041_backlink_gmail_project_bindings.sql",
     ]) {
       await admin.query(await readFile(migration(name), "utf8"));
     }
@@ -137,13 +138,20 @@ describe("BL-AI-128 PostgreSQL Initial Mail Sync Repository", () => {
         'test', 'test'
       );
       INSERT INTO backlinks.backlink_gmail_workspace_bindings (
-        id, organization_id, workspace_id, gmail_connection_id,
-        created_by, updated_by
+        id, organization_id, workspace_id, website_project_id,
+        gmail_connection_id, created_by, updated_by
       ) VALUES (
         '${id(502)}', '${context.organizationId}', '${context.workspaceId}',
-        '${context.gmailConnectionId}', 'test', 'test'
+        '${context.websiteProjectId}', '${context.gmailConnectionId}',
+        'test', 'test'
       );
     `);
+    await admin.query(
+      await readFile(
+        migration("0047_backlink_gmail_organization_reuse.sql"),
+        "utf8",
+      ),
+    );
     const tenantUrl = new URL(harness.connectionString);
     tenantUrl.username = loginRole;
     tenantUrl.password = password;

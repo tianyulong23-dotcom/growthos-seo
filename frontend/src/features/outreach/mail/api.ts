@@ -1,16 +1,50 @@
-import { ApiError, apiRequest } from "@/api/client"
+import {
+  requestBacklinks,
+  type BacklinksResponse,
+} from "@/api/generated/backlinks"
+import { ApiError } from "@/api/client"
 
-import type {
-  MailDetailResponse,
-  MailListResponse,
-  MailMatchStatus,
-  MailThreadResponse,
-  ReplyMatchCandidateListResponse,
-  ReplyMatchConfirmResponse,
-} from "./types"
+import type { MailMatchStatus } from "./types"
 
-const projectBasePath = (websiteProjectKey: string) =>
-  `/api/v1/projects/${encodeURIComponent(websiteProjectKey)}/backlinks`
+export type MailListResponse =
+  BacklinksResponse<"backlinksListReplyMailMessagesV1">
+export type MailDetailResponse =
+  BacklinksResponse<"backlinksGetReplyMailMessageV1">
+export type MailThreadResponse =
+  BacklinksResponse<"backlinksGetReplyMailThreadV1">
+export type ReplyMatchCandidateListResponse =
+  BacklinksResponse<"backlinksListReplyMatchCandidatesV1">
+export type ReplyMatchConfirmResponse =
+  BacklinksResponse<"backlinksConfirmReplyMatchCandidateV1">
+export type ReplyMatchUnbindResponse =
+  BacklinksResponse<"backlinksUnbindReplyMatchV1">
+export type GmailPollingSyncResponse =
+  BacklinksResponse<"backlinksStartGmailPollingSyncV1">
+export type GmailPollingSyncStatusResponse =
+  BacklinksResponse<"backlinksGetGmailPollingSyncStatusV1">
+
+export function startGmailPollingSync(
+  websiteProjectKey: string,
+  connectionId: string
+): Promise<GmailPollingSyncResponse> {
+  return requestBacklinks("backlinksStartGmailPollingSyncV1", {
+    path: { websiteProjectKey, connectionId },
+  })
+}
+
+export function getGmailPollingSyncStatus(
+  websiteProjectKey: string,
+  connectionId: string,
+  signal?: AbortSignal
+): Promise<GmailPollingSyncStatusResponse> {
+  return requestBacklinks(
+    "backlinksGetGmailPollingSyncStatusV1",
+    {
+      path: { websiteProjectKey, connectionId },
+    },
+    { signal }
+  )
+}
 
 export async function listReplyMailMessages(
   websiteProjectKey: string,
@@ -18,48 +52,62 @@ export async function listReplyMailMessages(
     matchStatus?: MailMatchStatus
     limit?: number
     cursor?: string
-  } = {}
+  } = {},
+  signal?: AbortSignal
 ): Promise<MailListResponse> {
-  const query = new URLSearchParams()
-  query.set("limit", String(input.limit ?? 25))
-  if (input.matchStatus) query.set("matchStatus", input.matchStatus)
-  if (input.cursor) query.set("cursor", input.cursor)
-
-  return apiRequest<MailListResponse>(
-    `${projectBasePath(websiteProjectKey)}/mail/messages?${query.toString()}`
+  return requestBacklinks(
+    "backlinksListReplyMailMessagesV1",
+    {
+      path: { websiteProjectKey },
+      query: {
+        matchStatus: input.matchStatus,
+        limit: input.limit ?? 25,
+        cursor: input.cursor,
+      },
+    },
+    { signal }
   )
 }
 
 export async function getReplyMailMessage(
   websiteProjectKey: string,
-  messageId: string
+  messageId: string,
+  signal?: AbortSignal
 ): Promise<MailDetailResponse> {
-  return apiRequest<MailDetailResponse>(
-    `${projectBasePath(websiteProjectKey)}/mail/messages/${encodeURIComponent(
-      messageId
-    )}`
+  return requestBacklinks(
+    "backlinksGetReplyMailMessageV1",
+    {
+      path: { websiteProjectKey, messageId },
+    },
+    { signal }
   )
 }
 
 export async function getReplyMailThread(
   websiteProjectKey: string,
-  threadId: string
+  threadId: string,
+  signal?: AbortSignal
 ): Promise<MailThreadResponse> {
-  return apiRequest<MailThreadResponse>(
-    `${projectBasePath(websiteProjectKey)}/mail/threads/${encodeURIComponent(
-      threadId
-    )}`
+  return requestBacklinks(
+    "backlinksGetReplyMailThreadV1",
+    {
+      path: { websiteProjectKey, threadId },
+    },
+    { signal }
   )
 }
 
 export async function listReplyMatchCandidates(
   websiteProjectKey: string,
-  inboundMessageId: string
+  inboundMessageId: string,
+  signal?: AbortSignal
 ): Promise<ReplyMatchCandidateListResponse> {
-  return apiRequest<ReplyMatchCandidateListResponse>(
-    `${projectBasePath(
-      websiteProjectKey
-    )}/replies/${encodeURIComponent(inboundMessageId)}/match-candidates`
+  return requestBacklinks(
+    "backlinksListReplyMatchCandidatesV1",
+    {
+      path: { websiteProjectKey, inboundMessageId },
+    },
+    { signal }
   )
 }
 
@@ -69,19 +117,27 @@ export async function confirmReplyMatchCandidate(
   candidateId: string,
   reason: string
 ): Promise<ReplyMatchConfirmResponse> {
-  return apiRequest<ReplyMatchConfirmResponse>(
-    `${projectBasePath(websiteProjectKey)}/replies/${encodeURIComponent(
-      inboundMessageId
-    )}/match-candidates/${encodeURIComponent(candidateId)}/confirm`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        expectedMatchStatus: "CANDIDATES_READY",
-        reason,
-      }),
-    }
-  )
+  return requestBacklinks("backlinksConfirmReplyMatchCandidateV1", {
+    path: { websiteProjectKey, inboundMessageId, candidateId },
+    body: {
+      expectedMatchStatus: "CANDIDATES_READY",
+      reason,
+    },
+  })
+}
+
+export async function unbindReplyMatch(
+  websiteProjectKey: string,
+  inboundMessageId: string,
+  reason: string
+): Promise<ReplyMatchUnbindResponse> {
+  return requestBacklinks("backlinksUnbindReplyMatchV1", {
+    path: { websiteProjectKey, inboundMessageId },
+    body: {
+      expectedMatchStatus: "MATCH_CONFIRMED",
+      reason,
+    },
+  })
 }
 
 export const isMailApiStatus = (error: unknown, status: number) =>

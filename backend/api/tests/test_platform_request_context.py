@@ -12,6 +12,7 @@ from app.core.platform_request_context import (
     PlatformActor,
     PlatformProject,
     PlatformTenant,
+    ResolvedPlatformCollectionContext,
     ResolvedPlatformRequestContext,
     issue_platform_request_context_v1,
     strip_untrusted_platform_context_headers,
@@ -112,6 +113,26 @@ class PlatformRequestContextProducerTest(unittest.TestCase):
                 "permissions",
             },
         )
+
+    def test_signs_collection_context_without_a_project(self) -> None:
+        resolved = ResolvedPlatformCollectionContext(
+            actor=PlatformActor("user-1", "session-1", ("member",)),
+            tenant=PlatformTenant("org-1", "workspace-1"),
+            permissions=("backlinks:read",),
+            correlation_id="correlation-1",
+        )
+
+        headers = issue_platform_request_context_v1(
+            resolved,
+            signing_key=TEST_SIGNING_KEY,
+            now=NOW,
+        )
+        encoded_payload = headers[PLATFORM_CONTEXT_HEADER]
+        payload = json.loads(
+            base64.urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4))
+        )
+
+        self.assertIsNone(payload["project"])
 
     def test_rejects_unsafe_signing_and_expiry_inputs(self) -> None:
         resolved = ResolvedPlatformRequestContext(

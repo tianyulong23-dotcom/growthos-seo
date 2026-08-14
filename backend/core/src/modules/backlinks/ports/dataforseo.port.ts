@@ -9,6 +9,25 @@ const safeCountSchema = z
   .nonnegative()
   .max(Number.MAX_SAFE_INTEGER);
 
+export const dataForSeoRequestIntentSchema = z.enum([
+  "DISCOVERY",
+  "CARD_ENRICHMENT",
+  "DEEP_ASSESSMENT",
+  "MONITORING",
+]);
+export type DataForSeoRequestIntent = z.output<
+  typeof dataForSeoRequestIntentSchema
+>;
+
+export const dataForSeoRefreshModeSchema = z.enum([
+  "CACHE_PREFERRED",
+  "BACKGROUND_REFRESH",
+  "FORCE_LIVE",
+]);
+export type DataForSeoRefreshMode = z.output<
+  typeof dataForSeoRefreshModeSchema
+>;
+
 export const providerRequestContextSchema = z
   .object({
     organizationId: identifierSchema,

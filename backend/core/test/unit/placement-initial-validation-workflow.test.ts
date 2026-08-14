@@ -158,6 +158,34 @@ describe("BL-AI-148 initial Placement validation Workflow", () => {
     );
   });
 
+  it("normalizes Temporal ISO dates before enforcing evidence time order", async () => {
+    const store = repository();
+    const response = {
+      ...page(`
+        <html><body>
+          <a href="https://client.example.com/guide">client guide</a>
+        </body></html>
+      `),
+      fetchedAt: "2026-07-27T10:00:02.000Z",
+    };
+
+    await runPlacementInitialValidationWorkflow(
+      {
+        ...input,
+        recordedAt: "2026-07-27T10:00:01.000Z",
+      },
+      store.value,
+      safeFetch(response),
+    );
+
+    expect(store.recorded[0]?.evidenceObservedAt).toEqual(
+      new Date("2026-07-27T10:00:02.000Z"),
+    );
+    expect(store.recorded[0]?.verifiedAt).toEqual(
+      new Date("2026-07-27T10:00:02.000Z"),
+    );
+  });
+
   it.each([
     {
       name: "missing target link",

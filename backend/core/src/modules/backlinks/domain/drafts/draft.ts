@@ -23,6 +23,7 @@ export const draftEvidenceSourceKinds = Object.freeze([
   "OPPORTUNITY",
   "CONTACT",
   "ASSESSMENT",
+  "USER_INPUT",
   "AI_SUMMARY",
   "AI_INFERENCE",
 ] as const);

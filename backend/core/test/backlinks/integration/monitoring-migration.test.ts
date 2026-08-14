@@ -1566,10 +1566,23 @@ describe("BL-AI-150 backlink monitoring persistence", () => {
 
     await client.query(`
       UPDATE backlink_monitor_policies
-      SET next_check_at='2026-07-30T10:00:00Z'
+      SET next_check_at='2026-07-30T10:00:00.123456Z'
       WHERE id='${policyId}'
     `);
     expect(await repository.listDue(scope)).toHaveLength(1);
+
+    await client.query(`
+      INSERT INTO backlink_monitor_runs (
+        id, organization_id, workspace_id, website_project_id, placement_id,
+        monitor_policy_id, policy_version, scheduled_for, execution_mode,
+        status, schema_version, created_by, updated_by
+      ) VALUES (
+        '${id(804)}', ${identity}, '${placementId}', '${policyId}',
+        'placement-monitoring-v1', '2026-07-30T10:00:00.123Z', 'static',
+        'SCHEDULED', 1, 'test', 'test'
+      )
+    `);
+    expect(await repository.listDue(scope)).toEqual([]);
 
     await appendProjectStatus(4, "DELETION_REQUESTED");
     expect(await repository.listDue(scope)).toEqual([]);

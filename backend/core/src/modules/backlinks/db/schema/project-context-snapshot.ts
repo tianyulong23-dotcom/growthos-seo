@@ -19,6 +19,7 @@ const pg = require("drizzle-orm/pg-core") as {
   readonly uuid: (name: string) => Builder;
   readonly text: (name: string) => Builder;
   readonly integer: (name: string) => Builder;
+  readonly jsonb: (name: string) => Builder;
   readonly timestamp: (
     name: string, config: { readonly mode: "date"; readonly withTimezone: true },
   ) => Builder;
@@ -41,8 +42,14 @@ export const backlinkProjectContextSnapshots = pg.pgTable(
     canonicalDomain: pg.text("canonical_domain").notNull(),
     locale: pg.text("locale").notNull(),
     countryCode: pg.text("country_code").notNull(),
+    targetMarket: pg.text("target_market").notNull(),
     profileVersionId: pg.text("profile_version_id").notNull(),
     promotionTargetVersionId: pg.text("promotion_target_version_id").notNull(),
+    products: pg.jsonb("products").notNull(),
+    keywords: pg.jsonb("keywords").notNull(),
+    targetUrls: pg.jsonb("target_urls").notNull(),
+    targetAudiences: pg.jsonb("target_audiences").notNull(),
+    partnershipGoals: pg.jsonb("partnership_goals").notNull(),
     createdAt: pg.timestamp("created_at", {
       mode: "date", withTimezone: true,
     }).notNull().defaultNow(),

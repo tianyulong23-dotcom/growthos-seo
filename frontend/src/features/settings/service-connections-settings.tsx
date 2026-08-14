@@ -2,7 +2,6 @@ import * as React from "react"
 import {
   Check,
   CircleAlert,
-  ExternalLink,
   LoaderCircle,
   Plug,
   RefreshCw,
@@ -28,7 +27,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { useGmailConnection } from "@/features/outreach/gmail/use-gmail-connection"
 import { GoogleSearchConsoleSettings } from "@/features/settings/data-source-settings"
 
 type LoadState = "loading" | "ready" | "error"
@@ -344,11 +342,6 @@ export function ServiceConnectionsSettings({
     null
   )
   const [wordpressOpen, setWordPressOpen] = React.useState(false)
-  const gmail = useGmailConnection(
-    projectId,
-    true,
-    `/projects/${projectId}/settings/connections`
-  )
 
   const loadWordPress = React.useCallback(async () => {
     setWordPressState("loading")
@@ -384,21 +377,12 @@ export function ServiceConnectionsSettings({
     }
   }, [projectId])
 
-  const gmailConnected = gmail.connection?.connectionStatus === "CONNECTED"
-  const gmailNeedsAuth =
-    gmail.connection?.connectionStatus === "REAUTH_REQUIRED"
-  const gmailDetail = gmailConnected
-    ? gmail.connection?.primaryEmail
-    : gmailNeedsAuth
-      ? "授权已失效，需要重新连接"
-      : null
-
   return (
     <div className="max-w-4xl space-y-6">
       <div>
         <h2 className="text-lg font-semibold">服务连接</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          管理当前项目使用的搜索数据、内容发布和邮箱授权。
+          管理当前项目使用的搜索数据和内容发布连接。
         </p>
       </div>
 
@@ -442,67 +426,6 @@ export function ServiceConnectionsSettings({
                 <Plug />
                 {wordpress.status === "connected" ? "管理" : "连接"}
               </Button>
-            </>
-          }
-        />
-        <ConnectionRow
-          name="Gmail"
-          description="授权外联邮件发送和回复同步。"
-          detail={gmailDetail}
-          loadState={
-            gmail.status === "loading" || gmail.status === "idle"
-              ? "loading"
-              : gmail.status === "error"
-                ? "error"
-                : "ready"
-          }
-          connected={gmailConnected}
-          error={gmail.errorMessage}
-          action={
-            <>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => void gmail.refresh()}
-                disabled={
-                  gmail.status === "loading" || Boolean(gmail.busyAction)
-                }
-                title="刷新 Gmail 状态"
-                aria-label="刷新 Gmail 状态"
-              >
-                <RefreshCw
-                  className={gmail.status === "loading" ? "animate-spin" : ""}
-                />
-              </Button>
-              {gmailConnected && (
-                <Button
-                  variant="outline"
-                  onClick={() => void gmail.disconnect()}
-                  disabled={Boolean(gmail.busyAction)}
-                >
-                  {gmail.busyAction === "disconnect" ? (
-                    <LoaderCircle className="animate-spin" />
-                  ) : (
-                    <Unplug />
-                  )}
-                  断开
-                </Button>
-              )}
-              {!gmailConnected && (
-                <Button
-                  onClick={() => void gmail.connect()}
-                  disabled={
-                    gmail.status === "loading" || Boolean(gmail.busyAction)
-                  }
-                >
-                  {gmail.busyAction === "connect" ? (
-                    <LoaderCircle className="animate-spin" />
-                  ) : (
-                    <ExternalLink />
-                  )}
-                  {gmailNeedsAuth ? "重新连接" : "连接"}
-                </Button>
-              )}
             </>
           }
         />

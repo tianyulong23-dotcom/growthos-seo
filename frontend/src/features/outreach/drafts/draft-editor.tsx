@@ -57,6 +57,11 @@ export function DraftEditor({
     extensions,
     content: initialDocument,
     editable: !readOnly,
+    editorProps: {
+      attributes: {
+        "aria-label": "邮件正文",
+      },
+    },
     onUpdate: ({ editor: currentEditor }) => {
       onChange(
         normalizeDraftDocument(currentEditor.getJSON(), { allowEmpty: true })

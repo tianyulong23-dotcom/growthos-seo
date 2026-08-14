@@ -30,7 +30,9 @@ export function createPlacementTemporalActivities(
   options: Readonly<{
     validationRepository: PlacementInitialValidationRepository;
     safeFetch: SafeFetchPort;
+    browserFetch?: SafeFetchPort;
     monitorRepository: PlacementMonitorRepository;
+    inventoryMonitorRepository?: PlacementMonitorRepository;
     staticMonitorActivity: PlacementStaticMonitorActivity;
   }>,
 ): PlacementTemporalActivities {
@@ -40,11 +42,15 @@ export function createPlacementTemporalActivities(
         input,
         options.validationRepository,
         options.safeFetch,
+        options.browserFetch,
       ),
     backlinksRunPlacementMonitoringV1: (input) =>
       runPlacementMonitorWorkflow(
         input,
-        options.monitorRepository,
+        input.policyVersion === "inventory-monitoring-v1"
+          && options.inventoryMonitorRepository !== undefined
+          ? options.inventoryMonitorRepository
+          : options.monitorRepository,
         options.staticMonitorActivity,
       ),
   });

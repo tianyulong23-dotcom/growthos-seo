@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { projectIdentityColumns } from "./common.js";
+import { backlinkContacts } from "./contacts.js";
 import { backlinkOpportunities } from "./opportunities.js";
 
 type Builder = {
@@ -56,6 +57,7 @@ export const backlinkEvidenceSnapshots = pg.pgTable(
     ...projectIdentityColumns(),
     opportunityId: pg.uuid("opportunity_id").notNull(),
     evidenceItems: pg.jsonb("evidence_items").notNull(),
+    contextData: pg.jsonb("context_data").notNull(),
     snapshotHash: pg.text("snapshot_hash").notNull(),
     schemaVersion: pg.integer("schema_version").notNull(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -83,12 +85,57 @@ export const backlinkEvidenceSnapshots = pg.pgTable(
   ],
 );
 
+export const backlinkDraftRequestSnapshots = pg.pgTable(
+  "backlink_draft_request_snapshots",
+  {
+    id: pg.uuid("id").primaryKey(),
+    ...projectIdentityColumns(),
+    opportunityId: pg.uuid("opportunity_id").notNull(),
+    contactId: pg.uuid("contact_id").notNull(),
+    contactVersion: pg.integer("contact_version").notNull(),
+    requestPayload: pg.jsonb("request_payload").notNull(),
+    requestHash: pg.text("request_hash").notNull(),
+    schemaVersion: pg.integer("schema_version").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    createdBy: pg.text("created_by").notNull(),
+  },
+  (table) => [
+    pg.uniqueIndex("backlink_draft_request_tenant_identity_uq").on(
+      ...identity(table),
+      table.id,
+      table.opportunityId,
+    ),
+    pg.uniqueIndex("backlink_draft_request_content_uq").on(
+      ...identity(table),
+      table.opportunityId,
+      table.contactId,
+      table.contactVersion,
+      table.requestHash,
+    ),
+    pg.foreignKey({
+      name: "backlink_draft_request_opportunity_fk",
+      columns: [...identity(table), table.opportunityId],
+      foreignColumns: [
+        ...identity(backlinkOpportunities),
+        backlinkOpportunities.id,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_draft_request_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
+    }),
+  ],
+);
+
 export const backlinkEmailDrafts = pg.pgTable(
   "backlink_email_drafts",
   {
     id: pg.uuid("id").primaryKey(),
     ...projectIdentityColumns(),
     opportunityId: pg.uuid("opportunity_id").notNull(),
+    contactId: pg.uuid("contact_id"),
+    contactVersion: pg.integer("contact_version"),
     logicalDraftKey: pg.text("logical_draft_key").notNull(),
     status: pg.text("status").notNull().default("generating"),
     version: pg.integer("version").notNull().default(1),
@@ -117,6 +164,11 @@ export const backlinkEmailDrafts = pg.pgTable(
         ...identity(backlinkOpportunities),
         backlinkOpportunities.id,
       ],
+    }),
+    pg.foreignKey({
+      name: "backlink_email_draft_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
     }),
     pg.foreignKey({
       name: "backlink_email_draft_current_version_fk",
@@ -173,7 +225,10 @@ export const backlinkModelRuns = pg.pgTable(
     ...projectIdentityColumns(),
     draftId: pg.uuid("draft_id").notNull(),
     opportunityId: pg.uuid("opportunity_id").notNull(),
+    contactId: pg.uuid("contact_id"),
+    contactVersion: pg.integer("contact_version"),
     evidenceSnapshotId: pg.uuid("evidence_snapshot_id").notNull(),
+    requestSnapshotId: pg.uuid("request_snapshot_id"),
     idempotencyKey: pg.text("idempotency_key").notNull(),
     requestHash: pg.text("request_hash").notNull(),
     status: pg.text("status").notNull().default("QUEUED"),
@@ -228,6 +283,11 @@ export const backlinkModelRuns = pg.pgTable(
       ],
     }),
     pg.foreignKey({
+      name: "backlink_model_run_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
+    }),
+    pg.foreignKey({
       name: "backlink_model_run_evidence_snapshot_fk",
       columns: [
         ...identity(table),
@@ -240,6 +300,19 @@ export const backlinkModelRuns = pg.pgTable(
         backlinkEvidenceSnapshots.opportunityId,
       ],
     }),
+    pg.foreignKey({
+      name: "backlink_model_run_request_snapshot_fk",
+      columns: [
+        ...identity(table),
+        table.requestSnapshotId,
+        table.opportunityId,
+      ],
+      foreignColumns: [
+        ...identity(backlinkDraftRequestSnapshots),
+        backlinkDraftRequestSnapshots.id,
+        backlinkDraftRequestSnapshots.opportunityId,
+      ],
+    }),
   ],
 );
 
@@ -250,11 +323,14 @@ export const backlinkDraftVersions = pg.pgTable(
     ...projectIdentityColumns(),
     draftId: pg.uuid("draft_id").notNull(),
     opportunityId: pg.uuid("opportunity_id").notNull(),
+    contactId: pg.uuid("contact_id"),
+    contactVersion: pg.integer("contact_version"),
     versionNo: pg.integer("version_no").notNull(),
     parentVersionId: pg.uuid("parent_version_id"),
     source: pg.text("source").notNull(),
     modelRunId: pg.uuid("model_run_id"),
     evidenceSnapshotId: pg.uuid("evidence_snapshot_id").notNull(),
+    requestSnapshotId: pg.uuid("request_snapshot_id"),
     subjectText: pg.text("subject_text").notNull(),
     bodyText: pg.text("body_text").notNull(),
     bodyDocument: pg.jsonb("body_document"),
@@ -296,6 +372,11 @@ export const backlinkDraftVersions = pg.pgTable(
         backlinkEmailDrafts.id,
         backlinkEmailDrafts.opportunityId,
       ],
+    }),
+    pg.foreignKey({
+      name: "backlink_draft_version_contact_fk",
+      columns: [...identity(table), table.contactId],
+      foreignColumns: [...identity(backlinkContacts), backlinkContacts.id],
     }),
     pg.foreignKey({
       name: "backlink_draft_version_parent_fk",
@@ -340,6 +421,19 @@ export const backlinkDraftVersions = pg.pgTable(
         ...identity(backlinkEvidenceSnapshots),
         backlinkEvidenceSnapshots.id,
         backlinkEvidenceSnapshots.opportunityId,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_draft_version_request_snapshot_fk",
+      columns: [
+        ...identity(table),
+        table.requestSnapshotId,
+        table.opportunityId,
+      ],
+      foreignColumns: [
+        ...identity(backlinkDraftRequestSnapshots),
+        backlinkDraftRequestSnapshots.id,
+        backlinkDraftRequestSnapshots.opportunityId,
       ],
     }),
   ],

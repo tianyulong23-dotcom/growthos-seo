@@ -117,6 +117,8 @@ describe("BL-AI-158 Links public query", () => {
           latestEvidenceSchemaVersion: 1,
           latestFailureCode: "unsafe/path/provider-token",
           nextCheckAt: "2026-07-29T09:30:00.000Z",
+          consecutiveAnomalies: 1,
+          browserFallbackEnabled: true,
           latestMonitorRunId: monitorRunId,
           latestMonitorRunStatus: "RETRY_WAIT",
           latestMonitorRunScheduledFor: "2026-07-29T08:00:00.000Z",

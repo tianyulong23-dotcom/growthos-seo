@@ -61,6 +61,16 @@ describe("DataForSEO envelope mapper", () => {
       "backlinks_spam_score",
     );
   });
+  it("treats the provider empty country bucket as unknown", () => {
+    const raw = readFixture();
+    const firstItem = raw.tasks[0].result[0].items[0];
+    if (firstItem === undefined) {
+      throw new Error("Fixture must contain a referring-domain item");
+    }
+    firstItem.referring_links_countries = { "": 2 };
+
+    expect(mapFixture(raw).referringDomains[0]?.countryCode).toBeNull();
+  });
   it("rejects a dirty item instead of coercing vendor fields", () => {
     const raw = readFixture();
     const firstItem = raw.tasks[0].result[0].items[0];

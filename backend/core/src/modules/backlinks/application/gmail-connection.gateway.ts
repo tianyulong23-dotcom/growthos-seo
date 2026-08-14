@@ -25,12 +25,26 @@ export type GmailConnectionView = Readonly<{
   mailSyncCapability: boolean;
   tokenExpiresAt: string;
   connectedAt: string;
+  affectedProjectCount?: number;
+  recentErrorCategory?: string | null;
+}>;
+
+export type GmailConnectionCompletionContext = Readonly<{
+  organizationId: string;
+  workspaceId: string;
+  websiteProjectId: string;
+  actorId: string;
 }>;
 
 export type GmailConnectionCompletionInput = Readonly<{
-  context: ResolvedProjectContext;
+  context: GmailConnectionCompletionContext;
   identity: GoogleIdentity;
   tokens: GoogleAuthTokenSet;
+}>;
+
+export type GmailProjectMailboxState = Readonly<{
+  accounts: readonly GmailConnectionView[];
+  selectedConnection: GmailConnectionView | null;
 }>;
 
 export interface GmailConnectionCompletionGateway {
@@ -44,7 +58,14 @@ export interface GmailConnectionCompletionGateway {
 }
 
 export interface GmailConnectionReader {
-  findVisibleConnection(
+  findProjectMailboxState(
     context: ResolvedProjectContext,
-  ): Promise<GmailConnectionView | null>;
+  ): Promise<GmailProjectMailboxState>;
+}
+
+export interface GmailConnectionSelector {
+  selectForProject(
+    context: ResolvedProjectContext,
+    connectionId: string,
+  ): Promise<GmailProjectMailboxState | null>;
 }

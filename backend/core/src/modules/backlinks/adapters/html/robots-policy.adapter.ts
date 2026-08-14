@@ -6,6 +6,9 @@ type ParsedRobots = Readonly<{
   isDisallowed(url: string, userAgent?: string): boolean | undefined;
   getCrawlDelay(userAgent?: string): number | undefined;
 }>;
+type RobotsDocument =
+  | Readonly<{ status: "parsed"; rules: ParsedRobots }>
+  | Readonly<{ status: "unavailable" | "parse_failed" }>;
 const parseRobots = robotsParser as unknown as (
   url: string, contents: string,
 ) => ParsedRobots;
@@ -77,53 +80,89 @@ function target(request: RobotsPolicyRequest): {
 }
 
 export class RobotsPolicyAdapter {
+  private readonly documents = new Map<string, Promise<RobotsDocument>>();
+
   constructor(private readonly safeFetch: SafeFetchPort) {}
+
+  private document(
+    request: RobotsPolicyRequest,
+    robotsUrl: string,
+  ): Promise<RobotsDocument> {
+    const key = [
+      request.workspaceId,
+      request.websiteProjectId,
+      robotsUrl,
+    ].join(":");
+    const existing = this.documents.get(key);
+    if (existing !== undefined) return existing;
+    const pending = (async (): Promise<RobotsDocument> => {
+      let fetched;
+      try {
+        fetched = await this.safeFetch.fetch({
+          url: robotsUrl,
+          purpose: "contact-enrichment",
+          workspaceId: request.workspaceId,
+          websiteProjectId: request.websiteProjectId,
+          maxBytes: maxRobotsBytes,
+          maxRedirects: maxRobotsRedirects,
+        });
+      } catch {
+        return { status: "unavailable" };
+      }
+      if (fetched.status < 200 || fetched.status >= 300) {
+        return { status: "unavailable" };
+      }
+      try {
+        return {
+          status: "parsed",
+          rules: parseRobots(robotsUrl, decoder.decode(fetched.body)),
+        };
+      } catch {
+        return { status: "parse_failed" };
+      }
+    })();
+    this.documents.set(key, pending);
+    return pending;
+  }
 
   async evaluate(request: RobotsPolicyRequest): Promise<RobotsEvidence> {
     const urls = target(request);
     if (urls === undefined) {
       return evidence(request, null, "unknown", "robots_unavailable");
     }
-    let fetched;
-    try {
-      fetched = await this.safeFetch.fetch({
-        url: urls.robotsUrl,
-        purpose: "contact-enrichment",
-        workspaceId: request.workspaceId,
-        websiteProjectId: request.websiteProjectId,
-        maxBytes: maxRobotsBytes,
-        maxRedirects: maxRobotsRedirects,
-      });
-    } catch {
-      return evidence(request, urls.robotsUrl, "unknown", "robots_unavailable");
-    }
-    if (fetched.status < 200 || fetched.status >= 300) {
-      return evidence(request, urls.robotsUrl, "unknown", "robots_unavailable");
-    }
-    try {
-      const rules = parseRobots(urls.robotsUrl, decoder.decode(fetched.body));
-      const disallowed = rules.isDisallowed(urls.targetUrl, request.userAgent);
-      const allowed = rules.isAllowed(urls.targetUrl, request.userAgent);
-      const decision = disallowed === true || allowed === false
-        ? "disallow"
-        : allowed === true || disallowed === false
-          ? "allow"
-          : "unknown";
-      const parsedDelay = rules.getCrawlDelay(request.userAgent);
-      const delay = Number.isFinite(parsedDelay) && (parsedDelay ?? -1) >= 0
-        ? parsedDelay
-        : undefined;
+    const document = await this.document(request, urls.robotsUrl);
+    if (document.status !== "parsed") {
       return evidence(
         request,
         urls.robotsUrl,
-        decision,
-        decision === "disallow"
-          ? "robots_disallowed"
-          : decision === "allow" ? "robots_allowed" : "robots_unknown",
-        delay,
+        "unknown",
+        document.status === "parse_failed"
+          ? "robots_parse_failed"
+          : "robots_unavailable",
       );
-    } catch {
-      return evidence(request, urls.robotsUrl, "unknown", "robots_parse_failed");
     }
+    const disallowed = document.rules.isDisallowed(
+      urls.targetUrl,
+      request.userAgent,
+    );
+    const allowed = document.rules.isAllowed(urls.targetUrl, request.userAgent);
+    const decision = disallowed === true || allowed === false
+      ? "disallow"
+      : allowed === true || disallowed === false
+        ? "allow"
+        : "unknown";
+    const parsedDelay = document.rules.getCrawlDelay(request.userAgent);
+    const delay = Number.isFinite(parsedDelay) && (parsedDelay ?? -1) >= 0
+      ? parsedDelay
+      : undefined;
+    return evidence(
+      request,
+      urls.robotsUrl,
+      decision,
+      decision === "disallow"
+        ? "robots_disallowed"
+        : decision === "allow" ? "robots_allowed" : "robots_unknown",
+      delay,
+    );
   }
 }

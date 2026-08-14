@@ -46,6 +46,14 @@ class ResolvedPlatformRequestContext:
     correlation_id: str
 
 
+@dataclass(frozen=True)
+class ResolvedPlatformCollectionContext:
+    actor: PlatformActor
+    tenant: PlatformTenant
+    permissions: tuple[str, ...]
+    correlation_id: str
+
+
 def strip_untrusted_platform_context_headers(
     headers: Mapping[str, str],
 ) -> dict[str, str]:
@@ -87,7 +95,7 @@ def _base64url(value: bytes) -> str:
 
 
 def issue_platform_request_context_v1(
-    resolved: ResolvedPlatformRequestContext,
+    resolved: ResolvedPlatformRequestContext | ResolvedPlatformCollectionContext,
     *,
     signing_key: bytes,
     now: datetime,
@@ -117,16 +125,20 @@ def issue_platform_request_context_v1(
         "issuedAt": issued_at,
         "issuer": PLATFORM_CONTEXT_ISSUER,
         "permissions": permissions,
-        "project": {
-            "websiteProjectId": _require_identifier(
-                "project.websiteProjectId",
-                resolved.project.website_project_id,
-            ),
-            "websiteProjectKey": _require_identifier(
-                "project.websiteProjectKey",
-                resolved.project.website_project_key,
-            ),
-        },
+        "project": (
+            {
+                "websiteProjectId": _require_identifier(
+                    "project.websiteProjectId",
+                    resolved.project.website_project_id,
+                ),
+                "websiteProjectKey": _require_identifier(
+                    "project.websiteProjectKey",
+                    resolved.project.website_project_key,
+                ),
+            }
+            if isinstance(resolved, ResolvedPlatformRequestContext)
+            else None
+        ),
         "tenant": {
             "organizationId": _require_identifier(
                 "tenant.organizationId",

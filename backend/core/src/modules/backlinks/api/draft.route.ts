@@ -20,6 +20,9 @@ import {
   draftDocumentSchema,
 } from "../application/schemas/draft-document.schema.js";
 import {
+  draftRequestSchema,
+} from "../application/schemas/draft-request.schema.js";
+import {
   backlinkProblemContentType,
   backlinkProblemDetailsSchema,
   toBacklinkProblemDetails,
@@ -39,17 +42,23 @@ const jobParams = z.object({
   websiteProjectKey: nonBlank,
   jobId: z.uuid(),
 }).strict();
+const latestJobQuery = z.object({
+  logicalDraftKey: nonBlank.max(200),
+}).strict();
 const draftParams = z.object({
   websiteProjectKey: nonBlank,
   draftId: z.uuid(),
 }).strict();
 export const createDraftJobBodySchema = z.object({
-  evidenceSnapshotId: z.uuid(),
+  contactId: z.uuid(),
+  contactVersion: z.number().int().positive(),
   logicalDraftKey: nonBlank.max(200),
+  request: draftRequestSchema,
 }).strict();
 const jobStatuses = [
   "QUEUED",
   "RUNNING",
+  "RETRY_SCHEDULED",
   "SUCCEEDED",
   "FAILED",
   "REFUSED",
@@ -66,23 +75,50 @@ const createResponseSchema = z.object({
   jobId: z.uuid(),
   draftId: z.uuid(),
   status: z.enum(jobStatuses),
+  contactId: z.uuid(),
+  contactVersion: z.number().int().positive(),
+  evidenceSnapshotId: z.uuid(),
+  requestSnapshotId: z.uuid(),
+  workflowId: nonBlank,
+  generationMode: z.enum(["MODEL", "MANUAL"]),
   replayed: z.boolean(),
   meta: metaSchema,
 }).strict();
+const jobSchema = z.object({
+  id: z.uuid(),
+  draftId: z.uuid(),
+  status: z.enum(jobStatuses),
+  contactId: z.uuid().nullable(),
+  contactVersion: z.number().int().positive().nullable(),
+  requestSnapshotId: z.uuid().nullable(),
+  request: draftRequestSchema.nullable(),
+  generator: z.enum(["AI", "TEMPLATE_FALLBACK"]).nullable(),
+  versionId: z.uuid().nullable(),
+  lastSuccessfulVersionId: z.uuid().nullable(),
+  queuedAt: z.string().datetime(),
+  startedAt: z.string().datetime().nullable(),
+  finishedAt: z.string().datetime().nullable(),
+  deadlineAt: z.string().datetime(),
+  queueWaitMs: z.number().int().nonnegative().nullable(),
+  latencyMs: z.number().int().nonnegative().nullable(),
+  persistenceLatencyMs: z.number().int().nonnegative().nullable(),
+  attemptCount: z.number().int().nonnegative(),
+  lastErrorCategory: nonBlank.nullable(),
+}).strict();
 const jobResponseSchema = z.object({
-  job: z.object({
-    id: z.uuid(),
-    draftId: z.uuid(),
-    status: z.enum(jobStatuses),
-    versionId: z.uuid().nullable(),
-    lastSuccessfulVersionId: z.uuid().nullable(),
-  }).strict(),
+  job: jobSchema,
+  meta: metaSchema,
+}).strict();
+const latestJobResponseSchema = z.object({
+  job: jobSchema.nullable(),
   meta: metaSchema,
 }).strict();
 const draftResponseSchema = z.object({
   draft: z.object({
     id: z.uuid(),
     opportunityId: z.uuid(),
+    contactId: z.uuid().nullable(),
+    contactVersion: z.number().int().positive().nullable(),
     status: z.enum(["generating", "draft", "approved", "rejected", "sent"]),
     draftVersion: z.number().int().positive(),
     approvedVersionId: z.uuid().nullable(),
@@ -92,7 +128,12 @@ const draftResponseSchema = z.object({
       subjectText: nonBlank.max(500),
       bodyText: nonBlank.max(50_000),
       bodyDocument: draftDocumentSchema,
-      source: z.enum(["MODEL", "MANUAL", "RESTORED"]),
+      source: z.enum([
+        "MODEL",
+        "TEMPLATE_FALLBACK",
+        "MANUAL",
+        "RESTORED",
+      ]),
       createdAt: z.string().datetime(),
     }).strict().nullable(),
   }).strict(),
@@ -190,6 +231,33 @@ export function registerBacklinksDraftRoutes(
         ...result,
         meta: meta(context, request.id),
       });
+    },
+  );
+
+  app.withTypeProvider<ZodTypeProvider>().get(
+    "/api/v1/projects/:websiteProjectKey/backlinks/opportunities/:opportunityId/draft-jobs/latest",
+    {
+      schema: {
+        operationId: "backlinksGetLatestDraftJobV1",
+        params: createParams,
+        querystring: latestJobQuery,
+        response: { 200: latestJobResponseSchema, ...errors },
+      },
+      errorHandler: sendError,
+    },
+    async (request) => {
+      const context = await options.module.projectContext.resolve({
+        actor: request.actor,
+        websiteProjectKey: request.params.websiteProjectKey,
+      });
+      return {
+        job: await options.module.queries.findLatestJob(
+          context,
+          request.params.opportunityId,
+          request.query.logicalDraftKey,
+        ),
+        meta: meta(context, request.id),
+      };
     },
   );
 

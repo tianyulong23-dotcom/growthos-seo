@@ -27,12 +27,14 @@ test("BL-AI-097 can reload an editable Draft snapshot from the backend", () => {
     [
       "id",
       "opportunityId",
+      "contactId",
+      "contactVersion",
       "status",
       "draftVersion",
       "approvedVersionId",
       "currentVersion",
     ],
-    "Draft reads must expose the backend aggregate version and current version."
+    "Draft reads must expose the bound Contact and backend versions."
   )
 
   const currentVersion = draftSchema?.properties?.currentVersion

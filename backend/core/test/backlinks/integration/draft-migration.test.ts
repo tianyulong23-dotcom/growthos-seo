@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  backlinkDraftRequestSnapshots,
   backlinkDraftVersions,
   backlinkEmailDrafts,
   backlinkEvidenceSnapshots,
@@ -49,6 +50,23 @@ const organization = id(1);
 const workspace = id(2);
 const project = id(3);
 const identity = `'${organization}', '${workspace}', '${project}'`;
+const generationRequest = {
+  cooperationType: "GENERAL_PARTNERSHIP",
+  linkAttributePreference: "NOT_SPECIFIED",
+  promotionTargetUrl: "https://owner.example/",
+  anchorTextSuggestion: null,
+  language: "en-US",
+  tone: "NEUTRAL_BUSINESS",
+  subjectStyle: "CLEAR_DIRECT",
+  additionalRequirements: "",
+  forbiddenPhrases: [],
+} as const;
+const validAiBody = [
+  "Hello, I am reaching out from owner.example after reviewing your site and the audience it serves. The published context appears relevant to people researching practical backlink outreach, so I wanted to ask whether a focused editorial collaboration could be useful.",
+  "We would like to explore a relevant content partnership around GrowthOS. The proposed destination is https://owner.example/. We can provide concise product context, factual source material, and a clear outline while leaving topic selection, wording, review standards, and publication decisions with your editorial team.",
+  "Any link treatment would remain entirely subject to your policy. We are not assuming acceptance, publication, ranking, indexing, placement, pricing, or a dofollow attribute, and the final format should only proceed if it is genuinely useful to your readers.",
+  "Would you be open to a brief review of the idea? If it is not a fit, no action is needed. If it may be relevant, please share the information or format your team would need before considering it.",
+].join("\n\n");
 const expectCode = async (query: Promise<unknown>, code: string) => {
   const error = await query.catch((caught: unknown) => caught as PgError);
   expect(error).toMatchObject({ code });
@@ -77,13 +95,33 @@ describe("BL-AI-086 Draft persistence", () => {
       "0007_backlink_opportunity_counter.sql",
       "0010_backlink_assessments.sql",
       "0011_backlink_contact_purpose_correction.sql",
+      "0012_backlink_gmail_connections.sql",
       "0013_backlink_drafts.sql",
+      "0014_backlink_send_intents.sql",
+      "0015_backlink_gmail_sync_capabilities.sql",
       "0022_backlink_draft_documents.sql",
+      "0035_backlink_contact_send_snapshots.sql",
+      "0038_backlink_contact_enrichment.sql",
+      "0042_backlink_project_recommendation_context.sql",
+      "0045_backlink_commercial_candidate_inventory.sql",
+      "0046_backlink_contact_publication_gate.sql",
+      "0048_backlink_draft_request_snapshots.sql",
     ]) {
       await client.query(await readFile(migration(name), "utf8"));
     }
     await client.query("SET search_path = backlinks, pg_catalog");
     await client.query(`
+      INSERT INTO backlink_project_context_snapshots (
+        id, organization_id, workspace_id, website_project_id,
+        snapshot_version, project_status, canonical_domain, locale,
+        country_code, products, keywords, target_urls,
+        profile_version_id, promotion_target_version_id, created_by
+      ) VALUES (
+        '${id(100)}', ${identity}, 1, 'ACTIVE', 'owner.example', 'en-US',
+        'US', '["GrowthOS"]', '["backlink outreach"]',
+        '["https://owner.example/"]',
+        'profile-v1', 'promotion-target-v1', 'test'
+      );
       INSERT INTO backlink_prospects (
         id, organization_id, workspace_id, website_project_id,
         recommendation_context_version_id, hostname_ascii,
@@ -109,6 +147,33 @@ describe("BL-AI-086 Draft persistence", () => {
         'example.com', 'www.example.com', 'tldts-7.4.9-v1', 1,
         'test', 'test'
       );
+      INSERT INTO backlink_contact_candidates (
+        id, organization_id, workspace_id, website_project_id,
+        prospect_id, recommendation_context_version_id,
+        normalized_email, email_domain_ascii, domain_relation,
+        syntax_validator_version, confidence, observed_role,
+        inferred_purpose, purpose_confidence, purpose_rule_version,
+        purpose_evidence, guessed, status, version, created_by, updated_by
+      ) VALUES (
+        '${id(103)}', ${identity}, '${id(101)}', '${id(102)}',
+        'contact@example.com', 'example.com', 'same_registrable_domain',
+        'test.v1', 100, 'editorial', 'editorial', 100,
+        'test-contact-purpose.v1', '[]', false, 'promoted', 2,
+        'test', 'test'
+      );
+      INSERT INTO backlink_contacts (
+        id, organization_id, workspace_id, website_project_id,
+        prospect_id, recommendation_context_version_id, source_candidate_id,
+        normalized_email, contact_role, confidence, observed_role,
+        inferred_purpose, purpose_confidence, purpose_rule_version,
+        purpose_evidence, guessed, confirmed_at, confirmed_by,
+        status, version, created_by, updated_by
+      ) VALUES (
+        '${id(104)}', ${identity}, '${id(101)}', '${id(102)}', '${id(103)}',
+        'contact@example.com', 'editorial', 100, 'editorial',
+        'editorial', 100, 'test-contact-purpose.v1', '[]', false,
+        now(), 'test', 'active', 1, 'test', 'test'
+      );
     `);
   }, 120_000);
 
@@ -117,15 +182,17 @@ describe("BL-AI-086 Draft persistence", () => {
     await harness?.stop();
   });
 
-  it("declares the four tenant-safe Draft tables", () => {
+  it("declares the five tenant-safe Draft tables", () => {
     const configs = [
       backlinkEvidenceSnapshots,
+      backlinkDraftRequestSnapshots,
       backlinkEmailDrafts,
       backlinkModelRuns,
       backlinkDraftVersions,
     ].map(getTableConfig);
     expect(configs.map(({ name }) => name)).toEqual([
       "backlink_evidence_snapshots",
+      "backlink_draft_request_snapshots",
       "backlink_email_drafts",
       "backlink_model_runs",
       "backlink_draft_versions",
@@ -139,13 +206,23 @@ describe("BL-AI-086 Draft persistence", () => {
       "backlink_email_draft_opportunity_fk",
       "backlink_model_run_draft_fk",
       "backlink_model_run_evidence_snapshot_fk",
+      "backlink_model_run_request_snapshot_fk",
       "backlink_draft_version_draft_fk",
       "backlink_draft_version_evidence_snapshot_fk",
+      "backlink_draft_version_request_snapshot_fk",
     ]));
   });
 
   it("stores one model result and keeps Snapshot and Version immutable", async () => {
     await client.query(`
+      INSERT INTO backlink_draft_request_snapshots (
+        id, organization_id, workspace_id, website_project_id, opportunity_id,
+        contact_id, contact_version, request_payload, request_hash,
+        schema_version, created_by
+      ) VALUES (
+        '${id(400)}', ${identity}, '${id(301)}', '${id(104)}', 1,
+        '${JSON.stringify(generationRequest)}', '${"0".repeat(64)}', 1, 'test'
+      );
       INSERT INTO backlink_evidence_snapshots (
         id, organization_id, workspace_id, website_project_id, opportunity_id,
         evidence_items, snapshot_hash, schema_version, created_by
@@ -157,20 +234,24 @@ describe("BL-AI-086 Draft persistence", () => {
       );
       INSERT INTO backlink_email_drafts (
         id, organization_id, workspace_id, website_project_id, opportunity_id,
-        logical_draft_key, status, created_by, updated_by
+        contact_id, contact_version, logical_draft_key, status,
+        created_by, updated_by
       ) VALUES (
-        '${id(501)}', ${identity}, '${id(301)}', 'initial-outreach',
+        '${id(501)}', ${identity}, '${id(301)}', '${id(104)}', 1,
+        'initial-outreach',
         'generating', 'test', 'test'
       );
       INSERT INTO backlink_model_runs (
         id, organization_id, workspace_id, website_project_id, draft_id,
-        opportunity_id, evidence_snapshot_id, idempotency_key, request_hash,
+        opportunity_id, contact_id, contact_version, evidence_snapshot_id,
+        request_snapshot_id, idempotency_key, request_hash,
         status, provider_ref, model_id, model_version, prompt_version,
         output_schema_version, input_tokens, output_tokens,
         estimated_cost_usd, latency_ms, attempt_count, repair_count,
         quality_result, started_at, finished_at, created_by, updated_by
       ) VALUES (
-        '${id(601)}', ${identity}, '${id(501)}', '${id(301)}', '${id(401)}',
+        '${id(601)}', ${identity}, '${id(501)}', '${id(301)}',
+        '${id(104)}', 1, '${id(401)}', '${id(400)}',
         'draft-request-1', '${"b".repeat(64)}', 'SUCCEEDED',
         'provider-secret-ref', 'model-1', '2026-07-01', 'draft-prompt.v1',
         'draft-output.v1', 120, 60, 0.010000, 250, 1, 0,
@@ -178,13 +259,15 @@ describe("BL-AI-086 Draft persistence", () => {
       );
       INSERT INTO backlink_draft_versions (
         id, organization_id, workspace_id, website_project_id, draft_id,
-        opportunity_id, version_no, source, model_run_id, evidence_snapshot_id,
+        opportunity_id, contact_id, contact_version, version_no, source,
+        model_run_id, evidence_snapshot_id, request_snapshot_id,
         subject_text, body_text, structured_output, evidence_ids,
         prompt_version, output_schema_version, model_id, model_version,
         requires_user_confirmation, can_auto_send, created_by
       ) VALUES (
-        '${id(701)}', ${identity}, '${id(501)}', '${id(301)}', 1, 'MODEL',
-        '${id(601)}', '${id(401)}', 'A relevant collaboration',
+        '${id(701)}', ${identity}, '${id(501)}', '${id(301)}',
+        '${id(104)}', 1, 1, 'MODEL',
+        '${id(601)}', '${id(401)}', '${id(400)}', 'A relevant collaboration',
         'Hello, this draft is evidence-backed.',
         '{"subject":"A relevant collaboration"}', '["profile:1"]',
         'draft-prompt.v1', 'draft-output.v1', 'model-1', '2026-07-01',
@@ -205,6 +288,10 @@ describe("BL-AI-086 Draft persistence", () => {
     await expectCode(client.query(`
       DELETE FROM backlink_evidence_snapshots
       WHERE id = '${id(401)}'
+    `), "55000");
+    await expectCode(client.query(`
+      DELETE FROM backlink_draft_request_snapshots
+      WHERE id = '${id(400)}'
     `), "55000");
     expect((await client.query(`
       SELECT status, version, current_version_id AS "currentVersionId"
@@ -256,12 +343,20 @@ describe("BL-AI-086 Draft persistence", () => {
       JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'backlinks'
         AND c.relname IN (
-          'backlink_evidence_snapshots', 'backlink_email_drafts',
+          'backlink_evidence_snapshots', 'backlink_draft_request_snapshots',
+          'backlink_email_drafts',
           'backlink_model_runs', 'backlink_draft_versions'
         )
       ORDER BY c.relname
     `)).rows;
     expect(rows).toEqual([
+      {
+        relname: "backlink_draft_request_snapshots",
+        secure: true,
+        owner: "growthos_backlinks_owner",
+        writer_append: true,
+        writer_mutation: false,
+      },
       {
         relname: "backlink_draft_versions",
         secure: true,
@@ -304,6 +399,8 @@ describe("BL-AI-086 Draft persistence", () => {
         SELECT
           (SELECT count(*)::integer FROM backlink_evidence_snapshots)
             AS "evidenceSnapshots",
+          (SELECT count(*)::integer FROM backlink_draft_request_snapshots)
+            AS "requestSnapshots",
           (SELECT count(*)::integer FROM backlink_email_drafts)
             AS "emailDrafts",
           (SELECT count(*)::integer FROM backlink_model_runs)
@@ -312,6 +409,7 @@ describe("BL-AI-086 Draft persistence", () => {
             AS "draftVersions"
       `)).rows).toEqual([{
         evidenceSnapshots: 1,
+        requestSnapshots: 1,
         emailDrafts: 1,
         modelRuns: 1,
         draftVersions: 1,
@@ -328,6 +426,8 @@ describe("BL-AI-086 Draft persistence", () => {
         SELECT
           (SELECT count(*)::integer FROM backlink_evidence_snapshots)
             AS "evidenceSnapshots",
+          (SELECT count(*)::integer FROM backlink_draft_request_snapshots)
+            AS "requestSnapshots",
           (SELECT count(*)::integer FROM backlink_email_drafts)
             AS "emailDrafts",
           (SELECT count(*)::integer FROM backlink_model_runs)
@@ -336,6 +436,7 @@ describe("BL-AI-086 Draft persistence", () => {
             AS "draftVersions"
       `)).rows).toEqual([{
         evidenceSnapshots: 0,
+        requestSnapshots: 0,
         emailDrafts: 0,
         modelRuns: 0,
         draftVersions: 0,
@@ -347,25 +448,109 @@ describe("BL-AI-086 Draft persistence", () => {
     }
   });
 
+  it("approves a Draft through the writer role without version UPDATE permission", async () => {
+    await client.query("SET ROLE growthos_backlinks_writer");
+    try {
+      await client.query(`
+        SELECT set_config('app.current_workspace_id', '${workspace}', false),
+          set_config('app.current_website_project_id', '${project}', false)
+      `);
+      expect((await client.query(`
+        SELECT has_table_privilege(
+          current_user,
+          'backlink_draft_versions',
+          'UPDATE'
+        ) AS "canUpdateVersions"
+      `)).rows).toEqual([{ canUpdateVersions: false }]);
+
+      const editing = createDraftEditingRepository(client);
+      expect(await editing.approve({
+        organizationId: organization,
+        workspaceId: workspace,
+        websiteProjectId: project,
+        draftId: id(501),
+        expectedVersion: 2,
+        actorId: "writer-reviewer",
+        recordedAt: new Date("2026-08-13T01:45:00.000Z"),
+      })).toMatchObject({
+        state: "completed",
+        versionId: id(701),
+        draftVersion: 3,
+        status: "approved",
+      });
+    } finally {
+      await client.query("RESET ROLE");
+      await client.query("RESET app.current_workspace_id");
+      await client.query("RESET app.current_website_project_id");
+    }
+  });
+
   it("replays completed generation without another AI call and preserves the last success", async () => {
-    await client.query(`
-      INSERT INTO backlink_evidence_snapshots (
-        id, organization_id, workspace_id, website_project_id, opportunity_id,
-        evidence_items, snapshot_hash, schema_version, created_by
-      ) VALUES (
-        '${id(402)}', ${identity}, '${id(301)}',
-        '[{"id":"profile:2","status":"ACTIVE","visibility":"VISIBLE",
-          "confidence":0.9,"sourceKind":"PROFILE","value":"GrowthOS"}]',
-        '${"c".repeat(64)}', 1, 'test'
-      )
-    `);
     const repository = createDraftGenerationRepository(client);
+    expect(await repository.prepareEvidenceSnapshot({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      opportunityId: id(301),
+      contactId: id(104),
+      contactVersion: 1,
+      snapshotId: id(402),
+      requestSnapshotId: id(403),
+      request: generationRequest,
+      actorId: "test",
+      recordedAt: new Date("2026-07-27T08:29:00.000Z"),
+    })).toEqual({
+      snapshotId: id(402),
+      requestSnapshotId: id(403),
+      replayed: false,
+    });
+    expect(await repository.prepareEvidenceSnapshot({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      opportunityId: id(301),
+      contactId: id(104),
+      contactVersion: 1,
+      snapshotId: id(405),
+      requestSnapshotId: id(404),
+      request: generationRequest,
+      actorId: "test",
+      recordedAt: new Date("2026-07-27T08:29:30.000Z"),
+    })).toEqual({
+      snapshotId: id(402),
+      requestSnapshotId: id(403),
+      replayed: true,
+    });
+    const prepared = (await client.query(`
+      SELECT evidence_items AS "evidenceItems"
+      FROM backlink_evidence_snapshots
+      WHERE id='${id(402)}'
+    `)).rows[0];
+    expect(JSON.stringify(prepared?.evidenceItems)).not.toContain(
+      "contact@example.com",
+    );
+    await expect(repository.prepareEvidenceSnapshot({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      opportunityId: id(301),
+      contactId: id(104),
+      contactVersion: 99,
+      snapshotId: id(406),
+      requestSnapshotId: id(407),
+      request: generationRequest,
+      actorId: "test",
+      recordedAt: new Date("2026-07-27T08:29:45.000Z"),
+    })).rejects.toThrow("Draft Contact is unavailable or version is stale.");
     const job = await repository.createJob({
       organizationId: organization,
       workspaceId: workspace,
       websiteProjectId: project,
       opportunityId: id(301),
+      contactId: id(104),
+      contactVersion: 1,
       evidenceSnapshotId: id(402),
+      requestSnapshotId: id(403),
       draftId: id(503),
       runId: id(603),
       logicalDraftKey: "workflow-outreach",
@@ -373,6 +558,7 @@ describe("BL-AI-086 Draft persistence", () => {
       requestHash: "d".repeat(64),
       promptVersion: "draft-prompt.v1",
       outputSchemaVersion: "draft-output.v1",
+      generationMode: "MODEL",
       actorId: "test",
       recordedAt: new Date("2026-07-27T08:30:00.000Z"),
     });
@@ -385,12 +571,11 @@ describe("BL-AI-086 Draft persistence", () => {
         return {
           output: {
             subject: "Evidence-led collaboration",
-            bodyText: "Hello, this draft uses approved Evidence.",
-            personalizationClaims: [{
-              text: "Evidence-led",
-              evidenceIds: ["profile:2"],
+            bodyText: validAiBody,
+            factsUsed: [{
+              claim: "owner.example is the sender project.",
+              evidenceIds: ["profile:current"],
             }],
-            missingInformation: [],
             riskFlags: [],
             requiresUserConfirmation: true as const,
             canAutoSend: false as const,
@@ -403,6 +588,7 @@ describe("BL-AI-086 Draft persistence", () => {
           },
           latencyMs: 200,
           repairCount: 0 as const,
+          estimatedCostUsd: 0.0025,
         };
       },
     };
@@ -413,23 +599,8 @@ describe("BL-AI-086 Draft persistence", () => {
       runId: id(603),
       versionId: id(703),
       actorId: "test",
-      recordedAt: new Date("2026-07-27T08:31:00.000Z"),
-      prompt: {
-        organizationId: organization,
-        workspaceId: workspace,
-        websiteProjectId: project,
-        opportunityId: id(301),
-        evidenceSnapshotId: id(402),
-        promptVersion: "draft-prompt.v1",
-        outputSchemaVersion: "draft-output.v1",
-        systemInstruction: "Use approved Evidence.",
-        userContext: {},
-        evidence: [{
-          id: "profile:2",
-          sourceKind: "PROFILE" as const,
-          value: "GrowthOS",
-        }],
-      },
+      recordedAt: "2026-07-27T08:31:00.000Z",
+      generationMode: "MODEL" as const,
     };
 
     expect(await runDraftGenerationWorkflow(
@@ -450,6 +621,51 @@ describe("BL-AI-086 Draft persistence", () => {
       versionId: id(703),
     });
     expect(calls).toBe(1);
+    const completedJob = await repository.getJob({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      runId: id(603),
+    });
+    expect(completedJob).toMatchObject({
+      status: "SUCCEEDED",
+      latencyMs: 200,
+      attemptCount: 1,
+      lastErrorCategory: null,
+    });
+    expect(completedJob.startedAt).toBeInstanceOf(Date);
+    expect(completedJob.finishedAt).toBeInstanceOf(Date);
+    expect(completedJob.persistenceLatencyMs).not.toBeNull();
+    expect(completedJob.persistenceLatencyMs).toBeGreaterThanOrEqual(0);
+    if (completedJob.startedAt === null || completedJob.finishedAt === null) {
+      throw new Error("Completed Draft Job timing fields are missing.");
+    }
+    expect(completedJob.startedAt.getTime()).toBeGreaterThanOrEqual(
+      completedJob.queuedAt.getTime(),
+    );
+    expect(completedJob.finishedAt.getTime()).toBeGreaterThanOrEqual(
+      completedJob.startedAt.getTime(),
+    );
+    expect(await repository.findLatestJob({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      opportunityId: id(301),
+      logicalDraftKey: "workflow-outreach",
+    })).toMatchObject({
+      runId: id(603),
+      status: "SUCCEEDED",
+      draftId: id(503),
+    });
+    expect((await client.query(`
+      SELECT structured_output->'evidenceRefs' AS "evidenceRefs",
+        evidence_ids AS "evidenceIds"
+      FROM backlink_draft_versions
+      WHERE id='${id(703)}'
+    `)).rows[0]).toEqual({
+      evidenceRefs: ["profile:current"],
+        evidenceIds: ["profile:current"],
+    });
 
     const failedJob = await repository.createJob({
       ...job,
@@ -487,6 +703,8 @@ describe("BL-AI-086 Draft persistence", () => {
     })).toMatchObject({
       status: "FAILED",
       lastSuccessfulVersionId: id(703),
+      attemptCount: 1,
+      lastErrorCategory: "DRAFT_GENERATION_FAILED",
     });
     await expect(repository.createJob({
       ...failedJob,
@@ -545,7 +763,7 @@ describe("BL-AI-086 Draft persistence", () => {
       {
         id: id(703),
         subjectText: "Evidence-led collaboration",
-        bodyText: "Hello, this draft uses approved Evidence.",
+        bodyText: validAiBody,
         bodyDocument: null,
       },
       {
@@ -692,19 +910,23 @@ describe("BL-AI-086 Draft persistence", () => {
       );
       INSERT INTO backlink_email_drafts (
         id, organization_id, workspace_id, website_project_id, opportunity_id,
-        logical_draft_key, status, created_by, updated_by
+        contact_id, contact_version, logical_draft_key, status,
+        created_by, updated_by
       ) VALUES (
-        '${id(504)}', ${identity}, '${id(301)}', 'rollback-approval',
+        '${id(504)}', ${identity}, '${id(301)}', '${id(104)}', 1,
+        'rollback-approval',
         'draft', 'test', 'test'
       );
       INSERT INTO backlink_draft_versions (
         id, organization_id, workspace_id, website_project_id, draft_id,
-        opportunity_id, version_no, source, evidence_snapshot_id,
+        opportunity_id, contact_id, contact_version, version_no, source,
+        evidence_snapshot_id,
         subject_text, body_text, structured_output, evidence_ids,
         prompt_version, output_schema_version,
         requires_user_confirmation, can_auto_send, created_by
       ) VALUES (
-        '${id(706)}', ${identity}, '${id(504)}', '${id(301)}', 1, 'MANUAL',
+        '${id(706)}', ${identity}, '${id(504)}', '${id(301)}',
+        '${id(104)}', 1, 1, 'MANUAL',
         '${id(403)}', 'Rollback subject', 'Rollback body', '{}', '[]',
         'manual.v1', 'draft-output.v1', true, false, 'test'
       );
@@ -776,19 +998,23 @@ describe("BL-AI-086 Draft persistence", () => {
       );
       INSERT INTO backlink_email_drafts (
         id, organization_id, workspace_id, website_project_id, opportunity_id,
-        logical_draft_key, status, created_by, updated_by
+        contact_id, contact_version, logical_draft_key, status,
+        created_by, updated_by
       ) VALUES (
-        '${id(505)}', ${identity}, '${id(301)}', 'concurrent-approval',
+        '${id(505)}', ${identity}, '${id(301)}', '${id(104)}', 1,
+        'concurrent-approval',
         'draft', 'test', 'test'
       );
       INSERT INTO backlink_draft_versions (
         id, organization_id, workspace_id, website_project_id, draft_id,
-        opportunity_id, version_no, source, evidence_snapshot_id,
+        opportunity_id, contact_id, contact_version, version_no, source,
+        evidence_snapshot_id,
         subject_text, body_text, structured_output, evidence_ids,
         prompt_version, output_schema_version,
         requires_user_confirmation, can_auto_send, created_by
       ) VALUES (
-        '${id(707)}', ${identity}, '${id(505)}', '${id(301)}', 1, 'MANUAL',
+        '${id(707)}', ${identity}, '${id(505)}', '${id(301)}',
+        '${id(104)}', 1, 1, 'MANUAL',
         '${id(404)}', 'Concurrent subject', 'Concurrent body', '{}', '[]',
         'manual.v1', 'draft-output.v1', true, false, 'test'
       );

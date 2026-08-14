@@ -3,23 +3,28 @@ import type {
   SendAttemptReference,
   SendAttemptSettlement,
   SendAttemptSettlementResult,
+  SendExecutionContext,
 } from "../services/send-attempt.repository.js";
 import {
   gmailSendFailureCodes,
   type GmailSendResult,
 } from "../../ports/gmail-send.port.js";
 
-export type GmailSendWorkflowInput = Readonly<{
+export type GmailSendWorkflowInput = SendExecutionContext & Readonly<{
   sendIntentId: string;
 }>;
 
 export interface SendWorkflowActivities {
-  claimAttempt(input: Readonly<{
+  claimAttempt(input: SendExecutionContext & Readonly<{
     sendIntentId: string;
     maxAttempts: number;
   }>): Promise<SendAttemptClaimResult>;
-  dispatchAttempt(attempt: SendAttemptReference): Promise<GmailSendResult>;
+  dispatchAttempt(input: Readonly<{
+    context: SendExecutionContext;
+    attempt: SendAttemptReference;
+  }>): Promise<GmailSendResult>;
   settleAttempt(input: Readonly<{
+    context: SendExecutionContext;
     attempt: SendAttemptReference;
     settlement: SendAttemptSettlement;
   }>): Promise<SendAttemptSettlementResult>;
@@ -148,8 +153,17 @@ export async function runGmailSendWorkflow(
     throw new TypeError("Gmail Send maxAttempts must be positive.");
   }
 
+  const context: SendExecutionContext = {
+    organizationId: input.organizationId,
+    workspaceId: input.workspaceId,
+    websiteProjectId: input.websiteProjectId,
+    gmailConnectionId: input.gmailConnectionId,
+    actorId: input.actorId,
+  };
+
   for (;;) {
     const claim = await activities.claimAttempt({
+      ...context,
       sendIntentId: input.sendIntentId,
       maxAttempts,
     });
@@ -164,13 +178,17 @@ export async function runGmailSendWorkflow(
       return resultFromClaim(claim);
     }
 
-    const sendResult = await activities.dispatchAttempt(claim.attempt);
+    const sendResult = await activities.dispatchAttempt({
+      context,
+      attempt: claim.attempt,
+    });
     const settlement = settlementFor(
       sendResult,
       claim.attempt,
       maxAttempts,
     );
     const persisted = await activities.settleAttempt({
+      context,
       attempt: claim.attempt,
       settlement,
     });

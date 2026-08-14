@@ -2,6 +2,7 @@ import swagger from "@fastify/swagger";
 import type { FastifyInstance } from "fastify";
 import {
   jsonSchemaTransform,
+  jsonSchemaTransformObject,
   serializerCompiler,
   validatorCompiler,
 } from "fastify-type-provider-zod";
@@ -20,5 +21,6 @@ export async function registerBacklinksOpenApi(
       },
     },
     transform: jsonSchemaTransform,
+    transformObject: jsonSchemaTransformObject,
   });
 }

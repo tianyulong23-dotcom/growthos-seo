@@ -6,12 +6,17 @@ import {
 import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
 import type {
   DraftEditingRepository,
+  DraftGenerationMode,
   DraftGenerationRepository,
 } from "../repositories/draft-generation.repository.js";
+import type {
+  DraftGenerationWorkflowInput,
+} from "../workflows/draft-generation-workflow.js";
 import { draftDocumentSchema } from "../schemas/draft-document.schema.js";
 import {
   draftDocumentToPlainText,
 } from "../../domain/drafts/draft-document.js";
+import type { DraftRequest } from "../schemas/draft-request.schema.js";
 
 export type DraftBudgetGate = Readonly<{
   assertAvailable(input: Readonly<{
@@ -22,12 +27,20 @@ export type DraftBudgetGate = Readonly<{
   }>): Promise<void>;
 }>;
 
+export type DraftGenerationScheduler = Readonly<{
+  start(input: DraftGenerationWorkflowInput): Promise<
+    Readonly<{ workflowId: string }>
+  >;
+}>;
+
 type CreateDraftCommand = Readonly<{
   context: ResolvedProjectContext;
   opportunityId: string;
-  evidenceSnapshotId: string;
+  contactId: string;
+  contactVersion: number;
   logicalDraftKey: string;
   idempotencyKey: string;
+  request: DraftRequest;
 }>;
 
 const digest = (value: unknown) =>
@@ -57,6 +70,12 @@ const mapRepositoryError = (error: unknown): never => {
       message: "Draft resource was not found in this project.",
     });
   }
+  if (message.includes("Draft Contact")) {
+    throw new BacklinkError({
+      code: backlinkErrorCodes.conflict,
+      message: "The selected Contact is unavailable or has changed.",
+    });
+  }
   throw error;
 };
 
@@ -67,41 +86,80 @@ export function createDraftCommands(dependencies: Readonly<{
   now(): Date;
   promptVersion: string;
   outputSchemaVersion: string;
+  generationMode: DraftGenerationMode;
+  modelProviderAvailable(): boolean;
+  scheduler: DraftGenerationScheduler;
 }>) {
   return Object.freeze({
     async create(input: CreateDraftCommand) {
       authorize(input.context);
-      try {
-        await dependencies.budget.assertAvailable({
-          organizationId: input.context.tenant.organizationId,
-          workspaceId: input.context.tenant.workspaceId,
-          websiteProjectId: input.context.project.websiteProjectId,
-          operation: "draft_generation",
-        });
-      } catch {
-        throw new BacklinkError({
-          code: backlinkErrorCodes.rateLimited,
-          message: "Draft generation budget is unavailable.",
-          retryable: true,
-        });
+      if (dependencies.generationMode === "MODEL") {
+        if (!dependencies.modelProviderAvailable()) {
+          throw new BacklinkError({
+            code: backlinkErrorCodes.invalidRequest,
+            message: "MISCONFIGURED: AI Draft Provider is not configured.",
+            fieldErrors: [{
+              field: "AI_PROVIDER_ENABLED",
+              message: "Enable and configure the AI Draft Provider.",
+            }],
+          });
+        }
+        try {
+          await dependencies.budget.assertAvailable({
+            organizationId: input.context.tenant.organizationId,
+            workspaceId: input.context.tenant.workspaceId,
+            websiteProjectId: input.context.project.websiteProjectId,
+            operation: "draft_generation",
+          });
+        } catch {
+          throw new BacklinkError({
+            code: backlinkErrorCodes.rateLimited,
+            message: "Draft generation budget is unavailable.",
+            retryable: true,
+          });
+        }
       }
 
-      const requestHash = digest({
-        opportunityId: input.opportunityId,
-        evidenceSnapshotId: input.evidenceSnapshotId,
-        logicalDraftKey: input.logicalDraftKey,
-        promptVersion: dependencies.promptVersion,
-        outputSchemaVersion: dependencies.outputSchemaVersion,
-      });
-      const draftId = dependencies.newId();
-      const runId = dependencies.newId();
+      const recordedAt = dependencies.now();
       try {
+        const evidenceSnapshot = await dependencies.repository
+          .prepareEvidenceSnapshot({
+            organizationId: input.context.tenant.organizationId,
+            workspaceId: input.context.tenant.workspaceId,
+            websiteProjectId: input.context.project.websiteProjectId,
+            opportunityId: input.opportunityId,
+            contactId: input.contactId,
+            contactVersion: input.contactVersion,
+            snapshotId: dependencies.newId(),
+            requestSnapshotId: dependencies.newId(),
+            request: input.request,
+            actorId: input.context.actor.userId,
+            recordedAt,
+          });
+        const requestHash = digest({
+          opportunityId: input.opportunityId,
+          contactId: input.contactId,
+          contactVersion: input.contactVersion,
+          evidenceSnapshotId: evidenceSnapshot.snapshotId,
+          requestSnapshotId: evidenceSnapshot.requestSnapshotId,
+          request: input.request,
+          logicalDraftKey: input.logicalDraftKey,
+          promptVersion: dependencies.promptVersion,
+          outputSchemaVersion: dependencies.outputSchemaVersion,
+          generationMode: dependencies.generationMode,
+        });
+        const draftId = dependencies.newId();
+        const runId = dependencies.newId();
+        const versionId = dependencies.newId();
         const job = await dependencies.repository.createJob({
           organizationId: input.context.tenant.organizationId,
           workspaceId: input.context.tenant.workspaceId,
           websiteProjectId: input.context.project.websiteProjectId,
           opportunityId: input.opportunityId,
-          evidenceSnapshotId: input.evidenceSnapshotId,
+          contactId: input.contactId,
+          contactVersion: input.contactVersion,
+          evidenceSnapshotId: evidenceSnapshot.snapshotId,
+          requestSnapshotId: evidenceSnapshot.requestSnapshotId,
           draftId,
           runId,
           logicalDraftKey: input.logicalDraftKey,
@@ -109,13 +167,30 @@ export function createDraftCommands(dependencies: Readonly<{
           requestHash,
           promptVersion: dependencies.promptVersion,
           outputSchemaVersion: dependencies.outputSchemaVersion,
+          generationMode: dependencies.generationMode,
           actorId: input.context.actor.userId,
-          recordedAt: dependencies.now(),
+          recordedAt,
+        });
+        const scheduled = await dependencies.scheduler.start({
+          organizationId: input.context.tenant.organizationId,
+          workspaceId: input.context.tenant.workspaceId,
+          websiteProjectId: input.context.project.websiteProjectId,
+          runId: job.runId,
+          versionId: job.versionId ?? versionId,
+          actorId: input.context.actor.userId,
+          recordedAt: recordedAt.toISOString(),
+          generationMode: dependencies.generationMode,
         });
         return {
           jobId: job.runId,
           draftId: job.draftId,
           status: job.status,
+          contactId: input.contactId,
+          contactVersion: input.contactVersion,
+          evidenceSnapshotId: evidenceSnapshot.snapshotId,
+          requestSnapshotId: evidenceSnapshot.requestSnapshotId,
+          workflowId: scheduled.workflowId,
+          generationMode: dependencies.generationMode,
           replayed: job.runId !== runId,
         };
       } catch (error) {

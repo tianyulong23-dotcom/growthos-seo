@@ -1,5 +1,10 @@
+import type {
+  BacklinksDraftBlockNode,
+  BacklinksResponse,
+} from "@/api/generated/backlinks"
+
 export type DraftStatus =
-  "generating" | "draft" | "approved" | "rejected" | "sent"
+  BacklinksResponse<"backlinksGetDraftV1">["draft"]["status"]
 
 export type DraftTextMark =
   | { type: "bold" }
@@ -37,32 +42,21 @@ export type DraftOrderedListNode = {
   content: DraftListItemNode[]
 }
 
-export type DraftBlockNode =
-  DraftParagraphNode | DraftBulletListNode | DraftOrderedListNode
+export type DraftBlockNode = BacklinksDraftBlockNode
 
 export type DraftDocument = {
   type: "doc"
   content: DraftBlockNode[]
 }
 
-export type DraftVersionSnapshot = {
-  id: string
-  versionNo: number
-  subjectText: string
-  bodyText: string
-  bodyDocument: DraftDocument
-  source: "MODEL" | "MANUAL" | "RESTORED"
-  createdAt: string
-}
+export type DraftVersionSnapshot = NonNullable<
+  BacklinksResponse<"backlinksGetDraftV1">["draft"]["currentVersion"]
+>
 
-export type DraftSnapshot = {
-  id: string
-  opportunityId: string
-  status: DraftStatus
-  draftVersion: number
-  approvedVersionId: string | null
-  currentVersion: DraftVersionSnapshot | null
-}
+export type DraftSnapshot = BacklinksResponse<"backlinksGetDraftV1">["draft"]
+
+export type OpportunityContact =
+  BacklinksResponse<"backlinksListOpportunityContactsV1">["items"][number]
 
 export type BacklinksMeta = {
   organizationId: string
@@ -73,13 +67,8 @@ export type BacklinksMeta = {
   generatedAt: string
 }
 
-export type DraftMutationResult = {
-  draftId: string
-  versionId: string
-  draftVersion: number
-  status: "draft" | "approved"
-  meta: BacklinksMeta
-}
+export type DraftMutationResult =
+  BacklinksResponse<"backlinksSaveDraftVersionV1">
 
 export type ContactCandidate = {
   id: string
@@ -100,16 +89,13 @@ export type ContactCandidate = {
 }
 
 export type SendIntentMessagePurpose =
-  | "INITIAL_OUTREACH"
-  | "FOLLOW_UP"
-  | "NEGOTIATION_REPLY"
+  "INITIAL_OUTREACH" | "FOLLOW_UP" | "NEGOTIATION_REPLY"
 
-export type SendIntentResult = {
-  sendIntentId: string
-  draftId: string
-  approvedDraftVersionId: string
-  status: "READY"
-  version: 1
-  requestedSendAt: string
-  meta: BacklinksMeta
-}
+export type SendIntentResult =
+  BacklinksResponse<"backlinksCreateSendIntentV1">
+
+export type SendIntentPreflight =
+  BacklinksResponse<"backlinksPreflightSendIntentV1">
+
+export type SendIntentView =
+  BacklinksResponse<"backlinksGetSendIntentV1">["sendIntent"]

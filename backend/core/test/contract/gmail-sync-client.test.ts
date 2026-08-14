@@ -184,6 +184,30 @@ describe("BL-AI-127 Gmail History Real Adapter shell", () => {
     });
   });
 
+  it("adds the configured initial query after the bounded lookback", async () => {
+    const fake = createClient();
+    const adapter = new GmailSyncClientAdapter({
+      config: {
+        enabled: true,
+        initialQuery: "subject:\"GrowthOS Gmail Canary + controlled\"",
+      },
+      client: fake.client,
+    });
+
+    await adapter.listInitialMessages(initialInput);
+
+    expect(fake.listInitial).toHaveBeenCalledWith({
+      gmailConnectionId,
+      userId: "me",
+      q: [
+        `after:${Math.floor(Date.parse(receivedAfter) / 1_000)}`,
+        "subject:\"GrowthOS Gmail Canary + controlled\"",
+      ].join(" "),
+      pageToken: "initial-page-1",
+      maxResults: 100,
+    });
+  });
+
   it("maps and de-duplicates messageAdded history records deterministically", async () => {
     const fake = createClient();
     const adapter = enabledAdapter(fake.client);
@@ -291,8 +315,45 @@ describe("BL-AI-127 Gmail History Real Adapter shell", () => {
         retryable: false,
       });
     await expect(failed.watch(watchInput)).rejects.toMatchObject({
-      code: gmailSyncClientAdapterFailureCodes.providerFailure,
-      retryable: false,
+      code: gmailSyncClientAdapterFailureCodes.provider5xx,
+      retryable: true,
     });
   });
+
+  it.each([
+    [
+      new GmailSyncProviderError({ kind: "timeout" }),
+      gmailSyncClientAdapterFailureCodes.networkTimeout,
+    ],
+    [
+      new GmailSyncProviderError({
+        kind: "http_response",
+        httpStatus: 429,
+        retryAfterSeconds: 120,
+      }),
+      gmailSyncClientAdapterFailureCodes.rateLimited,
+    ],
+    [
+      new GmailSyncProviderError({
+        kind: "transport",
+      }),
+      gmailSyncClientAdapterFailureCodes.transportFailure,
+    ],
+  ] as const)(
+    "preserves retryable sync category %s",
+    async (providerError, code) => {
+      const adapter = enabledAdapter({
+        ...createClient().client,
+        listInitial: async () => {
+          throw providerError;
+        },
+      });
+
+      await expect(adapter.listInitialMessages(initialInput)).rejects
+        .toMatchObject({
+          code,
+          retryable: true,
+        });
+    },
+  );
 });

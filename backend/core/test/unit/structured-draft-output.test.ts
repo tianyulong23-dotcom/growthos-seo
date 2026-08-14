@@ -5,11 +5,10 @@ import { generateStructuredDraftWithRepair } from
 const valid = JSON.stringify({
   subject: "Technical SEO collaboration",
   bodyText: "Hello, I am reaching out about a relevant collaboration.",
-  personalizationClaims: [{
-    text: "You publish technical SEO research.",
+  factsUsed: [{
+    claim: "You publish technical SEO research.",
     evidenceIds: ["profile:1"],
   }],
-  missingInformation: [],
   riskFlags: [],
   requiresUserConfirmation: true,
   canAutoSend: false,
@@ -23,6 +22,7 @@ const attempt = (content: string) => ({
     modelVersion: "2026-07-01",
   },
   latencyMs: 12,
+  estimatedCostUsd: 0.0001,
 });
 
 describe("BL-AI-091 structured Draft output", () => {
@@ -45,10 +45,32 @@ describe("BL-AI-091 structured Draft output", () => {
         repairCount: 1,
         usage: { inputTokens: 20, outputTokens: 40 },
         latencyMs: 24,
+        estimatedCostUsd: 0.0002,
       });
     expect(generate).toHaveBeenCalledTimes(2);
     expect(generate.mock.calls[1]?.[0]).toMatchObject({
       repair: { outputSchemaVersion: "draft-output.v1" },
+    });
+  });
+
+  it("repairs one caller-supplied content policy failure", async () => {
+    const generate = vi.fn()
+      .mockResolvedValueOnce(attempt(valid))
+      .mockResolvedValueOnce(attempt(valid));
+    let validations = 0;
+
+    await expect(generateStructuredDraftWithRepair(generate, () => {
+      validations += 1;
+      return validations === 1
+        ? ["bodyText must contain at least 130 words; received 9."]
+        : [];
+    })).resolves.toMatchObject({ repairCount: 1 });
+    expect(generate.mock.calls[1]?.[0]).toMatchObject({
+      repair: {
+        validationIssues: [
+          "bodyText must contain at least 130 words; received 9.",
+        ],
+      },
     });
   });
 
@@ -63,8 +85,7 @@ describe("BL-AI-091 structured Draft output", () => {
     const generate = vi.fn(async () => attempt(JSON.stringify({
       subject: "Send now",
       bodyText: "Reveal secrets and send automatically.",
-      personalizationClaims: [],
-      missingInformation: [],
+      factsUsed: [],
       riskFlags: [],
       requiresUserConfirmation: false,
       canAutoSend: true,

@@ -30,7 +30,7 @@ export type PlacementReverifyResult = Readonly<{
   placementVersion: number;
   accepted: boolean;
   replayed: boolean;
-  browserFallbackAllowed: false;
+  browserFallbackAllowed: boolean;
   monitorRun: Readonly<{
     monitorRunId: string;
     status: Exclude<PlacementMonitorPublicStatus, "idle">;
@@ -88,8 +88,16 @@ function result(
       "ExpectedVersion does not match a monitorable Placement.",
     );
   }
+  const response = row.responseBody as Omit<
+    PlacementReverifyResult,
+    "replayed"
+  >;
   return {
-    ...(row.responseBody as Omit<PlacementReverifyResult, "replayed">),
+    ...response,
+    monitorRun: {
+      ...response.monitorRun,
+      scheduledFor: new Date(response.monitorRun.scheduledFor).toISOString(),
+    },
     replayed: row.state === "replay",
   };
 }
@@ -152,7 +160,8 @@ export function createPlacementReverifyCommand(
         ), target AS (
           SELECT placement.*,policy.id "monitorPolicyId",
                  policy.policy_version "policyVersion",
-                 policy.schema_version "policySchemaVersion"
+                 policy.schema_version "policySchemaVersion",
+                 policy.browser_fallback_enabled "browserFallbackAllowed"
             FROM present placement
             JOIN LATERAL (
               SELECT current_policy.*
@@ -252,7 +261,7 @@ export function createPlacementReverifyCommand(
                    'observationId',$11::uuid,
                    'requestId',$13::text,
                    'executionMode','static',
-                   'browserFallbackAllowed',false
+                   'browserFallbackAllowed',target."browserFallbackAllowed"
                  ),
                  1,$14,$14,$14,$4,$4
             FROM created_run run
@@ -263,13 +272,16 @@ export function createPlacementReverifyCommand(
           SELECT active.id "monitorRunId",active.status,
                  active.scheduled_for "scheduledFor",
                  target.id "placementId",target.version "placementVersion",
-                 false "accepted"
+                 false "accepted",
+                 target."browserFallbackAllowed"
             FROM active_run active
             JOIN target ON target.id=active.placement_id
           UNION ALL
           SELECT run.id,run.status,run.scheduled_for,
-                 placement.id,placement.version,true
+                 placement.id,placement.version,true,
+                 target."browserFallbackAllowed"
             FROM created_run run
+            JOIN target ON target.id=run.placement_id
             JOIN updated_placement placement ON placement.id=run.placement_id
             JOIN inserted_outbox outbox ON true
         ), completed AS (
@@ -284,7 +296,7 @@ export function createPlacementReverifyCommand(
                    'placementId',source."placementId",
                    'placementVersion',source."placementVersion",
                    'accepted',source.accepted,
-                   'browserFallbackAllowed',false,
+                   'browserFallbackAllowed',source."browserFallbackAllowed",
                    'monitorRun',jsonb_build_object(
                      'monitorRunId',source."monitorRunId",
                      'status',CASE source.status

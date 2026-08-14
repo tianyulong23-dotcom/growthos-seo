@@ -140,9 +140,19 @@ function validationForReview(
 
 function assertConfirmable(candidate: PlacementReviewCandidate): void {
   const validation = validationForReview(candidate);
+  const hasDirectValidationBinding = (
+    candidate.opportunityId !== null
+    && candidate.matchStatus === "AUTO_MATCHED"
+  ) || (
+    candidate.opportunityId === null
+    && candidate.matchStatus === "UNMATCHED"
+    && (
+      candidate.sourceType === "manual"
+      || candidate.sourceType === "import"
+    )
+  );
   if (
-    candidate.matchStatus !== "AUTO_MATCHED"
-    || candidate.opportunityId === null
+    !hasDirectValidationBinding
     || candidate.sourcePageUrl === null
     || candidate.normalizedSourceUrl === null
     || candidate.normalizedSourceUrlHash === null

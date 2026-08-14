@@ -12,6 +12,7 @@ type LabelledCase = Readonly<{
   mailtoLabel?: string;
   nearbyText?: string;
   pageTitle?: string;
+  pageUrl?: string;
 }>;
 
 const labelledCases: readonly LabelledCase[] = [
@@ -28,13 +29,14 @@ const labelledCases: readonly LabelledCase[] = [
   { expected: "advertising", email: "advertising@example.com" },
   { expected: "advertising", email: "sponsorship@example.com" },
   { expected: "advertising", email: "ads@example.com" },
+  { expected: "business", email: "sales@example.com" },
   { expected: "support", email: "support@example.com" },
   { expected: "support", email: "helpdesk@example.com" },
   { expected: "support", email: "customer-support@example.com" },
   { expected: "general", email: "info@example.com" },
   { expected: "general", email: "hello@example.com" },
   { expected: "general", email: "contact@example.com" },
-  { expected: "unknown", email: "legal@example.com" },
+  { expected: "legal", email: "legal@example.com" },
   { expected: "unknown", email: "team@example.com" },
   { expected: "unknown", email: "person.name@example.com" },
 ];
@@ -69,6 +71,7 @@ describe("BL-AI-CORR-3C-001 contact purpose correction", () => {
         ...(entry.mailtoLabel === undefined ? {} : { mailtoLabel: entry.mailtoLabel }),
         ...(entry.nearbyText === undefined ? {} : { nearbyText: entry.nearbyText }),
         ...(entry.pageTitle === undefined ? {} : { pageTitle: entry.pageTitle }),
+        ...(entry.pageUrl === undefined ? {} : { pageUrl: entry.pageUrl }),
       }),
     }));
     const highConfidence = decisions.filter(
@@ -124,6 +127,49 @@ describe("BL-AI-CORR-3C-001 contact purpose correction", () => {
       source: "visible_text",
       pageTitle: "PR contact",
     }).inferredPurpose).not.toBe("press");
+  });
+
+  it("classifies a public manager mailbox as a general contact", () => {
+    const decision = classifyContactPurpose({
+      email: "manager@example.com",
+      source: "visible_text",
+    });
+
+    expect(decision.inferredPurpose).toBe("general");
+    expect(decision.observedRole).toBe("manager");
+    expect(decision.confidence).toBe(98);
+    expect(decision.evidence).toContainEqual(expect.objectContaining({
+      field: "email_local_part",
+      ruleId: "general.manager",
+    }));
+  });
+
+  it("uses an official contact-page path as low-trust general-purpose evidence", () => {
+    const decision = classifyContactPurpose({
+      email: "person.name@agency.example",
+      source: "mailto",
+      pageUrl: "https://publisher.example/contact/",
+    });
+
+    expect(decision).toMatchObject({
+      inferredPurpose: "general",
+      confidence: 72,
+    });
+    expect(decision.evidence).toContainEqual(expect.objectContaining({
+      field: "page_url",
+      ruleId: "general.contact",
+    }));
+  });
+
+  it("keeps restricted mailbox evidence above a contact-page path", () => {
+    expect(classifyContactPurpose({
+      email: "support@example.com",
+      source: "mailto",
+      pageUrl: "https://example.com/contact/",
+    })).toMatchObject({
+      inferredPurpose: "support",
+      confidence: 98,
+    });
   });
 
   it("keeps the elephtv regression general or unknown and never press", () => {

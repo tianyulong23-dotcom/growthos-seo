@@ -10,11 +10,15 @@ const read = (file) => readFile(path.join(dirname, file), "utf8")
 
 test("Links DTO keeps Candidate outside successful KPI", async () => {
   const types = await read("types.ts")
+  const generated = await read("../../../api/generated/backlinks.ts")
   const workspace = await read("links-workspace.tsx")
 
-  assert.match(types, /countsTowardKpi: false/)
-  assert.match(types, /countsTowardKpi: true/)
-  assert.match(workspace, /Candidate 只表示候选，不是成功状态/)
+  assert.match(types, /BacklinksResponse<"backlinksListLinksV1">/)
+  assert.match(types, /Extract<[\s\S]*recordType: "candidate"/)
+  assert.match(types, /Extract<[\s\S]*recordType: "placement"/)
+  assert.match(generated, /countsTowardKpi: false/)
+  assert.match(generated, /countsTowardKpi: true/)
+  assert.match(workspace, /Candidate\s*只表示候选，不是成功状态/)
   assert.match(workspace, /不计入成功 KPI/)
   assert.match(
     workspace,
@@ -25,37 +29,74 @@ test("Links DTO keeps Candidate outside successful KPI", async () => {
 test("Links matches all re-frozen public endpoints and reverify contract", async () => {
   const api = await read("api.ts")
 
-  assert.match(api, /\/backlinks\/links/)
-  assert.match(api, /\/candidates\/\$\{encodeURIComponent\(candidateId\)\}/)
-  assert.match(api, /\/placements\/\$\{encodeURIComponent\(placementId\)\}/)
-  assert.match(
-    api,
-    /\/placements\/\$\{encodeURIComponent\(placementId\)\}\/events/
-  )
-  assert.match(api, /\/evidence\/\$\{encodeURIComponent\(evidenceId\)\}/)
-  assert.match(
-    api,
-    /\/placements\/\$\{encodeURIComponent\(placementId\)\}\/reverify/
-  )
-  assert.match(api, /method: "POST"/)
-  assert.match(api, /"Idempotency-Key": input\.idempotencyKey/)
-  assert.match(
-    api,
-    /JSON\.stringify\(\{ expectedVersion: input\.expectedVersion \}\)/
-  )
-  assert.match(api, /apiRequest<\{ evidence: PlacementEvidence \}>/)
-  assert.match(api, /apiRequest<PlacementReverifyResult>/)
+  for (const operationId of [
+    "backlinksListOpportunitiesV1",
+    "backlinksCreatePlacementCandidateV1",
+    "backlinksListLinksV1",
+    "backlinksGetCandidateLinkV1",
+    "backlinksGetPlacementLinkV1",
+    "backlinksListPlacementLifecycleEventsV1",
+    "backlinksGetPlacementEvidenceV1",
+    "backlinksReverifyPlacementV1",
+    "backlinksGetProfileV1",
+    "backlinksListInventoryV1",
+    "backlinksRequestProfileSyncV1",
+    "backlinksGetProfileSyncJobV1",
+    "backlinksImportInventoryItemV1",
+    "backlinksUpdateInventoryMonitoringPolicyV1",
+    "backlinksRequestInventoryCheckV1",
+    "backlinksListInventoryDirectObservationsV1",
+  ]) {
+    assert.match(api, new RegExp(`"${operationId}"`))
+  }
+  assert.match(api, /requestBacklinks/)
+  assert.match(api, /createPlacementCandidate/)
+  assert.match(api, /"idempotency-key": input\.idempotencyKey/)
+  assert.match(api, /body: \{ expectedVersion: input\.expectedVersion \}/)
+  assert.match(api, /\{ signal \}/)
+  assert.doesNotMatch(api, /apiRequest/)
+  assert.doesNotMatch(api, /\/api\/v1\//)
+})
+
+test("Links mounts the project-scoped Backlink Profile and Inventory workspace", async () => {
+  const types = await read("types.ts")
+  const workspace = await read("links-workspace.tsx")
+  const panel = await read("backlink-profile-panel.tsx")
+
+  assert.match(types, /BacklinksResponse<"backlinksGetProfileV1">/)
+  assert.match(types, /BacklinksResponse<"backlinksListInventoryV1">/)
+  assert.match(workspace, /<BacklinkProfilePanel/)
+  assert.match(panel, /providerInputRequired/)
+  assert.match(panel, /Inventory coverage/)
+  assert.match(panel, /HealthComponents/)
+  assert.match(panel, /Distribution label="Anchor"/)
+  assert.match(panel, /DATAFORSEO/)
+  assert.match(panel, /USER_IMPORTED/)
+  assert.match(panel, /placementId/)
+  assert.match(panel, /opportunityId/)
+  assert.match(panel, /requestBacklinkProfileSync/)
+  assert.match(panel, /getBacklinkProfileSyncJob/)
+  assert.match(panel, /importBacklinkInventoryItem/)
+  assert.match(panel, /updateBacklinkInventoryPolicy/)
+  assert.match(panel, /requestBacklinkInventoryCheck/)
+  assert.match(panel, /listBacklinkInventoryDirectObservations/)
+  assert.match(panel, /Direct validation history/)
+  assert.match(panel, /Provider \{item\.providerStatus\}/)
+  assert.match(panel, /setPage\(\(current\) => current \+ 1\)/)
+  assert.match(panel, /disabled=\{itemBusy\}/)
+  assert.match(panel, /disabled=\{itemBusy \|\| providerOnly\}/)
 })
 
 test("Links renders Recovered, observations, evidence, events, stale and server job state", async () => {
   const types = await read("types.ts")
+  const generated = await read("../../../api/generated/backlinks.ts")
   const workspace = await read("links-workspace.tsx")
 
   assert.match(types, /"recovered"/)
   assert.match(types, /latestObservation/)
   assert.match(types, /LifecycleEventType/)
-  assert.match(types, /immutable: true/)
-  assert.match(types, /hashVerified: true/)
+  assert.match(generated, /immutable: true/)
+  assert.match(generated, /hashVerified: true/)
 
   for (const state of [
     "candidate",
@@ -93,6 +134,21 @@ test("Links has seek pagination and explicit error states for reads and commands
   assert.match(workspace, /onClick=\{nextPage\}/)
   assert.match(workspace, /crypto\.randomUUID\(\)/)
   assert.match(workspace, /expectedVersion: placement\.version/)
+  assert.match(workspace, /backlinksProjectQueries\.fetch/)
+  assert.match(workspace, /createProjectQueryKey/)
+  assert.match(workspace, /"links",[\s\S]*"list"/)
+  assert.match(workspace, /"link-detail"/)
+  assert.match(workspace, /"link-events"/)
+  assert.match(workspace, /"link-evidence"/)
+  assert.match(workspace, /AbortError/)
+  assert.match(workspace, /parsePlacementCsv/)
+  assert.match(workspace, /sourcePageUrl/)
+  assert.match(workspace, /targetUrl/)
+  assert.match(workspace, /client\.createPlacementCandidate/)
+  assert.match(workspace, /PENDING_VALIDATION/)
+  assert.match(workspace, /evidence\.link\.occurrences/)
+  assert.match(workspace, /consecutiveAnomalies/)
+  assert.match(workspace, /String\(result\.browserFallbackAllowed\)/)
 })
 
 test("protected Outreach workspace mounts Links with the routed project and shared client", async () => {
@@ -112,4 +168,5 @@ test("protected Outreach workspace mounts Links with the routed project and shar
   )
   assert.doesNotMatch(outreachWorkspace, /PlacementMonitoringWorkspace/)
   assert.doesNotMatch(outreachWorkspace, /const placements/)
+  assert.doesNotMatch(outreachWorkspace, /mock|fallback|demo/i)
 })

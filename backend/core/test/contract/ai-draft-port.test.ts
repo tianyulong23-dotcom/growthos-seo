@@ -30,11 +30,10 @@ const input = {
 const output = {
   subject: "Technical SEO collaboration",
   bodyText: "Hello, I am reaching out about a relevant collaboration.",
-  personalizationClaims: [{
-    text: "You publish technical SEO research.",
+  factsUsed: [{
+    claim: "You publish technical SEO research.",
     evidenceIds: ["profile:1"],
   }],
-  missingInformation: [],
   riskFlags: [],
   requiresUserConfirmation: true,
   canAutoSend: false,

@@ -89,4 +89,24 @@ describe("backlinks Problem Details", () => {
     expect(JSON.stringify(problem)).not.toContain("provider token secret");
     expect(backlinkProblemContentType).toBe("application/problem+json");
   });
+
+  it("maps a strictly shaped BacklinkError preserved across runtime boundaries", () => {
+    const isolatedRuntimeError = Object.assign(
+      new Error("Gmail polling is blocked."),
+      {
+        name: "BacklinkError",
+        code: backlinkErrorCodes.conflict,
+        retryable: false,
+      },
+    );
+
+    expect(
+      toBacklinkProblemDetails(isolatedRuntimeError, "request-4"),
+    ).toMatchObject({
+      status: 409,
+      code: backlinkErrorCodes.conflict,
+      message: "Gmail polling is blocked.",
+      retryable: false,
+    });
+  });
 });

@@ -25,6 +25,7 @@ const platformContextIssuer = "growthos-platform-gateway";
 const platformContextAudience = "growthos-backlinks-core";
 const maximumLifetimeMs = 60_000;
 const allowedClockSkewMs = 5_000;
+const verifiedContextByActor = new WeakMap<ActorContext, PlatformRequestContextV1>();
 
 const nonBlankIdentifier = z
   .string()
@@ -69,7 +70,8 @@ export const platformRequestContextSchema = z
         websiteProjectId: nonBlankIdentifier,
         websiteProjectKey: nonBlankIdentifier,
       })
-      .strict(),
+      .strict()
+      .nullable(),
     permissions: z
       .array(permission)
       .min(1)
@@ -97,7 +99,7 @@ export type PlatformRequestContextV1 = Readonly<{
   project: Readonly<{
     websiteProjectId: string;
     websiteProjectKey: string;
-  }>;
+  }> | null;
   permissions: readonly string[];
 }>;
 
@@ -118,6 +120,16 @@ function authenticationFailure(): BacklinkError {
     code: backlinkErrorCodes.authenticationRequired,
     message: "A valid internal platform context is required.",
   });
+}
+
+export function verifiedPlatformContextForActor(
+  actor: ActorContext,
+): PlatformRequestContextV1 {
+  const context = verifiedContextByActor.get(actor);
+  if (context === undefined) {
+    throw authenticationFailure();
+  }
+  return context;
 }
 
 function headerValue(
@@ -188,7 +200,9 @@ function freezeContext(
       roles: Object.freeze([...context.actor.roles]),
     }),
     tenant: Object.freeze({ ...context.tenant }),
-    project: Object.freeze({ ...context.project }),
+    project: context.project === null
+      ? null
+      : Object.freeze({ ...context.project }),
     permissions: Object.freeze([...context.permissions]),
   });
 }
@@ -234,7 +248,10 @@ export function verifyPlatformRequestContextV1(
   const requestedProjectKey = projectKey(request);
   if (
     requestedProjectKey !== undefined
-    && requestedProjectKey !== context.project.websiteProjectKey
+    && (
+      context.project === null
+      || requestedProjectKey !== context.project.websiteProjectKey
+    )
   ) {
     throw new BacklinkError({
       code: backlinkErrorCodes.accessDenied,
@@ -256,6 +273,13 @@ function sendContextFailure(
     .send(problem);
 }
 
+function requiresPlatformContext(request: FastifyRequest): boolean {
+  return projectKey(request) !== undefined
+    || request.url.startsWith(
+      "/api/v1/backlinks/gmail-connections/callback",
+    );
+}
+
 export function registerBacklinksPlatformContextConsumer(
   app: FastifyInstance,
   options: ConsumerOptions,
@@ -266,7 +290,7 @@ export function registerBacklinksPlatformContextConsumer(
   app.decorateRequest("actor");
   app.decorateRequest("platformContext");
   app.addHook("preHandler", async (request, reply) => {
-    if (projectKey(request) === undefined) {
+    if (!requiresPlatformContext(request)) {
       return;
     }
     try {
@@ -277,6 +301,7 @@ export function registerBacklinksPlatformContextConsumer(
         sessionId: context.actor.sessionId,
         roles: context.actor.roles,
       });
+      verifiedContextByActor.set(request.actor, context);
     } catch (error) {
       return sendContextFailure(error, request, reply);
     }

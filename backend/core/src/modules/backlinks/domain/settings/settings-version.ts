@@ -2,6 +2,9 @@ import {
   BacklinkError,
   backlinkErrorCodes,
 } from "../errors/backlink-error.js";
+import {
+  createRecommendationDomainKey,
+} from "../recommendations/domain-key.js";
 
 export type ProjectSettingsScope = Readonly<{
   organizationId: string;
@@ -13,6 +16,9 @@ export type ProjectSettingsValues = Readonly<{
   reportingTimezone: string;
   reportLookbackDays: number;
   exportExpiryHours: number;
+  discoveryTargetAudiences?: readonly string[];
+  discoveryPartnershipGoals?: readonly string[];
+  discoveryExplicitCompetitorDomains?: readonly string[];
 }>;
 
 export type ProjectSettingsVersion = ProjectSettingsScope & Readonly<{
@@ -56,6 +62,34 @@ function assertValues(values: ProjectSettingsValues): void {
     || values.exportExpiryHours > 168
   ) {
     throw new TypeError("exportExpiryHours must be between 1 and 168.");
+  }
+  for (const [name, items] of [
+    ["discoveryTargetAudiences", values.discoveryTargetAudiences ?? []],
+    ["discoveryPartnershipGoals", values.discoveryPartnershipGoals ?? []],
+  ] as const) {
+    if (
+      items.length > 100
+      || items.some((item) =>
+        item.trim().length === 0 || item.trim().length > 2_048
+      )
+    ) {
+      throw new TypeError(`${name} must contain bounded non-blank strings.`);
+    }
+  }
+  const competitors = values.discoveryExplicitCompetitorDomains ?? [];
+  if (competitors.length > 100) {
+    throw new TypeError(
+      "discoveryExplicitCompetitorDomains must contain at most 100 domains.",
+    );
+  }
+  for (const competitor of competitors) {
+    try {
+      createRecommendationDomainKey(competitor);
+    } catch {
+      throw new TypeError(
+        "discoveryExplicitCompetitorDomains contains an invalid domain.",
+      );
+    }
   }
 }
 

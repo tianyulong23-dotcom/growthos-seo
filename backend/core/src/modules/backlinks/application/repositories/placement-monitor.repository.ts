@@ -47,6 +47,7 @@ export type PlacementMonitorExecution = Readonly<{
   normalIntervalSeconds: number;
   suspectedRecheckIntervalSeconds: number;
   jitterWindowSeconds: number;
+  browserFallbackEnabled: boolean;
   retryInitialDelaySeconds: number;
   retryMaxDelaySeconds: number;
   retryBackoffMultiplier: number;
@@ -328,6 +329,7 @@ function mapRun(row: Record<string, unknown>): LoadedRun {
         row.suspectedRecheckIntervalSeconds,
       ),
       jitterWindowSeconds: Number(row.jitterWindowSeconds),
+      browserFallbackEnabled: row.browserFallbackEnabled === true,
       retryInitialDelaySeconds: Number(row.retryInitialDelaySeconds),
       retryMaxDelaySeconds: Number(row.retryMaxDelaySeconds),
       retryBackoffMultiplier: Number(row.retryBackoffMultiplier),
@@ -396,6 +398,7 @@ export function createPlacementMonitorRepository(
         policy.suspected_recheck_interval_seconds
           AS "suspectedRecheckIntervalSeconds",
         policy.jitter_window_seconds AS "jitterWindowSeconds",
+        policy.browser_fallback_enabled AS "browserFallbackEnabled",
         policy.retry_initial_delay_seconds AS "retryInitialDelaySeconds",
         policy.retry_max_delay_seconds AS "retryMaxDelaySeconds",
         policy.retry_backoff_multiplier AS "retryBackoffMultiplier",

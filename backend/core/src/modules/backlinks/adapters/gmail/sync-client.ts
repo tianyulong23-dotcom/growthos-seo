@@ -22,6 +22,7 @@ import {
 
 export const gmailSyncClientConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  initialQuery: z.string().trim().min(1).max(2_048).optional(),
 }).strict();
 
 export const gmailSyncClientAdapterFailureCodes = {
@@ -29,6 +30,12 @@ export const gmailSyncClientAdapterFailureCodes = {
   misconfigured: "GMAIL_SYNC_CLIENT_MISCONFIGURED",
   invalidResponse: "GMAIL_SYNC_CLIENT_INVALID_RESPONSE",
   providerFailure: "GMAIL_SYNC_CLIENT_PROVIDER_FAILURE",
+  networkTimeout: "GMAIL_SYNC_NETWORK_TIMEOUT",
+  rateLimited: "GMAIL_SYNC_RATE_LIMITED",
+  provider5xx: "GMAIL_SYNC_PROVIDER_5XX",
+  authenticationFailed: "GMAIL_SYNC_AUTHENTICATION_FAILED",
+  forbidden: "GMAIL_SYNC_FORBIDDEN",
+  transportFailure: "GMAIL_SYNC_TRANSPORT_FAILURE",
 } as const;
 
 export type GmailSyncClientAdapterFailureCode =
@@ -36,9 +43,17 @@ export type GmailSyncClientAdapterFailureCode =
     keyof typeof gmailSyncClientAdapterFailureCodes
   ];
 
+const retryableFailureCodes = new Set<GmailSyncClientAdapterFailureCode>([
+  gmailSyncClientAdapterFailureCodes.networkTimeout,
+  gmailSyncClientAdapterFailureCodes.rateLimited,
+  gmailSyncClientAdapterFailureCodes.provider5xx,
+  gmailSyncClientAdapterFailureCodes.authenticationFailed,
+  gmailSyncClientAdapterFailureCodes.transportFailure,
+]);
+
 export class GmailSyncClientAdapterError extends Error {
   readonly code: GmailSyncClientAdapterFailureCode;
-  readonly retryable = false;
+  readonly retryable: boolean;
 
   constructor(
     code: GmailSyncClientAdapterFailureCode,
@@ -47,6 +62,7 @@ export class GmailSyncClientAdapterError extends Error {
     super(`Gmail Sync Client failed with ${code}.`, options);
     this.name = "GmailSyncClientAdapterError";
     this.code = code;
+    this.retryable = retryableFailureCodes.has(code);
   }
 }
 
@@ -89,10 +105,28 @@ export interface GmailSyncProviderClient {
   watch(request: GmailSyncWatchProviderRequest): Promise<unknown>;
 }
 
-const gmailSyncProviderFailureSchema = z.object({
-  kind: z.literal("http_response"),
-  httpStatus: z.number().int().min(100).max(599),
-}).strict();
+const providerReasonSchema = z.enum([
+  "rate_limit",
+  "quota",
+  "scope",
+  "domain_policy",
+]);
+
+const gmailSyncProviderFailureSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("http_response"),
+    httpStatus: z.number().int().min(100).max(599),
+    reason: providerReasonSchema.optional(),
+    retryAfterSeconds: z.number().int().nonnegative()
+      .max(Number.MAX_SAFE_INTEGER).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("timeout"),
+  }).strict(),
+  z.object({
+    kind: z.literal("transport"),
+  }).strict(),
+]);
 
 export type GmailSyncProviderFailure = Readonly<
   z.output<typeof gmailSyncProviderFailureSchema>
@@ -103,7 +137,7 @@ export class GmailSyncProviderError extends Error {
 
   constructor(failure: GmailSyncProviderFailure, options?: ErrorOptions) {
     const parsed = gmailSyncProviderFailureSchema.parse(failure);
-    super(`Gmail Sync provider failed with HTTP ${parsed.httpStatus}.`, options);
+    super(`Gmail Sync provider failed with ${parsed.kind}.`, options);
     this.name = "GmailSyncProviderError";
     this.failure = Object.freeze(parsed);
   }
@@ -112,6 +146,7 @@ export class GmailSyncProviderError extends Error {
 export type GmailSyncClientAdapterOptions = Readonly<{
   config?: Readonly<{
     enabled?: boolean;
+    initialQuery?: string;
   }>;
   client?: GmailSyncProviderClient;
 }>;
@@ -166,6 +201,39 @@ const fail = (
   code,
   cause === undefined ? undefined : { cause },
 );
+
+const providerFailureCode = (
+  failure: GmailSyncProviderFailure,
+): GmailSyncClientAdapterFailureCode => {
+  if (failure.kind === "timeout") {
+    return gmailSyncClientAdapterFailureCodes.networkTimeout;
+  }
+  if (failure.kind === "transport") {
+    return gmailSyncClientAdapterFailureCodes.transportFailure;
+  }
+  if (
+    failure.httpStatus === 429
+    || (
+      failure.httpStatus === 403
+      && ["rate_limit", "quota"].includes(failure.reason ?? "")
+    )
+  ) {
+    return gmailSyncClientAdapterFailureCodes.rateLimited;
+  }
+  if (failure.httpStatus === 408) {
+    return gmailSyncClientAdapterFailureCodes.networkTimeout;
+  }
+  if (failure.httpStatus >= 500) {
+    return gmailSyncClientAdapterFailureCodes.provider5xx;
+  }
+  if (failure.httpStatus === 401) {
+    return gmailSyncClientAdapterFailureCodes.authenticationFailed;
+  }
+  if (failure.httpStatus === 403) {
+    return gmailSyncClientAdapterFailureCodes.forbidden;
+  }
+  return gmailSyncClientAdapterFailureCodes.providerFailure;
+};
 
 const parseProviderResponse = <Output>(
   schema: z.ZodType<Output>,
@@ -307,6 +375,7 @@ const mapWatchResponse = (value: unknown): GmailWatchResult => {
 
 export class GmailSyncClientAdapter implements GmailSyncPort {
   readonly #enabled: boolean;
+  readonly #initialQuery: string | undefined;
   readonly #client: GmailSyncProviderClient | undefined;
 
   constructor(options: GmailSyncClientAdapterOptions = {}) {
@@ -315,6 +384,7 @@ export class GmailSyncClientAdapter implements GmailSyncPort {
       throw fail(gmailSyncClientAdapterFailureCodes.misconfigured);
     }
     this.#enabled = config.enabled;
+    this.#initialQuery = config.initialQuery;
     this.#client = options.client;
   }
 
@@ -331,7 +401,10 @@ export class GmailSyncClientAdapter implements GmailSyncPort {
       (client) => client.listInitial({
         gmailConnectionId: parsed.gmailConnectionId,
         userId: "me",
-        q: `after:${receivedAfterSeconds}`,
+        q: [
+          `after:${receivedAfterSeconds}`,
+          this.#initialQuery,
+        ].filter((value): value is string => value !== undefined).join(" "),
         ...(parsed.pageToken === undefined
           ? {}
           : { pageToken: parsed.pageToken }),
@@ -357,7 +430,10 @@ export class GmailSyncClientAdapter implements GmailSyncPort {
         maxResults: parsed.pageSize,
       }),
       mapHistoryResponse,
-      (error) => error.failure.httpStatus === 404
+      (error) => (
+        error.failure.kind === "http_response"
+        && error.failure.httpStatus === 404
+      )
         ? gmailHistoryResultSchema.parse({
           kind: "history_expired",
           startHistoryId: parsed.startHistoryId,
@@ -420,6 +496,7 @@ export class GmailSyncClientAdapter implements GmailSyncPort {
       if (error instanceof GmailSyncProviderError) {
         const handled = handleProviderError?.(error);
         if (handled !== undefined) return handled;
+        throw fail(providerFailureCode(error.failure), error);
       }
       throw fail(gmailSyncClientAdapterFailureCodes.providerFailure, error);
     }

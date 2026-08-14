@@ -351,7 +351,10 @@ def create_platform_context_resolver(
         settings.app_env != "production"
         and settings.platform_local_development_auth_enabled
     ):
-        return LocalDevelopmentPlatformContextResolver(projects=projects)
+        return LocalDevelopmentPlatformContextResolver(
+            projects=projects,
+            organization_id=settings.default_organization_id,
+        )
     if (
         settings.platform_auth_signing_key is None
         or settings.platform_context_signing_key is None
@@ -388,6 +391,9 @@ def create_app(
     application.state.backlinks_gateway = gateway
     application.state.platform_context_resolver = (
         platform_context_resolver or create_platform_context_resolver(settings)
+    )
+    application.state.oauth_callback_frontend_origin = (
+        settings.backlinks_oauth_frontend_origin
     )
     application.state.owned_backlinks_gateway = gateway if owns_gateway else None
     application.add_middleware(

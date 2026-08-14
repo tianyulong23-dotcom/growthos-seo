@@ -212,6 +212,56 @@
       "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
     },
     {
+      "id": "OSS-GOOGLE-01",
+      "project": "Google Auth Library for Node.js",
+      "repository": "https://github.com/googleapis/google-auth-library-nodejs",
+      "license": "Apache-2.0",
+      "packageVersion": "10.9.1",
+      "packageIntegrity": "sha512-i1ydyHrqcIxXkWh/uBmVkzCvIuq5yiK2ATndIe5XxKholrG/MTYP9xGYka4sQhrbIAgGjL2B6NOE7rFaiF3fXw==",
+      "sourceFiles": [
+        "src/auth/oauth2client.ts",
+        "src/auth/googleauth.ts"
+      ],
+      "upstreamTests": [
+        "test/test.oauth2.ts"
+      ],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/adapters/gmail/google-auth-library-client.ts",
+        "backend/core/src/modules/backlinks/runtime/production-runtime.ts"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": [
+        "OAuth authorization URL construction, code exchange, token refresh, revocation, and ID token verification"
+      ],
+      "forbiddenReuse": [
+        "Persisting tokens in process memory as authority, expanding scopes, or logging OAuth credentials"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
+      "id": "OSS-GOOGLE-02",
+      "project": "Google APIs Node.js Client - Gmail",
+      "repository": "https://github.com/googleapis/google-api-nodejs-client",
+      "license": "Apache-2.0",
+      "packageVersion": "17.0.0",
+      "packageIntegrity": "sha512-pV0E+has0ZCqIJoaTmQkOyuRXDtcC8bvH+hmoqGH+J2qxEzhsLT3VX69v6Ef7bifhwokYH82rgQlMRHpFDLrmw==",
+      "sourceFiles": [
+        "src/apis/gmail/v1.ts"
+      ],
+      "upstreamTests": [],
+      "targetFiles": [
+        "backend/core/src/modules/backlinks/adapters/gmail"
+      ],
+      "adoption": "direct-dependency",
+      "allowedReuse": [
+        "Typed Gmail send, message lookup, history, thread, and profile API transport"
+      ],
+      "forbiddenReuse": [
+        "Provider retries after unknown send outcomes, business-state writes, or bypassing send and sync policy gates"
+      ],
+      "adr": "backend/core/docs/adr/ADR-BL-0002-runtime-stack.md"
+    },
+    {
       "id": "OSS-MAIL-01",
       "project": "Nodemailer MailComposer",
       "repository": "https://github.com/nodemailer/nodemailer",

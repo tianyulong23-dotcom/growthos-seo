@@ -1,20 +1,85 @@
-import { apiRequest } from "@/api/client"
+import {
+  requestBacklinks,
+  type BacklinksRequest,
+  type BacklinksResponse,
+} from "@/api/generated/backlinks"
 import type {
-  BacklinksMeta,
-  ContactCandidate,
   DraftDocument,
   DraftMutationResult,
-  DraftSnapshot,
   SendIntentMessagePurpose,
-  SendIntentResult,
 } from "@/features/outreach/drafts/types"
 
-const draftPath = (websiteProjectKey: string, draftId: string) =>
-  `/api/v1/projects/${encodeURIComponent(websiteProjectKey)}/backlinks/drafts/${encodeURIComponent(draftId)}`
+export type DraftJobStatus =
+  BacklinksResponse<"backlinksGetDraftJobV1">["job"]["status"]
+export type DraftJob =
+  BacklinksResponse<"backlinksGetDraftJobV1">["job"]
+export type DraftRequest = NonNullable<DraftJob["request"]>
 
-export function getDraft(websiteProjectKey: string, draftId: string) {
-  return apiRequest<{ draft: DraftSnapshot; meta: BacklinksMeta }>(
-    draftPath(websiteProjectKey, draftId)
+export type ManualContactRole =
+  BacklinksRequest<"backlinksCreateManualContactCandidateV1">["body"]["contactRole"]
+
+export type ManualContactCandidate =
+  BacklinksResponse<"backlinksCreateManualContactCandidateV1">
+
+export function createDraftJob(
+  websiteProjectKey: string,
+  opportunityId: string,
+  input: BacklinksRequest<"backlinksCreateDraftJobV1">["body"],
+  idempotencyKey: string,
+  signal: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksCreateDraftJobV1",
+    {
+      path: { websiteProjectKey, opportunityId },
+      headers: { "idempotency-key": idempotencyKey },
+      body: input,
+    },
+    { signal }
+  )
+}
+
+export function getDraftJob(
+  websiteProjectKey: string,
+  jobId: string,
+  signal: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksGetDraftJobV1",
+    {
+      path: { websiteProjectKey, jobId },
+    },
+    { signal }
+  )
+}
+
+export function getLatestDraftJob(
+  websiteProjectKey: string,
+  opportunityId: string,
+  logicalDraftKey: string,
+  signal: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksGetLatestDraftJobV1",
+    {
+      path: { websiteProjectKey, opportunityId },
+      query: { logicalDraftKey },
+    },
+    { signal }
+  )
+}
+
+export function getDraft(
+  websiteProjectKey: string,
+  draftId: string,
+  signal: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksGetDraftV1",
+    {
+      path: { websiteProjectKey, draftId },
+    },
+    { signal }
   )
 }
 
@@ -27,14 +92,10 @@ export function saveDraftVersion(
     bodyDocument: DraftDocument
   }>
 ) {
-  return apiRequest<DraftMutationResult>(
-    `${draftPath(websiteProjectKey, draftId)}/versions`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
-    }
-  )
+  return requestBacklinks("backlinksSaveDraftVersionV1", {
+    path: { websiteProjectKey, draftId },
+    body: input,
+  }) satisfies Promise<DraftMutationResult>
 }
 
 export function approveDraft(
@@ -42,24 +103,66 @@ export function approveDraft(
   draftId: string,
   expectedVersion: number
 ) {
-  return apiRequest<DraftMutationResult>(
-    `${draftPath(websiteProjectKey, draftId)}/approve`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expectedVersion }),
-    }
-  )
+  return requestBacklinks("backlinksApproveDraftV1", {
+    path: { websiteProjectKey, draftId },
+    body: { expectedVersion },
+  }) satisfies Promise<DraftMutationResult>
 }
 
 export function listContactCandidates(
   websiteProjectKey: string,
   prospectId: string
 ) {
-  const query = new URLSearchParams({ prospectId, limit: "25" })
-  return apiRequest<{ items: ContactCandidate[]; meta: BacklinksMeta }>(
-    `/api/v1/projects/${encodeURIComponent(websiteProjectKey)}/backlinks/contacts/candidates?${query.toString()}`
+  return requestBacklinks("backlinksListContactCandidatesV1", {
+    path: { websiteProjectKey },
+    query: { prospectId, limit: 25 },
+  })
+}
+
+export function listOpportunityContacts(
+  websiteProjectKey: string,
+  opportunityId: string,
+  signal?: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksListOpportunityContactsV1",
+    {
+      path: { websiteProjectKey, opportunityId },
+    },
+    signal ? { signal } : undefined
   )
+}
+
+export function createManualContactCandidate(
+  websiteProjectKey: string,
+  opportunityId: string,
+  input: Readonly<{
+    normalizedEmail: string
+    contactRole: ManualContactRole
+    reason: string
+  }>,
+  idempotencyKey: string
+) {
+  return requestBacklinks("backlinksCreateManualContactCandidateV1", {
+    path: { websiteProjectKey, opportunityId },
+    headers: { "idempotency-key": idempotencyKey },
+    body: input,
+  })
+}
+
+export function confirmContactCandidate(
+  websiteProjectKey: string,
+  candidateId: string,
+  input: Readonly<{
+    expectedVersion: number
+    contactRole: ManualContactRole
+    reason: string
+  }>
+) {
+  return requestBacklinks("backlinksConfirmContactCandidateV1", {
+    path: { websiteProjectKey, candidateId },
+    body: input,
+  })
 }
 
 export function createSendIntent(
@@ -67,18 +170,54 @@ export function createSendIntent(
   draftId: string,
   input: Readonly<{
     approvedDraftVersionId: string
+    contactId: string
+    contactVersion: number
     gmailConnectionId: string
     messagePurpose: SendIntentMessagePurpose
     followUpIndex: number
   }>,
   idempotencyKey: string
 ) {
-  return apiRequest<SendIntentResult>(`${draftPath(websiteProjectKey, draftId)}/send-intents`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "idempotency-key": idempotencyKey,
-    },
-    body: JSON.stringify(input),
+  return requestBacklinks("backlinksCreateSendIntentV1", {
+    path: { websiteProjectKey, draftId },
+    headers: { "idempotency-key": idempotencyKey },
+    body: input,
   })
+}
+
+export function preflightSendIntent(
+  websiteProjectKey: string,
+  draftId: string,
+  input: Readonly<{
+    approvedDraftVersionId: string
+    contactId: string
+    contactVersion: number
+    gmailConnectionId: string
+    messagePurpose: SendIntentMessagePurpose
+    followUpIndex: number
+  }>,
+  signal?: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksPreflightSendIntentV1",
+    {
+      path: { websiteProjectKey, draftId },
+      body: input,
+    },
+    signal ? { signal } : undefined
+  )
+}
+
+export function getSendIntent(
+  websiteProjectKey: string,
+  sendIntentId: string,
+  signal?: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksGetSendIntentV1",
+    {
+      path: { websiteProjectKey, sendIntentId },
+    },
+    signal ? { signal } : undefined
+  )
 }

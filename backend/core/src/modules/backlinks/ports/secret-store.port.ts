@@ -5,8 +5,12 @@ const nonBlankSchema = z.string().min(1).max(2_048)
 const plaintextSchema = z.string().min(1).max(65_536);
 
 export const secretKinds = {
+  googleOauthClientSecret: "GOOGLE_OAUTH_CLIENT_SECRET",
   oauthPkceVerifier: "OAUTH_PKCE_VERIFIER",
   gmailTokenSet: "GMAIL_TOKEN_SET",
+  gmailCanaryRecipient: "GMAIL_CANARY_RECIPIENT",
+  aiProviderCredential: "AI_PROVIDER_CREDENTIAL",
+  dataForSeoCredential: "DATAFORSEO_CREDENTIAL",
 } as const;
 
 export const secretKindSchema = z.enum(Object.values(secretKinds));
@@ -14,7 +18,7 @@ export type SecretKind = z.output<typeof secretKindSchema>;
 
 export const secretEncryptionContextSchema = z.object({
   organizationId: nonBlankSchema,
-  subjectProvider: z.literal("google"),
+  subjectProvider: z.enum(["google", "ai", "dataforseo"]),
   workspaceId: nonBlankSchema.optional(),
   connectionId: nonBlankSchema.optional(),
   oauthAttemptId: nonBlankSchema.optional(),

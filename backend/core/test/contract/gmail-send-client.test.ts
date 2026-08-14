@@ -101,7 +101,7 @@ describe("BL-AI-117 Gmail Send Real Adapter shell", () => {
 
   it.each([
     [400, undefined, gmailSendFailureCodes.invalidRequest, false, undefined],
-    [401, undefined, gmailSendFailureCodes.reauthRequired, false, undefined],
+    [401, undefined, gmailSendFailureCodes.preRequestFailed, true, undefined],
     [403, "scope", gmailSendFailureCodes.forbidden, false, undefined],
     [403, "quota", gmailSendFailureCodes.rateLimited, true, 120],
     [429, undefined, gmailSendFailureCodes.rateLimited, true, 120],

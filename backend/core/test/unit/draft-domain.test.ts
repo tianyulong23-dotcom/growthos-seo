@@ -56,6 +56,7 @@ describe("BL-AI-087 Draft state machine", () => {
       "OPPORTUNITY",
       "CONTACT",
       "ASSESSMENT",
+      "USER_INPUT",
       "AI_SUMMARY",
       "AI_INFERENCE",
     ]);

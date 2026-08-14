@@ -18,6 +18,7 @@ from app.core.platform_request_context import (
     PlatformActor,
     PlatformProject,
     PlatformTenant,
+    ResolvedPlatformCollectionContext,
     ResolvedPlatformRequestContext,
 )
 from app.main import create_app
@@ -40,12 +41,27 @@ RESOLVED = ResolvedPlatformRequestContext(
     permissions=("backlinks:read", "backlinks:write"),
     correlation_id="correlation-gateway",
 )
+COLLECTION_RESOLVED = ResolvedPlatformCollectionContext(
+    actor=RESOLVED.actor,
+    tenant=RESOLVED.tenant,
+    permissions=RESOLVED.permissions,
+    correlation_id=RESOLVED.correlation_id,
+)
 
 
 class StaticResolver(PlatformContextResolver):
     def __init__(self, resolved: ResolvedPlatformRequestContext) -> None:
         self.resolved = resolved
         self.calls: list[str] = []
+
+    async def resolve_collection(
+        self,
+        *,
+        request: object,
+    ) -> ResolvedPlatformCollectionContext:
+        del request
+        self.calls.append("collection")
+        return COLLECTION_RESOLVED
 
     async def resolve(
         self,
@@ -72,12 +88,14 @@ def request_app(
     path: str,
     headers: dict[str, str] | None = None,
     content: bytes | None = None,
+    oauth_frontend_origin: str | None = None,
 ) -> httpx.Response:
     async def run() -> httpx.Response:
         app = create_app(
             backlinks_gateway=gateway,
             platform_context_resolver=resolver,
         )
+        app.state.oauth_callback_frontend_origin = oauth_frontend_origin
         async with AsyncClient(
             transport=ASGITransport(app=app),
             base_url="http://gateway.test",
@@ -104,7 +122,7 @@ def runtime_api_routes(router: object) -> list[APIRoute]:
     return routes
 
 
-def test_registers_exactly_thirty_seven_private_runtime_routes() -> None:
+def test_registers_exactly_seventy_three_private_runtime_routes() -> None:
     gateway = BacklinksGateway(
         base_url="http://backlinks.internal",
         signing_key=SIGNING_KEY,
@@ -120,8 +138,8 @@ def test_registers_exactly_thirty_seven_private_runtime_routes() -> None:
         if isinstance(route, APIRoute) and "/backlinks/" in route.path
     ]
 
-    assert len(runtime_routes) == 37
-    assert len({(tuple(sorted(route.methods)), route.path) for route in runtime_routes}) == 37
+    assert len(runtime_routes) == 73
+    assert len({(tuple(sorted(route.methods)), route.path) for route in runtime_routes}) == 73
     assert all(route.include_in_schema is False for route in runtime_routes)
     assert all("/backlinks/" not in path for path in app.openapi()["paths"])
 
@@ -420,6 +438,121 @@ def test_forwards_gmail_callback_query_once() -> None:
         "code": "authorization-code",
         "state": "opaque-state",
     }
+
+
+def test_forwards_stable_gmail_callback_without_project_binding() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(
+            200,
+            json={
+                "connection": {"connectionId": "gmail-1"},
+                "returnPath": "/projects/project-key/backlinks/email",
+            },
+        )
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    resolver = StaticResolver(RESOLVED)
+    response = request_app(
+        gateway,
+        resolver,
+        method="GET",
+        path=(
+            "/api/v1/backlinks/gmail-connections/callback"
+            "?code=authorization-code&state=opaque-state"
+            "&iss=https%3A%2F%2Faccounts.google.com&scope=gmail.readonly"
+        ),
+        oauth_frontend_origin="http://127.0.0.1:5173/",
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == (
+        "http://127.0.0.1:5173/projects/project-key/backlinks/email"
+    )
+    assert resolver.calls == ["collection"]
+    assert len(calls) == 1
+    forwarded = calls[0]
+    assert forwarded.url.path == "/api/v1/backlinks/gmail-connections/callback"
+    assert dict(forwarded.url.params) == {
+        "code": "authorization-code",
+        "state": "opaque-state",
+    }
+    payload = decode_context(forwarded.headers[PLATFORM_CONTEXT_HEADER])
+    assert payload["project"] is None
+
+
+def test_rejects_untrusted_gmail_callback_parameters() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200)
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+
+    for query in (
+        "code=one&state=two&next=https%3A%2F%2Fevil.example",
+        "code=one&code=two&state=three",
+        "code=one&state=two&iss=https%3A%2F%2Fevil.example",
+    ):
+        response = request_app(
+            gateway,
+            StaticResolver(RESOLVED),
+            method="GET",
+            path=f"/api/v1/backlinks/gmail-connections/callback?{query}",
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "OAUTH_CALLBACK_INVALID"
+
+    assert calls == []
+
+
+def test_rejects_invalid_gmail_callback_return_path_and_preserves_upstream_failure() -> None:
+    responses = iter(
+        (
+            Response(200, json={"returnPath": "https://evil.example/callback"}),
+            Response(503, json={"code": "GMAIL_PROVIDER_UNAVAILABLE"}),
+        )
+    )
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(lambda _: next(responses))),
+    )
+    path = (
+        "/api/v1/backlinks/gmail-connections/callback"
+        "?code=authorization-code&state=opaque-state"
+    )
+
+    invalid_path = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="GET",
+        path=path,
+        oauth_frontend_origin="http://127.0.0.1:5173",
+    )
+    upstream_failure = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="GET",
+        path=path,
+        oauth_frontend_origin="http://127.0.0.1:5173",
+    )
+
+    assert invalid_path.status_code == 502
+    assert invalid_path.json()["code"] == "OAUTH_RETURN_PATH_INVALID"
+    assert upstream_failure.status_code == 503
+    assert upstream_failure.json()["code"] == "GMAIL_PROVIDER_UNAVAILABLE"
 
 
 def test_preserves_public_assessment_availability_contract() -> None:

@@ -8,6 +8,7 @@ export type PlacementReviewValidationStatus =
 export type PlacementReviewCandidate = Readonly<{
   candidateId: string;
   opportunityId: string | null;
+  sourceType: string;
   candidateStatus: string;
   matchStatus: string;
   initialValidationStatus: PlacementReviewValidationStatus;
@@ -180,6 +181,7 @@ function mapCandidate(
     opportunityId: row.opportunityId === null
       ? null
       : String(row.opportunityId),
+    sourceType: String(row.sourceType),
     candidateStatus: String(row.candidateStatus),
     matchStatus: String(row.matchStatus),
     initialValidationStatus:
@@ -285,9 +287,18 @@ async function confirm(
       )=($1,$2,$3,$4)
         AND c.version=$5
         AND c.status='REVIEW_REQUIRED'
-        AND c.match_status='AUTO_MATCHED'
         AND c.initial_validation_status='INCONCLUSIVE'
-        AND c.opportunity_id IS NOT NULL
+        AND (
+          (
+            c.opportunity_id IS NOT NULL
+            AND c.match_status='AUTO_MATCHED'
+          )
+          OR (
+            c.opportunity_id IS NULL
+            AND c.source_type IN ('manual','import')
+            AND c.match_status='UNMATCHED'
+          )
+        )
         AND c.source_page_url IS NOT NULL
         AND c.normalized_source_url IS NOT NULL
         AND c.normalized_source_url_hash IS NOT NULL
@@ -615,6 +626,7 @@ export function createPlacementReviewRepository(
     async getCandidate(input) {
       const result = await client.query(`
         SELECT c.id AS "candidateId",c.opportunity_id AS "opportunityId",
+          c.source_type AS "sourceType",
           c.status AS "candidateStatus",c.match_status AS "matchStatus",
           c.initial_validation_status AS "initialValidationStatus",
           c.source_page_url AS "sourcePageUrl",

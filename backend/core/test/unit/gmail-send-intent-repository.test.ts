@@ -14,10 +14,13 @@ const input: CreateSendIntentRecordInput = {
   workspaceId: "workspace-114",
   websiteProjectId: "project-114",
   sendIntentId: "018f0000-0000-7000-8000-000000000114",
+  sendSnapshotId: "018f0000-0000-7000-8000-000000000115",
   quotaReservationId: "018f0000-0000-7000-8000-000000000215",
   outboxEventId: "018f0000-0000-7000-8000-000000000214",
   draftId: "018f0000-0000-7000-8000-000000000314",
   approvedDraftVersionId: "018f0000-0000-7000-8000-000000000414",
+  contactId: "018f0000-0000-7000-8000-000000000415",
+  contactVersion: 3,
   gmailConnectionId: "018f0000-0000-7000-8000-000000000514",
   clientIdempotencyKey: "send-intent-114",
   logicalMessageKey:
@@ -32,15 +35,38 @@ const input: CreateSendIntentRecordInput = {
 };
 const persistedIntent = {
   sendIntentId: input.sendIntentId,
+  sendSnapshotId: input.sendSnapshotId,
   draftId: input.draftId,
   approvedDraftVersionId: input.approvedDraftVersionId,
+  contactId: input.contactId,
+  contactVersion: input.contactVersion,
   status: "READY",
   version: 1,
   requestedSendAt: input.requestedSendAt,
 };
+const defaultDraft = {
+  opportunityId: "018f0000-0000-7000-8000-000000000614",
+  opportunityVersion: 2,
+  prospectId: "018f0000-0000-7000-8000-000000000615",
+  recommendationContextVersionId:
+    "018f0000-0000-7000-8000-000000000616",
+  status: "approved",
+  currentVersionId: input.approvedDraftVersionId,
+  approvedVersionId: input.approvedDraftVersionId,
+  draftContactId: input.contactId,
+  draftContactVersion: input.contactVersion,
+  versionContactId: input.contactId,
+  versionContactVersion: input.contactVersion,
+  draftVersionNo: 1,
+  draftSource: "MODEL",
+  subjectText: "A relevant collaboration idea",
+  bodyText: "Hello, this is an approved draft.",
+  bodyDocument: null,
+};
 
 type FakePoolOptions = Readonly<{
   draft?: Record<string, unknown>;
+  approvalFact?: Record<string, unknown>;
   bindingAvailable?: boolean;
   failOutbox?: boolean;
   failReservation?: boolean;
@@ -78,27 +104,58 @@ const createFakePool = (options: FakePoolOptions = {}) => {
             && sql.includes("AS \"hasOutboxEvent\"")
           ) {
             return result([{
+              hasSendSnapshot: options.companionsAvailable !== false,
               hasReservation: options.companionsAvailable !== false,
               hasOutboxEvent: options.companionsAvailable !== false,
             }]);
           }
           if (sql.includes("FROM backlinks.backlink_email_drafts")) {
             return result(options.draft === undefined
-              ? [{
-                  opportunityId:
-                    "018f0000-0000-7000-8000-000000000614",
-                  status: "approved",
-                  currentVersionId: input.approvedDraftVersionId,
-                  approvedVersionId: input.approvedDraftVersionId,
-                }]
+              ? [defaultDraft]
               : [options.draft]);
+          }
+          if (sql.includes("FROM backlinks.backlink_lifecycle_events")) {
+            return result([options.approvalFact ?? {
+              approvalFactId:
+                "018f0000-0000-7000-8000-000000000417",
+              approvalActorId: input.actorId,
+              approvalRecordedAt:
+                new Date("2026-07-27T10:13:00.000Z"),
+            }]);
+          }
+          if (sql.includes("FROM backlinks.backlink_contacts AS contact")) {
+            return result([{
+              contactId: input.contactId,
+              contactVersion: input.contactVersion,
+              normalizedEmail: "confirmed-contact@example.test",
+            }]);
           }
           if (
             sql.includes(
               "FROM backlinks.backlink_gmail_workspace_bindings",
             )
           ) {
-            return result(options.bindingAvailable === false ? [] : [{ ok: 1 }]);
+            return result(options.bindingAvailable === false
+              ? []
+              : [{
+                  gmailConnectionVersion: 2,
+                  gmailIdentityId:
+                    "018f0000-0000-7000-8000-000000000515",
+                  gmailIdentityVersion: 4,
+                }]);
+          }
+          if (
+            sql.includes(
+              "FROM backlinks.backlink_suppression_entries AS entry",
+            )
+            && !sql.includes(
+              "FROM backlinks.backlink_rate_limit_reservations AS reservation",
+            )
+          ) {
+            return result([{
+              suppressed: false,
+              sendBlocked: false,
+            }]);
           }
           if (
             sql.includes(
@@ -130,6 +187,11 @@ const createFakePool = (options: FakePoolOptions = {}) => {
               throw new Error("reservation unavailable");
             }
             return result([{ id: input.quotaReservationId }]);
+          }
+          if (sql.startsWith(
+            "INSERT INTO backlinks.backlink_send_snapshots",
+          )) {
+            return result([{ id: input.sendSnapshotId }]);
           }
           if (sql.startsWith(
             "INSERT INTO backlinks.backlink_outbox_events",
@@ -174,9 +236,17 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
       && sql.includes("hashtextextended"))).toBe(true);
     expect(fake.queries.some((sql) =>
       sql.includes("FROM backlinks.backlink_email_drafts")
-      && sql.endsWith("FOR UPDATE"))).toBe(true);
+      && sql.endsWith("FOR UPDATE OF draft, opportunity"))).toBe(true);
+    expect(fake.queries.some((sql) =>
+      sql.includes("JOIN backlinks.backlink_secret_references AS secret")
+      && sql.includes("secret.status = 'ACTIVE'"))).toBe(true);
+    expect(fake.queries.some((sql) =>
+      sql.includes("FROM backlinks.backlink_lifecycle_events")
+      && sql.includes("draft.approval.recorded"))).toBe(true);
     const intentInsert = fake.queries.findIndex((sql) =>
       sql.startsWith("INSERT INTO backlinks.backlink_send_intents"));
+    const snapshotInsert = fake.queries.findIndex((sql) =>
+      sql.startsWith("INSERT INTO backlinks.backlink_send_snapshots"));
     const reservationInsert = fake.queries.findIndex((sql) =>
       sql.startsWith(
         "INSERT INTO backlinks.backlink_rate_limit_reservations",
@@ -184,7 +254,11 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     const outboxInsert = fake.queries.findIndex((sql) =>
       sql.startsWith("INSERT INTO backlinks.backlink_outbox_events"));
     expect(intentInsert).toBeGreaterThan(0);
-    expect(reservationInsert).toBeGreaterThan(intentInsert);
+    expect(snapshotInsert).toBeGreaterThan(intentInsert);
+    expect(fake.queries[snapshotInsert]).toContain("approval_fact_id");
+    expect(fake.queries[snapshotInsert]).toContain("approval_actor_id");
+    expect(fake.queries[snapshotInsert]).toContain("approval_recorded_at");
+    expect(reservationInsert).toBeGreaterThan(snapshotInsert);
     expect(outboxInsert).toBeGreaterThan(reservationInsert);
     expect(fake.queries.at(-1)).toBe("COMMIT");
     expect(fake.released()).toBe(true);
@@ -197,6 +271,30 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
         status: "approved",
         currentVersionId: "018f0000-0000-7000-8000-000000000714",
         approvedVersionId: "018f0000-0000-7000-8000-000000000714",
+        draftContactId: input.contactId,
+        draftContactVersion: input.contactVersion,
+        versionContactId: input.contactId,
+        versionContactVersion: input.contactVersion,
+      },
+    });
+    const repository = new PostgresqlSendIntentRepository({
+      pool: fake.pool,
+    });
+
+    await expect(repository.create(input)).resolves.toEqual({
+      state: "draft_not_approved",
+    });
+    expect(fake.queries.some((sql) => sql.startsWith("INSERT INTO"))).toBe(
+      false,
+    );
+    expect(fake.queries.at(-1)).toBe("COMMIT");
+  });
+
+  it("does not create an Intent for a diagnostic template fallback", async () => {
+    const fake = createFakePool({
+      draft: {
+        ...defaultDraft,
+        draftSource: "TEMPLATE_FALLBACK",
       },
     });
     const repository = new PostgresqlSendIntentRepository({
@@ -244,6 +342,9 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     const fake = createFakePool({
       existingIntent: {
         ...persistedIntent,
+        sendSnapshotId: input.sendSnapshotId,
+        contactId: input.contactId,
+        contactVersion: input.contactVersion,
         gmailConnectionId: input.gmailConnectionId,
         clientIdempotencyKey: input.clientIdempotencyKey,
         logicalMessageKey: input.logicalMessageKey,
@@ -258,6 +359,7 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     await expect(repository.create({
       ...input,
       sendIntentId: "018f0000-0000-7000-8000-000000000999",
+      sendSnapshotId: "018f0000-0000-7000-8000-000000000996",
       quotaReservationId: "018f0000-0000-7000-8000-000000000998",
       outboxEventId: "018f0000-0000-7000-8000-000000000997",
     })).resolves.toEqual({

@@ -41,10 +41,10 @@ describe("BL-AI-070 contact Candidate parser", () => {
         confirmed: false,
         evidence: expect.objectContaining({ source: "mailto" }),
         purposeDecision: expect.objectContaining({
-          observedRole: "contact",
-          inferredPurpose: "general",
-          confidence: 72,
-          ruleVersion: "contact-purpose-rules.v1",
+          observedRole: "sales",
+          inferredPurpose: "business",
+          confidence: 98,
+          ruleVersion: "contact-purpose-rules.v4",
         }),
       }),
       expect.objectContaining({
@@ -70,8 +70,28 @@ describe("BL-AI-070 contact Candidate parser", () => {
     ["user@localhost", false],
     ["üser@example.com", false],
     ["user\u0000@example.com", false],
+    ["bad@all.voter", false],
+    ["editorial@weekendspecial.co.zawe", false],
   ] as const)("locks conservative email syntax for %s", (value, expected) => {
     expect(isCandidateEmail(value)).toBe(expected);
+  });
+
+  it("does not join adjacent DOM text or natural language into email candidates", () => {
+    const body = new TextEncoder().encode(`
+      <body>
+        <span>editorial@weekendspecial.co.za</span><span>We publish weekly.</span>
+        <span>info@dstvproinstallation.co.za</span><strong>Professional service.</strong>
+        <p>Bad at all. Voter participation and risks are at stake. Research matters.</p>
+        <p>press at example dot com</p>
+      </body>
+    `);
+
+    expect(parseContactPage(page(body)).candidates.map(({ email }) => email))
+      .toEqual([
+        "editorial@weekendspecial.co.za",
+        "info@dstvproinstallation.co.za",
+        "press@example.com",
+      ]);
   });
 
   it("rejects non-HTML and excessive DOM input", () => {
@@ -82,7 +102,15 @@ describe("BL-AI-070 contact Candidate parser", () => {
       .toThrow("node limit");
   });
 
-  it("retains an unknown verified email without promoting short substrings", () => {
+  it("bounds marker-free text scanning", () => {
+    const body = new TextEncoder().encode(
+      `<body><p>${"x".repeat(200_000)}</p></body>`,
+    );
+
+    expect(parseContactPage(page(body)).candidates).toEqual([]);
+  });
+
+  it("retains a restricted verified email without promoting short substrings", () => {
     const body = new TextEncoder().encode(`
       <title>No Smart TV? No Problem</title>
       <body><a href="mailto:legal@elephtv.com">Privacy</a></body>
@@ -95,8 +123,26 @@ describe("BL-AI-070 contact Candidate parser", () => {
         status: "candidate",
         confirmed: false,
         purposeDecision: expect.objectContaining({
-          inferredPurpose: "unknown",
-          confidence: 0,
+          inferredPurpose: "legal",
+          confidence: 98,
+        }),
+      }),
+    ]);
+  });
+
+  it("extracts a public bare-email anchor without crawling it as a page URL", () => {
+    const body = new TextEncoder().encode(`
+      <title>Contact</title>
+      <body><a href="person@example.com">Email our editor</a></body>
+    `);
+
+    expect(parseContactPage(page(body)).candidates).toEqual([
+      expect.objectContaining({
+        email: "person@example.com",
+        evidence: expect.objectContaining({ source: "mailto" }),
+        purposeDecision: expect.objectContaining({
+          inferredPurpose: "editorial",
+          confidence: 96,
         }),
       }),
     ]);

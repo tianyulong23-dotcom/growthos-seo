@@ -13,6 +13,7 @@ from app.core.platform_request_context import (
     PlatformActor,
     PlatformProject,
     PlatformTenant,
+    ResolvedPlatformCollectionContext,
     ResolvedPlatformRequestContext,
 )
 from app.modules.projects.authority import WebsiteProjectAuthority
@@ -30,15 +31,9 @@ class AuthoritativePlatformContextResolver:
         self._projects = projects
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    async def resolve(
-        self,
-        *,
-        request: Request,
-        website_project_key: str,
-        required_permission: str | None = None,
-    ) -> ResolvedPlatformRequestContext:
+    def _authenticate(self, request: Request):
         try:
-            actor = self._authentication.authenticate(
+            return self._authentication.authenticate(
                 request.headers.get("authorization"),
                 now=self._clock(),
             )
@@ -49,6 +44,78 @@ class AuthoritativePlatformContextResolver:
                 title="Platform authentication failed",
                 detail=error.detail,
             ) from error
+
+    @staticmethod
+    def _correlation_id(request: Request) -> str:
+        correlation_id = (
+            request.headers.get("x-request-id", "").strip()
+            or request.headers.get("x-correlation-id", "").strip()
+        )
+        if not correlation_id:
+            raise PlatformContextResolutionError(
+                status=400,
+                code="PLATFORM_REQUEST_ID_REQUIRED",
+                title="Platform request ID required",
+                detail="A non-blank x-request-id or x-correlation-id header is required.",
+            )
+        return correlation_id
+
+    async def resolve_collection(
+        self,
+        *,
+        request: Request,
+    ) -> ResolvedPlatformCollectionContext:
+        actor = self._authenticate(request)
+        eligible = tuple(
+            membership
+            for membership in actor.memberships
+            if "backlinks:read" in membership.permissions
+        )
+        tenant_scopes = {
+            (membership.organization_id, membership.workspace_id)
+            for membership in eligible
+        }
+        if len(tenant_scopes) != 1:
+            raise PlatformContextResolutionError(
+                status=403,
+                code="PLATFORM_WORKSPACE_SCOPE_REQUIRED",
+                title="Platform workspace scope required",
+                detail=(
+                    "The authenticated request must resolve to exactly one "
+                    "Organization and Workspace."
+                ),
+            )
+        organization_id, workspace_id = next(iter(tenant_scopes))
+        scoped = tuple(
+            membership
+            for membership in eligible
+            if membership.organization_id == organization_id
+            and membership.workspace_id == workspace_id
+        )
+        return ResolvedPlatformCollectionContext(
+            actor=PlatformActor(
+                user_id=actor.user_id,
+                session_id=actor.session_id,
+                roles=tuple(sorted({role for item in scoped for role in item.roles})),
+            ),
+            tenant=PlatformTenant(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            ),
+            permissions=tuple(
+                sorted({permission for item in scoped for permission in item.permissions})
+            ),
+            correlation_id=self._correlation_id(request),
+        )
+
+    async def resolve(
+        self,
+        *,
+        request: Request,
+        website_project_key: str,
+        required_permission: str | None = None,
+    ) -> ResolvedPlatformRequestContext:
+        actor = self._authenticate(request)
 
         project = await self._projects.get_by_key(website_project_key)
         if project is None:
@@ -143,8 +210,38 @@ class LocalDevelopmentPlatformContextResolver:
         "content:write",
     )
 
-    def __init__(self, *, projects: WebsiteProjectAuthority) -> None:
+    def __init__(
+        self,
+        *,
+        projects: WebsiteProjectAuthority,
+        organization_id: str,
+    ) -> None:
         self._projects = projects
+        self._organization_id = organization_id
+
+    async def resolve_collection(
+        self,
+        *,
+        request: Request,
+    ) -> ResolvedPlatformCollectionContext:
+        correlation_id = (
+            request.headers.get("x-request-id", "").strip()
+            or request.headers.get("x-correlation-id", "").strip()
+            or f"local-oauth-callback-{uuid4().hex}"
+        )
+        return ResolvedPlatformCollectionContext(
+            actor=PlatformActor(
+                user_id="local-user",
+                session_id="local-development",
+                roles=("owner",),
+            ),
+            tenant=PlatformTenant(
+                organization_id=self._organization_id,
+                workspace_id="local",
+            ),
+            permissions=self._permissions,
+            correlation_id=correlation_id,
+        )
 
     async def resolve(
         self,

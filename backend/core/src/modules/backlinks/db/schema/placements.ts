@@ -105,7 +105,7 @@ export const backlinkPlacementValidationRuns = pg.pgTable(
     id: pg.uuid("id").primaryKey(),
     ...projectIdentityColumns(),
     candidateId: pg.uuid("candidate_id").notNull(),
-    opportunityId: pg.uuid("opportunity_id").notNull(),
+    opportunityId: pg.uuid("opportunity_id"),
     runNumber: pg.integer("run_number").notNull(),
     validationMethod: pg.text("validation_method").notNull(),
     status: pg.text("status").notNull(),
@@ -154,6 +154,31 @@ export const backlinkPlacementValidationRuns = pg.pgTable(
       table.evidenceContractVersion,
       table.evidenceSchemaVersion,
     ),
+    pg.uniqueIndex(
+      "backlink_placement_validation_initial_identity_uq",
+    ).on(
+      ...identity(table),
+      table.id,
+      table.candidateId,
+      table.status,
+      table.normalizedSourceUrlHash,
+      table.normalizedTargetUrlHash,
+      table.urlNormalizationVersion,
+      table.evidenceSnapshotHash,
+      table.evidenceContractVersion,
+      table.evidenceSchemaVersion,
+    ),
+    pg.foreignKey({
+      name: "backlink_placement_validation_candidate_identity_fk",
+      columns: [
+        ...identity(table),
+        table.candidateId,
+      ],
+      foreignColumns: [
+        ...identity(backlinkPlacementCandidates),
+        backlinkPlacementCandidates.id,
+      ],
+    }),
     pg.foreignKey({
       name: "backlink_placement_validation_candidate_fk",
       columns: [
@@ -176,7 +201,7 @@ export const backlinkPlacements = pg.pgTable(
     id: pg.uuid("id").primaryKey(),
     ...projectIdentityColumns(),
     candidateId: pg.uuid("candidate_id").notNull(),
-    opportunityId: pg.uuid("opportunity_id").notNull(),
+    opportunityId: pg.uuid("opportunity_id"),
     initialValidationId: pg.uuid("initial_validation_id").notNull(),
     initialValidationStatus: pg.text("initial_validation_status").notNull(),
     sourcePageUrl: pg.text("source_page_url").notNull(),
@@ -216,6 +241,17 @@ export const backlinkPlacements = pg.pgTable(
       table.normalizedSourceUrlHash,
       table.normalizedTargetUrlHash,
     ),
+    pg.foreignKey({
+      name: "backlink_placement_candidate_identity_fk",
+      columns: [
+        ...identity(table),
+        table.candidateId,
+      ],
+      foreignColumns: [
+        ...identity(backlinkPlacementCandidates),
+        backlinkPlacementCandidates.id,
+      ],
+    }),
     pg.foreignKey({
       name: "backlink_placement_candidate_fk",
       columns: [
@@ -257,6 +293,33 @@ export const backlinkPlacements = pg.pgTable(
         backlinkPlacementValidationRuns.id,
         backlinkPlacementValidationRuns.candidateId,
         backlinkPlacementValidationRuns.opportunityId,
+        backlinkPlacementValidationRuns.status,
+        backlinkPlacementValidationRuns.normalizedSourceUrlHash,
+        backlinkPlacementValidationRuns.normalizedTargetUrlHash,
+        backlinkPlacementValidationRuns.urlNormalizationVersion,
+        backlinkPlacementValidationRuns.evidenceSnapshotHash,
+        backlinkPlacementValidationRuns.evidenceContractVersion,
+        backlinkPlacementValidationRuns.evidenceSchemaVersion,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_placement_initial_validation_identity_fk",
+      columns: [
+        ...identity(table),
+        table.initialValidationId,
+        table.candidateId,
+        table.initialValidationStatus,
+        table.normalizedSourceUrlHash,
+        table.normalizedTargetUrlHash,
+        table.urlNormalizationVersion,
+        table.initialEvidenceSnapshotHash,
+        table.evidenceContractVersion,
+        table.initialEvidenceSchemaVersion,
+      ],
+      foreignColumns: [
+        ...identity(backlinkPlacementValidationRuns),
+        backlinkPlacementValidationRuns.id,
+        backlinkPlacementValidationRuns.candidateId,
         backlinkPlacementValidationRuns.status,
         backlinkPlacementValidationRuns.normalizedSourceUrlHash,
         backlinkPlacementValidationRuns.normalizedTargetUrlHash,

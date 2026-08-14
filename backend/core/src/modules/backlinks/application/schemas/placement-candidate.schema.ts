@@ -9,8 +9,12 @@ export const placementCandidateSourceTypes = [
 ] as const;
 
 const nonBlank = z.string().trim().min(1);
+const evidenceJsonValueSchema = z.json();
+z.globalRegistry.add(evidenceJsonValueSchema, {
+  id: "BacklinksEvidenceJsonValue",
+});
 const evidencePayloadSchema = z
-  .record(z.string().min(1).max(100), z.json())
+  .record(z.string().min(1).max(100), evidenceJsonValueSchema)
   .refine((value) => Object.keys(value).length > 0, {
     message: "Evidence payload must not be empty.",
   });
@@ -26,11 +30,33 @@ export const placementCandidateEvidenceSchema = z.object({
 
 export const createPlacementCandidateBodySchema = z.object({
   sourceType: z.enum(placementCandidateSourceTypes),
+  opportunityId: z.uuid().optional(),
   sourceExternalId: nonBlank.max(500).optional(),
   sourcePageUrl: nonBlank.max(2_048).optional(),
   targetUrl: nonBlank.max(2_048),
   evidence: placementCandidateEvidenceSchema,
-}).strict();
+}).strict().superRefine((value, context) => {
+  const isUserEntered =
+    value.sourceType === "manual" || value.sourceType === "import";
+  if (
+    (value.opportunityId !== undefined || isUserEntered)
+    && value.sourcePageUrl === undefined
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["sourcePageUrl"],
+      message: "A source page URL is required for direct validation.",
+    });
+  }
+  if (value.opportunityId !== undefined && !isUserEntered) {
+    context.addIssue({
+      code: "custom",
+      path: ["sourceType"],
+      message:
+        "Only manual and imported links can bind directly to an Opportunity.",
+    });
+  }
+});
 
 export type CreatePlacementCandidateBody = z.output<
   typeof createPlacementCandidateBodySchema

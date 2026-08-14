@@ -1,11 +1,14 @@
 export type OpportunityCreation = Readonly<{
   opportunityId: string; recommendationId: string; cycleId: string;
+  websiteProjectId: string; targetSiteKey: string; targetHostAscii: string;
+  contactCandidateId: string; contactReviewRequired: boolean;
   joinSequence: number; businessStage: "JOINED"; managementStatus: "ACTIVE";
   outcomeStatus: "OPEN"; fulfillmentStatus: "NOT_EXPECTED"; version: number;
   lifecycleEventId: string; auditEventId: string;
 }>;
 export type OpportunityCreationRow = Readonly<{
-  state: "completed" | "replay" | "not_found" | "version_conflict";
+  state: "completed" | "replay" | "not_found" | "version_conflict" |
+    "contact_required" | "duplicate";
   requestHash: string; responseBody?: OpportunityCreation;
 }>;
 export type OpportunityTransition = Readonly<{
@@ -27,10 +30,11 @@ export type OpportunityManagementPatchRow = Readonly<{
 }>;
 type CreateInput = Readonly<{
   organizationId: string; workspaceId: string; websiteProjectId: string;
-  actorId: string; recommendationId: string; expectedVersion: number;
+  actorId: string; recommendationId: string; contactCandidateId: string;
+  expectedVersion: number;
   idempotencyKey: string; requestHash: string; requestId: string;
   idempotencyRecordId: string; opportunityId: string; cycleId: string;
-  lifecycleEventId: string; auditEventId: string;
+  lifecycleEventId: string; auditEventId: string; contactId: string;
 }>;
 type TransitionInput = Readonly<{
   organizationId: string; workspaceId: string; websiteProjectId: string;
@@ -58,25 +62,284 @@ export type OpportunityRepository = Readonly<{
 export function createOpportunityRepository(client: Client): OpportunityRepository {
   return Object.freeze({
     async createFromRecommendation(input) {
-      const sql = `WITH guard AS (SELECT
-pg_advisory_xact_lock(hashtextextended($2::uuid::text||':'||$7||':opportunity.create',0))),
-prior AS (SELECT i.request_hash "requestHash",i.response_body "responseBody" FROM guard CROSS JOIN LATERAL (SELECT * FROM backlink_idempotency_records WHERE workspace_id=$2 AND idempotency_key=$7 AND command_type='opportunity.create') i),
-present AS (SELECT 1 FROM guard,backlink_recommendation_inventory i WHERE (i.organization_id,i.workspace_id,i.website_project_id,i.recommendation_id)=($1,$2,$3,$5) AND NOT EXISTS (SELECT 1 FROM prior)),
-source AS (SELECT i.id inventory_id,i.recommendation_id,i.prospect_id,i.recommendation_context_version_id,p.hostname_ascii,p.registrable_domain,p.normalization_version FROM guard,backlink_recommendation_inventory i JOIN backlink_prospects p ON (p.organization_id,p.workspace_id,p.website_project_id,p.id,p.recommendation_context_version_id)=(i.organization_id,i.workspace_id,i.website_project_id,i.prospect_id,i.recommendation_context_version_id) WHERE (i.organization_id,i.workspace_id,i.website_project_id,i.recommendation_id)=($1,$2,$3,$5) AND i.version=$6 AND i.status IN ('ready','shown') AND NOT EXISTS (SELECT 1 FROM prior) FOR UPDATE OF i),
-next_sequence AS (SELECT backlink_allocate_opportunity_join_sequence($1,$2,$3,$4) join_sequence FROM source),
-created AS (INSERT INTO backlink_opportunities (id,organization_id,workspace_id,website_project_id,recommendation_id,prospect_id,recommendation_context_version_id,target_site_key,target_host_ascii,target_identity_rule_version,join_sequence,created_by,updated_by) SELECT $10,$1,$2,$3,s.recommendation_id,s.prospect_id,s.recommendation_context_version_id,s.registrable_domain,s.hostname_ascii,s.normalization_version,n.join_sequence,$4,$4 FROM source s,next_sequence n RETURNING *),
-cycle AS (INSERT INTO backlink_opportunity_cycles (id,organization_id,workspace_id,website_project_id,opportunity_id,cycle_number,started_at,created_by,updated_by) SELECT $11,$1,$2,$3,id,1,now(),$4,$4 FROM created RETURNING id),
-inventory AS (UPDATE backlink_recommendation_inventory i SET status='accepted',version=i.version+1,updated_at=now(),updated_by=$4 FROM source s,cycle WHERE i.id=s.inventory_id RETURNING i.id),
-recommendation AS (UPDATE backlink_recommendations r SET status='accepted',version=r.version+1,updated_at=now(),updated_by=$4 FROM source s,inventory WHERE (r.organization_id,r.workspace_id,r.website_project_id,r.id)=($1,$2,$3,s.recommendation_id) RETURNING r.id),
-lifecycle AS (INSERT INTO backlink_lifecycle_events (id,organization_id,workspace_id,website_project_id,aggregate_type,aggregate_id,sequence,aggregate_version,event_type,actor_type,actor_id,after_state,reason,correlation_id,idempotency_key) SELECT $12,$1,$2,$3,'opportunity',c.id,1,c.version,'opportunity.created','user',$4,jsonb_build_object('businessStage',c.business_stage,'managementStatus',c.management_status,'outcomeStatus',c.outcome_status,'fulfillmentStatus',c.fulfillment_status,'joinSequence',c.join_sequence),'recommendation_confirmed',$14,'opportunity.create:'||$7 FROM created c,recommendation RETURNING id),
-audit AS (INSERT INTO backlink_audit_events (id,organization_id,workspace_id,website_project_id,lifecycle_event_id,actor_id,actor_kind,action,target_type,target_id,outcome,reason,after_redacted,request_id,correlation_id,integrity_hash) SELECT $13,$1,$2,$3,l.id,$4,'user','opportunity.created','opportunity',c.id,'success','recommendation_confirmed',jsonb_build_object('recommendationId',c.recommendation_id,'joinSequence',c.join_sequence),$14,$14,$8 FROM lifecycle l,created c RETURNING id),
-completed AS (INSERT INTO backlink_idempotency_records (id,organization_id,workspace_id,website_project_id,idempotency_key,command_type,request_hash,response_status,response_body,response_schema_version,completed_at,expires_at,created_by,updated_by) SELECT $9,$1,$2,$3,$7,'opportunity.create',$8,201,jsonb_build_object('opportunityId',c.id,'recommendationId',c.recommendation_id,'cycleId',$11,'joinSequence',c.join_sequence,'businessStage',c.business_stage,'managementStatus',c.management_status,'outcomeStatus',c.outcome_status,'fulfillmentStatus',c.fulfillment_status,'version',c.version,'lifecycleEventId',$12,'auditEventId',$13),1,now(),now()+interval '24 hours',$4,$4 FROM created c,audit RETURNING request_hash "requestHash",response_body "responseBody")
-SELECT 'completed' state,* FROM completed UNION ALL SELECT 'replay',"requestHash","responseBody" FROM prior UNION ALL SELECT CASE WHEN EXISTS (SELECT 1 FROM present) THEN 'version_conflict' ELSE 'not_found' END,$8,NULL::jsonb WHERE NOT EXISTS (SELECT 1 FROM completed) AND NOT EXISTS (SELECT 1 FROM prior)`;
+      const sql = `WITH guard AS (
+  SELECT pg_advisory_xact_lock(
+    hashtextextended(
+      $2::uuid::text||':'||$8||':opportunity.create',0
+    )
+  )
+),
+prior AS (
+  SELECT i.request_hash "requestHash",i.response_body "responseBody"
+    FROM guard
+    CROSS JOIN LATERAL (
+      SELECT *
+        FROM backlink_idempotency_records
+       WHERE workspace_id=$2
+         AND idempotency_key=$8
+         AND command_type='opportunity.create'
+    ) i
+),
+present AS (
+  SELECT i.*
+    FROM guard,backlink_recommendation_inventory i
+   WHERE (i.organization_id,i.workspace_id,i.website_project_id,
+          i.recommendation_id)=($1,$2,$3,$5)
+     AND NOT EXISTS (SELECT 1 FROM prior)
+   FOR UPDATE OF i
+),
+versioned AS (
+  SELECT *
+    FROM present
+   WHERE version=$7
+     AND status IN ('ready','shown')
+     AND publication_status='PUBLISHED'
+     AND verified_public_email_count>=1
+     AND contact_evidence_snapshot_id IS NOT NULL
+     AND default_contact_candidate_id=$6
+),
+source AS (
+  SELECT i.id inventory_id,i.recommendation_id,i.prospect_id,
+         i.recommendation_context_version_id,p.hostname_ascii,
+         p.registrable_domain,p.normalization_version,
+         c.id contact_candidate_id,
+         false contact_review_required
+    FROM versioned i
+    JOIN backlink_prospects p ON
+      (p.organization_id,p.workspace_id,p.website_project_id,p.id,
+       p.recommendation_context_version_id)=
+      (i.organization_id,i.workspace_id,i.website_project_id,i.prospect_id,
+       i.recommendation_context_version_id)
+    JOIN backlink_contact_candidates c ON
+      (c.organization_id,c.workspace_id,c.website_project_id,c.id,
+       c.prospect_id,c.recommendation_context_version_id)=
+      (i.organization_id,i.workspace_id,i.website_project_id,$6,
+       i.prospect_id,i.recommendation_context_version_id)
+    JOIN backlink_contact_evidence_snapshots snapshot ON
+      (snapshot.organization_id,snapshot.workspace_id,
+       snapshot.website_project_id,snapshot.id,
+       snapshot.recommendation_id,snapshot.prospect_id,
+       snapshot.recommendation_context_version_id,
+       snapshot.contact_candidate_id)=
+      (i.organization_id,i.workspace_id,i.website_project_id,
+       i.contact_evidence_snapshot_id,i.recommendation_id,i.prospect_id,
+       i.recommendation_context_version_id,c.id)
+    JOIN backlink_contact_evidence e ON
+      (e.organization_id,e.workspace_id,e.website_project_id,e.id,
+       e.candidate_id)=
+      (snapshot.organization_id,snapshot.workspace_id,
+       snapshot.website_project_id,snapshot.contact_evidence_id,c.id)
+   WHERE c.status IN ('candidate','promoted')
+     AND c.invalidated_at IS NULL
+     AND c.guessed=false
+     AND c.confidence>=80
+     AND c.purpose_confidence>=70
+     AND c.inferred_purpose IN (
+       'press','editorial','partnerships','advertising','business',
+       'marketing','site_owner','general'
+     )
+     AND lower(c.normalized_email) ~
+       '^[^[:space:]@]+@[a-z0-9.-]+[.][a-z]{2,}$'
+     AND split_part(lower(c.normalized_email),'@',1) !~
+       '^(no-?reply|do-?not-?reply|placeholder|example|sample|test|fake|dummy)$'
+     AND c.email_domain_ascii NOT IN (
+       'example.com','example.org','example.net'
+     )
+     AND c.email_domain_ascii NOT LIKE '%.invalid'
+     AND e.invalidated_at IS NULL
+     AND e.expires_at > now()
+     AND e.confidence>=80
+     AND e.extraction_method IN (
+       'mailto','visible_text','obfuscated_text','json_ld'
+     )
+     AND e.source_url=snapshot.source_url
+),
+existing AS (
+  SELECT o.id
+    FROM source s
+    JOIN backlink_opportunities o ON
+      (o.organization_id,o.workspace_id,o.website_project_id,
+       o.target_site_key)=
+      ($1,$2,$3,s.registrable_domain)
+   LIMIT 1
+),
+next_sequence AS (
+  SELECT backlink_allocate_opportunity_join_sequence(
+    $1,$2,$3,$4
+  ) join_sequence
+    FROM source
+   WHERE NOT EXISTS (SELECT 1 FROM existing)
+),
+created AS (
+  INSERT INTO backlink_opportunities (
+    id,organization_id,workspace_id,website_project_id,recommendation_id,
+    prospect_id,recommendation_context_version_id,
+    source_contact_candidate_id,contact_review_required,
+    target_site_key,target_host_ascii,target_identity_rule_version,
+    join_sequence,created_by,updated_by
+  )
+  SELECT $11,$1,$2,$3,s.recommendation_id,s.prospect_id,
+         s.recommendation_context_version_id,s.contact_candidate_id,
+         s.contact_review_required,s.registrable_domain,s.hostname_ascii,
+         s.normalization_version,n.join_sequence,$4,$4
+    FROM source s,next_sequence n
+  ON CONFLICT (website_project_id,target_site_key) DO NOTHING
+  RETURNING *
+),
+candidate_promoted AS (
+  UPDATE backlink_contact_candidates c
+     SET status='promoted',version=c.version+1,updated_at=now(),updated_by=$4
+    FROM source s,created o
+   WHERE (c.organization_id,c.workspace_id,c.website_project_id,c.id)=
+         ($1,$2,$3,s.contact_candidate_id)
+     AND s.contact_review_required=false
+     AND c.status='candidate'
+  RETURNING c.id
+),
+auto_contact AS (
+  INSERT INTO backlink_contacts (
+    id,organization_id,workspace_id,website_project_id,prospect_id,
+    recommendation_context_version_id,source_candidate_id,normalized_email,
+    contact_role,confidence,guessed,observed_role,inferred_purpose,
+    purpose_confidence,purpose_rule_version,purpose_evidence,
+    confirmed_at,confirmed_by,status,created_by,updated_by
+  )
+  SELECT $16,$1,$2,$3,c.prospect_id,c.recommendation_context_version_id,
+         c.id,c.normalized_email,c.inferred_purpose,c.confidence,false,
+         c.observed_role,c.inferred_purpose,c.purpose_confidence,
+         c.purpose_rule_version,c.purpose_evidence,
+         now(),$4,'active',$4,$4
+    FROM source s
+    CROSS JOIN created o
+    JOIN backlink_contact_candidates c ON
+      (c.organization_id,c.workspace_id,c.website_project_id,c.id)=
+      ($1,$2,$3,s.contact_candidate_id)
+    LEFT JOIN candidate_promoted promoted ON promoted.id=c.id
+   WHERE s.contact_review_required=false
+  ON CONFLICT DO NOTHING
+  RETURNING id
+),
+cycle AS (
+  INSERT INTO backlink_opportunity_cycles (
+    id,organization_id,workspace_id,website_project_id,opportunity_id,
+    cycle_number,started_at,created_by,updated_by
+  )
+  SELECT $12,$1,$2,$3,id,1,now(),$4,$4
+    FROM created
+  RETURNING id
+),
+inventory AS (
+  UPDATE backlink_recommendation_inventory i
+     SET status='accepted',version=i.version+1,updated_at=now(),updated_by=$4
+    FROM source s,cycle
+   WHERE i.id=s.inventory_id
+  RETURNING i.id
+),
+recommendation AS (
+  UPDATE backlink_recommendations r
+     SET status='accepted',version=r.version+1,updated_at=now(),updated_by=$4
+    FROM source s,inventory
+   WHERE (r.organization_id,r.workspace_id,r.website_project_id,r.id)=
+         ($1,$2,$3,s.recommendation_id)
+  RETURNING r.id
+),
+lifecycle AS (
+  INSERT INTO backlink_lifecycle_events (
+    id,organization_id,workspace_id,website_project_id,aggregate_type,
+    aggregate_id,sequence,aggregate_version,event_type,actor_type,actor_id,
+    after_state,reason,correlation_id,idempotency_key
+  )
+  SELECT $13,$1,$2,$3,'opportunity',c.id,1,c.version,
+         'opportunity.created','user',$4,
+         jsonb_build_object(
+           'businessStage',c.business_stage,
+           'managementStatus',c.management_status,
+           'outcomeStatus',c.outcome_status,
+           'fulfillmentStatus',c.fulfillment_status,
+           'joinSequence',c.join_sequence,
+           'contactCandidateId',c.source_contact_candidate_id,
+           'contactReviewRequired',c.contact_review_required,
+           'contactAutoConfirmed',NOT c.contact_review_required
+         ),
+         CASE WHEN c.contact_review_required
+           THEN 'recommendation_contact_selected_review_required'
+           ELSE 'recommendation_contact_confirmed'
+         END,$15,
+         'opportunity.create:'||$8
+    FROM created c,recommendation
+  RETURNING id
+),
+audit AS (
+  INSERT INTO backlink_audit_events (
+    id,organization_id,workspace_id,website_project_id,lifecycle_event_id,
+    actor_id,actor_kind,action,target_type,target_id,outcome,reason,
+    after_redacted,request_id,correlation_id,integrity_hash
+  )
+  SELECT $14,$1,$2,$3,l.id,$4,'user','opportunity.created','opportunity',
+         c.id,'success',
+         CASE WHEN c.contact_review_required
+           THEN 'recommendation_contact_selected_review_required'
+           ELSE 'recommendation_contact_confirmed'
+         END,
+         jsonb_build_object(
+           'recommendationId',c.recommendation_id,
+           'joinSequence',c.join_sequence,
+           'contactCandidateId',c.source_contact_candidate_id,
+           'contactReviewRequired',c.contact_review_required,
+           'contactAutoConfirmed',NOT c.contact_review_required
+         ),
+         $15,$15,$9
+    FROM lifecycle l,created c
+  RETURNING id
+),
+completed AS (
+  INSERT INTO backlink_idempotency_records (
+    id,organization_id,workspace_id,website_project_id,idempotency_key,
+    command_type,request_hash,response_status,response_body,
+    response_schema_version,completed_at,expires_at,created_by,updated_by
+  )
+  SELECT $10,$1,$2,$3,$8,'opportunity.create',$9,201,
+         jsonb_build_object(
+           'opportunityId',c.id,
+           'recommendationId',c.recommendation_id,
+           'websiteProjectId',c.website_project_id,
+           'targetSiteKey',c.target_site_key,
+           'targetHostAscii',c.target_host_ascii,
+           'contactCandidateId',c.source_contact_candidate_id,
+           'contactReviewRequired',c.contact_review_required,
+           'cycleId',$12,
+           'joinSequence',c.join_sequence,
+           'businessStage',c.business_stage,
+           'managementStatus',c.management_status,
+           'outcomeStatus',c.outcome_status,
+           'fulfillmentStatus',c.fulfillment_status,
+           'version',c.version,
+           'lifecycleEventId',$13,
+           'auditEventId',$14
+         ),
+         1,now(),now()+interval '24 hours',$4,$4
+    FROM created c,audit
+  RETURNING request_hash "requestHash",response_body "responseBody"
+)
+SELECT 'completed' state,* FROM completed
+UNION ALL
+SELECT 'replay',"requestHash","responseBody" FROM prior
+UNION ALL
+SELECT CASE
+         WHEN NOT EXISTS (SELECT 1 FROM present) THEN 'not_found'
+         WHEN NOT EXISTS (SELECT 1 FROM versioned) THEN 'version_conflict'
+         WHEN NOT EXISTS (SELECT 1 FROM source) THEN 'contact_required'
+         ELSE 'duplicate'
+       END,
+       $9,NULL::jsonb
+ WHERE NOT EXISTS (SELECT 1 FROM completed)
+   AND NOT EXISTS (SELECT 1 FROM prior)`;
       const values = [input.organizationId, input.workspaceId, input.websiteProjectId,
-        input.actorId, input.recommendationId, input.expectedVersion,
-        input.idempotencyKey, input.requestHash, input.idempotencyRecordId,
-        input.opportunityId, input.cycleId, input.lifecycleEventId,
-        input.auditEventId, input.requestId];
+        input.actorId, input.recommendationId, input.contactCandidateId,
+        input.expectedVersion, input.idempotencyKey, input.requestHash,
+        input.idempotencyRecordId, input.opportunityId, input.cycleId,
+        input.lifecycleEventId, input.auditEventId, input.requestId,
+        input.contactId];
       return (await client.query(sql, values)).rows[0] as OpportunityCreationRow;
     },
     async transitionBusinessStage(input) {

@@ -17,15 +17,25 @@ export type NewOAuthAttempt = Readonly<{
 export type OAuthAttemptConsumeInput = Readonly<{
   organizationId: string;
   workspaceId: string;
-  websiteProjectId: string;
   initiatedByUserId: string;
   stateHash: string;
   sessionBindingHash: string;
   consumedAt: Date;
 }>;
 
+export type OAuthAttemptCleanupInput = Readonly<{
+  organizationId: string;
+  workspaceId: string;
+  websiteProjectId: string;
+  cleanedByUserId: string;
+  expiredAt: Date;
+}>;
+
 export type ConsumedOAuthAttempt = Readonly<{
   attemptId: string;
+  organizationId: string;
+  workspaceId: string;
+  websiteProjectId: string;
   pkceVerifier: string;
   requestedScopes: readonly string[];
   redirectUri: string;
@@ -38,6 +48,13 @@ export interface OAuthAttemptRepository {
    * Secret Store and persist only its opaque reference in the business table.
    */
   create(input: NewOAuthAttempt): Promise<void>;
+
+  /**
+   * Implementations must destroy expired transient verifiers before marking
+   * their references destroyed. A failed Secret Store deletion must fail
+   * closed and leave the reference eligible for a later retry.
+   */
+  cleanupExpired(input: OAuthAttemptCleanupInput): Promise<number>;
 
   /**
    * Implementations must validate every binding, expiry, and consumed state,

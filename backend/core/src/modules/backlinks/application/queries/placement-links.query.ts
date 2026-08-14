@@ -103,7 +103,7 @@ export type PlacementLatestMonitorRun = Readonly<{
   updatedAt: string | null;
 }>;
 export type PlacementLinkDetail = PlacementLink & Readonly<{
-  opportunityId: string;
+  opportunityId: string | null;
   normalizedSourceUrl: string;
   normalizedTargetUrl: string;
   urlNormalizationVersion: string;
@@ -115,6 +115,9 @@ export type PlacementLinkDetail = PlacementLink & Readonly<{
     evidenceContractVersion: string;
     evidenceSchemaVersion: number;
   }>;
+  nextCheckAt: string;
+  consecutiveAnomalies: number;
+  browserFallbackEnabled: boolean;
   latestObservation: PlacementLatestObservation | null;
   latestMonitorRun: PlacementLatestMonitorRun;
 }>;
@@ -169,11 +172,22 @@ export type PlacementEvidence = Readonly<{
     finalUrl: string | null;
     contentType: string | null;
     fetchedAt: string | null;
+    redirectChain: string[];
+    xRobotsTag: string | null;
   }>;
   link: Readonly<{
     canonicalUrl: string | null;
     noindex: boolean | null;
     occurrenceCount: number | null;
+    robotsDirectives: string[];
+    occurrences: Readonly<{
+      resolvedHref: string;
+      anchorText: string;
+      rel: string[];
+      nofollow: boolean;
+      sponsored: boolean;
+      ugc: boolean;
+    }>[];
   }>;
 }>;
 export type PlacementLinksQuery = Readonly<{
@@ -229,6 +243,14 @@ function asNullableString(value: unknown, field: string): string | null {
 function asPositiveInteger(value: unknown, field: string): number {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) {
+    throw new TypeError(`Placement link query returned an invalid ${field}.`);
+  }
+  return number;
+}
+
+function asNonnegativeInteger(value: unknown, field: string): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) {
     throw new TypeError(`Placement link query returned an invalid ${field}.`);
   }
   return number;
@@ -398,6 +420,61 @@ function safeNumber(value: unknown): number | null {
 
 function safeBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function asBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new TypeError(`Placement link query returned an invalid ${field}.`);
+  }
+  return value;
+}
+
+function asStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new TypeError(`Placement link query returned an invalid ${field}.`);
+  }
+  return [...value];
+}
+
+function asText(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new TypeError(`Placement link query returned an invalid ${field}.`);
+  }
+  return value;
+}
+
+function evidenceOccurrences(
+  value: unknown,
+): PlacementEvidence["link"]["occurrences"] {
+  if (value === null || value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      "Placement link query returned invalid evidence occurrences.",
+    );
+  }
+  return value.map((item, index) => {
+    const occurrence = asRecord(item, `occurrences[${index}]`);
+    return {
+      resolvedHref: asString(
+        occurrence.resolvedHref,
+        `occurrences[${index}].resolvedHref`,
+      ),
+      anchorText: asText(
+        occurrence.anchorText,
+        `occurrences[${index}].anchorText`,
+      ),
+      rel: asStringArray(occurrence.rel, `occurrences[${index}].rel`),
+      nofollow: asBoolean(
+        occurrence.nofollow,
+        `occurrences[${index}].nofollow`,
+      ),
+      sponsored: asBoolean(
+        occurrence.sponsored,
+        `occurrences[${index}].sponsored`,
+      ),
+      ugc: asBoolean(occurrence.ugc, `occurrences[${index}].ugc`),
+    };
+  });
 }
 
 export function createPlacementLinksQuery(
@@ -582,6 +659,8 @@ export function createPlacementLinksQuery(
                observation.evidence_schema_version "latestEvidenceSchemaVersion",
                observation.failure_code "latestFailureCode",
                policy.next_check_at "nextCheckAt",
+               policy.browser_fallback_enabled "browserFallbackEnabled",
+               anomalies."consecutiveAnomalies",
                run.id "latestMonitorRunId", run.status "latestMonitorRunStatus",
                run.scheduled_for "latestMonitorRunScheduledFor",
                run.updated_at "latestMonitorRunUpdatedAt"
@@ -597,7 +676,7 @@ export function createPlacementLinksQuery(
              LIMIT 1
           ) observation ON true
           LEFT JOIN LATERAL (
-            SELECT policy.next_check_at
+            SELECT policy.next_check_at,policy.browser_fallback_enabled
               FROM backlink_monitor_policies policy
              WHERE (
                policy.organization_id,policy.workspace_id,
@@ -606,6 +685,27 @@ export function createPlacementLinksQuery(
              ORDER BY policy.created_at DESC,policy.id DESC
              LIMIT 1
           ) policy ON true
+          LEFT JOIN LATERAL (
+            SELECT count(*)::integer "consecutiveAnomalies"
+              FROM backlink_monitor_observations anomaly
+             WHERE (
+               anomaly.organization_id,anomaly.workspace_id,
+               anomaly.website_project_id,anomaly.placement_id
+             )=(p.organization_id,p.workspace_id,p.website_project_id,p.id)
+               AND anomaly.result<>'present'
+               AND anomaly.observed_at>COALESCE((
+                 SELECT max(reset.observed_at)
+                   FROM backlink_monitor_observations reset
+                  WHERE (
+                    reset.organization_id,reset.workspace_id,
+                    reset.website_project_id,reset.placement_id
+                  )=(
+                    p.organization_id,p.workspace_id,
+                    p.website_project_id,p.id
+                  )
+                    AND reset.result='present'
+               ),'-infinity'::timestamptz)
+          ) anomalies ON true
           LEFT JOIN LATERAL (
             SELECT run.id,run.status,run.scheduled_for,run.updated_at
               FROM backlink_monitor_runs run
@@ -634,7 +734,7 @@ export function createPlacementLinksQuery(
         displayState: displayStateForHealth(healthStatus),
         placementId: asString(row.placementId, "placementId"),
         candidateId: asString(row.candidateId, "candidateId"),
-        opportunityId: asString(row.opportunityId, "opportunityId"),
+        opportunityId: asNullableString(row.opportunityId, "opportunityId"),
         sourcePageUrl: asString(row.sourcePageUrl, "sourcePageUrl"),
         normalizedSourceUrl: asString(row.normalizedSourceUrl, "normalizedSourceUrl"),
         targetUrl: asString(row.targetUrl, "targetUrl"),
@@ -663,6 +763,15 @@ export function createPlacementLinksQuery(
             "initialEvidenceSchemaVersion",
           ),
         },
+        nextCheckAt: asIsoTimestamp(row.nextCheckAt, "nextCheckAt"),
+        consecutiveAnomalies: asNonnegativeInteger(
+          row.consecutiveAnomalies,
+          "consecutiveAnomalies",
+        ),
+        browserFallbackEnabled: asBoolean(
+          row.browserFallbackEnabled,
+          "browserFallbackEnabled",
+        ),
         latestObservation: latestObservationId === null ? null : {
           observationId: latestObservationId,
           result: observationResult(row.latestObservationResult),
@@ -863,6 +972,10 @@ export function createPlacementLinksQuery(
           fetchedAt: fetch?.fetchedAt === null || fetch?.fetchedAt === undefined
             ? null
             : asIsoTimestamp(fetch.fetchedAt, "fetchedAt"),
+          redirectChain: fetch === null
+            ? []
+            : asStringArray(fetch.redirectChain, "redirectChain"),
+          xRobotsTag: asNullableString(fetch?.xRobotsTag, "xRobotsTag"),
         },
         link: {
           canonicalUrl: asNullableString(page?.canonicalUrl, "canonicalUrl"),
@@ -870,6 +983,10 @@ export function createPlacementLinksQuery(
           occurrenceCount: Array.isArray(page?.occurrences)
             ? page.occurrences.length
             : null,
+          robotsDirectives: page === null
+            ? []
+            : asStringArray(page.robotsDirectives, "robotsDirectives"),
+          occurrences: evidenceOccurrences(page?.occurrences),
         },
       };
     },

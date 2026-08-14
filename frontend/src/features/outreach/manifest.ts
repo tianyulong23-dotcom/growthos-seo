@@ -8,13 +8,11 @@ export const backlinksNavigation: NavigationItem = {
   description: "从推荐发现、机会推进到邮件外联的统一工作区",
   icon: Link2,
   tabs: [
-    { id: "projects", label: "网站项目" },
     { id: "recommendations", label: "推荐池" },
     { id: "opportunities", label: "外链机会" },
-    { id: "links", label: "链接监控" },
     { id: "email", label: "邮件中心" },
   ],
-  action: "刷新推荐",
+  action: "",
   badge: {
     value: "5",
     variant: "secondary",

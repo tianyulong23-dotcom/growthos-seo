@@ -180,6 +180,15 @@
           "queryTypes": []
         },
         {
+          "workflowType": "backlinksContactEnrichmentV1Workflow",
+          "workflowIdPattern": "backlinks:<workspaceId>:<websiteProjectId>:contact-enrichment:v1:<instanceId>",
+          "replayPolicy": "deterministic",
+          "restartPolicy": "reuse-workflow-id",
+          "cancellationPolicy": "propagate",
+          "signalTypes": [],
+          "queryTypes": []
+        },
+        {
           "workflowType": "backlinksPlacementInitialValidationV1Workflow",
           "workflowIdPattern": "backlinks:<workspaceId>:<websiteProjectId>:placement-initial-validation:v1:<instanceId>",
           "replayPolicy": "deterministic",
@@ -203,6 +212,7 @@
         "backlinksReserveRecommendationRefillV1",
         "backlinksExecuteRecommendationRefillV1",
         "backlinksRecordRecommendationRefillFailureV1",
+        "backlinksRunContactEnrichmentV1",
         "backlinksRunPlacementInitialValidationV1",
         "backlinksRunPlacementMonitoringV1"
       ],
@@ -210,6 +220,10 @@
         {
           "providerId": "dataforseo",
           "killSwitch": "backlinks.dataforseo.v1"
+        },
+        {
+          "providerId": "shared-browser-worker",
+          "killSwitch": "backlinks.browser.v1"
         }
       ]
     }

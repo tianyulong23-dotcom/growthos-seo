@@ -84,6 +84,8 @@ const listItemNodeSchema: z.ZodType<DraftListItemNode> = z.lazy(() =>
   })
 );
 
+z.globalRegistry.add(blockNodeSchema, { id: "BacklinksDraftBlockNode" });
+
 function inspectDocument(
   document: DraftDocument,
 ): Readonly<{ characters: number; nodes: number; depth: number }> {

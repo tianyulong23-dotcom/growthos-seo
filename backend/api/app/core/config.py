@@ -185,6 +185,7 @@ class Settings(BaseSettings):
     google_gsc_client_secret: str | None = None
     gsc_public_api_origin: str = "http://localhost:8000"
     gsc_frontend_origin: str = "http://localhost:8080"
+    backlinks_oauth_frontend_origin: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

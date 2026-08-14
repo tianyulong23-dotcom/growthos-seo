@@ -294,7 +294,7 @@ function ModuleBody({
           </div>
         }
       >
-        <OutreachWorkspace view={view} />
+        <OutreachWorkspace view={view} project={project} />
       </React.Suspense>
     )
   if (moduleId === "performance")

@@ -50,6 +50,8 @@ describe("BL-AI-161 prerequisite PB-D fact contracts", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.text).toContain("WITH target AS");
+    expect(calls[0]?.text).toContain("JOIN backlink_draft_versions v");
+    expect(calls[0]?.text).toContain("v.source<>'TEMPLATE_FALLBACK'");
     expect(calls[0]?.text).toContain("INSERT INTO backlink_lifecycle_events");
     expect(calls[0]?.text).toContain("INSERT INTO backlink_audit_events");
     expect(calls[0]?.text).toContain("'draft.approval.recorded'");

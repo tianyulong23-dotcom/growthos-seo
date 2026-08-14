@@ -45,5 +45,6 @@ test("BL-AI-097 uses backend expectedVersion and keeps the editor free of send c
   assert.doesNotMatch(editor, /\/send|sendDraft|autoSend/)
   assert.match(page, /snapshot\.draftVersion/)
   assert.match(page, /人工批准/)
+  assert.match(page, /disabled=\{[\s\S]*fallbackDiagnostic/)
   assert.match(registration, /backlinks\/drafts\/:draftId/)
 })

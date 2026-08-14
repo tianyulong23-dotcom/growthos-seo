@@ -11,7 +11,7 @@ type Scope = Readonly<{
 
 export type PlacementValidationCandidate = Readonly<{
   candidateId: string;
-  opportunityId: string;
+  opportunityId: string | null;
   sourceType: string;
   sourcePageUrl: string;
   normalizedSourceUrl: string;
@@ -103,6 +103,19 @@ function asValidationStatus(value: unknown): PlacementValidationResultStatus {
   throw new Error("Placement validation status is invalid.");
 }
 
+function hasDirectValidationBinding(
+  row: Record<string, unknown>,
+): boolean {
+  return (
+    row.opportunityId !== null
+    && row.matchStatus === "AUTO_MATCHED"
+  ) || (
+    row.opportunityId === null
+    && row.matchStatus === "UNMATCHED"
+    && (row.sourceType === "manual" || row.sourceType === "import")
+  );
+}
+
 function mapCandidate(
   row: Record<string, unknown> | undefined,
 ): PlacementValidationCandidateState {
@@ -124,9 +137,8 @@ function mapCandidate(
 
   if (
     row.candidateStatus === "PENDING_VALIDATION"
-    && row.matchStatus === "AUTO_MATCHED"
     && row.initialValidationStatus === "PENDING"
-    && row.opportunityId !== null
+    && hasDirectValidationBinding(row)
     && row.sourcePageUrl !== null
     && row.normalizedSourceUrl !== null
     && row.normalizedSourceUrlHash !== null
@@ -135,7 +147,7 @@ function mapCandidate(
       state: "ready",
       candidate: {
         candidateId,
-        opportunityId: String(row.opportunityId),
+        opportunityId: asNullableString(row.opportunityId),
         sourceType: String(row.sourceType),
         sourcePageUrl: String(row.sourcePageUrl),
         normalizedSourceUrl: String(row.normalizedSourceUrl),
@@ -226,9 +238,18 @@ export function createPlacementInitialValidationRepository(
           )=($1,$2,$3,$4)
             AND c.version=$5
             AND c.status='PENDING_VALIDATION'
-            AND c.match_status='AUTO_MATCHED'
             AND c.initial_validation_status='PENDING'
-            AND c.opportunity_id IS NOT NULL
+            AND (
+              (
+                c.opportunity_id IS NOT NULL
+                AND c.match_status='AUTO_MATCHED'
+              )
+              OR (
+                c.opportunity_id IS NULL
+                AND c.source_type IN ('manual','import')
+                AND c.match_status='UNMATCHED'
+              )
+            )
             AND c.source_page_url IS NOT NULL
             AND c.normalized_source_url IS NOT NULL
             AND c.normalized_source_url_hash IS NOT NULL

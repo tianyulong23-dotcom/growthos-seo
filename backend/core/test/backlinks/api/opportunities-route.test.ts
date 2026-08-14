@@ -25,9 +25,11 @@ const rows = ["alpha", "beta"].map((name, index) => ({
   targetIdentityKind: "registrable_domain",
   targetIdentityRuleVersion: "tldts-v1",
   targetIdentityOverrideReason: null,
-  joinSequence: index + 10,
+  joinSequence: 11 - index,
   businessStage: "JOINED", managementStatus: "ACTIVE",
   outcomeStatus: "OPEN", fulfillmentStatus: "NOT_EXPECTED",
+  contactEmail: index === 1 ? "editorial@beta.example" : null,
+  hasDownstreamFacts: index === 0,
   version: index + 1,
   createdAt: new Date(`2026-07-24T00:00:0${index}.000Z`),
   updatedAt: new Date(`2026-07-24T01:00:0${index}.000Z`),
@@ -68,28 +70,31 @@ describe("BL-AI-080 Opportunity query API", () => {
     const first = await app.inject({ method: "GET",
       url: "/api/v1/projects/project-key/backlinks/opportunities"
         + "?businessStage=JOINED&managementStatus=ACTIVE"
-        + "&outcomeStatus=OPEN&fulfillmentStatus=NOT_EXPECTED&limit=1" });
+        + "&outcomeStatus=OPEN&fulfillmentStatus=NOT_EXPECTED"
+        + "&search=alpha&limit=1" });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toMatchObject({
-      items: [{ id: rows[0]?.id, joinSequence: 10, targetSiteKey: "alpha.example",
+      items: [{ id: rows[0]?.id, joinSequence: 11, targetSiteKey: "alpha.example",
+        contactEmail: null, hasDownstreamFacts: true,
         createdAt: "2026-07-24T00:00:00.000Z" }],
       hasMore: true, meta: { organizationId: "org-80", workspaceId: "workspace-80",
         websiteProjectId: "project-80", requestId: "request-80" },
     });
-    expect(calls[0]?.values?.slice(0, 7)).toEqual([
+    expect(calls[0]?.values?.slice(0, 8)).toEqual([
       "org-80", "workspace-80", "project-80",
-      "JOINED", "ACTIVE", "OPEN", "NOT_EXPECTED",
+      "JOINED", "ACTIVE", "OPEN", "NOT_EXPECTED", "alpha",
     ]);
-    expect(calls[0]?.text).toContain("ORDER BY o.join_sequence ASC,o.id ASC");
+    expect(calls[0]?.text).toContain("ORDER BY o.join_sequence DESC,o.id DESC");
 
     const cursor = first.json<{ nextCursor: string }>().nextCursor;
     const second = await app.inject({ method: "GET",
       url: `/api/v1/projects/project-key/backlinks/opportunities?limit=1&cursor=${cursor}` });
     expect(second.json()).toMatchObject({
-      items: [{ id: rows[1]?.id, joinSequence: 11 }],
+      items: [{ id: rows[1]?.id, joinSequence: 10,
+        contactEmail: "editorial@beta.example" }],
       hasMore: false, nextCursor: null,
     });
-    expect(calls[1]?.values?.slice(7, 9)).toEqual([10, rows[0]?.id]);
+    expect(calls[1]?.values?.slice(8, 10)).toEqual([11, rows[0]?.id]);
 
     const detail = await app.inject({ method: "GET",
       url: `/api/v1/projects/project-key/backlinks/opportunities/${rows[0]?.id}` });
@@ -108,6 +113,9 @@ describe("BL-AI-080 Opportunity query API", () => {
     expect(calls[2]?.values).toEqual([
       "org-80", "workspace-80", "project-80", rows[0]?.id,
     ]);
+    expect(calls[2]?.text).toContain(
+      "s.score_model_version<>\n                 'recommendation-commercial-fit.v3'",
+    );
 
     const missing = await app.inject({ method: "GET",
       url: "/api/v1/projects/project-key/backlinks/opportunities"

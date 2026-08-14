@@ -25,15 +25,97 @@ export type ApprovedDraftEvidence = Readonly<{
 type DraftOutput = Readonly<{
   subject: string;
   bodyText: string;
-  personalizationClaims: readonly Readonly<{
-    text: string;
+  factsUsed: readonly Readonly<{
+    claim: string;
     evidenceIds: readonly string[];
   }>[];
-  missingInformation: readonly string[];
   riskFlags: readonly string[];
   requiresUserConfirmation: boolean;
   canAutoSend: boolean;
 }>;
+
+const subjectStopWords = new Set([
+  "about",
+  "hello",
+  "idea",
+  "quick",
+  "question",
+  "regarding",
+  "the",
+  "this",
+  "thoughts",
+  "with",
+  "your",
+]);
+
+const semanticTerms = (value: string): readonly string[] =>
+  value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .match(/[\p{L}\p{N}]+/gu) ?? [];
+
+export function draftBodyLengthPolicyIssues(
+  bodyText: string,
+): readonly string[] {
+  const words = bodyText
+    .trim()
+    .split(/\s+/u)
+    .filter((word) => word !== "").length;
+  const paragraphs = bodyText
+    .trim()
+    .split(/\n\s*\n/u)
+    .filter((paragraph) => paragraph.trim() !== "").length;
+  const issues: string[] = [];
+  if (words < 130) {
+    issues.push(`bodyText must contain at least 130 words; received ${words}.`);
+  } else if (words > 220) {
+    issues.push(`bodyText must contain at most 220 words; received ${words}.`);
+  }
+  if (paragraphs < 3) {
+    issues.push(
+      `bodyText must contain at least 3 paragraphs; received ${paragraphs}.`,
+    );
+  } else if (paragraphs > 5) {
+    issues.push(
+      `bodyText must contain at most 5 paragraphs; received ${paragraphs}.`,
+    );
+  }
+  return issues;
+}
+
+export function draftOutputContentPolicyIssues(
+  output: Pick<DraftOutput, "subject" | "bodyText">,
+): readonly string[] {
+  const issues = [...draftBodyLengthPolicyIssues(output.bodyText)];
+
+  const outboundText = `${output.subject}\n${output.bodyText}`;
+  if (
+    /\[(?:name|company|website)\]|\{\{[^}]+\}\}|\b(?:TBD|lorem ipsum)\b/iu
+      .test(outboundText)
+  ) {
+    issues.push("Draft output contains a placeholder.");
+  }
+  if (
+    /\b(?:guaranteed?|promise(?:d|s)?)\s+(?:publication|ranking|indexing|placement|dofollow)\b/iu
+      .test(outboundText)
+    || /\b(?:will|shall)\s+(?:be\s+)?dofollow\b/iu.test(outboundText)
+  ) {
+    issues.push("Draft output contains a prohibited promise.");
+  }
+
+  const body = output.bodyText
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US");
+  const subjectTerms = semanticTerms(output.subject)
+    .filter((term) => term.length >= 4 && !subjectStopWords.has(term));
+  if (
+    subjectTerms.length === 0
+    || !subjectTerms.some((term) => body.includes(term))
+  ) {
+    issues.push("Draft output subject is not coherent with the body.");
+  }
+  return issues;
+}
 
 export function approveDraftEvidence(
   snapshot: EvidenceSnapshot,
@@ -75,7 +157,7 @@ export function validateDraftOutputPolicy(input: Readonly<{
   forbiddenValues: readonly string[];
 }>): void {
   const approvedIds = new Set(input.approvedEvidence.map((item) => item.id));
-  const referencesUnapprovedEvidence = input.output.personalizationClaims.some(
+  const referencesUnapprovedEvidence = input.output.factsUsed.some(
     (claim) =>
       claim.evidenceIds.length === 0
       || claim.evidenceIds.some((evidenceId) => !approvedIds.has(evidenceId)),
@@ -87,8 +169,7 @@ export function validateDraftOutputPolicy(input: Readonly<{
   const outputText = [
     input.output.subject,
     input.output.bodyText,
-    ...input.output.personalizationClaims.map((claim) => claim.text),
-    ...input.output.missingInformation,
+    ...input.output.factsUsed.map((claim) => claim.claim),
     ...input.output.riskFlags,
   ].join("\n");
   if (
@@ -104,4 +185,10 @@ export function validateDraftOutputPolicy(input: Readonly<{
   ) {
     throw new Error("Draft output violated the human-approval policy.");
   }
+
+  const contentPolicyIssue = draftOutputContentPolicyIssues(input.output)[0];
+  if (contentPolicyIssue?.startsWith("bodyText ") === true) {
+    throw new Error("Draft output violated the length policy.");
+  }
+  if (contentPolicyIssue !== undefined) throw new Error(contentPolicyIssue);
 }

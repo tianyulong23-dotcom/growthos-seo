@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { domainToASCII } from "node:url";
 import { load } from "cheerio";
+import { parse as parseDomain } from "tldts";
 import {
   classifyContactPurpose,
   type ContactPurposeDecision,
@@ -35,9 +37,30 @@ const emailOptions: EmailOptions = Object.freeze({
 });
 const htmlTypes = new Set(["text/html", "application/xhtml+xml"]);
 const emailPattern =
-  /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,63}/gu;
+  /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]{1,64}@(?:[\p{L}\p{N}-]{1,63}\.){1,10}[\p{L}]{2,63}/gu;
+const bracketedObfuscatedEmailPattern =
+  /([\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]{1,64})\s*(?:\[at\]|\(at\))\s*((?:[\p{L}\p{N}-]{1,63}\s*(?:\.|\[dot\]|\(dot\)|\sdot\s)\s*){1,10}[\p{L}]{2,63})/giu;
+const wordObfuscatedEmailPattern =
+  /([\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]{1,64})\s+at\s+((?:[\p{L}\p{N}-]{1,63}\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*){1,10}[\p{L}]{2,63})/giu;
+const emailMarkerPattern = /@/gu;
+const obfuscatedEmailMarkerPattern = /(?:\[at\]|\(at\)|\sat\s)/giu;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const maxNodes = 20_000;
+const markerWindowRadius = 320;
+const maxMarkerWindows = 256;
+
+function markerWindows(value: string, marker: RegExp): readonly string[] {
+  const windows: string[] = [];
+  for (const match of value.matchAll(marker)) {
+    if (match.index === undefined) continue;
+    windows.push(value.slice(
+      Math.max(0, match.index - markerWindowRadius),
+      Math.min(value.length, match.index + markerWindowRadius),
+    ));
+    if (windows.length >= maxMarkerWindows) break;
+  }
+  return windows;
+}
 
 export type ContactCandidate = Readonly<{
   email: string;
@@ -46,7 +69,8 @@ export type ContactCandidate = Readonly<{
   confirmed: false;
   evidence: Readonly<{
     pageUrl: string;
-    source: "mailto" | "visible_text";
+    source: "mailto" | "visible_text" | "obfuscated_text" | "json_ld";
+    snippet: string;
   }>;
   purposeDecision: ContactPurposeDecision;
 }>;
@@ -62,7 +86,13 @@ export type ContactPageEvidence = Readonly<{
 }>;
 
 export function isCandidateEmail(value: string): boolean {
-  return validateEmail(value, { ...emailOptions });
+  if (!validateEmail(value, { ...emailOptions })) return false;
+  const separator = value.lastIndexOf("@");
+  const domain = domainToASCII(value.slice(separator + 1)).toLowerCase();
+  if (domain === "") return false;
+  const parsed = parseDomain(domain, { allowPrivateDomains: true });
+  return parsed.domain !== null &&
+    (parsed.isIcann === true || parsed.isPrivate === true);
 }
 
 export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
@@ -108,6 +138,8 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
     raw: string,
     source: ContactCandidate["evidence"]["source"],
     mailtoLabel?: string,
+    snippet = raw,
+    nearbyText?: string,
   ) => {
     const email = raw.trim().toLowerCase();
     if (!isCandidateEmail(email) || candidates.has(email)) return;
@@ -117,31 +149,115 @@ export function parseContactPage(page: SafeFetchResult): ContactPageEvidence {
       ...(mailtoLabel === undefined || mailtoLabel.trim() === ""
         ? {}
         : { mailtoLabel }),
+      ...(nearbyText === undefined || nearbyText.trim() === ""
+        ? {}
+        : { nearbyText }),
       ...(title === "" ? {} : { pageTitle: title }),
+      pageUrl: page.finalUrl,
     });
     candidates.set(email, Object.freeze({
       email,
       status: "candidate",
       syntaxValid: true,
       confirmed: false,
-      evidence: Object.freeze({ pageUrl: page.finalUrl, source }),
+      evidence: Object.freeze({
+        pageUrl: page.finalUrl,
+        source,
+        snippet: snippet.replace(/\s+/gu, " ").trim().slice(0, 500),
+      }),
       purposeDecision,
     }));
   };
   visible.find("a[href]").each((_, element) => {
-    const href = $(element).attr("href") ?? "";
+    const href = ($(element).attr("href") ?? "").trim();
+    if (isCandidateEmail(href)) {
+      add(
+        href,
+        "mailto",
+        $(element).text(),
+        `${$(element).text()} ${href}`,
+        $(element).parent().text().slice(0, 1_000),
+      );
+      return;
+    }
     if (!href.toLowerCase().startsWith("mailto:")) return;
     try {
       add(
         decodeURIComponent(href.slice(7).split("?", 1)[0] ?? ""),
         "mailto",
         $(element).text(),
+        `${$(element).text()} ${href}`,
+        $(element).parent().text().slice(0, 1_000),
       );
     } catch {
       // Invalid percent encoding cannot provide trustworthy evidence.
     }
   });
-  for (const match of visible.text().matchAll(emailPattern)) add(match[0], "visible_text");
+  const textNodes = [
+    ...visible.contents().toArray(),
+    ...visible.find("*").contents().toArray(),
+  ];
+  for (const node of textNodes) {
+    if (node.type !== "text") continue;
+    const visibleText = $(node).text();
+    for (const window of markerWindows(visibleText, emailMarkerPattern)) {
+      for (const match of window.matchAll(emailPattern)) {
+        add(match[0], "visible_text", undefined, match[0], window);
+      }
+    }
+    for (
+      const window of markerWindows(
+        visibleText,
+        obfuscatedEmailMarkerPattern,
+      )
+    ) {
+      for (const pattern of [
+        bracketedObfuscatedEmailPattern,
+        wordObfuscatedEmailPattern,
+      ]) {
+        for (const match of window.matchAll(pattern)) {
+          const local = match[1];
+          const rawDomain = match[2];
+          if (local === undefined || rawDomain === undefined) continue;
+          const domain = rawDomain
+            .replace(/\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*/giu, ".")
+            .replace(/\s+/gu, "");
+          add(
+            `${local}@${domain}`,
+            "obfuscated_text",
+            undefined,
+            match[0],
+            window,
+          );
+        }
+      }
+    }
+  }
+  $("script[type='application/ld+json']").each((_, element) => {
+    const raw = $(element).text();
+    try {
+      const walk = (value: unknown): void => {
+        if (typeof value === "string") {
+          for (const window of markerWindows(value, emailMarkerPattern)) {
+            for (const match of window.matchAll(emailPattern)) {
+              add(match[0], "json_ld", undefined, window);
+            }
+          }
+          return;
+        }
+        if (Array.isArray(value)) {
+          value.forEach(walk);
+          return;
+        }
+        if (value !== null && typeof value === "object") {
+          Object.values(value).forEach(walk);
+        }
+      };
+      walk(JSON.parse(raw));
+    } catch {
+      // Invalid JSON-LD is not contact evidence.
+    }
+  });
 
   return Object.freeze({
     pageUrl: page.finalUrl,

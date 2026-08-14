@@ -47,7 +47,7 @@ describe("BL-AI-035 PostgreSQL Testcontainers harness", () => {
     const url = new URL(harness.connectionString);
     expect(url.port).not.toBe("5432");
     expect(harness.image).toMatch(
-      /^postgres:17\.10-bookworm@sha256:[a-f0-9]{64}$/,
+      /^postgres:18-bookworm@sha256:[a-f0-9]{64}$/,
     );
 
     await harness.migrate();
@@ -66,7 +66,7 @@ describe("BL-AI-035 PostgreSQL Testcontainers harness", () => {
     `);
     await client.end();
 
-    expect(version.rows[0]?.server_version).toMatch(/^17\.10/);
+    expect(version.rows[0]?.server_version).toMatch(/^18\./);
     expect(tables.rows).toHaveLength(6);
 
     const stoppedConnectionString = harness.connectionString;

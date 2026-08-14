@@ -51,6 +51,7 @@ const scope = {
 const jobId = "40000000-0000-4000-8000-000000000041";
 const snapshotId = "50000000-0000-4000-8000-000000000041";
 const workflowId = buildBacklinksWorkflowId({
+  organizationId: scope.organizationId,
   workspaceId: scope.workspaceId,
   websiteProjectId: scope.websiteProjectId,
   workflow: "project-analysis",
@@ -70,6 +71,15 @@ describe("BL-AI-041 Phase 02 gate", () => {
     temporal = await startBacklinksTemporalHarness();
     database = new PostgresClient({ connectionString: postgres.connectionString });
     await database.connect();
+    await database.query(`
+      ALTER TABLE backlink_project_context_snapshots
+        ADD COLUMN target_market text NOT NULL DEFAULT '',
+        ADD COLUMN products jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN keywords jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN target_urls jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN target_audiences jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN partnership_goals jsonb NOT NULL DEFAULT '[]'::jsonb
+    `);
   }, 120_000);
   afterAll(async () => {
     await database?.end();
@@ -87,8 +97,14 @@ describe("BL-AI-041 Phase 02 gate", () => {
       canonicalDomain: "example.com",
       locale: "en-US",
       countryCode: "US",
+      targetMarket: "United States",
       profileVersionId: "profile-v1",
       promotionTargetVersionId: "promotion-v1",
+      products: ["Example product"],
+      keywords: ["example keyword"],
+      targetUrls: ["https://example.com/"],
+      targetAudiences: ["site owners"],
+      partnershipGoals: ["editorial review"],
       actorId: "gate-test",
     });
     await createJobRepository(database).create({

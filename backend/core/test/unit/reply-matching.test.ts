@@ -181,6 +181,37 @@ describe("BL-AI-134 Reply candidate matching", () => {
     expect(result.candidates[0]?.requiresManualConfirmation).toBe(true);
   });
 
+  it("uses quoted body fingerprints as reviewable evidence", () => {
+    const result = matchInboundReply({
+      ...inbound,
+      providerThreadId: null,
+      inReplyToMessageId: null,
+      referenceMessageIds: [],
+      quotedBodyFingerprints: ["quoted-body-sha256"],
+      fromAddress: null,
+      participantAddresses: [],
+      subject: null,
+    }, [{
+      ...outbound,
+      providerThreadId: null,
+      rfcMessageId: null,
+      bodyFingerprint: "quoted-body-sha256",
+      contactAddress: null,
+      participantAddresses: [],
+      subject: null,
+    }]);
+
+    expect(result).toMatchObject({
+      decision: replyMatchDecisions.reviewRequired,
+      matchedOpportunityId: null,
+      confidence: "MEDIUM",
+    });
+    expect(result.candidates[0]?.evidence).toContainEqual({
+      kind: replyMatchEvidenceKinds.quotedBodyFingerprint,
+      fingerprint: "quoted-body-sha256",
+    });
+  });
+
   it("returns UNMATCHED without leaking unrelated candidates", () => {
     const result = matchInboundReply({
       ...inbound,

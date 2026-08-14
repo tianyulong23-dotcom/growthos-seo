@@ -12,6 +12,10 @@ export const gmailConnectionResourceParamsSchema =
     connectionId: z.uuid(),
   }).strict();
 
+export const gmailConnectionSelectionBodySchema = z.object({
+  connectionId: z.uuid(),
+}).strict();
+
 export const gmailConnectBodySchema = z.object({
   returnPath: z.string().max(2_048).refine(
     (value) => value.startsWith("/") && !value.startsWith("//"),
@@ -45,6 +49,8 @@ export const gmailConnectionViewSchema = z.object({
   mailSyncCapability: z.boolean(),
   tokenExpiresAt: timestamp,
   connectedAt: timestamp,
+  affectedProjectCount: z.number().int().nonnegative(),
+  recentErrorCategory: nonBlank.max(255).nullable(),
 }).strict();
 
 export const gmailConnectionMetaSchema = z.object({
@@ -70,6 +76,44 @@ export const gmailCallbackResponseSchema = z.object({
 
 export const gmailStatusResponseSchema = z.object({
   connection: gmailConnectionViewSchema.nullable(),
+  accounts: z.array(gmailConnectionViewSchema),
+  meta: gmailConnectionMetaSchema,
+}).strict();
+
+export const gmailSelectionResponseSchema = gmailStatusResponseSchema;
+
+export const gmailPollingSyncResponseSchema = z.object({
+  status: z.literal("ACCEPTED"),
+  workflowId: nonBlank.max(1_024),
+  meta: gmailConnectionMetaSchema,
+}).strict();
+
+export const gmailPollingSyncStatusResponseSchema = z.object({
+  state: z.enum(["BLOCKED", "WAITING_FOR_ACCEPTED_SEND", "POLLING"]),
+  workflowId: nonBlank.max(1_024),
+  pollingIntervalSeconds: z.number().int().min(15).max(3_600),
+  killSwitchOpen: z.boolean(),
+  acceptedSendCount: z.number().int().nonnegative(),
+  lastSuccessfulSyncAt: timestamp.nullable(),
+  lastError: nonBlank.max(1_000).nullable(),
+  lastErrorCategory: z.enum([
+    "AUTHENTICATION_FAILED",
+    "FORBIDDEN",
+    "GOOGLE_AUTH_EXPIRED",
+    "GOOGLE_5XX",
+    "NETWORK_TIMEOUT",
+    "RATE_LIMITED",
+    "TRANSPORT_FAILURE",
+    "UNKNOWN",
+  ]).nullable(),
+  nextRetryAt: timestamp.nullable(),
+  consecutiveFailures: z.number().int().nonnegative(),
+  cursor: z.object({
+    historyId: nonBlank,
+    initialSyncCompletedAt: timestamp.nullable(),
+    lastSyncedAt: timestamp.nullable(),
+    version: z.number().int().positive(),
+  }).strict().nullable(),
   meta: gmailConnectionMetaSchema,
 }).strict();
 

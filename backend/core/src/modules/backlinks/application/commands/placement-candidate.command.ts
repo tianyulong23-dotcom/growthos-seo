@@ -15,11 +15,15 @@ import {
 import type {
   ResolvedProjectContext,
 } from "../../ports/project-context.port.js";
+import type {
+  PlacementInitialValidationWorkflowInput,
+} from "../workflows/placement-initial-validation.workflow.js";
 
 export type PlacementCandidateCreation = Readonly<{
   candidateId: string;
-  status: "PENDING_MATCH";
-  matchStatus: "UNMATCHED";
+  opportunityId?: string;
+  status: "PENDING_MATCH" | "PENDING_VALIDATION";
+  matchStatus: "UNMATCHED" | "AUTO_MATCHED";
   initialValidationStatus: "PENDING";
   version: number;
 }>;
@@ -30,6 +34,7 @@ export type CreatePlacementCandidateRepositoryInput = Readonly<{
   websiteProjectId: string;
   actorId: string;
   candidateId: string;
+  opportunityId?: string;
   sourceType: CreatePlacementCandidateBody["sourceType"];
   sourceExternalId?: string;
   sourcePageUrl?: string;
@@ -39,8 +44,8 @@ export type CreatePlacementCandidateRepositoryInput = Readonly<{
   normalizedTargetUrl: string;
   normalizedTargetUrlHash: string;
   urlNormalizationVersion: string;
-  status: "PENDING_MATCH";
-  matchStatus: "UNMATCHED";
+  status: PlacementCandidateCreation["status"];
+  matchStatus: PlacementCandidateCreation["matchStatus"];
   initialValidationStatus: "PENDING";
   discoveryEvidenceSnapshot: PlacementCandidateDiscoveryEvidence;
   discoveryEvidenceHash: string;
@@ -75,6 +80,7 @@ export type CreatePlacementCandidateCommandResult =
   PlacementCandidateCreation & Readonly<{
     countsTowardKpi: false;
     replayed: boolean;
+    initialValidationRequest?: PlacementInitialValidationWorkflowInput;
   }>;
 
 function canonicalJson(value: unknown): string {
@@ -100,6 +106,19 @@ function digest(value: unknown): string {
   return createHash("sha256")
     .update(canonicalJson(value), "utf8")
     .digest("hex");
+}
+
+function deterministicUuid(value: string): string {
+  const hash = createHash("sha256").update(value, "utf8").digest("hex");
+  const variant = ((Number.parseInt(hash[16] ?? "0", 16) & 0x3) | 0x8)
+    .toString(16);
+  return [
+    hash.slice(0, 8),
+    hash.slice(8, 12),
+    `5${hash.slice(13, 16)}`,
+    `${variant}${hash.slice(17, 20)}`,
+    hash.slice(20, 32),
+  ].join("-");
 }
 
 function authorize(context: ResolvedProjectContext): void {
@@ -140,9 +159,11 @@ export function createPlacementCandidateCommand(
   dependencies: Readonly<{
     repository: PlacementCandidateRepository;
     newId?: () => string;
+    now?: () => Date;
   }>,
 ) {
   const newId = dependencies.newId ?? randomUUID;
+  const now = dependencies.now ?? (() => new Date());
 
   return Object.freeze({
     async execute(
@@ -157,6 +178,14 @@ export function createPlacementCandidateCommand(
             key: urlKey(sourcePageUrl, "sourcePageUrl"),
           };
       const targetUrlKey = urlKey(input.targetUrl, "targetUrl");
+      const directValidation = sourceUrl !== undefined && (
+        input.opportunityId !== undefined
+        || input.sourceType === "manual"
+        || input.sourceType === "import"
+      );
+      const matchStatus = input.opportunityId === undefined
+        ? "UNMATCHED"
+        : "AUTO_MATCHED";
       const discoveryEvidenceSnapshot = Object.freeze({
         contractVersion: input.evidence.contractVersion,
         schemaVersion: input.evidence.schemaVersion,
@@ -167,6 +196,7 @@ export function createPlacementCandidateCommand(
       });
       const discoveryEvidenceHash = digest(discoveryEvidenceSnapshot);
       const requestHash = digest({
+        opportunityId: input.opportunityId ?? null,
         sourceType: input.sourceType,
         sourceExternalId: input.sourceExternalId ?? null,
         normalizedSourceUrlHash:
@@ -186,12 +216,16 @@ export function createPlacementCandidateCommand(
       const sourceExternalId = input.sourceExternalId === undefined
         ? {}
         : { sourceExternalId: input.sourceExternalId };
+      const candidateId = newId();
       const row = await dependencies.repository.create({
         organizationId: input.context.tenant.organizationId,
         workspaceId: input.context.tenant.workspaceId,
         websiteProjectId: input.context.project.websiteProjectId,
         actorId: input.context.actor.userId,
-        candidateId: newId(),
+        candidateId,
+        ...(input.opportunityId === undefined
+          ? {}
+          : { opportunityId: input.opportunityId }),
         sourceType: input.sourceType,
         ...sourceExternalId,
         ...sourceFields,
@@ -199,8 +233,8 @@ export function createPlacementCandidateCommand(
         normalizedTargetUrl: targetUrlKey.normalizedUrl,
         normalizedTargetUrlHash: targetUrlKey.normalizedUrlHash,
         urlNormalizationVersion: targetUrlKey.normalizationVersion,
-        status: "PENDING_MATCH",
-        matchStatus: "UNMATCHED",
+        status: directValidation ? "PENDING_VALIDATION" : "PENDING_MATCH",
+        matchStatus,
         initialValidationStatus: "PENDING",
         discoveryEvidenceSnapshot,
         discoveryEvidenceHash,
@@ -220,11 +254,39 @@ export function createPlacementCandidateCommand(
       if (row.responseBody === undefined) {
         throw conflict("The idempotent command is already in progress.");
       }
+      const createdCandidateId = row.responseBody.candidateId;
 
       return {
         ...row.responseBody,
         countsTowardKpi: false,
         replayed: row.state === "replay",
+        ...(directValidation
+          ? {
+              initialValidationRequest: {
+                organizationId: input.context.tenant.organizationId,
+                workspaceId: input.context.tenant.workspaceId,
+                websiteProjectId: input.context.project.websiteProjectId,
+                candidateId: createdCandidateId,
+                validationRunId: deterministicUuid(
+                  `${createdCandidateId}:initial-validation`,
+                ),
+                placementId: deterministicUuid(
+                  `${createdCandidateId}:placement`,
+                ),
+                monitoringOutboxEventId: deterministicUuid(
+                  `${createdCandidateId}:monitoring-outbox`,
+                ),
+                placementLifecycleEventId: deterministicUuid(
+                  `${createdCandidateId}:placement-lifecycle`,
+                ),
+                auditEventId: deterministicUuid(
+                  `${createdCandidateId}:audit`,
+                ),
+                actorId: input.context.actor.userId,
+                recordedAt: now(),
+              },
+            }
+          : {}),
       };
     },
   });

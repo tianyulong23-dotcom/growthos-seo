@@ -1,11 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
-import {
-  AlertTriangle,
-  Database,
-  RefreshCw,
-  Save,
-  ShieldAlert,
-} from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Database, RefreshCw, Save, ShieldAlert } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -17,13 +11,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
-
 import {
-  isSettingsApiStatus,
-  settingsClient,
-} from "./api"
+  backlinksProjectQueries,
+  createProjectQueryKey,
+} from "@/features/outreach/api/project-query"
+import { isOutreachOffline } from "@/features/outreach/shared/outreach-network-state"
+import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
+
+import { isSettingsApiStatus, settingsClient } from "./api"
 import type {
   KillSwitchLayer,
   KillSwitchView,
@@ -33,22 +29,34 @@ import type {
 } from "./types"
 
 type ViewState =
-  | "loading"
-  | "ready"
-  | "error"
-  | "forbidden"
-  | "conflict"
-type SaveState = "idle" | "saving" | "saved" | "error" | "forbidden" | "conflict"
+  "loading" | "ready" | "error" | "forbidden" | "conflict" | "offline"
+type SaveState =
+  "idle" | "saving" | "saved" | "error" | "forbidden" | "conflict" | "offline"
 
 const DANGEROUS_CONFIRMATION = "CONFIRM DANGEROUS CHANGE"
-const retentionLabels = {
-  legal_hold: "legal_hold",
-  audit_record: "audit_record",
-  lifecycle_record: "lifecycle_record",
-  active_suppression: "active_suppression",
+const retentionExplanations = {
+  legal_hold: {
+    label: "legal_hold",
+    description: "法律保全中的记录不进入到期选择结果。",
+  },
+  audit_record: {
+    label: "audit_record",
+    description: "审计记录按治理要求保留，不由普通 Retention 选择。",
+  },
+  lifecycle_record: {
+    label: "lifecycle_record",
+    description: "生命周期事实用于重建状态，不在读取路径删除。",
+  },
+  active_suppression: {
+    label: "active_suppression",
+    description: "仍生效的抑制记录保留，避免恢复已阻止的操作。",
+  },
 } as const
 
-function errorState(error: unknown): "error" | "forbidden" | "conflict" {
+function errorState(
+  error: unknown
+): "error" | "forbidden" | "conflict" | "offline" {
+  if (isOutreachOffline()) return "offline"
   if (isSettingsApiStatus(error, 403)) return "forbidden"
   if (isSettingsApiStatus(error, 409)) return "conflict"
   return "error"
@@ -58,6 +66,19 @@ function sourceLabel(sourceLayer: KillSwitchView["sourceLayer"]): string {
   if (sourceLayer === "authority_unavailable") return "权限服务不可用"
   if (sourceLayer === "default") return "安全默认值"
   return sourceLayer
+}
+
+function killSwitchKey(item: KillSwitchView): string {
+  return `${item.capability}\u0000${item.provider ?? ""}`
+}
+
+function editableLayersForSwitch(
+  view: SettingsGovernanceView,
+  item: KillSwitchView
+): KillSwitchLayer[] {
+  return view.editableKillSwitchLayers.filter(
+    (layer) => layer === "project" || item.provider !== null
+  )
 }
 
 export function SettingsWorkspace({
@@ -71,44 +92,72 @@ export function SettingsWorkspace({
   const [saveState, setSaveState] = useState<SaveState>("idle")
   const [view, setView] = useState<SettingsGovernanceView | null>(null)
   const [values, setValues] = useState<SettingsValues | null>(null)
-  const [selectedCapability, setSelectedCapability] = useState("")
-  const [selectedLayer, setSelectedLayer] =
-    useState<KillSwitchLayer>("project")
+  const [selectedSwitchKey, setSelectedSwitchKey] = useState("")
+  const [selectedLayer, setSelectedLayer] = useState<KillSwitchLayer>("project")
   const [nextBlocked, setNextBlocked] = useState(true)
   const [confirmation, setConfirmation] = useState("")
   const [reason, setReason] = useState("")
+  const loadRequest = useRef(0)
+  const settingsKey = useMemo(
+    () => createProjectQueryKey(websiteProjectKey, "settings-governance"),
+    [websiteProjectKey]
+  )
 
-  const load = useCallback(async () => {
-    setViewState("loading")
-    try {
-      const response = await client.getSettings(websiteProjectKey)
-      setView(response)
-      setValues(response.settings.values)
-      setSelectedCapability((current) =>
-        current || response.killSwitches[0]?.capability || ""
-      )
-      setViewState("ready")
-    } catch (error) {
-      setViewState(errorState(error))
-    }
-  }, [client, websiteProjectKey])
+  const load = useCallback(
+    async (force = false) => {
+      const request = ++loadRequest.current
+      if (force) backlinksProjectQueries.invalidate(settingsKey)
+      setViewState("loading")
+      try {
+        const response = await backlinksProjectQueries.fetch(
+          settingsKey,
+          (signal) => client.getSettings(websiteProjectKey, signal)
+        )
+        if (request !== loadRequest.current) return
+        setView(response)
+        setValues(response.settings.values)
+        const selected =
+          response.killSwitches.find((item) => item.editable) ??
+          response.killSwitches[0] ??
+          null
+        setSelectedSwitchKey(selected === null ? "" : killSwitchKey(selected))
+        setSelectedLayer(
+          selected === null
+            ? "project"
+            : (editableLayersForSwitch(response, selected)[0] ?? "project")
+        )
+        setSaveState("idle")
+        setViewState("ready")
+      } catch (error) {
+        if (request !== loadRequest.current) return
+        if (error instanceof DOMException && error.name === "AbortError") return
+        setViewState(errorState(error))
+      }
+    },
+    [client, settingsKey, websiteProjectKey]
+  )
 
   useEffect(() => {
-    let active = true
-    queueMicrotask(() => {
-      if (active) void load()
-    })
+    queueMicrotask(() => void load())
     return () => {
-      active = false
+      loadRequest.current += 1
+      backlinksProjectQueries.invalidate(settingsKey)
     }
-  }, [load])
+  }, [load, settingsKey])
 
   const selectedSwitch = useMemo(
     () =>
       view?.killSwitches.find(
-        (item) => item.capability === selectedCapability
+        (item) => killSwitchKey(item) === selectedSwitchKey
       ) ?? null,
-    [selectedCapability, view]
+    [selectedSwitchKey, view]
+  )
+  const editableLayers = useMemo(
+    () =>
+      view === null || selectedSwitch === null
+        ? []
+        : editableLayersForSwitch(view, selectedSwitch),
+    [selectedSwitch, view]
   )
 
   async function saveSettings() {
@@ -123,6 +172,7 @@ export function SettingsWorkspace({
         current === null ? current : { ...current, settings: response.settings }
       )
       setValues(response.settings.values)
+      backlinksProjectQueries.invalidate(settingsKey)
       setSaveState("saved")
     } catch (error) {
       setSaveState(errorState(error))
@@ -130,7 +180,17 @@ export function SettingsWorkspace({
   }
 
   async function saveKillSwitch() {
-    if (view === null || selectedSwitch === null) return
+    if (
+      view === null ||
+      selectedSwitch === null ||
+      !selectedSwitch.editable ||
+      !editableLayers.includes(selectedLayer)
+    ) {
+      return
+    }
+    const provider =
+      selectedLayer === "provider" ? selectedSwitch.provider : null
+    if (selectedLayer === "provider" && provider === null) return
     setSaveState("saving")
     try {
       const response = await client.updateKillSwitch(
@@ -139,10 +199,7 @@ export function SettingsWorkspace({
         {
           expectedVersion: selectedSwitch.sourceVersion ?? 0,
           layer: selectedLayer,
-          provider:
-            selectedLayer === "provider"
-              ? selectedSwitch.provider ?? "DataForSEO"
-              : null,
+          provider,
           blocked: nextBlocked,
           confirmation,
           reason,
@@ -154,14 +211,16 @@ export function SettingsWorkspace({
           : {
               ...current,
               killSwitches: current.killSwitches.map((item) =>
-                item.capability === response.killSwitch.capability
+                killSwitchKey(item) === selectedSwitchKey
                   ? response.killSwitch
                   : item
               ),
             }
       )
+      setSelectedSwitchKey(killSwitchKey(response.killSwitch))
       setConfirmation("")
       setReason("")
+      backlinksProjectQueries.invalidate(settingsKey)
       setSaveState("saved")
     } catch (error) {
       setSaveState(errorState(error))
@@ -169,31 +228,26 @@ export function SettingsWorkspace({
   }
 
   if (viewState === "loading") {
-    return (
-      <div className="space-y-4" aria-label="设置加载中">
-        <Skeleton className="h-20 w-full" />
-        <Skeleton className="h-56 w-full" />
-        <Skeleton className="h-48 w-full" />
-      </div>
-    )
+    return <OutreachStandardStateView state="loading" title="设置加载中" />
   }
 
   if (viewState !== "ready" || view === null || values === null) {
     return (
-      <div className="flex min-h-64 flex-col items-center justify-center gap-3 border-y bg-muted/20 px-6 text-center">
-        <AlertTriangle className="size-6 text-destructive" />
-        <h2 className="text-base font-semibold">
-          {viewState === "forbidden"
+      <OutreachStandardStateView
+        state={viewState === "ready" ? "error" : viewState}
+        title={
+          viewState === "forbidden"
             ? "无权查看治理设置"
             : viewState === "conflict"
               ? "设置版本已变化"
-              : "设置读取失败"}
-        </h2>
-        <Button variant="outline" onClick={() => void load()}>
-          <RefreshCw data-icon="inline-start" />
-          重新读取
-        </Button>
-      </div>
+              : viewState === "offline"
+                ? "治理设置当前离线"
+                : "设置读取失败"
+        }
+        description="不会使用本地值覆盖服务端治理设置。"
+        onRetry={() => void load(true)}
+        retryLabel="重新读取"
+      />
     )
   }
 
@@ -208,11 +262,14 @@ export function SettingsWorkspace({
           <p className="mt-1 text-sm text-muted-foreground">
             运行中的 Job 保持启动时绑定的设置版本。
           </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            刷新仅重新读取治理视图，不触发 Provider 请求。
+          </p>
         </div>
         <Button
           size="sm"
           variant="outline"
-          onClick={() => void load()}
+          onClick={() => void load(true)}
           disabled={saveState === "saving"}
         >
           <RefreshCw data-icon="inline-start" />
@@ -308,18 +365,27 @@ export function SettingsWorkspace({
             <button
               type="button"
               key={`${item.capability}:${item.provider ?? "project"}`}
+              aria-pressed={killSwitchKey(item) === selectedSwitchKey}
               className="flex w-full items-center justify-between gap-4 py-3 text-left"
               onClick={() => {
-                setSelectedCapability(item.capability)
+                const layers = editableLayersForSwitch(view, item)
+                setSelectedSwitchKey(killSwitchKey(item))
+                setSelectedLayer(layers[0] ?? "project")
                 setNextBlocked(!item.effectiveBlocked)
+                setConfirmation("")
+                setReason("")
+                setSaveState("idle")
               }}
             >
               <span className="min-w-0">
                 <span className="block truncate text-sm font-medium">
-                  {item.provider === "DataForSEO"
-                    ? "DataForSEO"
-                    : item.capability}
+                  {item.provider ?? item.capability}
                 </span>
+                {item.provider !== null && (
+                  <span className="mt-1 block truncate text-xs text-muted-foreground">
+                    {item.capability}
+                  </span>
+                )}
                 <span className="mt-1 block text-xs text-muted-foreground">
                   生效来源：{sourceLabel(item.sourceLayer)}
                   {item.sourceVersion === null
@@ -343,57 +409,69 @@ export function SettingsWorkspace({
           ))}
         </div>
 
-        {selectedSwitch !== null && (
-          <div className="mt-4 grid gap-4 border-l-2 border-destructive bg-destructive/5 p-4 lg:grid-cols-[180px_minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
-            <label className="space-y-2 text-sm">
-              <span className="font-medium">变更层级</span>
-              <Select
-                value={selectedLayer}
-                onValueChange={(value) =>
-                  setSelectedLayer(value as KillSwitchLayer)
+        {selectedSwitch !== null &&
+          selectedSwitch.editable &&
+          editableLayers.length > 0 && (
+            <div className="mt-4 grid gap-4 border-l-2 border-destructive bg-destructive/5 p-4 lg:grid-cols-[180px_minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">变更层级</span>
+                <Select
+                  value={selectedLayer}
+                  onValueChange={(value) =>
+                    setSelectedLayer(value as KillSwitchLayer)
+                  }
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {editableLayers.map((layer) => (
+                      <SelectItem key={layer} value={layer}>
+                        {layer === "project" ? "项目" : "Provider"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">原因</span>
+                <Input
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">确认文本</span>
+                <Input
+                  value={confirmation}
+                  onChange={(event) => setConfirmation(event.target.value)}
+                  placeholder={DANGEROUS_CONFIRMATION}
+                />
+                <span className="block text-xs text-muted-foreground">
+                  ExpectedVersion {selectedSwitch.sourceVersion ?? 0}
+                </span>
+              </label>
+              <Button
+                variant={nextBlocked ? "destructive" : "default"}
+                onClick={() => void saveKillSwitch()}
+                disabled={
+                  saveState === "saving" ||
+                  reason.trim() === "" ||
+                  confirmation !== DANGEROUS_CONFIRMATION
                 }
               >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {view.editableKillSwitchLayers.map((layer) => (
-                    <SelectItem key={layer} value={layer}>
-                      {layer === "project" ? "项目" : "Provider"}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </label>
-            <label className="space-y-2 text-sm">
-              <span className="font-medium">原因</span>
-              <Input
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-              />
-            </label>
-            <label className="space-y-2 text-sm">
-              <span className="font-medium">确认文本</span>
-              <Input
-                value={confirmation}
-                onChange={(event) => setConfirmation(event.target.value)}
-                placeholder={DANGEROUS_CONFIRMATION}
-              />
-            </label>
-            <Button
-              variant={nextBlocked ? "destructive" : "default"}
-              onClick={() => void saveKillSwitch()}
-              disabled={
-                saveState === "saving" ||
-                reason.trim() === "" ||
-                confirmation !== DANGEROUS_CONFIRMATION
-              }
-            >
-              <ShieldAlert data-icon="inline-start" />
-              {nextBlocked ? "阻断" : "解除"}
-            </Button>
-          </div>
-        )}
+                <ShieldAlert data-icon="inline-start" />
+                {nextBlocked ? "阻断" : "解除"}
+              </Button>
+            </div>
+          )}
+        {selectedSwitch !== null &&
+          (!selectedSwitch.editable || editableLayers.length === 0) && (
+            <div className="mt-4 border-l-2 border-muted-foreground/40 bg-muted/20 p-4 text-sm text-muted-foreground">
+              当前有效状态来自不可操作层级，仅供查看。此页面不会提供 global、
+              organization 或 workspace 层修改入口。
+            </div>
+          )}
       </section>
 
       <section aria-labelledby="retention-heading">
@@ -428,12 +506,21 @@ export function SettingsWorkspace({
             </tbody>
           </table>
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {view.retention.exceptions.map((exception) => (
-            <Badge key={exception} variant="outline">
-              {retentionLabels[exception]}
-            </Badge>
-          ))}
+        <div className="mt-3 divide-y border-y">
+          {view.retention.exceptions.map((exception) => {
+            const explanation = retentionExplanations[exception]
+            return (
+              <div
+                key={exception}
+                className="flex flex-col gap-1 py-3 sm:flex-row sm:items-center sm:gap-3"
+              >
+                <Badge variant="outline">{explanation.label}</Badge>
+                <p className="text-sm text-muted-foreground">
+                  {explanation.description}
+                </p>
+              </div>
+            )
+          })}
         </div>
       </section>
 
@@ -450,6 +537,14 @@ export function SettingsWorkspace({
       )}
       {saveState === "error" && (
         <p className="text-sm text-destructive">设置保存失败。</p>
+      )}
+      {saveState === "offline" && (
+        <OutreachStandardStateView
+          state="offline"
+          title="设置保存请求当前离线"
+          description="本地编辑不会被当作已保存的服务端版本。"
+          compact
+        />
       )}
     </div>
   )

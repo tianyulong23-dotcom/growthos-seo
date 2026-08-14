@@ -13,6 +13,9 @@ export type AiDraftClientConfig = Readonly<{
   modelId?: string;
   modelVersion?: string;
   timeoutMs?: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  absoluteBudgetUsd?: number;
 }>;
 
 export type AiDraftTransport = Readonly<{
@@ -23,6 +26,8 @@ export type AiDraftTransport = Readonly<{
     modelId: string;
     modelVersion: string;
     timeoutMs: number;
+    maxInputTokens: number;
+    maxOutputTokens: number;
   }>): Promise<AiDraftResult>;
 }>;
 
@@ -37,6 +42,9 @@ type SafeLogEvent = Readonly<{
 const fail = (code: "UNAVAILABLE" | "MISCONFIGURED", message: string) =>
   new AiDraftError({ code, message, retryable: false });
 
+const positiveFinite = (value: number | undefined): value is number =>
+  value !== undefined && Number.isFinite(value) && value > 0;
+
 function validateConfig(config: AiDraftClientConfig) {
   if (config.enabled !== true) {
     throw fail("UNAVAILABLE", "AI Draft Adapter is disabled.");
@@ -47,12 +55,17 @@ function validateConfig(config: AiDraftClientConfig) {
   if (config.modelId?.trim() === undefined || config.modelId.trim() === "") {
     throw fail("MISCONFIGURED", "AI Draft modelId is required.");
   }
-  if (
-    config.timeoutMs === undefined
-    || !Number.isFinite(config.timeoutMs)
-    || config.timeoutMs <= 0
-  ) {
+  if (!positiveFinite(config.timeoutMs)) {
     throw fail("MISCONFIGURED", "AI Draft timeoutMs must be positive.");
+  }
+  if (!positiveFinite(config.maxInputTokens)) {
+    throw fail("MISCONFIGURED", "AI Draft maxInputTokens must be positive.");
+  }
+  if (!positiveFinite(config.maxOutputTokens)) {
+    throw fail("MISCONFIGURED", "AI Draft maxOutputTokens must be positive.");
+  }
+  if (!positiveFinite(config.absoluteBudgetUsd)) {
+    throw fail("MISCONFIGURED", "AI Draft absoluteBudgetUsd must be positive.");
   }
   return {
     secretRef: config.secretRef,
@@ -60,6 +73,9 @@ function validateConfig(config: AiDraftClientConfig) {
     modelId: config.modelId,
     modelVersion: config.modelVersion?.trim() || "unspecified",
     timeoutMs: config.timeoutMs,
+    maxInputTokens: config.maxInputTokens,
+    maxOutputTokens: config.maxOutputTokens,
+    absoluteBudgetUsd: config.absoluteBudgetUsd,
   };
 }
 
@@ -78,7 +94,36 @@ export function createAiDraftClient(options: Readonly<{
         providerRef: config.providerRef,
       });
       try {
-        const result = await options.transport.generate({ draft, ...config });
+        const { absoluteBudgetUsd, ...transportConfig } = config;
+        const result = await options.transport.generate({
+          draft,
+          ...transportConfig,
+        });
+        if (
+          !Number.isInteger(result.usage.inputTokens)
+          || result.usage.inputTokens < 0
+          || result.usage.inputTokens > config.maxInputTokens * 2
+          || !Number.isInteger(result.usage.outputTokens)
+          || result.usage.outputTokens < 0
+          || result.usage.outputTokens > config.maxOutputTokens * 2
+        ) {
+          throw new AiDraftError({
+            code: "BUDGET_EXCEEDED",
+            message: "AI Draft token usage exceeded the configured limit.",
+            retryable: false,
+          });
+        }
+        if (
+          !Number.isFinite(result.estimatedCostUsd)
+          || result.estimatedCostUsd < 0
+          || result.estimatedCostUsd > absoluteBudgetUsd
+        ) {
+          throw new AiDraftError({
+            code: "BUDGET_EXCEEDED",
+            message: "AI Draft cost exceeded the configured limit.",
+            retryable: false,
+          });
+        }
         options.logger?.({
           event: "backlinks.ai_draft.completed",
           modelId: config.modelId,

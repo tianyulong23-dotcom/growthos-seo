@@ -28,6 +28,7 @@ export const opportunitiesQuerySchema = z.object({
   managementStatus: z.enum(opportunityManagementStatuses).optional(),
   outcomeStatus: z.enum(opportunityOutcomeStatuses).optional(),
   fulfillmentStatus: z.enum(opportunityFulfillmentStatuses).optional(),
+  search: nonBlank.max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: nonBlank.max(2048).optional(),
 }).strict();
@@ -40,6 +41,10 @@ const listItemSchema = z.object({
   managementStatus: z.enum(opportunityManagementStatuses),
   outcomeStatus: z.enum(opportunityOutcomeStatuses),
   fulfillmentStatus: z.enum(opportunityFulfillmentStatuses),
+  sourceContactCandidateId: z.uuid().nullable(),
+  contactEmail: nonBlank.nullable(),
+  contactReviewRequired: z.boolean(),
+  hasDownstreamFacts: z.boolean(),
   version: z.number().int().positive(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -51,7 +56,7 @@ const detailSchema = listItemSchema.extend({
   targetIdentityKind: z.enum(["registrable_domain", "exact_host"]),
   targetIdentityRuleVersion: nonBlank,
   targetIdentityOverrideReason: z.string().nullable(),
-  assessment: publicAssessmentSchema,
+  assessment: publicAssessmentSchema.nullable(),
   placementCandidate: placementCandidateSchema.nullable(),
 }).strict();
 const metaSchema = z.object({

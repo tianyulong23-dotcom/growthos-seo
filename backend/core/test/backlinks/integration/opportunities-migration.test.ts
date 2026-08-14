@@ -93,6 +93,7 @@ describe("BL-AI-074 opportunity persistence migration", () => {
     expect(configs.slice(0, 3).flatMap(({ foreignKeys }) =>
       foreignKeys.map((key) => key.getName()))).toEqual([
       "backlink_opportunity_recommendation_fk",
+      "backlink_opportunity_source_contact_candidate_fk",
       "backlink_opportunity_cycle_parent_fk",
       "backlink_opportunity_cooperation_parent_fk",
     ]);

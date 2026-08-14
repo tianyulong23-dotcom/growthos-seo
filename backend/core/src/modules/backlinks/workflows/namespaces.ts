@@ -1,8 +1,14 @@
 const workflowKinds = [
   "project-analysis",
   "recommendation-refill",
+  "contact-enrichment",
   "placement-initial-validation",
   "placement-monitoring",
+  "placement-monitoring-initialization",
+  "draft-generation",
+  "backlink-profile-sync",
+  "gmail-send",
+  "gmail-polling-sync",
 ] as const;
 export type BacklinksWorkflowKind = (typeof workflowKinds)[number];
 
@@ -20,6 +26,10 @@ export const backlinksRuntimeContract = Object.freeze({
       workflowType: "backlinksRecommendationRefillV1Workflow",
       workflow: "recommendation-refill",
     },
+    contactEnrichment: {
+      workflowType: "backlinksContactEnrichmentV1Workflow",
+      workflow: "contact-enrichment",
+    },
     placementInitialValidation: {
       workflowType: "backlinksPlacementInitialValidationV1Workflow",
       workflow: "placement-initial-validation",
@@ -28,17 +38,51 @@ export const backlinksRuntimeContract = Object.freeze({
       workflowType: "backlinksPlacementMonitoringV1Workflow",
       workflow: "placement-monitoring",
     },
+    placementMonitoringInitialization: {
+      workflowType:
+        "backlinksPlacementMonitoringInitializationV1Workflow",
+      workflow: "placement-monitoring-initialization",
+    },
+    draftGeneration: {
+      workflowType: "backlinksDraftGenerationV1Workflow",
+      workflow: "draft-generation",
+    },
+    backlinkProfileSync: {
+      workflowType: "backlinksProfileSyncV1Workflow",
+      workflow: "backlink-profile-sync",
+    },
+    gmailSend: {
+      workflowType: "backlinksGmailSendV1Workflow",
+      workflow: "gmail-send",
+    },
+    gmailPollingSync: {
+      workflowType: "backlinksGmailPollingSyncV1Workflow",
+      workflow: "gmail-polling-sync",
+    },
   },
   activities: {
     loadProjectAnalysisContext: "backlinksLoadProjectAnalysisContextV1",
     reserveRecommendationRefill: "backlinksReserveRecommendationRefillV1",
     executeRecommendationRefill: "backlinksExecuteRecommendationRefillV1",
     storeReadyRecommendations: "backlinksStoreReadyRecommendationsV1",
+    planRecommendationRefillSupply:
+      "backlinksPlanRecommendationRefillSupplyV1",
+    completeRecommendationRefillSupply:
+      "backlinksCompleteRecommendationRefillSupplyV1",
     recordRecommendationRefillFailure:
       "backlinksRecordRecommendationRefillFailureV1",
+    runContactEnrichment: "backlinksRunContactEnrichmentV1",
     runPlacementInitialValidation:
       "backlinksRunPlacementInitialValidationV1",
     runPlacementMonitoring: "backlinksRunPlacementMonitoringV1",
+    initializePlacementMonitoring:
+      "backlinksInitializePlacementMonitoringV1",
+    runDraftGeneration: "backlinksRunDraftGenerationV1",
+    runBacklinkProfileSync: "backlinksRunProfileSyncV1",
+    claimGmailSendAttempt: "backlinksClaimGmailSendAttemptV1",
+    dispatchGmailSendAttempt: "backlinksDispatchGmailSendAttemptV1",
+    settleGmailSendAttempt: "backlinksSettleGmailSendAttemptV1",
+    runGmailPollingSync: "backlinksRunGmailPollingSyncV1",
   },
   providers: {
     dataForSeo: {
@@ -49,6 +93,7 @@ export const backlinksRuntimeContract = Object.freeze({
 } as const);
 
 type WorkflowIdInput = Readonly<{
+  organizationId: string;
   workspaceId: string;
   websiteProjectId: string;
   workflow: BacklinksWorkflowKind;
@@ -61,6 +106,7 @@ function validSegment(value: string): boolean {
 
 export function buildBacklinksWorkflowId(input: WorkflowIdInput): string {
   const segments = [
+    input.organizationId,
     input.workspaceId,
     input.websiteProjectId,
     input.workflow,
@@ -71,6 +117,7 @@ export function buildBacklinksWorkflowId(input: WorkflowIdInput): string {
   }
   return [
     backlinksRuntimeContract.moduleId,
+    input.organizationId,
     input.workspaceId,
     input.websiteProjectId,
     input.workflow,
@@ -81,13 +128,14 @@ export function buildBacklinksWorkflowId(input: WorkflowIdInput): string {
 
 export function isBacklinksWorkflowId(value: string): boolean {
   const segments = value.split(":");
-  return segments.length === 6 &&
+  return segments.length === 7 &&
     segments[0] === backlinksRuntimeContract.moduleId &&
     validSegment(segments[1] ?? "") &&
     validSegment(segments[2] ?? "") &&
-    workflowKinds.includes(segments[3] as BacklinksWorkflowKind) &&
-    segments[4] === "v1" &&
-    validSegment(segments[5] ?? "");
+    validSegment(segments[3] ?? "") &&
+    workflowKinds.includes(segments[4] as BacklinksWorkflowKind) &&
+    segments[5] === "v1" &&
+    validSegment(segments[6] ?? "");
 }
 
 export function assertBacklinksWorkflowId(value: string): void {

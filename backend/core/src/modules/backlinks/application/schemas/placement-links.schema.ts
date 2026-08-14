@@ -126,7 +126,7 @@ export const placementLinkCandidateResponseSchema = z.object({
 }).strict();
 export const placementLinkPlacementResponseSchema = z.object({
   link: placementLinkSchema.extend({
-    opportunityId: z.uuid(),
+    opportunityId: z.uuid().nullable(),
     normalizedSourceUrl: z.string().url(),
     normalizedTargetUrl: z.string().url(),
     urlNormalizationVersion: nonBlank,
@@ -138,6 +138,9 @@ export const placementLinkPlacementResponseSchema = z.object({
       evidenceContractVersion: nonBlank,
       evidenceSchemaVersion: z.number().int().positive(),
     }).strict(),
+    nextCheckAt: timestamp,
+    consecutiveAnomalies: z.number().int().nonnegative(),
+    browserFallbackEnabled: z.boolean(),
     latestObservation: z.object({
       observationId: z.uuid(),
       result: observationResult,
@@ -200,11 +203,22 @@ export const placementLinkEvidenceResponseSchema = z.object({
       finalUrl: z.string().url().nullable(),
       contentType: nonBlank.nullable(),
       fetchedAt: timestamp.nullable(),
+      redirectChain: z.array(z.string().url()),
+      xRobotsTag: nonBlank.nullable(),
     }).strict(),
     link: z.object({
       canonicalUrl: z.string().url().nullable(),
       noindex: z.boolean().nullable(),
       occurrenceCount: z.number().int().nonnegative().nullable(),
+      robotsDirectives: z.array(nonBlank),
+      occurrences: z.array(z.object({
+        resolvedHref: z.string().url(),
+        anchorText: z.string(),
+        rel: z.array(nonBlank),
+        nofollow: z.boolean(),
+        sponsored: z.boolean(),
+        ugc: z.boolean(),
+      }).strict()),
     }).strict(),
   }).strict(),
   meta: metaSchema,
@@ -214,7 +228,7 @@ export const placementLinkReverifyResponseSchema = z.object({
   placementVersion: z.number().int().positive(),
   accepted: z.boolean(),
   replayed: z.boolean(),
-  browserFallbackAllowed: z.literal(false),
+  browserFallbackAllowed: z.boolean(),
   monitorRun: z.object({
     monitorRunId: z.uuid(),
     status: monitorRunStatus.exclude(["idle"]),

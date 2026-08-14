@@ -17,6 +17,7 @@ export type SafeHttpResponse = Readonly<{
   contentType: string | undefined;
   contentLength: number | undefined;
   location: string | undefined;
+  xRobotsTag: string | undefined;
   body: AsyncIterable<Uint8Array>;
   close(): void;
 }>;
@@ -25,14 +26,25 @@ export type SafeFetchAdapterOptions = Readonly<{
   timeoutMs: number; resolver?: HostnameResolver;
   transport?: SafeHttpTransport; clock?: () => string }>;
 const redirects = new Set([301, 302, 303, 307, 308]);
-const allowedTypes = new Set(["text/html", "application/xhtml+xml", "text/plain"]);
+const allowedTypes = new Set([
+  "text/html",
+  "application/xhtml+xml",
+  "text/plain",
+  "application/xml",
+  "text/xml",
+  "application/rss+xml",
+  "application/atom+xml",
+]);
 function fail(url: string, code: SafeFetchFailureCode, cause?: unknown) {
   return new SafeFetchError({
     code, requestedUrl: url, message: `SafeFetch failed with ${code}.`,
     retryable: safeFetchFailureRetryability[code],
   }, cause === undefined ? undefined : { cause });
 }
-function header(response: IncomingMessage, name: "content-type" | "location") {
+function header(
+  response: IncomingMessage,
+  name: "content-type" | "location" | "x-robots-tag",
+) {
   const value = response.headers[name];
   return typeof value === "string" ? value : undefined;
 }
@@ -43,7 +55,8 @@ export const nodeHttpTransport: SafeHttpTransport = ({ url, address, signal }) =
       hostname: address.address, port: url.port, method: "GET", signal,
       path: `${target.pathname}${target.search}`,
       headers: {
-        accept: "text/html, application/xhtml+xml, text/plain;q=0.9",
+        accept:
+          "text/html, application/xhtml+xml, application/xml, text/xml, text/plain;q=0.9",
         "accept-encoding": "identity", host: target.host,
         "user-agent": "GrowthOS-SafeFetch/1.0",
       },
@@ -57,7 +70,9 @@ export const nodeHttpTransport: SafeHttpTransport = ({ url, address, signal }) =
         status: response.statusCode, contentType: header(response, "content-type"),
         contentLength: typeof length === "string" && /^\d+$/u.test(length)
           ? Number(length) : undefined,
-        location: header(response, "location"), body: response,
+        location: header(response, "location"),
+        xRobotsTag: header(response, "x-robots-tag"),
+        body: response,
         close: () => response.destroy(),
       });
     };
@@ -154,6 +169,7 @@ export class SafeFetchAdapter implements SafeFetchPort {
       return Object.freeze({
         requestedUrl: request.url, finalUrl: url.normalizedUrl,
         status: response.status, contentType,
+        xRobotsTag: response.xRobotsTag ?? null,
         body: Uint8Array.from(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), total)),
         redirectChain: Object.freeze(redirectChain),
         resolvedIps: Object.freeze(resolvedIps), fetchedAt: this.#clock(),

@@ -32,6 +32,7 @@ export const safeFetchResultSchema = z.object({
   finalUrl: urlValueSchema,
   status: z.number().int().min(100).max(599),
   contentType: z.string().trim().min(1).max(255),
+  xRobotsTag: z.string().trim().min(1).max(2_048).nullable().optional(),
   body: z.instanceof(Uint8Array),
   redirectChain: z.array(urlValueSchema),
   resolvedIps: z.array(z.string().trim().min(1).max(64)),

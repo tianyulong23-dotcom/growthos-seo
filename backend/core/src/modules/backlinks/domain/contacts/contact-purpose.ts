@@ -1,11 +1,21 @@
-export const contactPurposeRuleVersion = "contact-purpose-rules.v1";
+export const contactPurposeRuleVersion = "contact-purpose-rules.v4";
 
 export const contactPurposes = [
   "press",
   "editorial",
   "partnerships",
   "advertising",
+  "business",
+  "marketing",
+  "site_owner",
   "support",
+  "privacy",
+  "legal",
+  "abuse",
+  "security",
+  "billing",
+  "jobs",
+  "no_reply",
   "general",
   "unknown",
 ] as const;
@@ -13,7 +23,12 @@ export const contactPurposes = [
 export type ContactPurpose = (typeof contactPurposes)[number];
 export type ContactPurposeEvidence = Readonly<{
   tier: "high" | "medium" | "low";
-  field: "email_local_part" | "mailto_label" | "nearby_text" | "page_title";
+  field:
+    | "email_local_part"
+    | "mailto_label"
+    | "nearby_text"
+    | "page_title"
+    | "page_url";
   value: string;
   matchedToken: string;
   ruleId: string;
@@ -27,10 +42,11 @@ export type ContactPurposeDecision = Readonly<{
 }>;
 export type ContactPurposeInput = Readonly<{
   email: string;
-  source: "mailto" | "visible_text";
+  source: "mailto" | "visible_text" | "obfuscated_text" | "json_ld";
   mailtoLabel?: string;
   nearbyText?: string;
   pageTitle?: string;
+  pageUrl?: string;
 }>;
 
 type Rule = Readonly<{
@@ -49,6 +65,24 @@ type Field = Readonly<{
 }>;
 
 const rules: readonly Rule[] = [
+  { id: "restricted.no-reply", purpose: "no_reply",
+    observedRole: "no reply", tokens: ["no", "reply"] },
+  { id: "restricted.noreply", purpose: "no_reply",
+    observedRole: "no reply", tokens: ["noreply"], highTrustOnly: true },
+  { id: "restricted.privacy", purpose: "privacy",
+    observedRole: "privacy", tokens: ["privacy"] },
+  { id: "restricted.legal", purpose: "legal",
+    observedRole: "legal", tokens: ["legal"] },
+  { id: "restricted.abuse", purpose: "abuse",
+    observedRole: "abuse", tokens: ["abuse"] },
+  { id: "restricted.security", purpose: "security",
+    observedRole: "security", tokens: ["security"] },
+  { id: "restricted.billing", purpose: "billing",
+    observedRole: "billing", tokens: ["billing"] },
+  { id: "restricted.jobs", purpose: "jobs",
+    observedRole: "jobs", tokens: ["jobs"] },
+  { id: "restricted.careers", purpose: "jobs",
+    observedRole: "careers", tokens: ["careers"] },
   { id: "press.public-relations", purpose: "press",
     observedRole: "public relations", tokens: ["public", "relations"] },
   { id: "press.media-relations", purpose: "press",
@@ -80,6 +114,18 @@ const rules: readonly Rule[] = [
     observedRole: "sponsorship", tokens: ["sponsorship"] },
   { id: "advertising.ads", purpose: "advertising",
     observedRole: "ads", tokens: ["ads"] },
+  { id: "business.sales", purpose: "business",
+    observedRole: "sales", tokens: ["sales"] },
+  { id: "business.business", purpose: "business",
+    observedRole: "business", tokens: ["business"] },
+  { id: "business.commercial", purpose: "business",
+    observedRole: "commercial", tokens: ["commercial"] },
+  { id: "marketing.marketing", purpose: "marketing",
+    observedRole: "marketing", tokens: ["marketing"] },
+  { id: "site-owner.owner", purpose: "site_owner",
+    observedRole: "site owner", tokens: ["owner"], highTrustOnly: true },
+  { id: "site-owner.webmaster", purpose: "site_owner",
+    observedRole: "webmaster", tokens: ["webmaster"] },
   { id: "support.customer-support", purpose: "support",
     observedRole: "customer support", tokens: ["customer", "support"] },
   { id: "support.support", purpose: "support",
@@ -92,6 +138,8 @@ const rules: readonly Rule[] = [
   { id: "general.hello", purpose: "general", observedRole: "hello", tokens: ["hello"] },
   { id: "general.office", purpose: "general", observedRole: "office", tokens: ["office"] },
   { id: "general.admin", purpose: "general", observedRole: "admin", tokens: ["admin"] },
+  { id: "general.manager", purpose: "general",
+    observedRole: "manager", tokens: ["manager"], highTrustOnly: true },
 ];
 
 function tokenize(value: string): readonly string[] {
@@ -135,6 +183,10 @@ export function classifyContactPurpose(
   if (input.pageTitle !== undefined && input.pageTitle.trim() !== "") {
     fields.push({ field: "page_title", tier: "low", confidence: 72,
       value: input.pageTitle, highTrust: false });
+  }
+  if (input.pageUrl !== undefined && input.pageUrl.trim() !== "") {
+    fields.push({ field: "page_url", tier: "low", confidence: 72,
+      value: input.pageUrl, highTrust: false });
   }
 
   const matches = fields.flatMap((field) => {

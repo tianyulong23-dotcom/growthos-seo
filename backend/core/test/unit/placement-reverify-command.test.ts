@@ -78,7 +78,7 @@ describe("BL-AI-158 Placement reverify command", () => {
           monitorRun: {
             monitorRunId,
             status: "scheduled",
-            scheduledFor: requestedAt.toISOString(),
+            scheduledFor: "2026-07-29T10:00:00.000+00:00",
           },
         },
       }],
@@ -115,7 +115,9 @@ describe("BL-AI-158 Placement reverify command", () => {
     expect(sql).toContain("backlink_outbox_events");
     expect(sql).toContain("'requestKind','reverify'");
     expect(sql).toContain("'executionMode','static'");
-    expect(sql).toContain("'browserFallbackAllowed',false");
+    expect(sql).toContain(
+      "'browserFallbackAllowed',target.\"browserFallbackAllowed\"",
+    );
     expect(values).toEqual([
       "organization-158",
       "workspace-158",

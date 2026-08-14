@@ -73,6 +73,14 @@ describe("findBreakingOpenApiChanges", () => {
     expect(findSensitiveOpenApiFields(sensitiveFieldFixture)).toContain(
       "$.schema.properties.providerPayload",
     );
+    expect(findSensitiveOpenApiFields({
+      schema: {
+        type: "object",
+        properties: {
+          provider: { type: "string" },
+        },
+      },
+    })).toEqual([]);
   });
 
   it("publishes the corrected Links contract without internal evidence fields", async () => {
@@ -86,6 +94,10 @@ describe("findBreakingOpenApiChanges", () => {
     expect(serialized).toContain('"latestMonitorRun"');
     expect(serialized).toContain('"freshness"');
     expect(serialized).toContain('"recovered"');
+    expect(serialized).toContain("backlinksGetMetricDashboardV1");
+    expect(serialized).toContain("backlinksListPublishedReportsV1");
+    expect(serialized).toContain("backlinksRequestReportExportV1");
+    expect(serialized).toContain("backlinksGetSettingsGovernanceV1");
     expect(findSensitiveOpenApiFields(contract)).toEqual([]);
     for (const forbidden of [
       "providerPayload",

@@ -36,7 +36,7 @@ export type PlacementInitialValidationWorkflowInput = Readonly<{
   placementLifecycleEventId: string;
   auditEventId: string;
   actorId: string;
-  recordedAt: Date;
+  recordedAt: Date | string;
 }>;
 
 type ValidationDecision = Readonly<{
@@ -51,7 +51,7 @@ type ValidationDecision = Readonly<{
     redirectChain: readonly string[];
     resolvedIps: readonly string[];
     fetchedAt: string;
-    xRobotsTag: null;
+    xRobotsTag: string | null;
   }> | null;
   failure: Readonly<{
     code: string;
@@ -72,6 +72,16 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
+function parseRecordedAt(value: Date | string): Date {
+  const recordedAt = value instanceof Date
+    ? new Date(value.getTime())
+    : new Date(value);
+  if (Number.isNaN(recordedAt.getTime())) {
+    throw new Error("Placement validation recordedAt is invalid.");
+  }
+  return recordedAt;
+}
+
 function fetchEvidence(page: SafeFetchResult): NonNullable<
   ValidationDecision["fetch"]
 > {
@@ -83,8 +93,25 @@ function fetchEvidence(page: SafeFetchResult): NonNullable<
     redirectChain: Object.freeze([...page.redirectChain]),
     resolvedIps: Object.freeze([...page.resolvedIps]),
     fetchedAt: page.fetchedAt,
-    xRobotsTag: null,
+    xRobotsTag: page.xRobotsTag ?? null,
   });
+}
+
+const decoder = new TextDecoder("utf-8", { fatal: false });
+
+function hasDynamicRenderingSignals(page: SafeFetchResult): boolean {
+  const html = decoder.decode(page.body);
+  const text = html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, " ")
+    .replace(/<[^>]+>/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return (
+    /(?:id=["'](?:__next|__nuxt|root|app)["']|data-reactroot|ng-version|data-v-app)/iu
+      .test(html)
+    || (text.length < 300 && /<script\b[^>]+src=/iu.test(html))
+  );
 }
 
 function decideHtml(
@@ -119,7 +146,10 @@ function decideHtml(
       page,
       targetUrl: candidate.normalizedTargetUrl,
     });
-    if (evidence.noindex) {
+    if (
+      evidence.noindex
+      || /\bnoindex\b/iu.test(page.xRobotsTag ?? "")
+    ) {
       return {
         status: "INVALID",
         reasonCode: "SOURCE_NOINDEX",
@@ -225,6 +255,7 @@ export async function runPlacementInitialValidationWorkflow(
   input: PlacementInitialValidationWorkflowInput,
   repository: PlacementInitialValidationRepository,
   safeFetch: SafeFetchPort,
+  browserFetch?: SafeFetchPort,
 ) {
   const state = await repository.getCandidate(input);
   if (state.state === "not_found") {
@@ -250,20 +281,39 @@ export async function runPlacementInitialValidationWorkflow(
     };
   }
 
+  const recordedAt = parseRecordedAt(input.recordedAt);
   let decision: ValidationDecision;
+  let fetchMode = "safe_fetch_static";
   try {
-    decision = decideHtml(state.candidate, await safeFetch.fetch({
+    const request = {
       url: state.candidate.sourcePageUrl,
-      purpose: "placement-check",
+      purpose: "placement-check" as const,
       workspaceId: input.workspaceId,
       websiteProjectId: input.websiteProjectId,
       maxBytes: 2_000_000,
       maxRedirects: 5,
-    }));
+    };
+    const staticPage = await safeFetch.fetch(request);
+    decision = decideHtml(state.candidate, staticPage);
+    if (
+      browserFetch !== undefined
+      && decision.reasonCode === "TARGET_LINK_MISSING"
+      && hasDynamicRenderingSignals(staticPage)
+    ) {
+      fetchMode = "shared_browser_worker";
+      try {
+        decision = decideHtml(
+          state.candidate,
+          await browserFetch.fetch(request),
+        );
+      } catch (error) {
+        decision = decideFailure(error, recordedAt);
+      }
+    }
   } catch (error) {
     decision = decideFailure(
       error,
-      input.recordedAt,
+      recordedAt,
     );
   }
 
@@ -271,7 +321,7 @@ export async function runPlacementInitialValidationWorkflow(
     contractVersion: placementInitialValidationEvidenceContractVersion,
     schemaVersion: placementInitialValidationEvidenceSchemaVersion,
     policyVersion: placementInitialValidationPolicyVersion,
-    fetchMode: "safe_fetch_static",
+    fetchMode,
     candidateId: state.candidate.candidateId,
     opportunityId: state.candidate.opportunityId,
     sourcePageUrl: state.candidate.sourcePageUrl,
@@ -285,9 +335,9 @@ export async function runPlacementInitialValidationWorkflow(
     }),
   });
   const canonicalEvidence = JSON.stringify(canonicalize(evidenceSnapshot));
-  const verifiedAt = decision.observedAt > input.recordedAt
+  const verifiedAt = decision.observedAt > recordedAt
     ? decision.observedAt
-    : input.recordedAt;
+    : recordedAt;
   const record = await repository.record({
     ...input,
     expectedCandidateVersion: state.candidate.version,
