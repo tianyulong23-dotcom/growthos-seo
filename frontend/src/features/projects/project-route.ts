@@ -7,5 +7,8 @@ export function projectRouteForSwitch(
   const suffix = pathname.startsWith(projectPrefix)
     ? pathname.slice(projectPrefix.length)
     : ""
+  if (suffix.startsWith("/backlinks/drafts/")) {
+    return `/projects/${nextProjectId}/backlinks/email`
+  }
   return `/projects/${nextProjectId}${suffix || "/audit/overview"}`
 }

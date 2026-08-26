@@ -23,7 +23,18 @@ import {
 export type GoogleAuthLibraryClientOptions = Readonly<{
   clientId: string;
   clientSecret: string;
+  providerConnectivityProbe?: () => Promise<void>;
 }>;
+
+const googleOAuthTokenEndpoint = "https://oauth2.googleapis.com/token";
+const googleOAuthProbeTimeoutMs = 5_000;
+
+const transportCode = (error: unknown): string | undefined => {
+  if (typeof error !== "object" || error === null) return undefined;
+  if ("code" in error && typeof error.code === "string") return error.code;
+  if ("cause" in error) return transportCode(error.cause);
+  return undefined;
+};
 
 const fail = (
   operation: GoogleAuthOperation,
@@ -57,7 +68,7 @@ const providerMetadata = (
   const status = response?.status;
   const requestId = headers?.["x-request-id"]
     ?? headers?.["x-guploader-uploadid"];
-  const errorCode = "code" in error ? error.code : undefined;
+  const errorCode = transportCode(error);
   return {
     ...(typeof status === "number" ? { httpStatus: status } : {}),
     ...(typeof requestId === "string" && requestId.length > 0
@@ -92,13 +103,6 @@ const transientTransportCodes = new Set([
   "ESOCKETTIMEDOUT",
   "ETIMEDOUT",
 ]);
-
-const transportCode = (error: unknown): string | undefined => {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return undefined;
-  }
-  return typeof error.code === "string" ? error.code : undefined;
-};
 
 const googleScopeAliases = new Map([
   ["https://www.googleapis.com/auth/userinfo.email", "email"],
@@ -165,6 +169,40 @@ const requireText = (
   return value;
 };
 
+const probeGoogleOAuthProvider = async (): Promise<void> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), googleOAuthProbeTimeoutMs);
+  try {
+    const response = await fetch(googleOAuthTokenEndpoint, {
+      method: "HEAD",
+      redirect: "manual",
+      signal: controller.signal,
+    });
+    if (response.status === 429 || response.status >= 500) {
+      throw Object.assign(
+        new Error(`Google OAuth probe returned HTTP ${response.status}.`),
+        {
+          response: {
+            status: response.status,
+            headers: Object.fromEntries(response.headers.entries()),
+            data: {},
+          },
+        },
+      );
+    }
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw Object.assign(
+        new Error("Google OAuth provider connectivity probe timed out."),
+        { code: "ETIMEDOUT" },
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 const tokenSet = async (
   client: OAuth2Client,
   credentials: Credentials,
@@ -197,6 +235,7 @@ const tokenSet = async (
 export class GoogleAuthLibraryClient implements GoogleAuthClient {
   readonly #clientId: string;
   readonly #clientSecret: string;
+  readonly #providerConnectivityProbe: () => Promise<void>;
 
   constructor(options: GoogleAuthLibraryClientOptions) {
     if (
@@ -207,12 +246,15 @@ export class GoogleAuthLibraryClient implements GoogleAuthClient {
     }
     this.#clientId = options.clientId;
     this.#clientSecret = options.clientSecret;
+    this.#providerConnectivityProbe =
+      options.providerConnectivityProbe ?? probeGoogleOAuthProvider;
   }
 
   async createAuthorizationUrl(
     input: GoogleAuthRequestInput,
   ): Promise<GoogleAuthRequestResult> {
     try {
+      await this.#providerConnectivityProbe();
       const client = this.client(input.redirectUri);
       return {
         authorizationUrl: client.generateAuthUrl({

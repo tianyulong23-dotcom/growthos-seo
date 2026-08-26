@@ -24,6 +24,7 @@ import type {
   GmailConnectionRevocationScope,
   PendingGmailConnectionRevocation,
 } from "../../application/workflows/gmail-connection-disconnect.workflow.js";
+import { gmailOAuthScopes } from "../../domain/sending/oauth-attempt.js";
 import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
 import {
   secretKinds,
@@ -532,12 +533,30 @@ export class PostgresqlGmailConnectionRepository
         websiteProjectId: context.project.websiteProjectId,
       },
       async (transaction) => {
-        const result = await transaction.query(
+        const loadMailboxRows = () => transaction.query(
           `SELECT ${selectView},
                   backlinks.backlink_count_selected_gmail_projects(
                     connection.organization_id,
                     connection.id
                   ) AS "affectedProjectCount",
+                  binding.id AS "workspaceBindingId",
+                  EXISTS (
+                    SELECT 1
+                      FROM backlinks.backlink_secret_references AS secret
+                     WHERE secret.organization_id = connection.organization_id
+                       AND secret.id = connection.token_secret_reference_id
+                       AND secret.secret_kind = connection.token_secret_kind
+                       AND secret.secret_kind = 'GMAIL_TOKEN_SET'
+                       AND secret.status = 'ACTIVE'
+                  ) AS "hasActiveSecret",
+                  EXISTS (
+                    SELECT 1
+                      FROM backlinks.backlink_gmail_send_identities AS identity
+                     WHERE identity.organization_id =
+                       connection.organization_id
+                       AND identity.gmail_connection_id = connection.id
+                       AND identity.verification_status = 'accepted'
+                  ) AS "hasVerifiedSendIdentity",
                   COALESCE(project_binding.is_selected, false) AS "isSelected"
              FROM backlinks.backlink_gmail_connections AS connection
              JOIN backlinks.backlink_gmail_workspace_bindings AS binding
@@ -561,10 +580,55 @@ export class PostgresqlGmailConnectionRepository
             context.project.websiteProjectId,
           ],
         );
-        const accounts = result.rows.map(viewFromRow);
-        const selectedIndex = result.rows.findIndex(
+        let rows = (await loadMailboxRows()).rows;
+        let accounts = rows.map(viewFromRow);
+        let selectedIndex = rows.findIndex(
           (row) => row.isSelected === true,
         );
+        const soleRow = rows.length === 1 ? rows[0] : undefined;
+        const soleConnection = accounts.length === 1 ? accounts[0] : undefined;
+        const canAutoSelect =
+          selectedIndex < 0
+          && soleRow !== undefined
+          && soleConnection !== undefined
+          && typeof soleRow.workspaceBindingId === "string"
+          && soleRow.hasActiveSecret === true
+          && soleRow.hasVerifiedSendIdentity === true
+          && soleConnection.connectionStatus === "CONNECTED"
+          && soleConnection.sendAvailability === "AVAILABLE"
+          && soleConnection.recentErrorCategory === null
+          && gmailOAuthScopes.every((scope) =>
+            soleConnection.grantedScopes.includes(scope));
+        if (canAutoSelect) {
+          await transaction.query(
+            `INSERT INTO backlinks.backlink_website_project_mailbox_bindings (
+               id, organization_id, workspace_id, website_project_id,
+               gmail_workspace_binding_id, binding_status, is_selected,
+               created_by, updated_by
+             ) VALUES ($1, $2, $3, $4, $5, 'ACTIVE', true, $6, $6)
+             ON CONFLICT (
+               organization_id, workspace_id, website_project_id,
+               gmail_workspace_binding_id
+             ) DO UPDATE SET
+               binding_status = 'ACTIVE',
+               is_selected = true,
+               version =
+                 backlink_website_project_mailbox_bindings.version + 1,
+               updated_at = now(),
+               updated_by = EXCLUDED.updated_by`,
+            [
+              this.#newId(),
+              context.tenant.organizationId,
+              context.tenant.workspaceId,
+              context.project.websiteProjectId,
+              soleRow.workspaceBindingId,
+              context.actor.userId,
+            ],
+          );
+          rows = (await loadMailboxRows()).rows;
+          accounts = rows.map(viewFromRow);
+          selectedIndex = rows.findIndex((row) => row.isSelected === true);
+        }
         if (selectedIndex >= 0) {
           await this.#ensureSelectedProjectGovernance(transaction, {
             organizationId: context.tenant.organizationId,

@@ -32,6 +32,7 @@ const providerUnavailableOAuthAttemptMessage =
 const failedOAuthAttempt = "failed"
 const failedOAuthAttemptMessage =
   "Gmail 连接未完成。请点击重新连接 Gmail；若问题持续，请提供页面中的请求编号。"
+const gmailConnectionStatusRefreshIntervalMs = 15_000
 
 function readOAuthCallbackError(): string | null {
   if (typeof window === "undefined") return null
@@ -142,29 +143,59 @@ export function useGmailConnection(
       "gmail-connection-status"
     )
 
-    void backlinksProjectQueries
-      .fetch(queryKey, (signal) =>
-        getGmailConnectionStatus(websiteProjectKey, signal)
-      )
-      .then(
-        (response) => {
-          if (cancelled) return
-          applyStatusResponse(websiteProjectKey, response)
-          setErrorMessage(callbackError)
-        },
-        () => {
-          if (cancelled) return
-          setConnection(null)
-          setAccounts([])
-          setReadiness(null)
-          setLoadedProjectKey(websiteProjectKey)
-          setErrorMessage("无法读取 Gmail 连接状态；界面不会推断为已连接。")
-          setStatus("error")
-        }
-      )
+    const fetchLatestStatus = (
+      messageAfterSuccess: string | null,
+      clearCurrentStateOnFailure: boolean
+    ) => {
+      backlinksProjectQueries.invalidate(queryKey)
+      return backlinksProjectQueries
+        .fetch(queryKey, (signal) =>
+          getGmailConnectionStatus(websiteProjectKey, signal)
+        )
+        .then(
+          (response) => {
+            if (cancelled) return
+            applyStatusResponse(websiteProjectKey, response)
+            setErrorMessage(messageAfterSuccess)
+          },
+          () => {
+            if (cancelled) return
+            if (clearCurrentStateOnFailure) {
+              setConnection(null)
+              setAccounts([])
+              setReadiness(null)
+              setLoadedProjectKey(websiteProjectKey)
+              setStatus("error")
+            }
+            setErrorMessage(
+              "无法读取 Gmail 连接状态；界面不会推断为已连接。"
+            )
+          }
+        )
+    }
+
+    void fetchLatestStatus(callbackError, true)
+
+    const refreshFromServer = () => {
+      void fetchLatestStatus(null, false)
+    }
+    const poller = window.setInterval(
+      refreshFromServer,
+      gmailConnectionStatusRefreshIntervalMs
+    )
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        refreshFromServer()
+      }
+    }
+    window.addEventListener("focus", refreshFromServer)
+    document.addEventListener("visibilitychange", refreshWhenVisible)
 
     return () => {
       cancelled = true
+      window.clearInterval(poller)
+      window.removeEventListener("focus", refreshFromServer)
+      document.removeEventListener("visibilitychange", refreshWhenVisible)
     }
   }, [applyStatusResponse, callbackError, enabled, websiteProjectKey])
 

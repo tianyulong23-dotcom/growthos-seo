@@ -186,6 +186,7 @@ export function MailSyncStatusPanel({
         <MailCenter
           websiteProjectKey={websiteProjectKey}
           connectionId={controller.connection?.connectionId ?? null}
+          gmailSyncReady={controller.readiness?.sync.ready === true}
         />
       ) : (
         <div className="rounded-xl border px-4 py-8 text-center" role="alert">

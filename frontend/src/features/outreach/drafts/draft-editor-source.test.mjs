@@ -59,6 +59,7 @@ test("draft editing UI presents generation truth without exposing raw diagnostic
   assert.match(page, /草稿语言需要校对/)
   assert.match(page, /发送邮件/)
   assert.doesNotMatch(page, /版本与生成详情|快照哈希|技术详情/)
+  assert.doesNotMatch(page, />邮件版本</)
   assert.doesNotMatch(page, /失败分类：/)
 })
 

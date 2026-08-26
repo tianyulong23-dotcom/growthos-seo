@@ -200,9 +200,11 @@ function businessContextPath(
 export function MailCenter({
   websiteProjectKey,
   connectionId,
+  gmailSyncReady,
 }: {
   websiteProjectKey: string
   connectionId: string | null
+  gmailSyncReady: boolean
 }) {
   const [filter, setFilter] = useState<MatchFilter>("ALL")
   const [items, setItems] = useState<MailListItem[]>([])
@@ -219,6 +221,8 @@ export function MailCenter({
   const [businessConsumersRunning, setBusinessConsumersRunning] = useState<
     boolean | null
   >(null)
+  const syncOperational =
+    businessConsumersRunning === true && gmailSyncReady
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
     null
   )
@@ -315,7 +319,12 @@ export function MailCenter({
   }
 
   const syncAndRefresh = async () => {
-    if (connectionId === null || syncing || businessConsumersRunning !== true) {
+    if (
+      connectionId === null ||
+      syncing ||
+      businessConsumersRunning !== true ||
+      !gmailSyncReady
+    ) {
       return
     }
     setSyncing(true)
@@ -703,20 +712,24 @@ export function MailCenter({
           <span className="flex min-w-0 items-center gap-2">
             <span
               className={
-                businessConsumersRunning === true
+                syncOperational
                   ? "size-2 shrink-0 rounded-full bg-emerald-500"
                   : "size-2 shrink-0 rounded-full bg-amber-500"
               }
             />
             <span className="font-medium">
-              {businessConsumersRunning === true
+              {syncOperational
                 ? "邮件同步可用"
-                : "邮件同步已暂停"}
+                : businessConsumersRunning === true
+                  ? "邮件同步不可用"
+                  : "邮件同步已暂停"}
             </span>
             <span className="text-muted-foreground">
-              {businessConsumersRunning === true
+              {syncOperational
                 ? "可通过邮件列表右上角刷新。"
-                : "已保存邮件仍可读取；立即同步暂不可用。"}
+                : businessConsumersRunning === true
+                  ? "Gmail 凭据需要重新连接；已保存邮件仍可读取。"
+                  : "已保存邮件仍可读取；立即同步暂不可用。"}
             </span>
           </span>
           <span className="flex shrink-0 items-center gap-1 text-muted-foreground">
@@ -834,15 +847,15 @@ export function MailCenter({
               aria-label="立即同步并刷新邮件"
               size="icon-xs"
               title={
-                businessConsumersRunning === true
+                syncOperational
                   ? "立即同步并刷新邮件"
-                  : "后台 Worker 未运行，立即同步暂不可用"
+                  : businessConsumersRunning === true
+                    ? "Gmail 凭据需要重新连接，立即同步暂不可用"
+                    : "后台 Worker 未运行，立即同步暂不可用"
               }
               variant="ghost"
               disabled={
-                connectionId === null ||
-                syncing ||
-                businessConsumersRunning !== true
+                connectionId === null || syncing || !syncOperational
               }
               onClick={() => void syncAndRefresh()}
             >

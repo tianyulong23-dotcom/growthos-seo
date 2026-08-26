@@ -690,6 +690,177 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
     ).toBe(2);
   });
 
+  it("automatically binds the only healthy workspace Gmail account to a new project", async () => {
+    let nextId = 2_100;
+    const repository = new PostgresqlGmailConnectionRepository({
+      pool,
+      newId: () => id(nextId++),
+      projectGovernance: {
+        gmailSendEnabled: true,
+        gmailSyncEnabled: true,
+      },
+    });
+    const testOrganizationId = id(2_000);
+    const testWorkspaceId = id(2_001);
+    const connectedProjectId = id(2_002);
+    const newProjectId = id(2_003);
+    const healthyConnectionId = id(2_004);
+
+    await repository.saveAuthorizedConnectionWithBindings({
+      connectionId: healthyConnectionId,
+      organizationId: testOrganizationId,
+      workspaceId: testWorkspaceId,
+      websiteProjectId: connectedProjectId,
+      connectedByUserId: "user-auto-bind",
+      googleSubject: "google-subject-auto-bind",
+      primaryEmail: "auto-bind@example.test",
+      displayName: "Auto Bind",
+      hostedDomain: "example.test",
+      grantedScopes: gmailOAuthScopes,
+      tokenSecretReference: {
+        provider: "integration-secret-store",
+        secretKind: secretKinds.gmailTokenSet,
+        externalSecretId: healthyConnectionId,
+        externalSecretVersion: "1",
+      },
+      tokenExpiresAt: "2026-08-26T18:00:00.000Z",
+    });
+
+    const newProjectContext = {
+      actor: createActorContext({
+        userId: "user-auto-bind",
+        sessionId: "session-auto-bind",
+        roles: ["member"],
+      }),
+      tenant: createTenantContext({
+        organizationId: testOrganizationId,
+        workspaceId: testWorkspaceId,
+      }),
+      project: createProjectContext({
+        websiteProjectId: newProjectId,
+        canonicalDomain: "new-project.example.test",
+        locale: "en-US",
+        countryCode: "US",
+        profileVersionId: id(2_005),
+        promotionTargetVersionId: id(2_006),
+      }),
+    };
+
+    await expect(
+      repository.findProjectMailboxState(newProjectContext),
+    ).resolves.toMatchObject({
+      accounts: [{
+        connectionId: healthyConnectionId,
+        affectedProjectCount: 2,
+      }],
+      selectedConnection: {
+        connectionId: healthyConnectionId,
+        connectionStatus: "CONNECTED",
+        sendAvailability: "AVAILABLE",
+        affectedProjectCount: 2,
+      },
+    });
+    await expect(
+      repository.findProjectReadinessInfrastructure(
+        newProjectContext,
+        healthyConnectionId,
+      ),
+    ).resolves.toMatchObject({
+      connectionId: healthyConnectionId,
+      projectBindingActive: true,
+      verifiedSendIdentity: true,
+    });
+
+    expect(
+      (
+        await client.query(
+          `SELECT count(*)::integer AS count
+             FROM backlinks.backlink_website_project_mailbox_bindings
+            WHERE organization_id = $1
+              AND workspace_id = $2
+              AND website_project_id = $3
+              AND binding_status = 'ACTIVE'
+              AND is_selected = true`,
+          [testOrganizationId, testWorkspaceId, newProjectId],
+        )
+      ).rows,
+    ).toEqual([{ count: 1 }]);
+  });
+
+  it("does not guess a Gmail account when a workspace has multiple choices", async () => {
+    let nextId = 2_300;
+    const repository = new PostgresqlGmailConnectionRepository({
+      pool,
+      newId: () => id(nextId++),
+    });
+    const testOrganizationId = id(2_200);
+    const testWorkspaceId = id(2_201);
+    const firstProjectId = id(2_202);
+    const secondProjectId = id(2_203);
+    const unboundProjectId = id(2_204);
+    const firstConnectionId = id(2_205);
+    const secondConnectionId = id(2_206);
+    const saveConnection = (
+      projectId: string,
+      connectionId: string,
+      subject: string,
+      email: string,
+    ) => repository.saveAuthorizedConnectionWithBindings({
+      connectionId,
+      organizationId: testOrganizationId,
+      workspaceId: testWorkspaceId,
+      websiteProjectId: projectId,
+      connectedByUserId: "user-multiple-accounts",
+      googleSubject: subject,
+      primaryEmail: email,
+      displayName: email,
+      hostedDomain: "example.test",
+      grantedScopes: gmailOAuthScopes,
+      tokenSecretReference: {
+        provider: "integration-secret-store",
+        secretKind: secretKinds.gmailTokenSet,
+        externalSecretId: connectionId,
+        externalSecretVersion: "1",
+      },
+      tokenExpiresAt: "2026-08-26T18:00:00.000Z",
+    });
+    await saveConnection(
+      firstProjectId,
+      firstConnectionId,
+      "google-subject-multiple-a",
+      "multiple-a@example.test",
+    );
+    await saveConnection(
+      secondProjectId,
+      secondConnectionId,
+      "google-subject-multiple-b",
+      "multiple-b@example.test",
+    );
+
+    const state = await repository.findProjectMailboxState({
+      actor: createActorContext({
+        userId: "user-multiple-accounts",
+        sessionId: "session-multiple-accounts",
+        roles: ["member"],
+      }),
+      tenant: createTenantContext({
+        organizationId: testOrganizationId,
+        workspaceId: testWorkspaceId,
+      }),
+      project: createProjectContext({
+        websiteProjectId: unboundProjectId,
+        canonicalDomain: "unbound.example.test",
+        locale: "en-US",
+        countryCode: "US",
+        profileVersionId: id(2_207),
+        promotionTargetVersionId: id(2_208),
+      }),
+    });
+
+    expect(state.accounts).toHaveLength(2);
+    expect(state.selectedConnection).toBeNull();
+  });
+
   it("repairs missing enabled Gmail governance without reopening an explicit pause", async () => {
     let nextId = 1_600;
     const legacyProjectId = id(160);

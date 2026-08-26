@@ -362,6 +362,50 @@ describe("Send Intent query", () => {
     });
   });
 
+  it("allows a new preflight after token refresh failed before provider submission", async () => {
+    const queryClient = vi.fn(async () => ({
+      rows: [{
+        ...immutableEnvelopeRow,
+        sendIntentId: "018f0000-0000-7000-8000-000000000119",
+        draftId: "018f0000-0000-7000-8000-000000000319",
+        status: "FAILED_FINAL",
+        version: 5,
+        requestedSendAt: new Date("2026-08-18T01:00:00.000Z"),
+        updatedAt: new Date("2026-08-18T01:05:00.000Z"),
+        attemptId: "018f0000-0000-7000-8000-000000000719",
+        attemptNo: 3,
+        attemptStatus: "FAILED_FINAL",
+        rfcMessageId: "<send-119@example.com>",
+        providerMessageId: null,
+        providerThreadId: null,
+        errorCode: "GMAIL_SEND_TOKEN_REFRESH_FAILED",
+        startedAt: new Date("2026-08-18T01:00:01.000Z"),
+        completedAt: new Date("2026-08-18T01:05:00.000Z"),
+        retryEligibleAt: null,
+      }],
+    }));
+    const query = createSendIntentQuery(
+      { query: queryClient },
+      {
+        buildIdentity: "build-token-refresh-recovery",
+        workerMode: async () => "normal",
+      },
+    );
+
+    const result = await query.getSendIntent(
+      context,
+      "018f0000-0000-7000-8000-000000000119",
+    );
+
+    expect(result.diagnostics).toMatchObject({
+      operationCheckpoint: "FAILED_FINAL",
+      retryable: false,
+      resubmittable: true,
+      costUncertainty: "NONE",
+      primaryNextAction: "RECHECK_BEFORE_RESUBMIT",
+    });
+  });
+
   it("can restore the latest persisted Send Intent for one draft", async () => {
     const queryClient = vi.fn(async () => ({ rows: [] }));
     const query = createSendIntentQuery({ query: queryClient });

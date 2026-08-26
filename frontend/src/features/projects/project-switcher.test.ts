@@ -18,4 +18,14 @@ describe("projectRouteForSwitch", () => {
       projectRouteForSwitch("/projects/project-1", "project-1", "project-2")
     ).toBe("/projects/project-2/audit/overview")
   })
+
+  it("does not carry a project-scoped draft into another project", () => {
+    expect(
+      projectRouteForSwitch(
+        "/projects/project-1/backlinks/drafts/draft-1",
+        "project-1",
+        "project-2"
+      )
+    ).toBe("/projects/project-2/backlinks/email")
+  })
 })

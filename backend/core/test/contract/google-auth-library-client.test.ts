@@ -18,6 +18,7 @@ describe("Google Auth official client", () => {
     const client = new GoogleAuthLibraryClient({
       clientId: "canary.apps.googleusercontent.com",
       clientSecret: "not-a-real-secret",
+      providerConnectivityProbe: async () => {},
     });
     const result = await client.createAuthorizationUrl({
       redirectUri,
@@ -38,6 +39,29 @@ describe("Google Auth official client", () => {
     expect(url.searchParams.get("scope")?.split(" ")).toEqual(
       gmailOAuthScopes,
     );
+  });
+
+  it("fails before redirecting the user when the Google token endpoint is unreachable", async () => {
+    const client = new GoogleAuthLibraryClient({
+      clientId: "canary.apps.googleusercontent.com",
+      clientSecret: "not-a-real-secret",
+      providerConnectivityProbe: async () => {
+        throw Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
+      },
+    });
+
+    await expect(client.createAuthorizationUrl({
+      redirectUri,
+      state: "state-value",
+      codeChallenge: "pkce-challenge",
+      codeChallengeMethod: "S256",
+      requestedScopes: gmailOAuthScopes,
+    })).rejects.toMatchObject({
+      operation: "authorize",
+      code: googleAuthFailureCodes.temporaryFailure,
+      retryable: true,
+      transportCode: "ECONNRESET",
+    });
   });
 
   it("rejects missing client credentials before any network operation", () => {

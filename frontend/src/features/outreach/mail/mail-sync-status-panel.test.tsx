@@ -5,6 +5,14 @@ import type { GmailConnectionController } from "@/features/outreach/gmail/use-gm
 
 import { MailSyncStatusPanel } from "./mail-sync-status-panel"
 
+const mailCenterProps = vi.hoisted(() => ({
+  current: null as null | {
+    websiteProjectKey: string
+    connectionId: string | null
+    gmailSyncReady: boolean
+  },
+}))
+
 vi.mock("@/features/outreach/gmail/gmail-account-selector", () => ({
   GmailAccountSelector: () => <div>account selector</div>,
 }))
@@ -14,7 +22,14 @@ vi.mock("@/features/outreach/gmail/gmail-readiness", () => ({
 }))
 
 vi.mock("./mail-center", () => ({
-  MailCenter: () => <div>mail center</div>,
+  MailCenter: (props: {
+    websiteProjectKey: string
+    connectionId: string | null
+    gmailSyncReady: boolean
+  }) => {
+    mailCenterProps.current = props
+    return <div>mail center</div>
+  },
 }))
 
 describe("MailSyncStatusPanel OAuth recovery", () => {
@@ -55,5 +70,44 @@ describe("MailSyncStatusPanel OAuth recovery", () => {
         name: "重新连接 Gmail",
       }).disabled
     ).toBe(false)
+  })
+
+  it("passes blocked Gmail sync readiness to the mail center", () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/projects/project-a/backlinks/email"
+    )
+    const controller = {
+      status: "ready",
+      connection: {
+        connectionId: "gmail-account",
+        version: 1,
+        primaryEmail: "sender@example.test",
+      },
+      accounts: [],
+      readiness: {
+        connection: { state: "NOT_CONNECTED", ready: false },
+        send: { state: "BLOCKED", ready: false },
+        sync: { state: "BLOCKED", ready: false },
+        blockers: [],
+        primaryBlocker: null,
+      },
+      errorMessage: null,
+      busyAction: null,
+      lastDisconnect: null,
+      refresh: vi.fn(),
+      connect: vi.fn(),
+      select: vi.fn(),
+      disconnect: vi.fn(),
+    } as unknown as GmailConnectionController
+
+    render(<MailSyncStatusPanel controller={controller} />)
+
+    expect(mailCenterProps.current).toEqual({
+      websiteProjectKey: "project-a",
+      connectionId: "gmail-account",
+      gmailSyncReady: false,
+    })
   })
 })

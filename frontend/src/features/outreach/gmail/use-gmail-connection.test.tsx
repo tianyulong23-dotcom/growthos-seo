@@ -64,6 +64,7 @@ const statusResponse = (
 afterEach(() => {
   backlinksProjectQueries.invalidate(["backlinks"])
   vi.clearAllMocks()
+  vi.useRealTimers()
   window.history.replaceState({}, "", "/")
 })
 
@@ -120,6 +121,42 @@ describe("useGmailConnection project ownership", () => {
 })
 
 describe("useGmailConnection OAuth start recovery", () => {
+  it("refreshes a stale unavailable state after the backend restores the connection", async () => {
+    vi.useFakeTimers()
+    const unavailable = statusResponse("project-a-id", "gmail-a")
+    unavailable.connection = {
+      ...unavailable.connection!,
+      connectionStatus: "REAUTH_REQUIRED",
+      sendAvailability: "PAUSED",
+      recentErrorCategory: "GOOGLE_AUTH_TEMPORARY_FAILURE",
+    }
+    unavailable.readiness = {
+      ...unavailable.readiness,
+      connection: { state: "NOT_CONNECTED", ready: false },
+      send: { state: "BLOCKED", ready: false },
+      sync: { state: "BLOCKED", ready: false },
+    }
+    getGmailConnectionStatus
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValue(statusResponse("project-a-id", "gmail-a"))
+
+    const { result } = renderHook(() => useGmailConnection("project-a", true))
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(result.current.readiness?.connection.ready).toBe(false)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000)
+    })
+
+    expect(getGmailConnectionStatus).toHaveBeenCalledTimes(2)
+    expect(result.current.readiness?.connection.ready).toBe(true)
+    expect(result.current.connection?.connectionStatus).toBe("CONNECTED")
+  })
+
   it("restores an actionable message after a temporary Google callback failure", async () => {
     window.history.replaceState(
       {},

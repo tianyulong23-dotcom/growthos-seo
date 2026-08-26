@@ -5,6 +5,7 @@ const safelyReplaceableFailureCodes = new Set([
   "GMAIL_SEND_FORBIDDEN",
   "GMAIL_SEND_RATE_LIMITED",
   "GMAIL_SEND_PRE_REQUEST_FAILED",
+  "GMAIL_SEND_TOKEN_REFRESH_FAILED",
 ]);
 
 export type FailedSendIntentReplacementEvidence = Readonly<{

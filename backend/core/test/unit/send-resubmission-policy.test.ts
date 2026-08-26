@@ -17,6 +17,14 @@ describe("Send resubmission policy", () => {
     expect(canReplaceFailedSendIntent(verifiedNotSent)).toBe(true);
   });
 
+  it("allows a fresh Intent after token refresh failed before provider submission", () => {
+    expect(canReplaceFailedSendIntent({
+      ...verifiedNotSent,
+      attemptStatus: "FAILED_FINAL",
+      errorCode: "GMAIL_SEND_TOKEN_REFRESH_FAILED",
+    })).toBe(true);
+  });
+
   it.each([
     ["unknown provider result", {
       ...verifiedNotSent,

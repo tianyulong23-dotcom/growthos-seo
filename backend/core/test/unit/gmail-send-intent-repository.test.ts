@@ -503,6 +503,40 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     expect(fake.queries.at(-1)).toBe("COMMIT");
   });
 
+  it("creates a fresh Intent after token refresh failed before provider submission", async () => {
+    const fake = createFakePool({
+      existingIntent: {
+        ...persistedIntent,
+        sendIntentId: "018f0000-0000-7000-8000-000000000920",
+        sendSnapshotId: "018f0000-0000-7000-8000-000000000921",
+        clientIdempotencyKey: "previous-token-refresh-request",
+        logicalMessageKey: input.logicalMessageKey,
+        messagePurpose: input.messagePurpose,
+        followUpIndex: input.followUpIndex,
+        intentStatus: "FAILED_FINAL",
+        attemptStatus: "FAILED_FINAL",
+        errorCode: "GMAIL_SEND_TOKEN_REFRESH_FAILED",
+        providerMessageId: null,
+        providerThreadId: null,
+      },
+    });
+    const repository = new PostgresqlSendIntentRepository({
+      pool: fake.pool,
+    });
+
+    await expect(repository.create(input)).resolves.toEqual({
+      state: "created",
+      intent: {
+        ...persistedIntent,
+        requestedSendAt: input.requestedSendAt.toISOString(),
+      },
+    });
+    expect(fake.queries.some((sql) =>
+      sql.startsWith("INSERT INTO backlinks.backlink_send_intents"),
+    )).toBe(true);
+    expect(fake.queries.at(-1)).toBe("COMMIT");
+  });
+
   it("does not create an Intent after the rolling quota is exhausted", async () => {
     const fake = createFakePool({ usedSlots: 5 });
     const repository = new PostgresqlSendIntentRepository({

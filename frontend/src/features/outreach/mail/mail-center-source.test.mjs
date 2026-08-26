@@ -182,6 +182,23 @@ test("Mail Center always exposes Gmail reconnection after token refresh failure"
   assert.match(panel, /onClick=\{\(\) => void controller\.connect\(\)\}/)
 })
 
+test("Mail Center does not report sync available while Gmail readiness is blocked", () => {
+  const center = read("./mail-center.tsx")
+  const panel = read("./mail-sync-status-panel.tsx")
+
+  assert.match(
+    panel,
+    /gmailSyncReady=\{controller\.readiness\?\.sync\.ready === true\}/
+  )
+  assert.match(center, /gmailSyncReady: boolean/)
+  assert.match(
+    center,
+    /businessConsumersRunning === true && gmailSyncReady/
+  )
+  assert.match(center, /Gmail 凭据需要重新连接；已保存邮件仍可读取/)
+  assert.match(center, /!gmailSyncReady/)
+})
+
 test("Phase 10 keeps negotiation facts versioned, review-gated, and project attributed", () => {
   const api = read("./api.ts")
   const center = read("./mail-center.tsx")

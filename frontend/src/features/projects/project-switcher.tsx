@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -39,29 +40,31 @@ export function ProjectSwitcher() {
         <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-72" align="start">
-        <DropdownMenuLabel>当前项目</DropdownMenuLabel>
-        {projects.map((item) => (
-          <DropdownMenuItem
-            key={item.id}
-            disabled={item.id === project.id}
-            onClick={() =>
-              navigate(
-                projectRouteForSwitch(location.pathname, project.id, item.id)
-              )
-            }
-          >
-            <ProjectFavicon project={item} className="size-7" />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate">{item.name}</span>
-              <span className="block truncate text-xs font-normal text-muted-foreground">
-                {item.domain}
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>当前项目</DropdownMenuLabel>
+          {projects.map((item) => (
+            <DropdownMenuItem
+              key={item.id}
+              disabled={item.id === project.id}
+              onClick={() =>
+                navigate(
+                  projectRouteForSwitch(location.pathname, project.id, item.id)
+                )
+              }
+            >
+              <ProjectFavicon project={item} className="size-7" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">{item.name}</span>
+                <span className="block truncate text-xs font-normal text-muted-foreground">
+                  {item.domain}
+                </span>
               </span>
-            </span>
-            {item.id === project.id && (
-              <Check className="size-4 text-primary" />
-            )}
-          </DropdownMenuItem>
-        ))}
+              {item.id === project.id && (
+                <Check className="size-4 text-primary" />
+              )}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={() => navigate("/projects")}>
           <LayoutGrid />
