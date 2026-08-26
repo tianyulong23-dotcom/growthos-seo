@@ -26,6 +26,8 @@ export const gmailSendFailureCodes = {
   reauthRequired: "GMAIL_SEND_REAUTH_REQUIRED",
   forbidden: "GMAIL_SEND_FORBIDDEN",
   rateLimited: "GMAIL_SEND_RATE_LIMITED",
+  tokenRefreshFailed: "GMAIL_SEND_TOKEN_REFRESH_FAILED",
+  providerNetwork: "GMAIL_SEND_PROVIDER_NETWORK",
   preRequestFailed: "GMAIL_SEND_PRE_REQUEST_FAILED",
   provider5xx: "GMAIL_SEND_PROVIDER_5XX",
   timeout: "GMAIL_SEND_TIMEOUT",
@@ -71,6 +73,16 @@ export const gmailSendDefinitelyNotSentResultSchema = z.discriminatedUnion(
     z.object({
       kind: z.literal("definitely_not_sent"),
       code: z.literal(gmailSendFailureCodes.preRequestFailed),
+      retryable: z.literal(true),
+    }).strict(),
+    z.object({
+      kind: z.literal("definitely_not_sent"),
+      code: z.literal(gmailSendFailureCodes.tokenRefreshFailed),
+      retryable: z.literal(true),
+    }).strict(),
+    z.object({
+      kind: z.literal("definitely_not_sent"),
+      code: z.literal(gmailSendFailureCodes.providerNetwork),
       retryable: z.literal(true),
     }).strict(),
   ],

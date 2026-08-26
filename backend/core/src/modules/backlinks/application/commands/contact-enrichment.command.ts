@@ -10,8 +10,12 @@ import {
 } from "../../domain/errors/backlink-error.js";
 import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
 import { buildBacklinksWorkflowId } from "../../workflows/namespaces.js";
+import { createRecommendationsQuery } from "../queries/recommendations.query.js";
 import { reassessStoredContactEvidence } from "../services/contact-evidence-reassessment.service.js";
-import { synchronizeRecommendationPublication } from "../services/recommendation-publication.service.js";
+import {
+  reconcilePublishedOpportunityContacts,
+  synchronizeRecommendationContactState,
+} from "../services/recommendation-contact-synchronization.service.js";
 
 export const contactEnrichmentRequestedEventType =
   "backlinks.contact-enrichment.requested.v1";
@@ -78,7 +82,7 @@ type Scope = Readonly<{
   websiteProjectId: string;
 }>;
 
-type JobOptions = Readonly<{
+export type ContactEnrichmentJobOptions = Readonly<{
   maxPages: number;
   maxDepth: number;
   maxAttempts: number;
@@ -220,11 +224,11 @@ export async function ensureReadyContactEnrichmentJobs(
     scope: Scope;
     actorId: string;
     limit: number;
-    options: JobOptions;
+    options: ContactEnrichmentJobOptions;
   }>,
 ): Promise<number> {
   const exhaustedRecovery = await client.query(
-    `UPDATE backlink_contact_enrichment_jobs
+    `UPDATE backlink_contact_enrichment_jobs AS job
         SET status='partially_completed',retry_after=NULL,finished_at=now(),
             completed_at=now(),terminal_reason_code='COMPLETED_PARTIAL',
             method=CASE
@@ -233,13 +237,39 @@ export async function ensureReadyContactEnrichmentJobs(
               WHEN pages_visited>0 THEN 'static'
               ELSE 'none'
             END,
-            last_error_category='STALE_RUNNING_JOB',
-            last_error_code=COALESCE(last_error_code,'STALE_RUNNING_JOB'),
+            last_error_category='MAX_ATTEMPTS_EXHAUSTED',
+            last_error_code=COALESCE(
+              last_error_code,'MAX_ATTEMPTS_EXHAUSTED'
+            ),
             updated_at=now(),updated_by=$4,version=version+1
       WHERE organization_id=$1 AND workspace_id=$2
-        AND website_project_id=$3 AND status='running'
-        AND updated_at<now()-interval '10 minutes'
+        AND website_project_id=$3
         AND attempt_count>=max_attempts
+        AND (
+          (
+            status='running'
+            AND updated_at<now()-interval '10 minutes'
+          )
+          OR (
+            status='retry_scheduled'
+            AND (retry_after IS NULL OR retry_after<=now())
+          )
+          OR (
+            status='pending'
+            AND updated_at<now()-interval '10 minutes'
+            AND EXISTS (
+              SELECT 1
+                FROM backlink_outbox_events AS event
+               WHERE event.organization_id=job.organization_id
+                 AND event.workspace_id=job.workspace_id
+                 AND event.website_project_id=job.website_project_id
+                 AND event.event_type=$5
+                 AND event.aggregate_id=job.id
+                 AND event.aggregate_version=job.version
+                 AND event.status='published'
+            )
+          )
+        )
       RETURNING prospect_id "prospectId",
                 recommendation_context_version_id
                   "recommendationContextVersionId"`,
@@ -248,10 +278,11 @@ export async function ensureReadyContactEnrichmentJobs(
       input.scope.workspaceId,
       input.scope.websiteProjectId,
       input.actorId,
+      contactEnrichmentRequestedEventType,
     ],
   );
   for (const row of exhaustedRecovery.rows) {
-    await synchronizeRecommendationPublication(client, {
+    await synchronizeRecommendationContactState(client, {
       ...input.scope,
       prospectId: String(row.prospectId),
       recommendationContextVersionId: String(
@@ -423,7 +454,7 @@ export async function ensureReadyContactEnrichmentJobs(
           r.id,r.recommendation_context_version_id)
       WHERE (i.organization_id,i.workspace_id,i.website_project_id)=
             ($1,$2,$3)
-        AND i.status IN ('ready','shown')
+        AND i.status IN ('ready','shown','accepted')
         AND r.recommendation_context_version_id = (
           SELECT snapshot.id
             FROM backlink_project_context_snapshots AS snapshot
@@ -515,13 +546,50 @@ export type HistoricalContactEnrichmentQueueSummary = Readonly<{
   outboxEventsCreated: number;
 }>;
 
+export type CurrentPoolContactEnrichmentSummary =
+  HistoricalContactEnrichmentQueueSummary &
+    Readonly<{
+      batchId: string | null;
+      poolRecommendationCount: number;
+    }>;
+
+async function listCurrentPoolRecommendationIds(
+  client: ContactEnrichmentCommandClient,
+  context: ResolvedProjectContext,
+): Promise<readonly string[]> {
+  const query = createRecommendationsQuery(client);
+  const recommendationIds: string[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  do {
+    const page = await query.listRecommendations(context, {
+      limit: 100,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    if (page.presentationState !== "current") return Object.freeze([]);
+    recommendationIds.push(...page.items.map((item) => item.id));
+    if (!page.hasMore) break;
+    if (page.nextCursor === null || seenCursors.has(page.nextCursor)) {
+      throw new BacklinkError({
+        code: backlinkErrorCodes.internal,
+        message: "Recommendation pool pagination did not advance.",
+      });
+    }
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+
+  return Object.freeze([...new Set(recommendationIds)]);
+}
+
 export async function queueHistoricalContactEnrichmentJobs(
   client: ContactEnrichmentCommandClient,
   input: Readonly<{
     scope: Scope;
     actorId: string;
     recommendationIds: readonly string[];
-    options: JobOptions;
+    options: ContactEnrichmentJobOptions;
   }>,
 ): Promise<HistoricalContactEnrichmentQueueSummary> {
   const recommendationIds = [...new Set(input.recommendationIds)];
@@ -581,8 +649,12 @@ export async function queueHistoricalContactEnrichmentJobs(
         AND recommendation.id=ANY($4::uuid[])
         AND inventory.fit_decision='eligible'
         AND inventory.fit_score_model_version=
-              'recommendation-commercial-fit.v3'
-        AND inventory.publication_status<>'PUBLISHED'
+              'recommendation-commercial-fit.v4'
+        AND (
+          inventory.contact_decision IS DISTINCT FROM 'eligible'
+          OR inventory.contact_reason_code IS DISTINCT FROM 'PUBLIC_EMAIL_FOUND'
+          OR inventory.verified_public_email_count<1
+        )
       ORDER BY recommendation.recommendation_context_version_id,
                recommendation.id`,
     [
@@ -694,8 +766,7 @@ export async function queueHistoricalContactEnrichmentJobs(
         WHERE (organization_id,workspace_id,website_project_id,id)=
               ($1,$2,$3,$6)
           AND status IN (
-            'completed','partially_completed','no_contact_found',
-            'retry_scheduled'
+            'completed','partially_completed','no_contact_found'
           )
           AND attempt_count<10
         RETURNING batch_id "batchId"`,
@@ -745,8 +816,17 @@ export async function queueHistoricalContactEnrichmentJobs(
 
 export function createContactEnrichmentCommands(
   client: ContactEnrichmentCommandClient,
-  options: JobOptions,
+  options: ContactEnrichmentJobOptions,
+  dependencies: Readonly<{
+    listCurrentPoolRecommendationIds?: (
+      context: ResolvedProjectContext,
+    ) => Promise<readonly string[]>;
+  }> = {},
 ) {
+  const resolveCurrentPoolRecommendationIds =
+    dependencies.listCurrentPoolRecommendationIds ??
+    ((context: ResolvedProjectContext) =>
+      listCurrentPoolRecommendationIds(client, context));
   const get = async (
     context: ResolvedProjectContext,
     jobId: string,
@@ -772,6 +852,71 @@ export function createContactEnrichmentCommands(
     return mapJob(result.rows[0]);
   };
   return {
+    async runCurrentPool(
+      context: ResolvedProjectContext,
+    ): Promise<CurrentPoolContactEnrichmentSummary> {
+      authorize(context);
+      const { tenant, project, actor } = context;
+      const scope = {
+        organizationId: tenant.organizationId,
+        workspaceId: tenant.workspaceId,
+        websiteProjectId: project.websiteProjectId,
+      };
+      await reconcilePublishedOpportunityContacts(client, {
+        ...scope,
+        actorId: actor.userId,
+      });
+      const recommendationIds =
+        await resolveCurrentPoolRecommendationIds(context);
+      const summary = await queueHistoricalContactEnrichmentJobs(client, {
+        scope,
+        actorId: actor.userId,
+        recommendationIds,
+        options,
+      });
+      const hasActiveBatch =
+        summary.jobsCreated +
+          summary.jobsRetried +
+          summary.activeJobsPreserved >
+        0;
+      const batch = hasActiveBatch
+        ? await client.query(
+            `SELECT batch.id
+               FROM backlink_contact_enrichment_batches AS batch
+              WHERE (
+                batch.organization_id,batch.workspace_id,
+                batch.website_project_id
+              )=($1,$2,$3)
+                AND batch.recommendation_context_version_id=(
+                  SELECT snapshot.id
+                    FROM backlink_project_context_snapshots AS snapshot
+                   WHERE (
+                     snapshot.organization_id,snapshot.workspace_id,
+                     snapshot.website_project_id
+                   )=($1,$2,$3)
+                     AND snapshot.project_status='ACTIVE'
+                   ORDER BY snapshot.snapshot_version DESC,
+                            snapshot.created_at DESC,snapshot.id DESC
+                   LIMIT 1
+                )
+                AND batch.status='running'
+              ORDER BY batch.started_at DESC,batch.id DESC
+              LIMIT 1`,
+            [
+              scope.organizationId,
+              scope.workspaceId,
+              scope.websiteProjectId,
+            ],
+          )
+        : { rows: [] };
+      return Object.freeze({
+        batchId:
+          batch.rows[0]?.id === undefined ? null : String(batch.rows[0].id),
+        poolRecommendationCount: recommendationIds.length,
+        ...summary,
+      });
+    },
+
     async start(
       input: Readonly<{
         context: ResolvedProjectContext;
@@ -818,10 +963,15 @@ export function createContactEnrichmentCommands(
           message: "Recommendation was not found in this project.",
         });
       }
-      if (!["ready", "shown"].includes(String(source.inventoryStatus))) {
+      if (
+        !["ready", "shown", "accepted"].includes(
+          String(source.inventoryStatus),
+        )
+      ) {
         throw new BacklinkError({
           code: backlinkErrorCodes.conflict,
-          message: "Only Ready recommendations can start contact enrichment.",
+          message:
+            "Only visible or accepted recommendations can start contact enrichment.",
         });
       }
       const jobId = randomUUID();
@@ -998,8 +1148,27 @@ export function createContactEnrichmentCommands(
                    policy.website_project_id)=($1,$2,$3)
               AND policy.project_context_version_id=(
                 SELECT id FROM current_context
-              )
+             )
             FOR UPDATE
+         ),
+         generation_contract AS (
+           SELECT contract.id
+             FROM backlink_recommendation_generation_contracts AS contract
+             JOIN current_policy AS policy ON
+               contract.visible_pool_generation=
+                 policy.visible_pool_generation
+            WHERE (
+              contract.organization_id,contract.workspace_id,
+              contract.website_project_id,
+              contract.recommendation_context_version_id
+            )=(
+              $1,$2,$3,(SELECT id FROM current_context)
+            )
+              AND contract.qualification_contract_version=
+                'recommendation-qualification.v1'
+              AND contract.visibility_contract_version=
+                'recommendation-visibility.v1'
+            LIMIT 1
          ),
          published_capacity AS (
            SELECT count(*)::integer published_count
@@ -1016,28 +1185,84 @@ export function createContactEnrichmentCommands(
                    inventory.website_project_id)=($1,$2,$3)
               AND inventory.recommendation_context_version_id=
                   policy.project_context_version_id
-              AND inventory.publication_status='PUBLISHED'
-              AND inventory.fit_decision='eligible'
-              AND inventory.fit_score_model_version=
-                    'recommendation-commercial-fit.v3'
-              AND inventory.contact_decision='eligible'
-              AND inventory.contact_reason_code='PUBLIC_EMAIL_FOUND'
-              AND inventory.verified_public_email_count>=1
-              AND inventory.status IN ('ready','shown','accepted')
-              AND recommendation.status IN ('ready','shown','accepted')
+               AND inventory.publication_status='PUBLISHED'
+               AND inventory.fit_decision='eligible'
+               AND inventory.fit_score_model_version=
+                     'recommendation-commercial-fit.v4'
+               AND inventory.status IN ('ready','shown','accepted')
+                AND recommendation.status IN ('ready','shown','accepted')
+         ),
+         corrected_visibility_capacity AS (
+           SELECT count(*)::integer visible_count
+             FROM (
+               SELECT DISTINCT ON (qualification.canonical_domain)
+                      qualification.id,qualification.canonical_domain,
+                      qualification.decision
+                 FROM backlink_recommendation_qualification_facts
+                   AS qualification
+                WHERE qualification.generation_contract_id=(
+                        SELECT id FROM generation_contract
+                      )
+                  AND (
+                    qualification.organization_id,
+                    qualification.workspace_id,
+                    qualification.website_project_id,
+                    qualification.recommendation_context_version_id
+                  )=(
+                    $1,$2,$3,(SELECT id FROM current_context)
+                  )
+                  AND qualification.recommendation_id IS NOT NULL
+                ORDER BY qualification.canonical_domain,
+                         qualification.attempt DESC,
+                         qualification.observed_at DESC,
+                         qualification.id DESC
+             ) AS qualification
+             JOIN LATERAL (
+               SELECT visibility.decision
+                 FROM backlink_recommendation_visibility_facts AS visibility
+                WHERE visibility.generation_contract_id=(
+                        SELECT id FROM generation_contract
+                      )
+                  AND (
+                    visibility.organization_id,visibility.workspace_id,
+                    visibility.website_project_id,
+                    visibility.recommendation_context_version_id,
+                    visibility.qualification_fact_id
+                  )=(
+                    $1,$2,$3,(SELECT id FROM current_context),
+                    qualification.id
+                  )
+                ORDER BY visibility.attempt DESC,
+                         visibility.observed_at DESC,
+                         visibility.id DESC
+                LIMIT 1
+             ) AS visibility ON true
+            WHERE qualification.decision='eligible'
+              AND visibility.decision='visible'
+         ),
+         effective_capacity AS (
+           SELECT CASE WHEN generation_contract.id IS NULL
+                    THEN published_capacity.published_count
+                    ELSE corrected_visibility_capacity.visible_count
+                  END published_count,
+                  generation_contract.id IS NOT NULL corrected_contract
+             FROM published_capacity
+             CROSS JOIN corrected_visibility_capacity
+             LEFT JOIN generation_contract ON true
          ),
          effective_policy AS (
            SELECT policy.organization_id,policy.workspace_id,
                   policy.website_project_id,
                   policy.project_context_version_id,
                   policy.visible_pool_generation,
+                  capacity.corrected_contract,
                   CASE
                     WHEN capacity.published_count>=
                          policy.visible_pool_target_count THEN 'active'
                     ELSE policy.visible_pool_state
                   END visible_pool_state
              FROM current_policy AS policy
-             CROSS JOIN published_capacity AS capacity
+             CROSS JOIN effective_capacity AS capacity
          ),
          reconciled_policy AS (
            UPDATE backlink_commercial_inventory_policies AS policy
@@ -1074,7 +1299,7 @@ export function createContactEnrichmentCommands(
                   END,
                   updated_at=now(),updated_by=$4,
                   version=policy.version+1
-             FROM current_policy,published_capacity AS capacity
+             FROM current_policy,effective_capacity AS capacity
             WHERE (policy.organization_id,policy.workspace_id,
                    policy.website_project_id,
                    policy.project_context_version_id,
@@ -1120,12 +1345,23 @@ export function createContactEnrichmentCommands(
            CROSS JOIN sync_marker
           WHERE (inventory.organization_id,inventory.workspace_id,
                  inventory.website_project_id)=($1,$2,$3)
-            AND inventory.publication_status<>'PUBLISHED'
             AND inventory.fit_decision='eligible'
-            AND inventory.fit_score_model_version=
-                  'recommendation-commercial-fit.v3'
-            AND policy.visible_pool_state='building'
-          ORDER BY inventory.prospect_id`,
+             AND inventory.fit_score_model_version=
+                   'recommendation-commercial-fit.v4'
+             AND (
+               inventory.contact_decision IS DISTINCT FROM 'eligible'
+               OR inventory.contact_reason_code IS DISTINCT FROM
+                    'PUBLIC_EMAIL_FOUND'
+               OR inventory.verified_public_email_count<1
+             )
+             AND (
+               policy.visible_pool_state='building'
+               OR (
+                 policy.corrected_contract
+                 AND policy.visible_pool_state='active'
+               )
+             )
+           ORDER BY inventory.prospect_id`,
         [
           scope.organizationId,
           scope.workspaceId,
@@ -1144,7 +1380,7 @@ export function createContactEnrichmentCommands(
           recommendationContextVersionId,
           actorId: actor.userId,
         });
-        await synchronizeRecommendationPublication(client, {
+        await synchronizeRecommendationContactState(client, {
           ...scope,
           prospectId,
           recommendationContextVersionId,
@@ -1172,7 +1408,12 @@ export function createContactEnrichmentCommands(
                 (job.organization_id,job.workspace_id,
                  job.website_project_id,job.recommendation_id,
                  job.recommendation_context_version_id)
-            AND inventory.publication_status<>'PUBLISHED'
+            AND (
+              inventory.contact_decision IS DISTINCT FROM 'eligible'
+              OR inventory.contact_reason_code IS DISTINCT FROM
+                   'PUBLIC_EMAIL_FOUND'
+              OR inventory.verified_public_email_count<1
+            )
             AND job.status IN (
               'completed','partially_completed','no_contact_found',
               'retry_scheduled'
@@ -1383,7 +1624,7 @@ export function createContactEnrichmentCommands(
           relation,
         ],
       );
-      await synchronizeRecommendationPublication(client, {
+      await synchronizeRecommendationContactState(client, {
         organizationId: tenant.organizationId,
         workspaceId: tenant.workspaceId,
         websiteProjectId: project.websiteProjectId,

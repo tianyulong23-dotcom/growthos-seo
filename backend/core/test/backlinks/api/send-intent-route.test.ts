@@ -11,8 +11,13 @@ import type {
   SendIntentRepository,
   SendIntentRepositoryResult,
 } from "../../../src/modules/backlinks/application/services/send-intent.repository.js";
+import {
+  createGmailSendReadinessSnapshot,
+  gmailSendReadinessConditionCodes,
+} from "../../../src/modules/backlinks/application/services/send-policy-gate.js";
 import { registerBacklinksOpenApi } from "../../../src/modules/backlinks/api/openapi.js";
 import {
+  registerBacklinksSendIntentListRoute,
   registerBacklinksSendIntentRoute,
 } from "../../../src/modules/backlinks/api/send-intent.route.js";
 import {
@@ -31,8 +36,37 @@ const outboxEventId = "018f0000-0000-7000-8000-000000000214";
 const quotaReservationId = "018f0000-0000-7000-8000-000000000215";
 const sendSnapshotId = "018f0000-0000-7000-8000-000000000216";
 const sendAttemptId = "018f0000-0000-7000-8000-000000000217";
+const opportunityId = "018f0000-0000-7000-8000-000000000814";
+const gmailIdentityId = "018f0000-0000-7000-8000-000000000516";
 const contactVersion = 3;
 const requestedSendAt = "2026-07-27T10:14:00.000Z";
+const readinessConditions = gmailSendReadinessConditionCodes.map(
+  (code, index) => ({
+    code,
+    revision: `revision-${index + 1}`,
+  }),
+);
+const readinessSnapshot = createGmailSendReadinessSnapshot({
+  evaluatedAt: new Date(requestedSendAt),
+  conditions: readinessConditions,
+});
+const createPayload = (
+  overrides: Record<string, unknown> = {},
+) => ({
+  approvedDraftVersionId,
+  contactId,
+  contactVersion,
+  gmailConnectionId,
+  messagePurpose: "INITIAL_OUTREACH",
+  followUpIndex: 0,
+  readinessSnapshot,
+  humanConfirmation: {
+    confirmed: true,
+    confirmedAt: requestedSendAt,
+    readinessSnapshotVersion: readinessSnapshot.snapshotVersion,
+  },
+  ...overrides,
+});
 const tokenSecretReference = {
   provider: "platform-secret-store",
   secretKind: "GMAIL_TOKEN_SET" as const,
@@ -60,6 +94,7 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
   let preflightState: SendIntentPreflightRepositoryResult = {
     state: "allowed",
     tokenSecretReference,
+    readinessConditions,
     gmail: {
       connectionId: gmailConnectionId,
       primaryEmail: "sender@example.test",
@@ -70,12 +105,14 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
   };
   let recorded: CreateSendIntentRecordInput | undefined;
   let queriedId: string | undefined;
+  let listedQueueKind: string | undefined;
 
   beforeEach(async () => {
     repositoryState = { state: "created", intent: createdIntent };
     preflightState = {
       state: "allowed",
       tokenSecretReference,
+      readinessConditions,
       gmail: {
         connectionId: gmailConnectionId,
         primaryEmail: "sender@example.test",
@@ -86,6 +123,7 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
     };
     recorded = undefined;
     queriedId = undefined;
+    listedQueueKind = undefined;
     const member = createActorContext({
       userId: "user-114",
       sessionId: "session-114",
@@ -120,8 +158,7 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
           })
         : member;
     });
-    registerBacklinksSendIntentRoute(app, {
-      module: createBacklinksModule({
+    const backlinksModule = createBacklinksModule({
         projectContext: {
           resolve: async ({ actor }) => ({
             actor,
@@ -140,15 +177,85 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
           }),
         },
         queries: {
+          listSendIntents: async (_context, input) => {
+            listedQueueKind = input.queueKind;
+            return {
+              items: [{
+                sendIntentId,
+                opportunityId,
+                draftId,
+                approvedDraftVersionId,
+                messagePurpose: "INITIAL_OUTREACH",
+                followUpIndex: 0,
+                status: "DELIVERY_UNKNOWN",
+                queueKind: "RECONCILIATION_REQUIRED",
+                version: 3,
+                requestedSendAt,
+                updatedAt: "2026-07-27T10:14:02.000Z",
+                deliveryEnvelope: {
+                  sendSnapshotId,
+                  gmailConnectionId,
+                  gmailAccountEmail: "account@example.test",
+                  gmailIdentityId,
+                  fromAddress: "sender@example.test",
+                  recipient: "recipient@example.test",
+                  contactId,
+                  contactVersion,
+                  approvalRecordedAt: requestedSendAt,
+                },
+                diagnostics: {
+                  operationId: sendIntentId,
+                  operationCheckpoint: "PROVIDER_RESULT_UNKNOWN",
+                  retryable: false,
+                  resubmittable: false,
+                  nextRetryAt: null,
+                  costUncertainty: "UNKNOWN",
+                  workerMode: "normal",
+                  buildIdentity: "phase-9-test",
+                  primaryNextAction: "RECONCILE_BEFORE_RETRY",
+                },
+                attempt: null,
+              }],
+              nextCursor: null,
+              hasMore: false,
+            };
+          },
           getSendIntent: async (_context, id) => {
             queriedId = id;
             return {
               sendIntentId,
+              opportunityId,
               draftId,
+              approvedDraftVersionId,
+              messagePurpose: "INITIAL_OUTREACH",
+              followUpIndex: 0,
               status: "PROVIDER_ACCEPTED",
+              queueKind: "WAITING_REPLY",
               version: 3,
               requestedSendAt,
               updatedAt: "2026-07-27T10:14:02.000Z",
+              deliveryEnvelope: {
+                sendSnapshotId,
+                gmailConnectionId,
+                gmailAccountEmail: "account@example.test",
+                gmailIdentityId,
+                fromAddress: "sender@example.test",
+                recipient: "recipient@example.test",
+                contactId,
+                contactVersion,
+                approvalRecordedAt: requestedSendAt,
+              },
+              diagnostics: {
+                operationId: sendIntentId,
+                operationCheckpoint: "PROVIDER_ACCEPTANCE_PERSISTED",
+                retryable: false,
+                resubmittable: false,
+                nextRetryAt: null,
+                costUncertainty: "NONE",
+                workerMode: "normal",
+                buildIdentity: "phase-9-test",
+                primaryNextAction: "START_OR_CONTINUE_SYNC",
+              },
               attempt: {
                 attemptId: sendAttemptId,
                 attemptNo: 1,
@@ -164,7 +271,12 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
             };
           },
         },
-      }),
+      });
+    registerBacklinksSendIntentListRoute(app, {
+      module: backlinksModule,
+    });
+    registerBacklinksSendIntentRoute(app, {
+      module: backlinksModule,
       commands: createSendIntentCommands({
         repository,
         sendRuntimeEnabled: true,
@@ -192,9 +304,17 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
     expect(response.json()).toMatchObject({
       sendIntent: {
         sendIntentId,
+        opportunityId,
         draftId,
+        approvedDraftVersionId,
         status: "PROVIDER_ACCEPTED",
+        queueKind: "WAITING_REPLY",
         version: 3,
+        deliveryEnvelope: {
+          gmailAccountEmail: "account@example.test",
+          fromAddress: "sender@example.test",
+          recipient: "recipient@example.test",
+        },
         attempt: {
           attemptId: sendAttemptId,
           status: "PROVIDER_ACCEPTED",
@@ -212,20 +332,50 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
     expect(queriedId).toBe(sendIntentId);
   });
 
+  it("lists the project Send Intent reconciliation queue", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url:
+        "/api/v1/projects/project-key/backlinks/send-intents" +
+        "?queueKind=RECONCILIATION_REQUIRED&limit=25",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      items: [{
+        sendIntentId,
+        opportunityId,
+        approvedDraftVersionId,
+        queueKind: "RECONCILIATION_REQUIRED",
+        deliveryEnvelope: {
+          fromAddress: "sender@example.test",
+          recipient: "recipient@example.test",
+        },
+        diagnostics: {
+          primaryNextAction: "RECONCILE_BEFORE_RETRY",
+        },
+      }],
+      hasMore: false,
+      nextCursor: null,
+      meta: {
+        organizationId: "organization-114",
+        workspaceId: "workspace-114",
+        websiteProjectId: "project-114",
+      },
+    });
+    expect(listedQueueKind).toBe("RECONCILIATION_REQUIRED");
+  });
+
   it("returns 201 after creating only the approved Intent request", async () => {
     const response = await app.inject({
       method: "POST",
       url:
         `/api/v1/projects/project-key/backlinks/drafts/${draftId}/send-intents`,
       headers: { "idempotency-key": "send-intent-114" },
-      payload: {
-        approvedDraftVersionId,
-        contactId,
-        contactVersion,
-        gmailConnectionId,
+      payload: createPayload({
         messagePurpose: "FOLLOW_UP",
         followUpIndex: 1,
-      },
+      }),
     });
 
     expect(response.statusCode).toBe(201);
@@ -257,6 +407,12 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
       gmailConnectionId,
       messagePurpose: "FOLLOW_UP",
       followUpIndex: 1,
+      readinessSnapshot,
+      humanConfirmation: {
+        confirmed: true,
+        confirmedAt: new Date(requestedSendAt),
+        readinessSnapshotVersion: readinessSnapshot.snapshotVersion,
+      },
     });
   });
 
@@ -279,6 +435,7 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
     expect(response.json()).toMatchObject({
       allowed: true,
       deliveryState: "NOT_SENT",
+      readinessSnapshot,
       gmail: {
         connectionId: gmailConnectionId,
         primaryEmail: "sender@example.test",
@@ -293,27 +450,16 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
     expect((await app.inject({
       method: "POST",
       url,
-      payload: {
-        approvedDraftVersionId,
-        contactId,
-        contactVersion,
-        gmailConnectionId,
-        messagePurpose: "INITIAL_OUTREACH",
-        followUpIndex: 0,
-      },
+      payload: createPayload(),
     })).statusCode).toBe(400);
     expect((await app.inject({
       method: "POST",
       url,
       headers: { "idempotency-key": "send-intent-invalid" },
-      payload: {
-        approvedDraftVersionId,
-        contactId,
-        contactVersion,
-        gmailConnectionId,
+      payload: createPayload({
         messagePurpose: "FOLLOW_UP",
         followUpIndex: 0,
-      },
+      }),
     })).statusCode).toBe(400);
     expect((await app.inject({
       method: "POST",
@@ -322,14 +468,7 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
         "idempotency-key": "send-intent-viewer",
         "x-role": "viewer",
       },
-      payload: {
-        approvedDraftVersionId,
-        contactId,
-        contactVersion,
-        gmailConnectionId,
-        messagePurpose: "INITIAL_OUTREACH",
-        followUpIndex: 0,
-      },
+      payload: createPayload(),
     })).statusCode).toBe(403);
   });
 
@@ -340,14 +479,10 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
       url:
         `/api/v1/projects/project-key/backlinks/drafts/${draftId}/send-intents`,
       headers: { "idempotency-key": "send-intent-stale" },
-      payload: {
-        approvedDraftVersionId,
-        contactId,
-        contactVersion,
-        gmailConnectionId,
+      payload: createPayload({
         messagePurpose: "NEGOTIATION_REPLY",
         followUpIndex: 0,
-      },
+      }),
     });
 
     expect(response.statusCode).toBe(409);
@@ -367,14 +502,7 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
       url:
         `/api/v1/projects/project-key/backlinks/drafts/${draftId}/send-intents`,
       headers: { "idempotency-key": "send-intent-quota" },
-      payload: {
-        approvedDraftVersionId,
-        contactId,
-        contactVersion,
-        gmailConnectionId,
-        messagePurpose: "INITIAL_OUTREACH",
-        followUpIndex: 0,
-      },
+      payload: createPayload(),
     });
 
     expect(response.statusCode).toBe(429);
@@ -402,18 +530,45 @@ describe("BL-AI-114/115 approved Send Intent API", () => {
         url:
           `/api/v1/projects/project-key/backlinks/drafts/${draftId}/send-intents`,
         headers: { "idempotency-key": `send-intent-${state.state}` },
-        payload: {
-          approvedDraftVersionId,
-          contactId,
-          contactVersion,
-          gmailConnectionId,
-          messagePurpose: "INITIAL_OUTREACH",
-          followUpIndex: 0,
-        },
+        payload: createPayload(),
       });
 
       expect(response.statusCode).toBe(statusCode);
       expect(response.json()).toMatchObject({ code });
     },
   );
+
+  it("returns exact readiness changes when the confirmed snapshot is stale", async () => {
+    repositoryState = {
+      state: "readiness_changed",
+      changedConditions: [{
+        code: "QUOTA",
+        reason: "CHANGED",
+        expectedRevision: "0/5",
+        currentRevision: "5/5",
+        retryable: true,
+        recoveryAction: "WAIT_AND_RUN_PREFLIGHT",
+      }],
+    };
+    const response = await app.inject({
+      method: "POST",
+      url:
+        `/api/v1/projects/project-key/backlinks/drafts/${draftId}/send-intents`,
+      headers: { "idempotency-key": "send-intent-readiness-stale" },
+      payload: createPayload(),
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      code: "SEND_READINESS_STALE",
+      changedConditions: [{
+        code: "QUOTA",
+        reason: "CHANGED",
+        expectedRevision: "0/5",
+        currentRevision: "5/5",
+        retryable: true,
+        recoveryAction: "WAIT_AND_RUN_PREFLIGHT",
+      }],
+    });
+  });
 });

@@ -3,10 +3,14 @@ import base64
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlparse
 
 import httpx
+import pytest
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
+from starlette.requests import ClientDisconnect
+from starlette.requests import Request as StarletteRequest
 
 from app.core.backlinks_gateway import (
     BacklinksGateway,
@@ -60,8 +64,9 @@ class StaticResolver(PlatformContextResolver):
         self,
         *,
         request: object,
+        required_permission: str = "backlinks:read",
     ) -> ResolvedPlatformCollectionContext:
-        del request
+        del request, required_permission
         self.calls.append("collection")
         return COLLECTION_RESOLVED
 
@@ -91,6 +96,8 @@ def request_app(
     headers: dict[str, str] | None = None,
     content: bytes | None = None,
     oauth_frontend_origin: str | None = None,
+    oauth_callback_url: str | None = None,
+    base_url: str = "http://gateway.test",
 ) -> httpx.Response:
     async def run() -> httpx.Response:
         app = create_app(
@@ -98,9 +105,10 @@ def request_app(
             platform_context_resolver=resolver,
         )
         app.state.oauth_callback_frontend_origin = oauth_frontend_origin
+        app.state.oauth_callback_url = oauth_callback_url
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://gateway.test",
+            base_url=base_url,
         ) as client:
             return await client.request(
                 method,
@@ -118,17 +126,26 @@ def gmail_oauth_flow(
     *,
     callback_path: str,
     oauth_frontend_origin: str | None = None,
+    oauth_callback_url: str | None = None,
 ) -> tuple[httpx.Response, httpx.Response]:
     async def run() -> tuple[httpx.Response, httpx.Response]:
+        frontend_origin = oauth_frontend_origin or "http://localhost:5173"
+        callback_url = oauth_callback_url or (
+            f"{urlparse(frontend_origin).scheme}://"
+            f"{urlparse(frontend_origin).hostname}:7200"
+            "/api/v1/backlinks/gmail-connections/callback"
+        )
+        callback_origin = urlparse(callback_url)
         app = create_app(
             backlinks_gateway=gateway,
             platform_context_resolver=resolver,
         )
-        app.state.oauth_callback_frontend_origin = oauth_frontend_origin
+        app.state.oauth_callback_frontend_origin = frontend_origin
+        app.state.oauth_callback_url = callback_url
         app.state.oauth_callback_cookie_secure = False
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://gateway.test",
+            base_url=f"{callback_origin.scheme}://{callback_origin.netloc}",
         ) as client:
             connect = await client.post(
                 "/api/v1/projects/project-key/backlinks/gmail-connections/connect",
@@ -156,7 +173,7 @@ def runtime_api_routes(router: object) -> list[APIRoute]:
     return routes
 
 
-def test_registers_exactly_seventy_three_private_runtime_routes() -> None:
+def test_registers_exactly_seventy_seven_private_runtime_routes() -> None:
     gateway = BacklinksGateway(
         base_url="http://backlinks.internal",
         signing_key=SIGNING_KEY,
@@ -172,10 +189,41 @@ def test_registers_exactly_seventy_three_private_runtime_routes() -> None:
         if isinstance(route, APIRoute) and "/backlinks/" in route.path
     ]
 
-    assert len(runtime_routes) == 73
-    assert len({(tuple(sorted(route.methods)), route.path) for route in runtime_routes}) == 73
+    assert len(runtime_routes) == 77
+    assert len({(tuple(sorted(route.methods)), route.path) for route in runtime_routes}) == 77
     assert all(route.include_in_schema is False for route in runtime_routes)
     assert all("/backlinks/" not in path for path in app.openapi()["paths"])
+
+
+def test_forwards_current_pool_contact_enrichment_batch() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(202, json={"accepted": 3})
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=(
+            "/api/v1/projects/project-key/backlinks/"
+            "contact-enrichment-batches/current/run"
+        ),
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"accepted": 3}
+    assert len(calls) == 1
+    assert calls[0].url.path == (
+        "/api/v1/projects/project-key/backlinks/"
+        "contact-enrichment-batches/current/run"
+    )
 
 
 def test_forwards_gmail_push_without_platform_resolution_and_preserves_provider_auth() -> None:
@@ -290,6 +338,176 @@ def test_strips_forged_context_binds_project_and_forwards_query_once() -> None:
     }
 
 
+def test_get_forward_does_not_read_disconnected_request_body() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200, json={"items": []})
+
+    async def disconnected_receive() -> dict[str, object]:
+        raise ClientDisconnect()
+
+    async def run() -> httpx.Response:
+        request = StarletteRequest(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/api/v1/projects/project-key/backlinks/opportunities",
+                "raw_path": b"/api/v1/projects/project-key/backlinks/opportunities",
+                "query_string": b"",
+                "headers": [],
+                "client": ("127.0.0.1", 12345),
+                "server": ("gateway.test", 80),
+                "root_path": "",
+            },
+            receive=disconnected_receive,
+        )
+        gateway = BacklinksGateway(
+            base_url="http://backlinks.internal",
+            signing_key=SIGNING_KEY,
+            client=AsyncClient(transport=MockTransport(handler)),
+        )
+        return await gateway.forward(
+            request,
+            resolved=RESOLVED,
+            website_project_key="project-key",
+        )
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0].content == b""
+
+
+def test_server_selected_upstream_path_is_strict_and_forwards_query_once() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200, json={"items": []})
+
+    request = StarletteRequest(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/v1/projects/project-key/performance/backlinks",
+            "raw_path": b"/api/v1/projects/project-key/performance/backlinks",
+            "query_string": b"view=all",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("gateway.test", 80),
+            "root_path": "",
+        }
+    )
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+
+    response = asyncio.run(
+        gateway.forward(
+            request,
+            resolved=RESOLVED,
+            website_project_key="project-key",
+            upstream_path="/api/v1/projects/project-key/backlinks/links",
+            query_params=[("view", "suspected_lost"), ("limit", "10")],
+        )
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0].url.path == (
+        "/api/v1/projects/project-key/backlinks/links"
+    )
+    assert calls[0].url.query == b"view=suspected_lost&limit=10"
+
+    for invalid_path in (
+        "api/v1/projects/project-key/backlinks/links",
+        "//other-host/backlinks",
+        "/backlinks/links?view=all",
+        "/backlinks/links#fragment",
+        "/backlinks\\links",
+    ):
+        with pytest.raises(ValueError):
+            asyncio.run(
+                gateway.forward(
+                    request,
+                    resolved=RESOLVED,
+                    website_project_key="project-key",
+                    upstream_path=invalid_path,
+                )
+            )
+    assert len(calls) == 1
+
+
+def test_publishes_project_context_to_exact_internal_route_with_signed_context() -> None:
+    calls: list[httpx.Request] = []
+    projection = {
+        "snapshotId": "a8646413-5769-4ee0-850a-87a977a38b39",
+        "snapshotVersion": 4,
+        "projectStatus": "ACTIVE",
+        "canonicalDomain": "example.test",
+        "locale": "en",
+        "countryCode": "ZA",
+        "targetMarket": "ZA",
+        "products": ["Streaming"],
+        "keywords": ["streaming service in za"],
+        "targetUrls": ["https://example.test/"],
+        "targetAudiences": ["Streaming viewers"],
+        "partnershipGoals": ["Earn editorial backlinks"],
+        "inputComplete": True,
+        "profileVersionId": "c04d6d43-28f4-482e-965b-3e77216bb3d6",
+        "promotionTargetVersionId": "e9aee5d3-94bd-488f-9604-b856ca6b35b9",
+        "jobId": "e7ec49da-23e6-4d4d-8208-2e7ae04c0bfa",
+        "outboxEventId": "d3288e52-fe7d-4cf0-a42a-711083ce7570",
+    }
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(202, json={"accepted": True})
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+
+    response = asyncio.run(
+        gateway.publish_project_context(
+            resolved=RESOLVED,
+            website_project_key="project-key",
+            payload=projection,
+        )
+    )
+
+    assert response.status_code == 202
+    assert len(calls) == 1
+    published = calls[0]
+    assert published.method == "POST"
+    assert published.url.path == (
+        "/internal/v1/projects/project-key/backlinks/project-context-projection"
+    )
+    assert json.loads(published.content) == projection
+    assert published.headers["x-correlation-id"] == "correlation-gateway"
+    signed = decode_context(published.headers[PLATFORM_CONTEXT_HEADER])
+    assert signed["tenant"] == {
+        "organizationId": "org-gateway",
+        "workspaceId": "workspace-gateway",
+    }
+    assert signed["project"] == {
+        "websiteProjectId": "project-gateway",
+        "websiteProjectKey": "project-key",
+    }
+    assert published.headers[PLATFORM_CONTEXT_SIGNATURE_HEADER].startswith("v1=")
+
+
 def test_forwards_assessment_query_once() -> None:
     calls: list[httpx.Request] = []
     payload = {
@@ -380,6 +598,47 @@ def test_forwards_draft_query_once() -> None:
     )
 
 
+def test_forwards_send_intent_list_query_once() -> None:
+    calls: list[httpx.Request] = []
+    payload = {
+        "items": [
+            {
+                "sendIntentId": "018f0000-0000-7000-8000-000000000114",
+                "status": "FAILED_FINAL",
+            }
+        ],
+        "nextCursor": None,
+    }
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200, json=payload)
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="GET",
+        path=(
+            "/api/v1/projects/project-key/backlinks/send-intents"
+            "?draftId=018f0000-0000-7000-8000-000000000011&limit=1"
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == payload
+    assert len(calls) == 1
+    assert calls[0].url.path.endswith("/backlinks/send-intents")
+    assert dict(calls[0].url.params) == {
+        "draftId": "018f0000-0000-7000-8000-000000000011",
+        "limit": "1",
+    }
+
+
 def test_forwards_send_intent_once_and_requires_idempotency() -> None:
     calls: list[httpx.Request] = []
 
@@ -454,7 +713,14 @@ def test_legacy_gmail_callback_uses_ticket_and_forwards_query_once() -> None:
                     )
                 },
             )
-        return Response(200, json={"connection": {"connectionId": "gmail-1"}})
+        return Response(
+            200,
+            json={
+                "connection": {"connectionId": "gmail-1"},
+                "returnPath": "/projects/project-key/backlinks/email",
+                "meta": {"websiteProjectId": "project-gateway"},
+            },
+        )
 
     gateway = BacklinksGateway(
         base_url="http://backlinks.internal",
@@ -477,7 +743,10 @@ def test_legacy_gmail_callback_uses_ticket_and_forwards_query_once() -> None:
     assert "samesite=lax" in connect_cookie
     assert "path=/api/v1" in connect_cookie
     assert "max-age=600" in connect_cookie
-    assert response.status_code == 200
+    assert response.status_code == 303
+    assert response.headers["location"] == (
+        "http://localhost:5173/projects/project-key/backlinks/email"
+    )
     assert "max-age=0" in response.headers["set-cookie"].lower()
     assert resolver.calls == ["project-key"]
     assert len(calls) == 2
@@ -516,6 +785,7 @@ def test_stable_gmail_callback_restores_project_without_browser_auth() -> None:
             json={
                 "connection": {"connectionId": "gmail-1"},
                 "returnPath": "/projects/project-key/backlinks/email",
+                "meta": {"websiteProjectId": "project-gateway"},
             },
         )
 
@@ -581,10 +851,14 @@ def test_gmail_callback_rejects_tampered_ticket_and_state_mismatch() -> None:
             backlinks_gateway=gateway,
             platform_context_resolver=StaticResolver(RESOLVED),
         )
+        app.state.oauth_callback_frontend_origin = "http://localhost:5173"
+        app.state.oauth_callback_url = (
+            "http://localhost:7200/api/v1/backlinks/gmail-connections/callback"
+        )
         app.state.oauth_callback_cookie_secure = False
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://gateway.test",
+            base_url="http://localhost:7200",
         ) as client:
             await client.post("/api/v1/projects/project-key/backlinks/gmail-connections/connect")
             cookie_name = next(
@@ -603,10 +877,14 @@ def test_gmail_callback_rejects_tampered_ticket_and_state_mismatch() -> None:
 
     tampered, mismatch = asyncio.run(run())
 
-    assert tampered.status_code == 400
-    assert tampered.json()["code"] == "OAUTH_CALLBACK_INVALID"
-    assert mismatch.status_code == 400
-    assert mismatch.json()["code"] == "OAUTH_CALLBACK_INVALID"
+    assert tampered.status_code == 303
+    assert tampered.headers["location"] == (
+        "http://localhost:5173/?gmailOAuth=invalid_or_expired"
+    )
+    assert mismatch.status_code == 303
+    assert mismatch.headers["location"] == (
+        "http://localhost:5173/?gmailOAuth=invalid_or_expired"
+    )
     assert len(calls) == 1
 
 
@@ -646,6 +924,167 @@ def test_gmail_access_denied_redirects_without_calling_core_callback() -> None:
     assert len(calls) == 1
 
 
+def test_gmail_connect_rejects_proxy_host_without_browser_origin() -> None:
+    calls: list[httpx.Request] = []
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(
+            transport=MockTransport(
+                lambda request: calls.append(request) or Response(200)
+            )
+        ),
+    )
+
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path="/api/v1/projects/project-key/backlinks/gmail-connections/connect",
+        oauth_frontend_origin="http://localhost:5173",
+        oauth_callback_url=(
+            "http://localhost:7200/api/v1/backlinks/gmail-connections/callback"
+        ),
+        base_url="http://127.0.0.1:5173",
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "type": "urn:growthos:problem:platform:oauth-origin-mismatch",
+        "title": "OAuth origin mismatch",
+        "status": 409,
+        "detail": "Gmail authorization must start from the configured public hostname.",
+        "code": "OAUTH_ORIGIN_MISMATCH",
+        "message": "Gmail authorization must start from the configured public hostname.",
+        "requestId": "unresolved",
+        "retryable": True,
+        "canonicalFrontendOrigin": "http://localhost:5173",
+    }
+    assert calls == []
+
+
+def test_gmail_connect_accepts_canonical_browser_origin_through_proxy() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(
+            200,
+            json={
+                "authorizationUrl": (
+                    f"https://accounts.google.com/o/oauth2/v2/auth?state={OAUTH_STATE}"
+                )
+            },
+        )
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path="/api/v1/projects/project-key/backlinks/gmail-connections/connect",
+        headers={"origin": "http://localhost:5173"},
+        oauth_frontend_origin="http://localhost:5173",
+        oauth_callback_url=(
+            "http://localhost:7200/api/v1/backlinks/gmail-connections/callback"
+        ),
+        base_url="http://127.0.0.1:7200",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["authorizationUrl"].startswith(
+        "https://accounts.google.com/"
+    )
+    assert "backlinks_gmail_oauth_" in response.headers["set-cookie"]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("oauth_frontend_origin", "oauth_callback_url"),
+    [
+        (
+            None,
+            "http://localhost:7200/api/v1/backlinks/gmail-connections/callback",
+        ),
+        ("http://localhost:5173", None),
+    ],
+)
+def test_gmail_connect_rejects_missing_public_oauth_configuration_before_creating_state(
+    oauth_frontend_origin: str | None,
+    oauth_callback_url: str | None,
+) -> None:
+    calls: list[httpx.Request] = []
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(
+            transport=MockTransport(
+                lambda request: calls.append(request) or Response(200)
+            )
+        ),
+    )
+
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path="/api/v1/projects/project-key/backlinks/gmail-connections/connect",
+        oauth_frontend_origin=oauth_frontend_origin,
+        oauth_callback_url=oauth_callback_url,
+        base_url="http://localhost:7200",
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "type": "urn:growthos:problem:platform:oauth-configuration-invalid",
+        "title": "OAuth configuration invalid",
+        "status": 503,
+        "detail": (
+            "Gmail authorization is unavailable because its public callback "
+            "configuration is incomplete."
+        ),
+        "code": "OAUTH_CONFIGURATION_INVALID",
+        "message": (
+            "Gmail authorization is unavailable because its public callback "
+            "configuration is incomplete."
+        ),
+        "requestId": "unresolved",
+        "retryable": False,
+    }
+    assert calls == []
+
+
+def test_missing_gmail_callback_ticket_redirects_to_recovery_page() -> None:
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(lambda _: Response(200))),
+    )
+
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="GET",
+        path=(
+            "/api/v1/backlinks/gmail-connections/callback"
+            f"?code=authorization-code&state={OAUTH_STATE}"
+        ),
+        oauth_frontend_origin="http://localhost:5173",
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == (
+        "http://localhost:5173/?gmailOAuth=invalid_or_expired"
+    )
+
+
 def test_rejects_untrusted_gmail_callback_parameters() -> None:
     calls: list[httpx.Request] = []
 
@@ -676,11 +1115,70 @@ def test_rejects_untrusted_gmail_callback_parameters() -> None:
     assert calls == []
 
 
-def test_rejects_invalid_gmail_callback_return_path_and_preserves_upstream_failure() -> None:
+@pytest.mark.parametrize(
+    "callback_payload",
+    [
+        {
+            "returnPath": "https://evil.example/callback",
+            "meta": {"websiteProjectId": "project-gateway"},
+        },
+        {
+            "returnPath": "/projects/other-project/backlinks/email",
+            "meta": {"websiteProjectId": "other-project-id"},
+        },
+        {
+            "returnPath": "/projects/project-key/backlinks/email",
+            "meta": {"websiteProjectId": "other-project-id"},
+        },
+    ],
+)
+def test_rejects_invalid_gmail_callback_project_context(
+    callback_payload: dict[str, object],
+) -> None:
+    def handler(request: httpx.Request) -> Response:
+        if request.method == "POST":
+            return Response(
+                200,
+                json={
+                    "authorizationUrl": (
+                        f"https://accounts.google.com/o/oauth2/v2/auth?state={OAUTH_STATE}"
+                    )
+                },
+            )
+        return Response(200, json=callback_payload)
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    path = (
+        f"/api/v1/backlinks/gmail-connections/callback?code=authorization-code&state={OAUTH_STATE}"
+    )
+
+    _, response = gmail_oauth_flow(
+        gateway,
+        StaticResolver(RESOLVED),
+        callback_path=path,
+        oauth_frontend_origin="http://127.0.0.1:5173",
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "OAUTH_PROJECT_CONTEXT_MISMATCH"
+    assert "max-age=0" in response.headers["set-cookie"].lower()
+
+
+def test_redirects_retryable_gmail_callback_failure_to_recovery_ui() -> None:
     callbacks = iter(
         [
-            Response(200, json={"returnPath": "https://evil.example/callback"}),
-            Response(503, json={"code": "GMAIL_PROVIDER_UNAVAILABLE"}),
+            Response(
+                503,
+                json={
+                    "code": "GMAIL_OAUTH_PROVIDER_UNAVAILABLE",
+                    "requestId": "core-request",
+                    "retryable": True,
+                },
+            ),
         ]
     )
 
@@ -705,12 +1203,6 @@ def test_rejects_invalid_gmail_callback_return_path_and_preserves_upstream_failu
         f"/api/v1/backlinks/gmail-connections/callback?code=authorization-code&state={OAUTH_STATE}"
     )
 
-    _, invalid_path = gmail_oauth_flow(
-        gateway,
-        StaticResolver(RESOLVED),
-        callback_path=path,
-        oauth_frontend_origin="http://127.0.0.1:5173",
-    )
     _, upstream_failure = gmail_oauth_flow(
         gateway,
         StaticResolver(RESOLVED),
@@ -718,11 +1210,12 @@ def test_rejects_invalid_gmail_callback_return_path_and_preserves_upstream_failu
         oauth_frontend_origin="http://127.0.0.1:5173",
     )
 
-    assert invalid_path.status_code == 502
-    assert invalid_path.json()["code"] == "OAUTH_RETURN_PATH_INVALID"
-    assert upstream_failure.status_code == 503
-    assert upstream_failure.json()["code"] == "GMAIL_PROVIDER_UNAVAILABLE"
-    assert "set-cookie" not in upstream_failure.headers
+    assert upstream_failure.status_code == 303
+    assert upstream_failure.headers["location"] == (
+        "http://127.0.0.1:5173/projects/project-key/backlinks/email"
+        "?gmailOAuth=provider_unavailable"
+    )
+    assert "max-age=0" in upstream_failure.headers["set-cookie"].lower()
 
 
 def test_gmail_oauth_callback_ticket_round_trip_and_expiry() -> None:
@@ -1032,6 +1525,61 @@ def test_forwards_idempotent_command_once_and_never_retries_transport_failure() 
     assert calls[4].headers["idempotency-key"] == "placement-reverify-once"
     assert calls[4].content == reverify_body
 
+    cancel_refill_path = (
+        "/api/v1/projects/project-key/backlinks/recommendation-refill-jobs/"
+        "018f0000-0000-7000-8000-000000000155/cancel"
+    )
+    cancel_refill_body = json.dumps(
+        {
+            "expectedVersion": 1,
+            "reasonCode": "read_side_effect_cleanup",
+        }
+    ).encode()
+    cancel_refill = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=cancel_refill_path,
+        headers={
+            "content-type": "application/json",
+            "idempotency-key": "cancel-read-side-effect-once",
+        },
+        content=cancel_refill_body,
+    )
+    assert cancel_refill.status_code == 200
+    assert len(calls) == 6
+    assert calls[5].headers["idempotency-key"] == (
+        "cancel-read-side-effect-once"
+    )
+    assert calls[5].content == cancel_refill_body
+
+    close_duplicate_path = (
+        "/api/v1/projects/project-key/backlinks/recommendation-refill-jobs/"
+        "018f0000-0000-7000-8000-000000000156/close-duplicate"
+    )
+    close_duplicate_body = json.dumps(
+        {
+            "expectedVersion": 61,
+            "canonicalJobId": "018f0000-0000-7000-8000-000000000157",
+            "reasonCode": "duplicate_recovery_owner",
+        }
+    ).encode()
+    close_duplicate = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=close_duplicate_path,
+        headers={
+            "content-type": "application/json",
+            "idempotency-key": "close-duplicate-once",
+        },
+        content=close_duplicate_body,
+    )
+    assert close_duplicate.status_code == 200
+    assert len(calls) == 7
+    assert calls[6].headers["idempotency-key"] == "close-duplicate-once"
+    assert calls[6].content == close_duplicate_body
+
     failure_calls = 0
 
     def failure_handler(request: httpx.Request) -> Response:
@@ -1068,6 +1616,14 @@ def test_forwards_idempotent_command_once_and_never_retries_transport_failure() 
         headers={"content-type": "application/json"},
         content=reverify_body,
     )
+    missing_close_duplicate_key = request_app(
+        unavailable_gateway,
+        StaticResolver(RESOLVED),
+        method="POST",
+        path=close_duplicate_path,
+        headers={"content-type": "application/json"},
+        content=close_duplicate_body,
+    )
     unavailable = request_app(
         unavailable_gateway,
         StaticResolver(RESOLVED),
@@ -1086,6 +1642,11 @@ def test_forwards_idempotent_command_once_and_never_retries_transport_failure() 
     assert missing_placement_key.json()["code"] == "PLATFORM_IDEMPOTENCY_REQUIRED"
     assert missing_reverify_key.status_code == 400
     assert missing_reverify_key.json()["code"] == "PLATFORM_IDEMPOTENCY_REQUIRED"
+    assert missing_close_duplicate_key.status_code == 400
+    assert (
+        missing_close_duplicate_key.json()["code"]
+        == "PLATFORM_IDEMPOTENCY_REQUIRED"
+    )
     assert unavailable.status_code == 503
     assert unavailable.headers["content-type"].startswith("application/problem+json")
     assert unavailable.json() == {

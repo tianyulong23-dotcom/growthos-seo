@@ -90,6 +90,39 @@ describe("backlinks Temporal client and worker", () => {
     await expect(running.completion).resolves.toBeUndefined();
   });
 
+  it("uses an explicitly isolated recovery task queue", async () => {
+    let finishRun: (() => void) | undefined;
+    const run = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRun = resolve;
+        }),
+    );
+    const factory = vi.fn<BacklinksWorkerFactory>(
+      async () => ({
+        run,
+        shutdown: () => finishRun?.(),
+        close: async () => undefined,
+      }),
+    );
+    const config = backlinksTemporalConfigSchema.parse({
+      ...requiredConfig,
+      BACKLINKS_WORKER_ENABLED: "true",
+    });
+    const recoveryTaskQueue =
+      "growthos.backlinks.v1.recovery.00000000-0000-4000-8000-000000000004";
+    const running = await startBacklinksWorker(
+      config,
+      { ...registrations, taskQueue: recoveryTaskQueue },
+      factory,
+    );
+
+    expect(factory).toHaveBeenCalledWith(expect.objectContaining({
+      taskQueue: recoveryTaskQueue,
+    }));
+    await running.stop();
+  });
+
   it("starts and drains background services with the worker", async () => {
     let finishRun: (() => void) | undefined;
     const run = vi.fn(

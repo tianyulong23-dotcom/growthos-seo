@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   GmailConnectionStatus,
   GmailSendAvailability,
@@ -5,6 +7,54 @@ import type {
 import type { DraftSnapshot } from "../repositories/draft-generation.repository.js";
 
 export const gmailSendPolicyVersion = "gmail-send-policy.v1";
+export const gmailSendReadinessSchemaVersion =
+  "gmail-send-readiness.v1";
+export const gmailSendReadinessDefaultTtlSeconds = 15 * 60;
+
+export const gmailSendReadinessConditionCodes = Object.freeze([
+  "DRAFT_APPROVAL",
+  "CONTACT_VERSION",
+  "GMAIL_BINDING",
+  "GMAIL_IDENTITY",
+  "SUPPRESSION",
+  "KILL_SWITCH",
+  "COOLDOWN",
+  "QUOTA",
+] as const);
+
+export type GmailSendReadinessConditionCode =
+  (typeof gmailSendReadinessConditionCodes)[number];
+
+export type GmailSendReadinessCondition = Readonly<{
+  code: GmailSendReadinessConditionCode;
+  revision: string;
+}>;
+
+export type GmailSendReadinessSnapshot = Readonly<{
+  schemaVersion: typeof gmailSendReadinessSchemaVersion;
+  policyVersion: typeof gmailSendPolicyVersion;
+  snapshotVersion: string;
+  evaluatedAt: string;
+  expiresAt: string;
+  conditions: readonly GmailSendReadinessCondition[];
+}>;
+
+export type GmailSendReadinessChangedCondition = Readonly<{
+  code: GmailSendReadinessConditionCode | "SNAPSHOT_VALIDITY";
+  reason: "CHANGED" | "MISSING" | "EXPIRED";
+  expectedRevision: string | null;
+  currentRevision: string | null;
+  retryable: true;
+  recoveryAction:
+    | "RUN_PREFLIGHT_AGAIN"
+    | "REAPPROVE_CURRENT_DRAFT"
+    | "REFRESH_CONTACT"
+    | "RESELECT_GMAIL_ACCOUNT"
+    | "VERIFY_SEND_IDENTITY"
+    | "REVIEW_SUPPRESSION"
+    | "REVIEW_KILL_SWITCH"
+    | "WAIT_AND_RUN_PREFLIGHT";
+}>;
 
 export const gmailSendPolicyBlockCodes = Object.freeze({
   draftNotApproved: "DRAFT_NOT_APPROVED",
@@ -83,6 +133,225 @@ const assertNonBlank = (value: string, name: string): void => {
     throw new TypeError(`${name} must not be blank.`);
   }
 };
+
+const readinessConditionSet = new Set<string>(
+  gmailSendReadinessConditionCodes,
+);
+
+const canonicalJson = (value: unknown): string => {
+  if (value === null) return "null";
+  if (
+    typeof value === "boolean"
+    || typeof value === "number"
+    || typeof value === "string"
+  ) {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (typeof value !== "object") {
+    throw new TypeError("Gmail readiness content is not JSON-compatible.");
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+};
+
+const readinessHash = (
+  value: Omit<GmailSendReadinessSnapshot, "snapshotVersion">,
+): string =>
+  createHash("sha256")
+    .update(canonicalJson(value), "utf8")
+    .digest("hex");
+
+const recoveryActionFor = (
+  code: GmailSendReadinessChangedCondition["code"],
+): GmailSendReadinessChangedCondition["recoveryAction"] => {
+  switch (code) {
+    case "DRAFT_APPROVAL":
+      return "REAPPROVE_CURRENT_DRAFT";
+    case "CONTACT_VERSION":
+      return "REFRESH_CONTACT";
+    case "GMAIL_BINDING":
+      return "RESELECT_GMAIL_ACCOUNT";
+    case "GMAIL_IDENTITY":
+      return "VERIFY_SEND_IDENTITY";
+    case "SUPPRESSION":
+      return "REVIEW_SUPPRESSION";
+    case "KILL_SWITCH":
+      return "REVIEW_KILL_SWITCH";
+    case "COOLDOWN":
+    case "QUOTA":
+      return "WAIT_AND_RUN_PREFLIGHT";
+    case "SNAPSHOT_VALIDITY":
+      return "RUN_PREFLIGHT_AGAIN";
+  }
+};
+
+const normalizeReadinessConditions = (
+  conditions: readonly GmailSendReadinessCondition[],
+): readonly GmailSendReadinessCondition[] => {
+  const seen = new Set<string>();
+  const normalized = conditions.map((condition) => {
+    if (!readinessConditionSet.has(condition.code)) {
+      throw new TypeError(
+        `Unsupported Gmail readiness condition: ${condition.code}.`,
+      );
+    }
+    assertNonBlank(condition.revision, `${condition.code}.revision`);
+    if (seen.has(condition.code)) {
+      throw new TypeError(
+        `Duplicate Gmail readiness condition: ${condition.code}.`,
+      );
+    }
+    seen.add(condition.code);
+    return Object.freeze({
+      code: condition.code,
+      revision: condition.revision,
+    });
+  }).sort((left, right) => left.code.localeCompare(right.code));
+  if (seen.size !== gmailSendReadinessConditionCodes.length) {
+    throw new TypeError("Gmail readiness conditions are incomplete.");
+  }
+  return Object.freeze(normalized);
+};
+
+export function createGmailSendReadinessSnapshot(input: Readonly<{
+  evaluatedAt: Date;
+  conditions: readonly GmailSendReadinessCondition[];
+  ttlSeconds?: number;
+}>): GmailSendReadinessSnapshot {
+  if (!Number.isFinite(input.evaluatedAt.getTime())) {
+    throw new TypeError("Gmail readiness evaluatedAt must be valid.");
+  }
+  const ttlSeconds =
+    input.ttlSeconds ?? gmailSendReadinessDefaultTtlSeconds;
+  if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1) {
+    throw new TypeError("Gmail readiness ttlSeconds must be positive.");
+  }
+  const snapshot = Object.freeze({
+    schemaVersion: gmailSendReadinessSchemaVersion,
+    policyVersion: gmailSendPolicyVersion,
+    evaluatedAt: input.evaluatedAt.toISOString(),
+    expiresAt: new Date(
+      input.evaluatedAt.getTime() + ttlSeconds * 1000,
+    ).toISOString(),
+    conditions: normalizeReadinessConditions(input.conditions),
+  });
+  return Object.freeze({
+    ...snapshot,
+    snapshotVersion: readinessHash(snapshot),
+  });
+}
+
+export function compareGmailSendReadinessSnapshot(input: Readonly<{
+  expected: GmailSendReadinessSnapshot;
+  currentConditions: readonly GmailSendReadinessCondition[];
+  comparedAt: Date;
+}>): readonly GmailSendReadinessChangedCondition[] {
+  if (!Number.isFinite(input.comparedAt.getTime())) {
+    throw new TypeError("Gmail readiness comparedAt must be valid.");
+  }
+  const expectedWithoutVersion = {
+    schemaVersion: input.expected.schemaVersion,
+    policyVersion: input.expected.policyVersion,
+    evaluatedAt: input.expected.evaluatedAt,
+    expiresAt: input.expected.expiresAt,
+    conditions: normalizeReadinessConditions(input.expected.conditions),
+  };
+  if (
+    input.expected.schemaVersion !== gmailSendReadinessSchemaVersion
+    || input.expected.policyVersion !== gmailSendPolicyVersion
+    || readinessHash(expectedWithoutVersion)
+      !== input.expected.snapshotVersion
+  ) {
+    return Object.freeze([Object.freeze({
+      code: "SNAPSHOT_VALIDITY",
+      reason: "MISSING",
+      expectedRevision: input.expected.snapshotVersion || null,
+      currentRevision: null,
+      retryable: true,
+      recoveryAction: recoveryActionFor("SNAPSHOT_VALIDITY"),
+    })]);
+  }
+  const expiresAt = asTimestamp(input.expected.expiresAt, "expiresAt");
+  if (input.comparedAt.getTime() > expiresAt) {
+    return Object.freeze([Object.freeze({
+      code: "SNAPSHOT_VALIDITY",
+      reason: "EXPIRED",
+      expectedRevision: input.expected.snapshotVersion,
+      currentRevision: null,
+      retryable: true,
+      recoveryAction: recoveryActionFor("SNAPSHOT_VALIDITY"),
+    })]);
+  }
+
+  const expectedByCode = new Map(
+    input.expected.conditions.map((condition) => [
+      condition.code,
+      condition.revision,
+    ]),
+  );
+  const currentByCode = new Map(
+    normalizeReadinessConditions(input.currentConditions).map(
+      (condition) => [condition.code, condition.revision],
+    ),
+  );
+  const changes = gmailSendReadinessConditionCodes.flatMap((code) => {
+    const expectedRevision = expectedByCode.get(code) ?? null;
+    const currentRevision = currentByCode.get(code) ?? null;
+    if (expectedRevision === currentRevision) return [];
+    return [Object.freeze({
+      code,
+      reason: expectedRevision === null || currentRevision === null
+        ? "MISSING" as const
+        : "CHANGED" as const,
+      expectedRevision,
+      currentRevision,
+      retryable: true as const,
+      recoveryAction: recoveryActionFor(code),
+    })];
+  });
+  return Object.freeze(changes);
+}
+
+export function describeGmailSendReadinessChange(input: Readonly<{
+  expected: GmailSendReadinessSnapshot;
+  code: GmailSendReadinessConditionCode;
+  currentRevision: string | null;
+}>): GmailSendReadinessChangedCondition {
+  const expectedRevision = input.expected.conditions.find(
+    (condition) => condition.code === input.code,
+  )?.revision ?? null;
+  return Object.freeze({
+    code: input.code,
+    reason: expectedRevision === null || input.currentRevision === null
+      ? "MISSING"
+      : "CHANGED",
+    expectedRevision,
+    currentRevision: input.currentRevision,
+    retryable: true,
+    recoveryAction: recoveryActionFor(input.code),
+  });
+}
+
+export function describeGmailSendReadinessSnapshotValidity(
+  input: Readonly<{
+    expected: GmailSendReadinessSnapshot;
+    reason: "CHANGED" | "MISSING" | "EXPIRED";
+    currentRevision: string | null;
+  }>,
+): GmailSendReadinessChangedCondition {
+  return Object.freeze({
+    code: "SNAPSHOT_VALIDITY",
+    reason: input.reason,
+    expectedRevision: input.expected.snapshotVersion || null,
+    currentRevision: input.currentRevision,
+    retryable: true,
+    recoveryAction: recoveryActionFor("SNAPSHOT_VALIDITY"),
+  });
+}
 
 const asLatestFutureTimestamp = (
   timestamps: readonly number[],

@@ -619,6 +619,12 @@ func (a *Activities) saveFailure(ctx context.Context, task crawler.Task, message
 }
 
 func failureMessage(task crawler.Task, err error) string {
+	if task.Type == crawler.TaskTechnicalAudit {
+		if err != nil && strings.Contains(strings.ToLower(err.Error()), "no crawlable pages") {
+			return "技术审计失败：未抓取到可审计页面"
+		}
+		return "网站抓取失败"
+	}
 	if task.Type != crawler.TaskSiteUnderstanding {
 		return "网站抓取失败"
 	}

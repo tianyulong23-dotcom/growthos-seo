@@ -9,6 +9,10 @@ import type {
   SendIntentRepository,
 } from "../../src/modules/backlinks/application/services/send-intent.repository.js";
 import {
+  createGmailSendReadinessSnapshot,
+  gmailSendReadinessConditionCodes,
+} from "../../src/modules/backlinks/application/services/send-policy-gate.js";
+import {
   createActorContext,
   createProjectContext,
   createTenantContext,
@@ -26,6 +30,16 @@ const contactId = "018f0000-0000-7000-8000-000000000614";
 const sendSnapshotId = "018f0000-0000-7000-8000-000000000216";
 const contactVersion = 3;
 const requestedSendAt = new Date("2026-07-27T10:14:00.000Z");
+const readinessConditions = gmailSendReadinessConditionCodes.map(
+  (code, index) => ({
+    code,
+    revision: `revision-${index + 1}`,
+  }),
+);
+const readinessSnapshot = createGmailSendReadinessSnapshot({
+  evaluatedAt: requestedSendAt,
+  conditions: readinessConditions,
+});
 const tokenSecretReference = {
   provider: "platform-secret-store",
   secretKind: "GMAIL_TOKEN_SET" as const,
@@ -62,6 +76,12 @@ const input = {
   messagePurpose: "FOLLOW_UP" as const,
   followUpIndex: 1,
   idempotencyKey: "send-intent-114",
+  readinessSnapshot,
+  humanConfirmation: {
+    confirmed: true as const,
+    confirmedAt: requestedSendAt.toISOString(),
+    readinessSnapshotVersion: readinessSnapshot.snapshotVersion,
+  },
 };
 const createdIntent = {
   sendIntentId,
@@ -77,6 +97,7 @@ const createdIntent = {
 const allowedPreflight = {
   state: "allowed" as const,
   tokenSecretReference,
+  readinessConditions,
   gmail: {
     connectionId: gmailConnectionId,
     primaryEmail: "sender@example.test",
@@ -151,6 +172,12 @@ describe("BL-AI-114/115 Send Intent command", () => {
       minimumIntervalSeconds: 300,
       reservationTtlSeconds: 600,
       actorId: "user-114",
+      readinessSnapshot,
+      humanConfirmation: {
+        confirmed: true,
+        confirmedAt: requestedSendAt,
+        readinessSnapshotVersion: readinessSnapshot.snapshotVersion,
+      },
     });
     expect(recorded?.logicalMessageKey).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -171,7 +198,13 @@ describe("BL-AI-114/115 Send Intent command", () => {
     };
     const commands = createSendIntentCommands({
       repository: withPreflight(repository),
-      ...enabledRuntime,
+      sendRuntimeEnabled: false,
+      workerAvailable: async () => {
+        throw new Error("create must not consult mutable worker state");
+      },
+      gmailCredentialAvailable: async () => {
+        throw new Error("create must not resolve credentials again");
+      },
       newId: () => sendIntentId,
       now: () => requestedSendAt,
     });
@@ -316,6 +349,7 @@ describe("BL-AI-114/115 Send Intent command", () => {
       allowed: true,
       deliveryState: "NOT_SENT",
       checkedAt: requestedSendAt.toISOString(),
+      readinessSnapshot,
       gmail: allowedPreflight.gmail,
     });
     expect(creates).toBe(0);
@@ -352,7 +386,7 @@ describe("BL-AI-114/115 Send Intent command", () => {
         now: () => requestedSendAt,
       });
 
-      await expect(commands.create(input)).rejects.toMatchObject<
+      await expect(commands.preflight(input)).rejects.toMatchObject<
         Partial<BacklinkError>
       >({ code });
       expect(preflights).toBe(0);
@@ -380,7 +414,7 @@ describe("BL-AI-114/115 Send Intent command", () => {
       now: () => requestedSendAt,
     });
 
-    await expect(commands.create(input)).rejects.toMatchObject<
+    await expect(commands.preflight(input)).rejects.toMatchObject<
       Partial<BacklinkError>
     >({ code: "DRAFT_VERSION_STALE" });
     expect(creates).toBe(0);
@@ -408,7 +442,7 @@ describe("BL-AI-114/115 Send Intent command", () => {
       now: () => requestedSendAt,
     });
 
-    await expect(commands.create(input)).rejects.toMatchObject<
+    await expect(commands.preflight(input)).rejects.toMatchObject<
       Partial<BacklinkError>
     >({
       code: "GMAIL_REAUTH_REQUIRED",
@@ -455,7 +489,7 @@ describe("BL-AI-114/115 Send Intent command", () => {
         now: () => requestedSendAt,
       });
 
-      await expect(commands.create(input)).rejects.toMatchObject<
+      await expect(commands.preflight(input)).rejects.toMatchObject<
         Partial<BacklinkError>
       >({ code });
       expect(credentialChecks).toBe(0);

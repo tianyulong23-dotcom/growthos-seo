@@ -15,6 +15,7 @@ const moduleConfiguration = {
   backlinks: {
     label: "Backlinks",
     operations: null,
+    additionalOperations: new Set(["get_project_backlink_performance_v1"]),
   },
   platform: {
     label: "Platform",
@@ -26,6 +27,7 @@ const moduleConfiguration = {
       "platformArchiveWebsiteProjectV1",
       "platformRestoreWebsiteProjectV1",
     ]),
+    additionalOperations: new Set(),
   },
 }[requestedModule]
 if (!moduleConfiguration) {
@@ -179,9 +181,12 @@ const operations = Object.entries(document.paths ?? {}).flatMap(
       .filter(
         ([method, operation]) =>
           methods.has(method) &&
-          operation["x-growthos-module"] === requestedModule &&
-          (moduleConfiguration.operations === null ||
-            moduleConfiguration.operations.has(operation.operationId))
+          ((operation["x-growthos-module"] === requestedModule &&
+            (moduleConfiguration.operations === null ||
+              moduleConfiguration.operations.has(operation.operationId))) ||
+            moduleConfiguration.additionalOperations.has(
+              operation.operationId
+            ))
       )
       .map(([method, operation]) => ({ method, path, pathItem, operation }))
 )

@@ -9,8 +9,8 @@ import { ModulePage } from "@/pages/module-page"
 
 export function BacklinksModulePage() {
   const [actionCount, setActionCount] = React.useState(0)
-  const { projects, getProject } = useProjects()
-  const { projectId = projects[0]?.id ?? "" } = useParams<{
+  const { getProject } = useProjects()
+  const { projectId = "" } = useParams<{
     projectId: string
   }>()
   const project = getProject(projectId)
@@ -19,12 +19,20 @@ export function BacklinksModulePage() {
     <ModulePage
       module={backlinksNavigation}
       actionLabel={
-        actionCount > 0 ? `已添加 ${actionCount} 项` : backlinksNavigation.action
+        actionCount > 0
+          ? `已添加 ${actionCount} 项`
+          : backlinksNavigation.action
       }
       actionIcon={<Link2 />}
       onAction={() => setActionCount((count) => count + 1)}
     >
-      {(activeView) => <OutreachWorkspace view={activeView} project={project} />}
+      {(activeView) => (
+        <OutreachWorkspace
+          key={`${project.id}:${activeView}`}
+          view={activeView}
+          project={project}
+        />
+      )}
     </ModulePage>
   )
 }

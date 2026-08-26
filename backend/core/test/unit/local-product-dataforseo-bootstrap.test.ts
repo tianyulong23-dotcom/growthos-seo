@@ -10,7 +10,6 @@ import {
 const input = {
   login: "account@example.com",
   password: "protected-provider-password",
-  websiteProjectKey: "elephtv",
   credentialSecretRef:
     "secret://growthos/local-product/dataforseo/provider-credential/v7",
   endpointAllowlist: [...localProductDataForSeoEndpoints],
@@ -19,11 +18,6 @@ const input = {
   absoluteBudgetMicros: 5_000,
   maxPaidCalls: 25,
   candidateLimit: 25,
-  locationCode: "2840",
-  languageCode: "en",
-  keywords: ["video streaming", "creator monetization"],
-  products: ["streaming platform"],
-  targetUrls: ["https://elephtv.com/"],
 } as const;
 
 const manifest = {
@@ -51,6 +45,11 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
     });
     expect(JSON.stringify(environment)).not.toContain(input.login);
     expect(JSON.stringify(environment)).not.toContain(input.password);
+    expect(environment).not.toHaveProperty("DATAFORSEO_LOCATION_CODE");
+    expect(environment).not.toHaveProperty("DATAFORSEO_LANGUAGE_CODE");
+    expect(environment).not.toHaveProperty("DATAFORSEO_PROJECT_KEYWORDS_JSON");
+    expect(environment).not.toHaveProperty("DATAFORSEO_PROJECT_PRODUCTS_JSON");
+    expect(environment).not.toHaveProperty("DATAFORSEO_TARGET_URLS_JSON");
   });
 
   it("updates only the safe manifest section for bounded paid calls", () => {
@@ -76,7 +75,18 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
     expect(JSON.stringify(updated)).not.toContain(input.password);
   });
 
-  it("rejects cross-project, unsafe endpoint, excess calls, and fake inputs", () => {
+  it("allows a bounded approved endpoint subset", () => {
+    expect(() => localProductDataForSeoBootstrapInputSchema.parse({
+      ...input,
+      endpointAllowlist: [
+        "https://api.dataforseo.com/v3/dataforseo_labs/google/competitors_domain/live",
+        "https://api.dataforseo.com/v3/backlinks/backlinks/live",
+        "https://api.dataforseo.com/v3/backlinks/bulk_spam_score/live",
+      ],
+    })).not.toThrow();
+  });
+
+  it("rejects unsafe endpoints, excess calls, and fake inputs", () => {
     expect(() => localProductDataForSeoBootstrapInputSchema.parse({
       ...input,
       timeoutMs: 300_000,
@@ -87,17 +97,8 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
     })).toThrow();
     expect(() => localProductDataForSeoBootstrapInputSchema.parse({
       ...input,
-      websiteProjectKey: "other-project",
-    })).not.toThrow();
-    expect(() => updateLocalProductDataForSeoManifest(
-      manifest,
-      { ...input, websiteProjectKey: "other-project" },
-      new Date("2026-08-04T10:00:00.000Z"),
-    )).toThrow("LOCAL_PRODUCT_DATAFORSEO_PROJECT_CONTEXT_MISMATCH");
-    expect(() => localProductDataForSeoBootstrapInputSchema.parse({
-      ...input,
       endpointAllowlist: [
-        "https://api.dataforseo.com/v3/backlinks/summary/live",
+        "https://api.dataforseo.com/v3/backlinks/history/live",
       ],
     })).toThrow();
     expect(() => localProductDataForSeoBootstrapInputSchema.parse({
@@ -111,7 +112,7 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
     })).toThrow();
     expect(() => localProductDataForSeoBootstrapInputSchema.parse({
       ...input,
-      targetUrls: ["https://example.invalid/"],
+      websiteProjectKey: "legacy-project-bound-input",
     })).toThrow();
   });
 });

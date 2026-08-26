@@ -31,6 +31,33 @@ const gmailConnection = {
   tokenExpiresAt: "2026-07-27T06:00:00.000Z",
   connectedAt: "2026-07-27T05:00:00.000Z",
 };
+const gmailReadiness = {
+  evaluatedAt: "2026-08-18T02:00:00.000Z",
+  connection: { state: "CONNECTED" as const, ready: true },
+  send: { state: "WAITING_FOR_SEND_CONTEXT" as const, ready: false },
+  sync: {
+    state: "WAITING_FOR_ACCEPTED_SEND" as const,
+    ready: true,
+  },
+  blockers: [{
+    code: "SEND_CONTEXT_REQUIRED" as const,
+    capability: "SEND" as const,
+    owner: "USER" as const,
+    retrySafe: true,
+    recoveryAction: "OPEN_APPROVED_DRAFT" as const,
+    detail:
+      "Open an approved draft and recipient to evaluate send-specific readiness.",
+  }],
+  primaryBlocker: {
+    code: "SEND_CONTEXT_REQUIRED" as const,
+    capability: "SEND" as const,
+    owner: "USER" as const,
+    retrySafe: true,
+    recoveryAction: "OPEN_APPROVED_DRAFT" as const,
+    detail:
+      "Open an approved draft and recipient to evaluate send-specific readiness.",
+  },
+};
 
 function createDependencies() {
   const actor = createActorContext({
@@ -314,6 +341,33 @@ function createDependencies() {
         auditEventId: "audit-refill-private-api",
         replayed: false,
       }),
+      cancelQueuedRefill: async () => ({
+        jobId: "018f0000-0000-7000-8000-000000000156",
+        refillId: "018f0000-0000-7000-8000-000000000157",
+        outboxEventId: "018f0000-0000-7000-8000-000000000158",
+        recommendationContextVersionId:
+          "018f0000-0000-7000-8000-000000000159",
+        visiblePoolGeneration: 1,
+        status: "cancelled" as const,
+        outboxStatus: "published" as const,
+        dispatchDisposition: "cancelled_before_dispatch" as const,
+        policyState: "idle" as const,
+        reasonCode: "read_side_effect_cleanup" as const,
+        version: 2,
+        lifecycleEventId: "lifecycle-refill-cancel-private-api",
+        auditEventId: "audit-refill-cancel-private-api",
+        replayed: false,
+      }),
+      closeDuplicateRefill: async () => ({
+        duplicateJobId: "018f0000-0000-7000-8000-000000000160",
+        canonicalJobId: "018f0000-0000-7000-8000-000000000161",
+        status: "cancelled" as const,
+        reasonCode: "duplicate_recovery_owner" as const,
+        version: 2,
+        lifecycleEventId: "lifecycle-refill-close-private-api",
+        auditEventId: "audit-refill-close-private-api",
+        replayed: false,
+      }),
     },
     metricDashboardQuery: {
       getDashboard: async () => ({
@@ -484,7 +538,11 @@ function createDependencies() {
       }),
     },
     gmailConnectionQuery: {
-      getStatus: async () => gmailConnection,
+      getStatus: async () => ({
+        accounts: [gmailConnection],
+        selectedConnection: gmailConnection,
+        readiness: gmailReadiness,
+      }),
     },
     gmailPollingSyncCommands: {
       start: async () => ({
@@ -541,11 +599,15 @@ describe("private Backlinks API bootstrap", () => {
       headers: { origin: "https://browser.example" },
     });
 
-    expect(operationIds).toHaveLength(73);
-    expect(new Set(operationIds).size).toBe(73);
+    expect(operationIds).toHaveLength(78);
+    expect(new Set(operationIds).size).toBe(78);
     expect(operationIds).toContain("backlinksPrivateHealthV1");
     expect(operationIds).toContain("backlinksPreflightSendIntentV1");
+    expect(operationIds).toContain("backlinksListSendIntentsV1");
     expect(operationIds).toContain("backlinksRetryUnpublishedContactsV1");
+    expect(operationIds).toContain(
+      "backlinksRunCurrentPoolContactEnrichmentV1",
+    );
     expect(operationIds).toContain("backlinksGetAssessmentV1");
     expect(operationIds).toContain("backlinksCreateDraftJobV1");
     expect(operationIds).toContain("backlinksGetDraftJobV1");
@@ -560,6 +622,12 @@ describe("private Backlinks API bootstrap", () => {
     expect(operationIds).toContain("backlinksStartContactEnrichmentV1");
     expect(operationIds).toContain("backlinksGetContactEnrichmentJobV1");
     expect(operationIds).toContain("backlinksRetryContactEnrichmentV1");
+    expect(operationIds).toContain(
+      "backlinksCancelQueuedRecommendationRefillV1",
+    );
+    expect(operationIds).toContain(
+      "backlinksCloseDuplicateRecommendationRefillV1",
+    );
     expect(operationIds).toContain("backlinksAddPublicContactCandidateV1");
     expect(operationIds).toContain("backlinksCorrectContactCandidateV1");
     expect(operationIds).toContain("backlinksConnectGmailV1");
@@ -607,7 +675,29 @@ describe("private Backlinks API bootstrap", () => {
       "backlinksListInventoryDirectObservationsV1",
     );
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ status: "ok" });
+    expect(response.json()).toMatchObject({
+      status: "ok",
+      process: "api",
+      buildId: null,
+      providers: {
+        dataForSeo: {
+          configured: false,
+          externalAvailability: "disabled",
+        },
+        browser: {
+          configured: false,
+          externalAvailability: "disabled",
+        },
+        ai: {
+          configured: false,
+          externalAvailability: "disabled",
+        },
+        gmail: {
+          configured: false,
+          externalAvailability: "disabled",
+        },
+      },
+    });
     expect(response.headers).not.toHaveProperty("access-control-allow-origin");
     await app.close();
   });
@@ -659,7 +749,29 @@ describe("private Backlinks API bootstrap", () => {
 
     const response = await fetch(`${server.address}/health`);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: "ok" });
+    expect(await response.json()).toMatchObject({
+      status: "ok",
+      process: "api",
+      buildId: null,
+      providers: {
+        dataForSeo: {
+          configured: false,
+          externalAvailability: "disabled",
+        },
+        browser: {
+          configured: false,
+          externalAvailability: "disabled",
+        },
+        ai: {
+          configured: false,
+          externalAvailability: "disabled",
+        },
+        gmail: {
+          configured: false,
+          externalAvailability: "disabled",
+        },
+      },
+    });
 
     const closed = once(app.server, "close");
     await server.stop();

@@ -3,25 +3,33 @@ import {
   commercialFitHardGateIds,
   scoreCommercialRecommendationFit,
   type CommercialFitDecision,
+  type CommercialFitComponentId,
   type CommercialFitEvidenceState,
   type CommercialFitGateInput,
   type CommercialFitScoreInput,
-} from "./commercial-score-v3.js";
+} from "./commercial-score-v4.js";
 
 type JsonObject = Readonly<Record<string, unknown>>;
 
-const componentMap = Object.freeze({
-  semantic_relevance: "relevance",
-  audience_partnership: "target_cooperation_angle",
-  market_language_tier: "market_language",
-  site_editorial_commercial: "editorial_commercial_feasibility",
-  dataforseo_authority_risk: "dataforseo_authority_risk",
-  dataforseo_traffic_visibility: "traffic_visibility",
-  safefetch_technical_access: "technical",
-}) satisfies Readonly<Record<
-  CommercialFitScoreInput["id"],
-  string
->>;
+const componentSources = Object.freeze({
+  semantic_relevance: ["relevance"],
+  placement_attainability: [
+    "target_cooperation_angle",
+    "editorial_commercial_feasibility",
+  ],
+  relative_authority: ["dataforseo_authority_risk"],
+  market_language_tier: ["market_language"],
+  traffic_basic_quality: ["traffic_visibility", "technical"],
+  evidence_completeness: [
+    "relevance",
+    "target_cooperation_angle",
+    "market_language",
+    "editorial_commercial_feasibility",
+    "dataforseo_authority_risk",
+    "traffic_visibility",
+    "technical",
+  ],
+}) satisfies Readonly<Record<CommercialFitComponentId, readonly string[]>>;
 
 const gateMap = Object.freeze({
   self_or_related_domain: "self_or_related_domain",
@@ -29,11 +37,13 @@ const gateMap = Object.freeze({
   permanently_rejected_or_suppressed: "permanently_rejected_or_suppressed",
   unsafe_or_disallowed: "unsafe_or_malicious",
   pbn_or_link_farm: "pbn_or_link_farm",
-  forbidden_market_mismatch: "strict_market_mismatch",
 }) satisfies Readonly<Record<
   Exclude<
     CommercialFitGateInput["id"],
-    "zero_topic_relevance" | "unrelated_industry"
+    | "zero_topic_relevance"
+    | "unrelated_industry"
+    | "confirmed_inaccessible"
+    | "mega_platform_without_placement_evidence"
   >,
   string
 >>;
@@ -76,16 +86,6 @@ function normalizedValue(value: unknown): number | null {
   return parsed !== null && parsed >= 0 && parsed <= 1 ? parsed : null;
 }
 
-function rawValue(
-  value: unknown,
-): number | string | boolean | null {
-  return typeof value === "number"
-      || typeof value === "string"
-      || typeof value === "boolean"
-    ? value
-    : null;
-}
-
 function collectedAt(value: unknown, fallback: string): string {
   return typeof value === "string" && !Number.isNaN(Date.parse(value))
     ? value
@@ -100,6 +100,68 @@ function componentById(
   return objectValue(components.find(
     (component) => objectValue(component).id === id,
   ));
+}
+
+function mappedComponent(
+  oldScore: JsonObject,
+  id: CommercialFitComponentId,
+  fallbackCollectedAt: string,
+  forceZero = false,
+): CommercialFitScoreInput {
+  const previous = componentSources[id].map((sourceId) =>
+    componentById(oldScore, sourceId)
+  );
+  const usable = previous.filter((component) =>
+    ["observed", "derived"].includes(evidenceState(component.state))
+      && normalizedValue(component.normalizedValue) !== null
+  );
+  const normalized = forceZero
+    ? 0
+    : id === "evidence_completeness"
+      ? usable.length / previous.length
+      : usable.length === 0
+        ? null
+        : usable.reduce(
+            (sum, component) =>
+              sum + (normalizedValue(component.normalizedValue) ?? 0),
+            0,
+          ) / usable.length;
+  const state: CommercialFitEvidenceState = forceZero || usable.length > 0
+    ? "derived"
+    : previous.some((component) =>
+        evidenceState(component.state) === "manual_review"
+      )
+      ? "manual_review"
+      : previous.some((component) =>
+          evidenceState(component.state) === "insufficient_data"
+        )
+        ? "insufficient_data"
+        : "unavailable";
+  return Object.freeze({
+    id,
+    state,
+    rawValue: forceZero
+      ? "strict_market_mismatch"
+      : normalized,
+    normalizedValue: normalized,
+    evidenceRefs: Object.freeze([
+      ...new Set(previous.flatMap((component) =>
+        stringValues(component.evidenceRefs)
+      )),
+      ...(forceZero
+        ? ["historical-v2-gate:strict_market_mismatch"]
+        : []),
+    ]),
+    collectedAt: previous
+      .map((component) => collectedAt(
+        component.collectedAt,
+        fallbackCollectedAt,
+      ))
+      .sort()
+      .at(-1) ?? fallbackCollectedAt,
+    normalizationRuleVersion:
+      `historical-v2-to-v4.${id}.v1`,
+  });
 }
 
 function gate(
@@ -148,26 +210,15 @@ export function reassessHistoricalCommercialCandidate(input: Readonly<{
     ...stringValues(oldScore.hitGates),
   ]);
   const staticEvidence = stringValues(staticAssessment.evidenceRefs);
-  const components = commercialFitComponentIds.map((id) => {
-    const previous = componentById(oldScore, componentMap[id]);
-    return Object.freeze({
+  const components = commercialFitComponentIds.map((id) =>
+    mappedComponent(
+      oldScore,
       id,
-      state: evidenceState(previous.state),
-      rawValue: rawValue(previous.rawValue),
-      normalizedValue: normalizedValue(previous.normalizedValue),
-      evidenceRefs: Object.freeze([
-        ...stringValues(previous.evidenceRefs),
-      ]),
-      collectedAt: collectedAt(
-        previous.collectedAt,
-        input.fallbackCollectedAt,
-      ),
-      normalizationRuleVersion:
-        `historical-v2-reuse|${String(
-          previous.normalizationRuleVersion ?? "unknown",
-        )}`,
-    });
-  });
+      input.fallbackCollectedAt,
+      id === "market_language_tier"
+        && oldHitGates.has("strict_market_mismatch"),
+    )
+  );
   const relevance = components.find(
     ({ id }) => id === "semantic_relevance",
   );
@@ -194,6 +245,25 @@ export function reassessHistoricalCommercialCandidate(input: Readonly<{
       ]),
     );
   });
+  const technical = componentById(oldScore, "technical");
+  const projectAuthority = finiteNumber(
+    objectValue(objectValue(oldScore.details).authority).projectAuthority,
+  );
+  const candidateAuthority = normalizedValue(
+    componentById(oldScore, "dataforseo_authority_risk").normalizedValue,
+  );
+  const siteType = typeof staticAssessment.siteType === "string"
+    ? staticAssessment.siteType.toLowerCase()
+    : null;
+  const megaSiteTypes = new Set([
+    "global_marketplace",
+    "search_engine",
+    "social_network",
+    "code_hosting",
+    "cloud_infrastructure",
+    "encyclopedia",
+  ]);
+  const cooperationPages = stringValues(staticAssessment.cooperationPages);
   const gates = Object.freeze([
     ...mappedGates,
     gate(
@@ -207,6 +277,35 @@ export function reassessHistoricalCommercialCandidate(input: Readonly<{
       relevanceUsable ? "derived" : relevance.state,
       relevanceUsable && (relevance.normalizedValue ?? 0) > 0 ? false : null,
       relevance.evidenceRefs,
+    ),
+    gate(
+      "confirmed_inaccessible",
+      "derived",
+      staticAssessment.technicalAccessibility === 0
+        || normalizedValue(technical.normalizedValue) === 0,
+      Object.freeze([
+        ...staticEvidence,
+        ...stringValues(technical.evidenceRefs),
+      ]),
+    ),
+    gate(
+      "mega_platform_without_placement_evidence",
+      "derived",
+      projectAuthority !== null
+        && candidateAuthority !== null
+        && candidateAuthority * 100 - projectAuthority > 55
+        && siteType !== null
+        && megaSiteTypes.has(siteType)
+        && cooperationPages.length === 0,
+      Object.freeze([
+        ...staticEvidence,
+        ...stringValues(
+          componentById(
+            oldScore,
+            "dataforseo_authority_risk",
+          ).evidenceRefs,
+        ),
+      ]),
     ),
   ].sort(
     (left, right) =>

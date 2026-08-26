@@ -23,6 +23,12 @@ import {
   type BacklinksTemporalClient,
 } from "./modules/backlinks/workflows/client.js";
 import {
+  createBacklinksApiRuntimeHealth,
+  createBacklinksWorkerRuntimeHealth,
+  startBacklinksWorkerHealthServer,
+  type BacklinksWorkerExecutionMode,
+} from "./modules/backlinks/runtime/runtime-health.js";
+import {
   startBacklinksWorker,
   type BacklinksWorkerRegistrations,
 } from "./modules/backlinks/workflows/worker.js";
@@ -58,6 +64,7 @@ export type BacklinksRuntimeFactoryContext = Readonly<{
   process: RuntimeProcess;
   pool: RuntimePool;
   temporal: BacklinksTemporalClient;
+  buildIdentity: LocalProductRuntimeBuildIdentity;
 }>;
 
 export type BacklinksProductionRuntimeModule = Readonly<{
@@ -113,6 +120,19 @@ const runtimeEnvironmentSchema = z
     BACKLINK_API_REQUEST_TIMEOUT_MS: requiredTextSchema,
     BACKLINKS_HOST: requiredTextSchema,
     BACKLINKS_PORT: portSchema,
+    BACKLINKS_WORKER_EXECUTION_MODE: z
+      .enum(["normal", "quiesced", "recovery"])
+      .optional()
+      .default("normal"),
+    BACKLINKS_RECOVERY_WEBSITE_PROJECT_ID: z.string().uuid().optional(),
+    BACKLINKS_RECOVERY_REFILL_JOB_ID: z.string().uuid().optional(),
+    BACKLINKS_RECOVERY_REFILL_OUTBOX_EVENT_ID: z.string().uuid().optional(),
+    BACKLINKS_WORKER_HEALTH_HOST: requiredTextSchema
+      .optional()
+      .default("127.0.0.1"),
+    BACKLINKS_WORKER_HEALTH_PORT: portSchema
+      .optional()
+      .default(7302),
     PLATFORM_CONTEXT_SIGNING_KEY_SECRET_REF: requiredTextSchema,
     PLATFORM_CONTEXT_SIGNING_KEY_FILE: requiredTextSchema,
     BACKLINKS_RUNTIME_MODE: z.enum([
@@ -154,7 +174,6 @@ const runtimeEnvironmentSchema = z
       positiveIntegerStringSchema.optional(),
     LOCAL_PRODUCT_ORGANIZATION_ID: requiredTextSchema.optional(),
     LOCAL_PRODUCT_WORKSPACE_ID: requiredTextSchema.optional(),
-    LOCAL_PRODUCT_WEBSITE_PROJECT_ID: requiredTextSchema.optional(),
     LOCAL_PRODUCT_USER_ID: requiredTextSchema.optional(),
   })
   .strict();
@@ -211,6 +230,17 @@ function assertProcessConfiguration(
     throw new Error(
       "Worker process requires BACKLINKS_API_ENABLED=false and BACKLINKS_WORKER_ENABLED=true",
     );
+  }
+  if (
+    runtimeProcess === "worker"
+    && environment.BACKLINKS_WORKER_EXECUTION_MODE === "recovery"
+    && (
+      environment.BACKLINKS_RECOVERY_WEBSITE_PROJECT_ID === undefined
+      || environment.BACKLINKS_RECOVERY_REFILL_JOB_ID === undefined
+      || environment.BACKLINKS_RECOVERY_REFILL_OUTBOX_EVENT_ID === undefined
+    )
+  ) {
+    throw new Error("BACKLINKS_RECOVERY_IDENTITY_REQUIRED");
   }
 }
 
@@ -385,6 +415,7 @@ async function startApiProcess(
       process: "api",
       pool: resources.pool,
       temporal: resources.temporal,
+      buildIdentity,
     });
     const app = await createBacklinksPrivateApi({
       config,
@@ -395,6 +426,10 @@ async function startApiProcess(
         await assertTemporalReady(resources.temporal);
       },
       buildIdentity,
+      runtimeHealth: createBacklinksApiRuntimeHealth(
+        process.env,
+        buildIdentity.buildId,
+      ),
     });
     const server = await startBacklinksPrivateApi(app, {
       host: environment.BACKLINKS_HOST,
@@ -435,6 +470,9 @@ async function startWorkerProcess(
 ): Promise<void> {
   const resources = await createRuntimeResources("worker", environment);
   let runtime: BacklinksProductionRuntimeModule | undefined;
+  let worker: Awaited<ReturnType<typeof startBacklinksWorker>> | undefined;
+  let healthServer:
+    Awaited<ReturnType<typeof startBacklinksWorkerHealthServer>> | undefined;
   try {
     runtime = await loadRuntimeModule(environment.BACKLINKS_RUNTIME_MODULE);
     if (runtime.createWorkerRegistrations === undefined) {
@@ -444,16 +482,39 @@ async function startWorkerProcess(
       process: "worker",
       pool: resources.pool,
       temporal: resources.temporal,
+      buildIdentity,
     });
-    const worker = await startBacklinksWorker(
+    worker = await startBacklinksWorker(
       resources.temporalConfig,
       registrations,
     );
+    const workerExecutionMode: BacklinksWorkerExecutionMode =
+      environment.BACKLINKS_WORKER_EXECUTION_MODE;
+    if (workerExecutionMode === "quiesced") {
+      throw new Error(
+        "QUIESCED_WORKER_REQUIRES_LOCAL_PRODUCT_QUIESCED_ENTRYPOINT",
+      );
+    }
+    const health = createBacklinksWorkerRuntimeHealth({
+      buildId: buildIdentity.buildId,
+      workerExecutionMode,
+      postgresReady: true,
+      temporalReady: true,
+    });
+    healthServer = await startBacklinksWorkerHealthServer(
+      health,
+      {
+        host: environment.BACKLINKS_WORKER_HEALTH_HOST,
+        port: environment.BACKLINKS_WORKER_HEALTH_PORT,
+      },
+      registrations.healthSnapshot,
+    );
     installSignalHandlers(async () => {
       try {
-        await worker.stop();
+        await worker?.stop();
       } finally {
         await closeResources([
+          async () => healthServer?.stop(),
           async () => runtime?.close?.(),
           () => resources.pool.end(),
           () => resources.temporal.close(),
@@ -462,12 +523,19 @@ async function startWorkerProcess(
     });
     console.log(JSON.stringify({
       event: "backlinks.worker.ready",
-      taskQueue: environment.TEMPORAL_BACKLINKS_TASK_QUEUE,
+      taskQueue:
+        registrations.taskQueue
+        ?? environment.TEMPORAL_BACKLINKS_TASK_QUEUE,
       buildId: buildIdentity.buildId,
+      healthAddress: healthServer.address,
+      workerExecutionMode,
+      businessConsumersRunning: health.businessConsumersRunning,
     }));
     await worker.completion;
   } catch (error) {
     await closeResources([
+      async () => worker?.stop(),
+      async () => healthServer?.stop(),
       async () => runtime?.close?.(),
       () => resources.pool.end(),
       () => resources.temporal.close(),

@@ -69,6 +69,8 @@ export const backlinksRuntimeContract = Object.freeze({
       "backlinksPlanRecommendationRefillSupplyV1",
     completeRecommendationRefillSupply:
       "backlinksCompleteRecommendationRefillSupplyV1",
+    completeRecommendationRefillSupersession:
+      "backlinksCompleteRecommendationRefillSupersessionV1",
     recordRecommendationRefillFailure:
       "backlinksRecordRecommendationRefillFailureV1",
     runContactEnrichment: "backlinksRunContactEnrichmentV1",
@@ -82,7 +84,20 @@ export const backlinksRuntimeContract = Object.freeze({
     claimGmailSendAttempt: "backlinksClaimGmailSendAttemptV1",
     dispatchGmailSendAttempt: "backlinksDispatchGmailSendAttemptV1",
     settleGmailSendAttempt: "backlinksSettleGmailSendAttemptV1",
+    loadGmailSendReconciliation:
+      "backlinksLoadGmailSendReconciliationV1",
+    queryGmailSentMessage: "backlinksQueryGmailSentMessageV1",
+    recoverGmailDispatch: "backlinksRecoverGmailDispatchV1",
+    reconcileGmailSendResult: "backlinksReconcileGmailSendResultV1",
     runGmailPollingSync: "backlinksRunGmailPollingSyncV1",
+  },
+  signals: {
+    recommendationRefillSuperseded:
+      "backlinksRecommendationRefillSupersededV1",
+  },
+  queries: {
+    recommendationRefillSupersessionStatus:
+      "backlinksRecommendationRefillSupersessionStatusV1",
   },
   providers: {
     dataForSeo: {
@@ -147,5 +162,21 @@ export function assertBacklinksWorkflowId(value: string): void {
 export function assertBacklinksTaskQueue(value: string): void {
   if (value !== backlinksRuntimeContract.taskQueue) {
     throw new Error("BACKLINKS_TASK_QUEUE_INVALID");
+  }
+}
+
+export function buildBacklinksRecoveryTaskQueue(jobId: string): string {
+  if (!validSegment(jobId)) {
+    throw new Error("BACKLINKS_RECOVERY_TASK_QUEUE_INVALID");
+  }
+  return `${backlinksRuntimeContract.taskQueue}.recovery.${jobId}`;
+}
+
+export function assertBacklinksRecoveryTaskQueue(
+  value: string,
+  jobId: string,
+): void {
+  if (value !== buildBacklinksRecoveryTaskQueue(jobId)) {
+    throw new Error("BACKLINKS_RECOVERY_TASK_QUEUE_INVALID");
   }
 }

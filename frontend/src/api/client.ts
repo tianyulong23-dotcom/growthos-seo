@@ -47,6 +47,49 @@ function extractErrorMessage(detail: unknown): string | null {
   return messages.length ? messages.join("; ") : null
 }
 
+export type ApiChangedCondition = Readonly<{
+  code: string
+  reason: "CHANGED" | "MISSING" | "EXPIRED"
+  expectedRevision: string | null
+  currentRevision: string | null
+  retryable: boolean
+  recoveryAction: string
+}>
+
+function extractChangedConditions(value: unknown): ApiChangedCondition[] {
+  if (!Array.isArray(value)) return []
+
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return []
+    const record = item as Record<string, unknown>
+    const reason = record.reason
+    if (
+      typeof record.code !== "string" ||
+      !["CHANGED", "MISSING", "EXPIRED"].includes(String(reason)) ||
+      typeof record.retryable !== "boolean" ||
+      typeof record.recoveryAction !== "string"
+    ) {
+      return []
+    }
+    return [
+      {
+        code: record.code,
+        reason: reason as ApiChangedCondition["reason"],
+        expectedRevision:
+          typeof record.expectedRevision === "string"
+            ? record.expectedRevision
+            : null,
+        currentRevision:
+          typeof record.currentRevision === "string"
+            ? record.currentRevision
+            : null,
+        retryable: record.retryable,
+        recoveryAction: record.recoveryAction,
+      },
+    ]
+  })
+}
+
 export class ApiError extends Error {
   public readonly status: number
   public readonly code: string | null
@@ -58,6 +101,8 @@ export class ApiError extends Error {
   public readonly clientReviewVersion: number | null
   public readonly clientVersionNumber: number | null
   public readonly acceptedSequence: number | null
+  public readonly canonicalFrontendOrigin: string | null
+  public readonly changedConditions: readonly ApiChangedCondition[]
   public readonly recoverableAutosave: {
     id: string
     client_id: string
@@ -79,6 +124,8 @@ export class ApiError extends Error {
       clientReviewVersion?: number | null
       clientVersionNumber?: number | null
       acceptedSequence?: number | null
+      canonicalFrontendOrigin?: string | null
+      changedConditions?: readonly ApiChangedCondition[]
       recoverableAutosave?: ApiError["recoverableAutosave"]
     }
   ) {
@@ -94,6 +141,8 @@ export class ApiError extends Error {
     this.clientReviewVersion = details?.clientReviewVersion ?? null
     this.clientVersionNumber = details?.clientVersionNumber ?? null
     this.acceptedSequence = details?.acceptedSequence ?? null
+    this.canonicalFrontendOrigin = details?.canonicalFrontendOrigin ?? null
+    this.changedConditions = details?.changedConditions ?? []
     this.recoverableAutosave = details?.recoverableAutosave ?? null
   }
 }
@@ -110,6 +159,11 @@ export async function apiRequest<T>(
     try {
       const body = (await response.json()) as {
         detail?: unknown
+        code?: string
+        message?: string
+        retryable?: boolean
+        canonicalFrontendOrigin?: string
+        changedConditions?: unknown
         error?: {
           code?: string
           message?: string
@@ -121,27 +175,34 @@ export async function apiRequest<T>(
           client_review_version?: number
           client_version_number?: number
           accepted_sequence?: number
+          changed_conditions?: unknown
           recoverable_autosave?: ApiError["recoverableAutosave"]
         }
       }
       const detailMessage = extractErrorMessage(body.detail)
       if (detailMessage) {
         message = detailMessage
+      } else if (body.message) {
+        message = body.message
       } else if (body.error?.message) {
         message = body.error.message
       }
-      if (body.error) {
+      if (body.code || body.error) {
         details = {
-          code: body.error.code,
-          retryable: body.error.retryable,
-          conflictId: body.error.conflict_id,
-          currentVersion: body.error.current_version,
-          serverReviewVersion: body.error.server_review_version,
-          serverVersionNumber: body.error.server_version_number,
-          clientReviewVersion: body.error.client_review_version,
-          clientVersionNumber: body.error.client_version_number,
-          acceptedSequence: body.error.accepted_sequence,
-          recoverableAutosave: body.error.recoverable_autosave,
+          code: body.code ?? body.error?.code,
+          retryable: body.retryable ?? body.error?.retryable,
+          conflictId: body.error?.conflict_id,
+          currentVersion: body.error?.current_version,
+          serverReviewVersion: body.error?.server_review_version,
+          serverVersionNumber: body.error?.server_version_number,
+          clientReviewVersion: body.error?.client_review_version,
+          clientVersionNumber: body.error?.client_version_number,
+          acceptedSequence: body.error?.accepted_sequence,
+          canonicalFrontendOrigin: body.canonicalFrontendOrigin,
+          changedConditions: extractChangedConditions(
+            body.changedConditions ?? body.error?.changed_conditions
+          ),
+          recoverableAutosave: body.error?.recoverable_autosave,
         }
       }
     } catch {

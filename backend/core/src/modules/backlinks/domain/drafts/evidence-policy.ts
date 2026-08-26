@@ -54,6 +54,13 @@ const semanticTerms = (value: string): readonly string[] =>
     .toLocaleLowerCase("en-US")
     .match(/[\p{L}\p{N}]+/gu) ?? [];
 
+const internalDraftMetadataMarkerPattern =
+  /\[\s*[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]*(?:\s*,\s*[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]*)*\s*\]/iu;
+
+export function containsInternalDraftMetadataMarker(value: string): boolean {
+  return internalDraftMetadataMarkerPattern.test(value.normalize("NFKC"));
+}
+
 export function draftBodyLengthPolicyIssues(
   bodyText: string,
 ): readonly string[] {
@@ -85,6 +92,7 @@ export function draftBodyLengthPolicyIssues(
 
 export function draftOutputContentPolicyIssues(
   output: Pick<DraftOutput, "subject" | "bodyText">,
+  internalIdentifiers: readonly string[] = [],
 ): readonly string[] {
   const issues = [...draftBodyLengthPolicyIssues(output.bodyText)];
 
@@ -101,6 +109,13 @@ export function draftOutputContentPolicyIssues(
     || /\b(?:will|shall)\s+(?:be\s+)?dofollow\b/iu.test(outboundText)
   ) {
     issues.push("Draft output contains a prohibited promise.");
+  }
+  if (
+    containsInternalDraftMetadataMarker(outboundText)
+    || internalIdentifiers.some((identifier) =>
+      identifier.trim() !== "" && outboundText.includes(identifier))
+  ) {
+    issues.push("Draft output contains internal evidence metadata.");
   }
 
   const body = output.bodyText
@@ -186,7 +201,10 @@ export function validateDraftOutputPolicy(input: Readonly<{
     throw new Error("Draft output violated the human-approval policy.");
   }
 
-  const contentPolicyIssue = draftOutputContentPolicyIssues(input.output)[0];
+  const contentPolicyIssue = draftOutputContentPolicyIssues(
+    input.output,
+    input.approvedEvidence.map((item) => item.id),
+  )[0];
   if (contentPolicyIssue?.startsWith("bodyText ") === true) {
     throw new Error("Draft output violated the length policy.");
   }

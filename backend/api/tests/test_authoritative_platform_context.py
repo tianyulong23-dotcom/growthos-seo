@@ -9,6 +9,7 @@ from fastapi import Request
 
 from app.core.authoritative_platform_context import (
     AuthoritativePlatformContextResolver,
+    LocalDevelopmentPlatformContextResolver,
 )
 from app.core.backlinks_gateway import PlatformContextResolutionError
 from app.core.platform_auth import (
@@ -127,8 +128,20 @@ def resolver_for(
     )
 
 
+def local_resolver_for(
+    projects: list[AuthoritativeWebsiteProject],
+) -> LocalDevelopmentPlatformContextResolver:
+    return LocalDevelopmentPlatformContextResolver(
+        projects=StaticProjectAuthority(projects),
+        organization_id="11111111-1111-4111-8111-111111111111",
+        workspace_id="22222222-2222-4222-8222-222222222222",
+        user_id="44444444-4444-4444-8444-444444444444",
+    )
+
+
 def resolve(
-    resolver: AuthoritativePlatformContextResolver,
+    resolver: AuthoritativePlatformContextResolver
+    | LocalDevelopmentPlatformContextResolver,
     token: str,
     *,
     website_project_key: str = "project-1",
@@ -144,11 +157,41 @@ def resolve(
     )
 
 
+def test_local_context_requires_the_persisted_project_tenant_to_match() -> None:
+    project = AuthoritativeWebsiteProject(
+        website_project_id="project-1",
+        website_project_key="project-1",
+        organization_id="local",
+        workspace_id="local",
+    )
+
+    with pytest.raises(PlatformContextResolutionError) as error:
+        resolve(local_resolver_for([project]), "")
+
+    assert error.value.status == 409
+    assert error.value.code == "PLATFORM_LOCAL_PROJECT_TENANT_MISMATCH"
+
+
+def test_local_context_uses_a_matching_persisted_project_tenant() -> None:
+    project = AuthoritativeWebsiteProject(
+        website_project_id="project-1",
+        website_project_key="project-1",
+        organization_id="11111111-1111-4111-8111-111111111111",
+        workspace_id="22222222-2222-4222-8222-222222222222",
+    )
+
+    resolved = resolve(local_resolver_for([project]), "")
+
+    assert resolved.tenant.organization_id == project.organization_id
+    assert resolved.tenant.workspace_id == project.workspace_id
+
+
 def test_resolves_signed_actor_membership_project_and_permission() -> None:
     project = AuthoritativeWebsiteProject(
         website_project_id="project-1",
         website_project_key="project-1",
         organization_id="org-1",
+        workspace_id="workspace-1",
     )
 
     resolved = resolve(
@@ -172,6 +215,7 @@ def test_ignores_browser_supplied_internal_context_headers() -> None:
         website_project_id="project-1",
         website_project_key="project-1",
         organization_id="org-1",
+        workspace_id="workspace-1",
     )
     token = issue_access_token(memberships=[membership()])
     resolver = resolver_for([project])
@@ -223,6 +267,7 @@ def test_rejects_forged_and_expired_access_tokens(
                 website_project_id="project-1",
                 website_project_key="project-1",
                 organization_id="org-1",
+                workspace_id="workspace-1",
             )
         ]
     )
@@ -245,7 +290,7 @@ def test_rejects_forged_and_expired_access_tokens(
         (
             membership(workspace_id="workspace-other", project_ids=("project-other",)),
             "project-1",
-            "PLATFORM_PROJECT_ACCESS_DENIED",
+            "PLATFORM_TENANT_ACCESS_DENIED",
         ),
         (
             membership(project_ids=("project-1",)),
@@ -264,11 +309,13 @@ def test_rejects_cross_tenant_workspace_and_project_access(
             website_project_id="project-1",
             website_project_key="project-1",
             organization_id="org-1",
+            workspace_id="workspace-1",
         ),
         AuthoritativeWebsiteProject(
             website_project_id="project-2",
             website_project_key="project-2",
             organization_id="org-1",
+            workspace_id="workspace-1",
         ),
     ]
 
@@ -283,26 +330,25 @@ def test_rejects_cross_tenant_workspace_and_project_access(
     assert error.value.code == expected_code
 
 
-def test_rejects_ambiguous_cross_workspace_project_grants() -> None:
+def test_uses_the_project_workspace_when_other_workspace_memberships_exist() -> None:
     project = AuthoritativeWebsiteProject(
         website_project_id="project-1",
         website_project_key="project-1",
         organization_id="org-1",
+        workspace_id="workspace-1",
     )
 
-    with pytest.raises(PlatformContextResolutionError) as error:
-        resolve(
-            resolver_for([project]),
-            issue_access_token(
-                memberships=[
-                    membership(workspace_id="workspace-1"),
-                    membership(workspace_id="workspace-2"),
-                ]
-            ),
-        )
+    resolved = resolve(
+        resolver_for([project]),
+        issue_access_token(
+            memberships=[
+                membership(workspace_id="workspace-1"),
+                membership(workspace_id="workspace-2"),
+            ]
+        ),
+    )
 
-    assert error.value.status == 403
-    assert error.value.code == "PLATFORM_PROJECT_ACCESS_DENIED"
+    assert resolved.tenant.workspace_id == "workspace-1"
 
 
 def test_requires_method_specific_permission() -> None:
@@ -310,6 +356,7 @@ def test_requires_method_specific_permission() -> None:
         website_project_id="project-1",
         website_project_key="project-1",
         organization_id="org-1",
+        workspace_id="workspace-1",
     )
 
     with pytest.raises(PlatformContextResolutionError) as error:
@@ -317,6 +364,38 @@ def test_requires_method_specific_permission() -> None:
             resolver_for([project]),
             issue_access_token(memberships=[membership(permissions=("backlinks:read",))]),
             method="POST",
+        )
+
+    assert error.value.status == 403
+    assert error.value.code == "PLATFORM_PERMISSION_DENIED"
+
+
+def test_collection_resolution_uses_the_requested_project_permission() -> None:
+    resolver = resolver_for([])
+    token = issue_access_token(
+        memberships=[membership(permissions=("projects:read", "projects:write"))]
+    )
+
+    import asyncio
+
+    resolved = asyncio.run(
+        resolver.resolve_collection(
+            request=request_for(token),
+            required_permission="projects:read",
+        )
+    )
+
+    assert resolved.tenant.organization_id == "org-1"
+    assert resolved.tenant.workspace_id == "workspace-1"
+
+    with pytest.raises(PlatformContextResolutionError) as error:
+        asyncio.run(
+            resolver.resolve_collection(
+                request=request_for(
+                    issue_access_token(memberships=[membership(permissions=("backlinks:read",))])
+                ),
+                required_permission="projects:read",
+            )
         )
 
     assert error.value.status == 403

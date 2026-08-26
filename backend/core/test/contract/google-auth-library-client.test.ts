@@ -95,4 +95,24 @@ describe("Google Auth official client", () => {
       });
     },
   );
+
+  it("preserves safe transport diagnostics for token refresh failures", () => {
+    expect(
+      mapGoogleAuthLibraryError("refresh", {
+        code: "ETIMEDOUT",
+        response: {
+          status: 503,
+          headers: { "x-request-id": "google-request-1" },
+          data: {},
+        },
+      }),
+    ).toMatchObject({
+      operation: "refresh",
+      code: googleAuthFailureCodes.temporaryFailure,
+      retryable: true,
+      transportCode: "ETIMEDOUT",
+      httpStatus: 503,
+      providerRequestId: "google-request-1",
+    });
+  });
 });

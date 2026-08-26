@@ -54,6 +54,8 @@ export const nodeHttpTransport: SafeHttpTransport = ({ url, address, signal }) =
     const options: RequestOptions = {
       hostname: address.address, port: url.port, method: "GET", signal,
       path: `${target.pathname}${target.search}`,
+      // This transport pins an approved IP and must not inherit Node's env proxy agent.
+      agent: false,
       headers: {
         accept:
           "text/html, application/xhtml+xml, application/xml, text/xml, text/plain;q=0.9",
@@ -128,10 +130,24 @@ export class SafeFetchAdapter implements SafeFetchPort {
     const resolvedIps: string[] = [];
     while (true) {
       const network = await enforceNetworkPolicy(url, this.#resolver);
-      const address = network.addresses[0];
-      if (address === undefined) throw fail(request.url, safeFetchFailureCodes.networkBlocked);
-      resolvedIps.push(address.address);
-      const response = await this.#transport({ url, address, signal });
+      let response: SafeHttpResponse | undefined;
+      let transportFailure: unknown;
+      for (const address of network.addresses) {
+        resolvedIps.push(address.address);
+        try {
+          response = await this.#transport({ url, address, signal });
+          break;
+        } catch (cause) {
+          transportFailure = cause;
+          if (signal.aborted) throw cause;
+        }
+      }
+      if (response === undefined) {
+        if (network.addresses.length === 0) {
+          throw fail(request.url, safeFetchFailureCodes.networkBlocked);
+        }
+        throw transportFailure;
+      }
       if (redirects.has(response.status)) {
         response.close();
         if (redirectChain.length >= request.maxRedirects) {

@@ -124,6 +124,12 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
         "utf8",
       ),
     );
+    await client.query(`
+      ALTER TABLE backlinks.backlink_project_context_snapshots
+        ADD COLUMN target_market text NOT NULL DEFAULT '',
+        ADD COLUMN target_audiences jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN partnership_goals jsonb NOT NULL DEFAULT '[]'::jsonb
+    `);
     await client.query("SET search_path = backlinks, pg_catalog");
   }, 120_000);
   beforeEach(() =>
@@ -201,11 +207,14 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       canonicalDomain: "example.com",
       locale: "en-US",
       countryCode: "US",
+      targetMarket: "United States",
       profileVersionId: "profile-v1",
       promotionTargetVersionId: "promotion-v1",
       products: ["Example product"],
       keywords: ["example keyword"],
       targetUrls: ["https://example.com/"],
+      targetAudiences: ["site owners"],
+      partnershipGoals: ["editorial review"],
       actorId: "user-051",
     });
     await client.query(
@@ -288,7 +297,7 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
     ]);
   }, 60_000);
 
-  it("closes the Analysis Job and rejects a second Job for one workflow ID", async () => {
+  it("closes zero-provider Analysis without recommendation side effects", async () => {
     const snapshots = createProjectContextSnapshotRepository(client);
     await snapshots.append({
       ...scope,
@@ -298,11 +307,14 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       canonicalDomain: "example.com",
       locale: "en-US",
       countryCode: "US",
+      targetMarket: "United States",
       profileVersionId: "profile-v1",
       promotionTargetVersionId: "promotion-v1",
       products: ["Example product"],
       keywords: ["example keyword"],
       targetUrls: ["https://example.com/"],
+      targetAudiences: ["site owners"],
+      partnershipGoals: ["editorial review"],
       actorId: "user-039",
     });
     const jobs = createJobRepository(client);
@@ -352,5 +364,138 @@ describe("BL-AI-039/051 BacklinkProjectAnalysisWorkflow", () => {
       [workflowInput.workflowId],
     );
     expect(stored.rows[0]).toEqual({ count: 1 });
+    const sideEffects = await client.query(`
+      SELECT
+        (SELECT count(*)::int FROM backlink_provider_requests)
+          AS provider_request_count,
+        (SELECT count(*)::int FROM backlink_provider_usage_ledger)
+          AS provider_ledger_count,
+        (SELECT count(*)::int FROM backlink_provider_budgets)
+          AS provider_budget_count,
+        (SELECT count(*)::int FROM provider_batch_requests)
+          AS provider_batch_count,
+        (SELECT count(*)::int FROM backlink_recommendation_refills)
+          AS recommendation_refill_count,
+        (SELECT count(*)::int
+           FROM backlink_jobs
+          WHERE job_type='recommendation_refill')
+          AS recommendation_job_count,
+        (SELECT count(*)::int
+           FROM backlink_outbox_events
+          WHERE event_type='backlinks.recommendation-refill.requested.v1')
+          AS recommendation_outbox_count
+    `);
+    expect(sideEffects.rows[0]).toEqual({
+      provider_request_count: 0,
+      provider_ledger_count: 0,
+      provider_budget_count: 0,
+      provider_batch_count: 0,
+      recommendation_refill_count: 0,
+      recommendation_job_count: 0,
+      recommendation_outbox_count: 0,
+    });
+  }, 60_000);
+
+  it("closes a superseded snapshot job instead of leaving it recoverable", async () => {
+    const snapshots = createProjectContextSnapshotRepository(client);
+    const appendSnapshot = (
+      snapshotId: string,
+      snapshotVersion: number,
+    ) => snapshots.append({
+      ...scope,
+      snapshotId,
+      snapshotVersion,
+      projectStatus: "ACTIVE",
+      canonicalDomain: "example.com",
+      locale: "en-US",
+      countryCode: "US",
+      targetMarket: "United States",
+      profileVersionId: `profile-v${snapshotVersion}`,
+      promotionTargetVersionId: `promotion-v${snapshotVersion}`,
+      products: ["Example product"],
+      keywords: ["example keyword"],
+      targetUrls: ["https://example.com/"],
+      targetAudiences: ["site owners"],
+      partnershipGoals: ["editorial review"],
+      actorId: "worker-analysis",
+    });
+    await appendSnapshot(uuid(20), 1);
+    await appendSnapshot(uuid(21), 2);
+    await expect(createJobRepository(client).create({
+      ...scope,
+      actorId: "worker-analysis",
+      jobId: workflowInput.jobId,
+      jobType: "project-analysis",
+      sourceObjectType: "project-context-snapshot",
+      sourceObjectId: uuid(20),
+      workflowId: workflowInput.workflowId,
+      correlationId: "correlation-superseded",
+    })).resolves.toBe(true);
+
+    const activities = createBacklinkProjectAnalysisActivities(
+      snapshots,
+      undefined,
+      createProjectAnalysisJobWriter(client),
+    );
+    await expect(
+      activities.loadBacklinkProjectAnalysisContext(workflowInput),
+    ).rejects.toThrow("BACKLINK_PROJECT_CONTEXT_SNAPSHOT_VERSION_MISMATCH");
+
+    expect((await client.query(
+      `SELECT status,step,progress,result_summary,error,finished_at
+         FROM backlink_jobs WHERE id=$1`,
+      [workflowInput.jobId],
+    )).rows[0]).toMatchObject({
+      status: "cancelled",
+      step: "superseded_project_context",
+      progress: 100,
+      result_summary: {
+        outcome: "superseded",
+        requestedSnapshotVersion: 1,
+        authoritativeSnapshotId: uuid(21),
+        authoritativeSnapshotVersion: 2,
+      },
+      error: null,
+    });
+  }, 60_000);
+
+  it("fails a job terminally when its project snapshot is unavailable", async () => {
+    await expect(createJobRepository(client).create({
+      ...scope,
+      actorId: "worker-analysis",
+      jobId: workflowInput.jobId,
+      jobType: "project-analysis",
+      sourceObjectType: "project-context-snapshot",
+      sourceObjectId: uuid(20),
+      workflowId: workflowInput.workflowId,
+      correlationId: "correlation-missing",
+    })).resolves.toBe(true);
+    const activities = createBacklinkProjectAnalysisActivities(
+      createProjectContextSnapshotRepository(client),
+      undefined,
+      createProjectAnalysisJobWriter(client),
+    );
+
+    await expect(
+      activities.loadBacklinkProjectAnalysisContext(workflowInput),
+    ).rejects.toThrow("BACKLINK_PROJECT_CONTEXT_SNAPSHOT_NOT_FOUND");
+
+    expect((await client.query(
+      `SELECT status,step,progress,result_summary,error,finished_at
+         FROM backlink_jobs WHERE id=$1`,
+      [workflowInput.jobId],
+    )).rows[0]).toMatchObject({
+      status: "failed",
+      step: "project_context_snapshot_invalid",
+      progress: 100,
+      result_summary: {
+        outcome: "input_invalid",
+        requestedSnapshotVersion: 1,
+      },
+      error: {
+        code: "BACKLINK_PROJECT_CONTEXT_SNAPSHOT_NOT_FOUND",
+        retryable: false,
+      },
+    });
   }, 60_000);
 });

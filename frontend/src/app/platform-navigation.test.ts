@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  performanceNavigation,
   platformSettingsNavigation,
   settingsNavigation,
 } from "@/app/platform-navigation"
@@ -52,6 +53,23 @@ describe("backlinks navigation", () => {
       ["recommendations", "推荐池"],
       ["opportunities", "外链机会"],
       ["email", "邮件中心"],
+      ["links", "外链监控"],
+      ["reports", "指标报告"],
+    ])
+  })
+})
+
+describe("performance navigation", () => {
+  it("adds backlink effects without replacing article performance", () => {
+    expect(modules.find((module) => module.id === "performance")).toBe(
+      performanceNavigation
+    )
+    expect(
+      performanceNavigation.tabs.map(({ id, label }) => [id, label])
+    ).toEqual([
+      ["overview", "总览"],
+      ["articles", "文章效果"],
+      ["backlinks", "外链监控"],
     ])
   })
 })

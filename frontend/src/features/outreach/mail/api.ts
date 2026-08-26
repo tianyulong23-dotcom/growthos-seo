@@ -1,5 +1,6 @@
 import {
   requestBacklinks,
+  type BacklinksRequest,
   type BacklinksResponse,
 } from "@/api/generated/backlinks"
 import { ApiError } from "@/api/client"
@@ -18,6 +19,16 @@ export type ReplyMatchConfirmResponse =
   BacklinksResponse<"backlinksConfirmReplyMatchCandidateV1">
 export type ReplyMatchUnbindResponse =
   BacklinksResponse<"backlinksUnbindReplyMatchV1">
+export type NegotiationFactsResponse =
+  BacklinksResponse<"backlinksListNegotiationFactsV1">
+export type NegotiationFactDecisionInput =
+  BacklinksRequest<"backlinksReviewNegotiationFactV1">["body"]
+export type NegotiationFactDecisionResponse =
+  BacklinksResponse<"backlinksReviewNegotiationFactV1">
+export type SendIntentListResponse =
+  BacklinksResponse<"backlinksListSendIntentsV1">
+export type SendIntentDetailResponse =
+  BacklinksResponse<"backlinksGetSendIntentV1">
 export type GmailPollingSyncResponse =
   BacklinksResponse<"backlinksStartGmailPollingSyncV1">
 export type GmailPollingSyncStatusResponse =
@@ -138,6 +149,70 @@ export async function unbindReplyMatch(
       reason,
     },
   })
+}
+
+export async function listNegotiationFacts(
+  websiteProjectKey: string,
+  inboundMessageId: string,
+  signal?: AbortSignal
+): Promise<NegotiationFactsResponse> {
+  return requestBacklinks(
+    "backlinksListNegotiationFactsV1",
+    {
+      path: { websiteProjectKey, inboundMessageId },
+    },
+    { signal }
+  )
+}
+
+export async function reviewNegotiationFact(
+  websiteProjectKey: string,
+  inboundMessageId: string,
+  input: NegotiationFactDecisionInput,
+  idempotencyKey: string
+): Promise<NegotiationFactDecisionResponse> {
+  return requestBacklinks("backlinksReviewNegotiationFactV1", {
+    path: { websiteProjectKey, inboundMessageId },
+    headers: { "idempotency-key": idempotencyKey },
+    body: input,
+  })
+}
+
+export async function listSendIntents(
+  websiteProjectKey: string,
+  input: {
+    queueKind?: SendIntentListResponse["items"][number]["queueKind"]
+    limit?: number
+    cursor?: string
+  } = {},
+  signal?: AbortSignal
+): Promise<SendIntentListResponse> {
+  return requestBacklinks(
+    "backlinksListSendIntentsV1",
+    {
+      path: { websiteProjectKey },
+      query: {
+        queueKind: input.queueKind ?? undefined,
+        limit: input.limit ?? 25,
+        cursor: input.cursor,
+      },
+    },
+    { signal }
+  )
+}
+
+export async function getSendIntent(
+  websiteProjectKey: string,
+  sendIntentId: string,
+  signal?: AbortSignal
+): Promise<SendIntentDetailResponse> {
+  return requestBacklinks(
+    "backlinksGetSendIntentV1",
+    {
+      path: { websiteProjectKey, sendIntentId },
+    },
+    { signal }
+  )
 }
 
 export const isMailApiStatus = (error: unknown, status: number) =>

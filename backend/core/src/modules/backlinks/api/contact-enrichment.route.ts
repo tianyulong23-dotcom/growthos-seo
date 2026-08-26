@@ -127,6 +127,17 @@ const retryUnpublishedResponse = z.object({
   batchId: z.uuid().nullable(),
   retriedJobCount: z.number().int().min(0),
 }).strict();
+const runCurrentPoolResponse = z.object({
+  batchId: z.uuid().nullable(),
+  poolRecommendationCount: z.number().int().min(0),
+  eligibleRecommendationCount: z.number().int().min(0),
+  jobsCreated: z.number().int().min(0),
+  jobsRetried: z.number().int().min(0),
+  activeJobsPreserved: z.number().int().min(0),
+  staleContextsSkipped: z.number().int().min(0),
+  attemptLimitsSkipped: z.number().int().min(0),
+  outboxEventsCreated: z.number().int().min(0),
+}).strict();
 
 function sendError(
   error: FastifyError,
@@ -165,6 +176,26 @@ export function registerBacklinksContactEnrichmentRoutes(
       actor: request.actor,
       websiteProjectKey,
     });
+
+  api.post(
+    "/api/v1/projects/:websiteProjectKey/backlinks/contact-enrichment-batches/current/run",
+    {
+      schema: {
+        operationId: "backlinksRunCurrentPoolContactEnrichmentV1",
+        params: projectParams,
+        response: { 202: runCurrentPoolResponse, ...errors },
+      },
+      errorHandler: sendError,
+    },
+    async (request, reply) => {
+      const context = await resolve(
+        request,
+        request.params.websiteProjectKey,
+      );
+      const result = await options.commands.runCurrentPool(context);
+      return reply.code(202).send(result);
+    },
+  );
 
   api.post(
     "/api/v1/projects/:websiteProjectKey/backlinks/contact-enrichment-batches/current/retry-unpublished",

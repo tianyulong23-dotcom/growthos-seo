@@ -12,6 +12,7 @@ const input = {
   providerRef: "vercel-ai-gateway",
   baseUrl: "https://ai-gateway.vercel.sh/v1",
   modelId: "provider/model",
+  discoveryModelId: "gpt-5.6-terra",
   modelVersion: "2026-08-03",
   maxCalls: 25,
   timeoutMs: 45_000,
@@ -20,6 +21,15 @@ const input = {
   absoluteBudgetUsd: 0.1,
   inputCostUsdPerMillionTokens: 1,
   outputCostUsdPerMillionTokens: 2,
+  discoveryMaxCalls: 5,
+  discoveryAbsoluteBudgetUsd: 0.05,
+  discoveryWindowSeconds: 3_600,
+  discoveryMaxConcurrency: 1,
+  discoveryMaxWorkItemsPerGeneration: 1,
+  outreachDraftMaxCalls: 20,
+  outreachDraftAbsoluteBudgetUsd: 0.08,
+  outreachDraftWindowSeconds: 7_200,
+  outreachDraftMaxConcurrency: 2,
 } as const;
 
 const manifest = {
@@ -43,12 +53,47 @@ describe("LOCAL_PRODUCT AI bootstrap", () => {
       AI_PROVIDER_REF: "vercel-ai-gateway",
       AI_PROVIDER_BASE_URL: "https://ai-gateway.vercel.sh/v1",
       AI_MODEL_ID: "provider/model",
+      AI_DISCOVERY_MODEL_ID: "gpt-5.6-terra",
       AI_PROVIDER_CREDENTIAL_SECRET_REF:
         "secret://growthos/local-product/ai/provider-credential/v1",
       AI_PROVIDER_MAX_CALLS: "25",
       AI_PROVIDER_ABSOLUTE_BUDGET_USD: "0.1",
+      AI_DISCOVERY_MAX_CALLS: "5",
+      AI_DISCOVERY_ABSOLUTE_BUDGET_USD: "0.05",
+      AI_DISCOVERY_WINDOW_SECONDS: "3600",
+      AI_DISCOVERY_MAX_CONCURRENCY: "1",
+      AI_DISCOVERY_MAX_WORK_ITEMS_PER_GENERATION: "1",
+      AI_OUTREACH_DRAFT_MAX_CALLS: "20",
+      AI_OUTREACH_DRAFT_ABSOLUTE_BUDGET_USD: "0.08",
+      AI_OUTREACH_DRAFT_WINDOW_SECONDS: "7200",
+      AI_OUTREACH_DRAFT_MAX_CONCURRENCY: "2",
     });
     expect(JSON.stringify(environment)).not.toContain(input.apiKey);
+  });
+
+  it("uses Terra for discovery when no capability override is supplied", () => {
+    const withoutOverride = {
+      ...input,
+      discoveryModelId: undefined,
+    };
+
+    expect(buildLocalProductAiEnvironment(withoutOverride)).toMatchObject({
+      AI_MODEL_ID: "provider/model",
+      AI_DISCOVERY_MODEL_ID: "gpt-5.6-terra",
+    });
+    expect(updateLocalProductAiManifest(
+      manifest,
+      withoutOverride,
+    )).toMatchObject({
+      ai: {
+        model: "provider/model",
+        capabilities: {
+          AI_DISCOVERY: {
+            model: "gpt-5.6-terra",
+          },
+        },
+      },
+    });
   });
 
   it("accepts OpenAI and rejects providers outside the exact allowlist", () => {
@@ -80,6 +125,22 @@ describe("LOCAL_PRODUCT AI bootstrap", () => {
           "secret://growthos/local-product/ai/provider-credential/v1",
         maxCalls: 25,
         currency: "USD",
+        capabilities: {
+          AI_DISCOVERY: {
+            model: "gpt-5.6-terra",
+            maxCalls: 5,
+            absoluteBudget: 0.05,
+            windowSeconds: 3_600,
+            maxConcurrency: 1,
+            maxWorkItemsPerGeneration: 1,
+          },
+          AI_OUTREACH_DRAFT: {
+            maxCalls: 20,
+            absoluteBudget: 0.08,
+            windowSeconds: 7_200,
+            maxConcurrency: 2,
+          },
+        },
       },
     });
     expect(JSON.stringify(updated)).not.toContain(input.apiKey);
@@ -116,6 +177,14 @@ describe("LOCAL_PRODUCT AI bootstrap", () => {
     expect(() => localProductAiBootstrapInputSchema.parse({
       ...input,
       maxCalls: 10_001,
+    })).toThrow();
+    expect(() => localProductAiBootstrapInputSchema.parse({
+      ...input,
+      discoveryAbsoluteBudgetUsd: 0.001,
+    })).toThrow();
+    expect(() => localProductAiBootstrapInputSchema.parse({
+      ...input,
+      outreachDraftAbsoluteBudgetUsd: 0.01,
     })).toThrow();
   });
 

@@ -111,11 +111,21 @@ function errorText(error: unknown): string {
 
 function classify(value: string): RecommendationRefillRootCause {
   const upper = value.toUpperCase();
+  const stableCodes = new Set(upper.split(/[^A-Z0-9_]+/u).filter(Boolean));
   if (upper.includes("BUDGET")) return "BUDGET_PAUSED";
   if (upper.includes("PROVIDER") || upper.includes("DATAFORSEO")) {
     return "PROVIDER_UNAVAILABLE";
   }
+  if (
+    stableCodes.has("WEBSITE_PROJECT_DISCOVERY_LANGUAGE_INPUT_REQUIRED")
+    || stableCodes.has("WEBSITE_PROJECT_DISCOVERY_INPUT_REQUIRED")
+  ) {
+    return "PROJECT_CONTEXT_REQUIRED";
+  }
   if (upper.includes("PROJECT_CONTEXT")) return "PROJECT_CONTEXT_REQUIRED";
+  if (stableCodes.has("COMMERCIAL_SUPPLY_OPERATION_NOT_FOUND")) {
+    return "RECOVERY_CONFLICT";
+  }
   if (
     upper.includes("CONFLICT")
     || upper.includes("ALREADY_STARTED")

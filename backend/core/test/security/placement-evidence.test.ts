@@ -103,6 +103,7 @@ describe("BL-AI-158 immutable public evidence", () => {
       evidenceId,
       placementId,
       kind: "placement_observation",
+      evidenceSource: "DIRECT_MONITOR",
       immutable: true,
       hashVerified: true,
       hash: hashPlacementEvidence(snapshot),

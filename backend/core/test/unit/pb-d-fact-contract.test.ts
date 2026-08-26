@@ -15,6 +15,14 @@ describe("BL-AI-161 prerequisite PB-D fact contracts", () => {
     const repository = createDraftEditingRepository({
       async query(text, values = []) {
         calls.push({ text, values });
+        if (calls.length === 1) {
+          return {
+            rows: [{
+              subjectText: "A relevant subject",
+              bodyText: "A valid outreach draft without internal metadata.",
+            }],
+          };
+        }
         return {
           rows: [{
             draftId: "018f0000-0000-7000-8000-000000000501",
@@ -48,18 +56,21 @@ describe("BL-AI-161 prerequisite PB-D fact contracts", () => {
       status: "approved",
     });
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.text).toContain("WITH target AS");
-    expect(calls[0]?.text).toContain("JOIN backlink_draft_versions v");
-    expect(calls[0]?.text).toContain("v.source<>'TEMPLATE_FALLBACK'");
-    expect(calls[0]?.text).toContain("INSERT INTO backlink_lifecycle_events");
-    expect(calls[0]?.text).toContain("INSERT INTO backlink_audit_events");
-    expect(calls[0]?.text).toContain("'draft.approval.recorded'");
-    expect(calls[0]?.text).toContain("'draftId'");
-    expect(calls[0]?.text).toContain("'approvedVersionId'");
-    expect(calls[0]?.text).toContain("'previousAggregateVersion'");
-    expect(calls[0]?.text).toContain("'nextAggregateVersion'");
-    expect(calls[0]?.values).toContain(draftApprovalFactContractVersion);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.text).toContain(
+      'SELECT v.subject_text AS "subjectText",v.body_text AS "bodyText"',
+    );
+    expect(calls[1]?.text).toContain("WITH target AS");
+    expect(calls[1]?.text).toContain("JOIN backlink_draft_versions v");
+    expect(calls[1]?.text).toContain("v.source<>'TEMPLATE_FALLBACK'");
+    expect(calls[1]?.text).toContain("INSERT INTO backlink_lifecycle_events");
+    expect(calls[1]?.text).toContain("INSERT INTO backlink_audit_events");
+    expect(calls[1]?.text).toContain("'draft.approval.recorded'");
+    expect(calls[1]?.text).toContain("'draftId'");
+    expect(calls[1]?.text).toContain("'approvedVersionId'");
+    expect(calls[1]?.text).toContain("'previousAggregateVersion'");
+    expect(calls[1]?.text).toContain("'nextAggregateVersion'");
+    expect(calls[1]?.values).toContain(draftApprovalFactContractVersion);
   });
 
   it("uses one immutable Reply assignment payload for AUTO and MANUAL", () => {

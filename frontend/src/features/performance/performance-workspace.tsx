@@ -73,6 +73,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { BacklinkMonitoringWorkspace } from "@/features/performance/backlinks/backlink-monitoring-workspace"
 
 const ranges: PerformanceRange[] = [7, 28, 90]
 const chartConfig = {
@@ -747,7 +748,7 @@ function DetailSheet({
   )
 }
 
-export function PerformanceWorkspace({
+function ArticlePerformanceWorkspace({
   view,
   projectId,
   onOpenArticle,
@@ -1178,5 +1179,28 @@ export function PerformanceWorkspace({
         onResolveSignal={(signalId) => void handleResolveSignal(signalId)}
       />
     </div>
+  )
+}
+
+export function PerformanceWorkspace({
+  view,
+  projectId,
+  onOpenArticle,
+}: {
+  view: string
+  projectId: string
+  onOpenArticle: (articleId: string) => void
+}) {
+  if (view === "backlinks") {
+    return (
+      <BacklinkMonitoringWorkspace key={projectId} projectId={projectId} />
+    )
+  }
+  return (
+    <ArticlePerformanceWorkspace
+      view={view}
+      projectId={projectId}
+      onOpenArticle={onOpenArticle}
+    />
   )
 }

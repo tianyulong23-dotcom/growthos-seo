@@ -1,7 +1,7 @@
 export type OpportunityCreation = Readonly<{
   opportunityId: string; recommendationId: string; cycleId: string;
   websiteProjectId: string; targetSiteKey: string; targetHostAscii: string;
-  contactCandidateId: string; contactReviewRequired: boolean;
+  contactCandidateId: string | null; contactReviewRequired: boolean;
   joinSequence: number; businessStage: "JOINED"; managementStatus: "ACTIVE";
   outcomeStatus: "OPEN"; fulfillmentStatus: "NOT_EXPECTED"; version: number;
   lifecycleEventId: string; auditEventId: string;
@@ -30,7 +30,7 @@ export type OpportunityManagementPatchRow = Readonly<{
 }>;
 type CreateInput = Readonly<{
   organizationId: string; workspaceId: string; websiteProjectId: string;
-  actorId: string; recommendationId: string; contactCandidateId: string;
+  actorId: string; recommendationId: string; contactCandidateId: string | null;
   expectedVersion: number;
   idempotencyKey: string; requestHash: string; requestId: string;
   idempotencyRecordId: string; opportunityId: string; cycleId: string;
@@ -90,21 +90,99 @@ present AS (
 ),
 versioned AS (
   SELECT *
-    FROM present
+    FROM present i
    WHERE version=$7
      AND status IN ('ready','shown')
-     AND publication_status='PUBLISHED'
-     AND verified_public_email_count>=1
-     AND contact_evidence_snapshot_id IS NOT NULL
-     AND default_contact_candidate_id=$6
+     AND (
+       NOT EXISTS (
+         SELECT 1
+           FROM backlink_commercial_inventory_policies policy
+          WHERE (
+            policy.organization_id,policy.workspace_id,
+            policy.website_project_id
+          )=(i.organization_id,i.workspace_id,i.website_project_id)
+       )
+       OR EXISTS (
+         SELECT 1
+           FROM backlink_commercial_inventory_policies policy
+          WHERE (
+            policy.organization_id,policy.workspace_id,
+            policy.website_project_id,policy.project_context_version_id,
+            policy.visible_pool_generation
+          )=(
+            i.organization_id,i.workspace_id,i.website_project_id,
+            i.recommendation_context_version_id,i.visible_pool_generation
+          )
+            AND policy.visible_pool_state IN ('building','active')
+            AND (
+              policy.updated_at,policy.version,
+              policy.project_context_version_id
+            )=(
+              SELECT current_policy.updated_at,current_policy.version,
+                     current_policy.project_context_version_id
+                FROM backlink_commercial_inventory_policies current_policy
+               WHERE (
+                 current_policy.organization_id,current_policy.workspace_id,
+                 current_policy.website_project_id
+               )=(i.organization_id,i.workspace_id,i.website_project_id)
+               ORDER BY current_policy.updated_at DESC,
+                        current_policy.version DESC,
+                        current_policy.project_context_version_id DESC
+               LIMIT 1
+            )
+       )
+     )
+),
+selection AS (
+  SELECT i.*,
+         generation.id selection_generation_contract_id,
+         generation.input_pin_id selection_input_pin_id,
+         generation.score_model_version selection_score_model_version,
+         pin.project_context_version selection_project_context_version,
+         pin.site_profile_version_id selection_site_profile_version_id,
+         pin.outreach_profile_version_id selection_outreach_profile_version_id,
+         pin.promotion_target_version_id
+           selection_promotion_target_version_id,
+         pin.immutable_fingerprint selection_immutable_fingerprint,
+         outreach.target_urls->>0 selection_target_url
+    FROM versioned i
+    LEFT JOIN backlink_recommendation_generation_contracts generation ON
+      (
+        generation.organization_id,generation.workspace_id,
+        generation.website_project_id,
+        generation.recommendation_context_version_id,
+        generation.visible_pool_generation
+      )=(
+        i.organization_id,i.workspace_id,i.website_project_id,
+        i.recommendation_context_version_id,i.visible_pool_generation
+      )
+    LEFT JOIN backlink_generation_input_pins pin ON
+      (pin.organization_id,pin.workspace_id,pin.website_project_id,pin.id)=
+      (generation.organization_id,generation.workspace_id,
+       generation.website_project_id,generation.input_pin_id)
+    LEFT JOIN backlink_outreach_profile_versions outreach ON
+      (outreach.organization_id,outreach.workspace_id,
+       outreach.website_project_id,outreach.id)=
+      (pin.organization_id,pin.workspace_id,pin.website_project_id,
+       pin.outreach_profile_version_id)
 ),
 source AS (
   SELECT i.id inventory_id,i.recommendation_id,i.prospect_id,
          i.recommendation_context_version_id,p.hostname_ascii,
          p.registrable_domain,p.normalization_version,
          c.id contact_candidate_id,
-         false contact_review_required
-    FROM versioned i
+         false contact_review_required,
+         i.visible_pool_generation,
+         i.selection_generation_contract_id,
+         i.selection_input_pin_id,
+         i.selection_score_model_version,
+         i.selection_project_context_version,
+         i.selection_site_profile_version_id,
+         i.selection_outreach_profile_version_id,
+         i.selection_promotion_target_version_id,
+         i.selection_immutable_fingerprint,
+         i.selection_target_url
+    FROM selection i
     JOIN backlink_prospects p ON
       (p.organization_id,p.workspace_id,p.website_project_id,p.id,
        p.recommendation_context_version_id)=
@@ -153,6 +231,30 @@ source AS (
        'mailto','visible_text','obfuscated_text','json_ld'
      )
      AND e.source_url=snapshot.source_url
+     AND $6::uuid IS NOT NULL
+  UNION ALL
+  SELECT i.id inventory_id,i.recommendation_id,i.prospect_id,
+         i.recommendation_context_version_id,p.hostname_ascii,
+         p.registrable_domain,p.normalization_version,
+         NULL::uuid contact_candidate_id,
+         true contact_review_required,
+         i.visible_pool_generation,
+         i.selection_generation_contract_id,
+         i.selection_input_pin_id,
+         i.selection_score_model_version,
+         i.selection_project_context_version,
+         i.selection_site_profile_version_id,
+         i.selection_outreach_profile_version_id,
+         i.selection_promotion_target_version_id,
+         i.selection_immutable_fingerprint,
+         i.selection_target_url
+    FROM selection i
+    JOIN backlink_prospects p ON
+      (p.organization_id,p.workspace_id,p.website_project_id,p.id,
+       p.recommendation_context_version_id)=
+      (i.organization_id,i.workspace_id,i.website_project_id,i.prospect_id,
+       i.recommendation_context_version_id)
+   WHERE $6::uuid IS NULL
 ),
 existing AS (
   SELECT o.id
@@ -259,14 +361,31 @@ lifecycle AS (
            'joinSequence',c.join_sequence,
            'contactCandidateId',c.source_contact_candidate_id,
            'contactReviewRequired',c.contact_review_required,
-           'contactAutoConfirmed',NOT c.contact_review_required
+           'contactAutoConfirmed',NOT c.contact_review_required,
+           'visiblePoolGeneration',s.visible_pool_generation,
+           'generationContractId',s.selection_generation_contract_id,
+           'inputPinId',s.selection_input_pin_id,
+           'scoreModelVersion',s.selection_score_model_version,
+           'projectContextVersion',s.selection_project_context_version,
+           'siteProfileVersionId',s.selection_site_profile_version_id,
+           'outreachProfileVersionId',s.selection_outreach_profile_version_id,
+           'promotionTargetVersionId',
+             s.selection_promotion_target_version_id,
+           'immutableFingerprint',s.selection_immutable_fingerprint,
+           'selectedTargetUrl',s.selection_target_url,
+           'selectedBy',c.created_by,
+           'selectedAt',c.created_at
          ),
-         CASE WHEN c.contact_review_required
+         CASE WHEN c.source_contact_candidate_id IS NULL
+           THEN 'recommendation_contact_pending'
+           WHEN c.contact_review_required
            THEN 'recommendation_contact_selected_review_required'
            ELSE 'recommendation_contact_confirmed'
          END,$15,
          'opportunity.create:'||$8
-    FROM created c,recommendation
+    FROM created c
+    JOIN source s ON s.recommendation_id=c.recommendation_id
+    CROSS JOIN recommendation
   RETURNING id
 ),
 audit AS (
@@ -277,7 +396,9 @@ audit AS (
   )
   SELECT $14,$1,$2,$3,l.id,$4,'user','opportunity.created','opportunity',
          c.id,'success',
-         CASE WHEN c.contact_review_required
+         CASE WHEN c.source_contact_candidate_id IS NULL
+           THEN 'recommendation_contact_pending'
+           WHEN c.contact_review_required
            THEN 'recommendation_contact_selected_review_required'
            ELSE 'recommendation_contact_confirmed'
          END,
@@ -286,10 +407,23 @@ audit AS (
            'joinSequence',c.join_sequence,
            'contactCandidateId',c.source_contact_candidate_id,
            'contactReviewRequired',c.contact_review_required,
-           'contactAutoConfirmed',NOT c.contact_review_required
+           'contactAutoConfirmed',NOT c.contact_review_required,
+           'visiblePoolGeneration',s.visible_pool_generation,
+           'generationContractId',s.selection_generation_contract_id,
+           'inputPinId',s.selection_input_pin_id,
+           'scoreModelVersion',s.selection_score_model_version,
+           'projectContextVersion',s.selection_project_context_version,
+           'siteProfileVersionId',s.selection_site_profile_version_id,
+           'outreachProfileVersionId',s.selection_outreach_profile_version_id,
+           'promotionTargetVersionId',
+             s.selection_promotion_target_version_id,
+           'immutableFingerprint',s.selection_immutable_fingerprint,
+           'selectedTargetUrl',s.selection_target_url
          ),
          $15,$15,$9
-    FROM lifecycle l,created c
+    FROM lifecycle l
+    JOIN created c ON true
+    JOIN source s ON s.recommendation_id=c.recommendation_id
   RETURNING id
 ),
 completed AS (

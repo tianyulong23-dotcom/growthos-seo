@@ -20,8 +20,8 @@ const paidRefillTierSchema = z.enum([
   "same_language_expansion",
 ]);
 const refillTierSchema = z.union([
-  paidRefillTierSchema,
   z.literal("curated_resource_library"),
+  paidRefillTierSchema,
 ]);
 const contactEvidenceSchema = z.object({
   id: z.uuid(),
@@ -65,6 +65,7 @@ const contactJobSchema = z.object({
   candidateCount: z.number().int().min(0),
   evidenceCount: z.number().int().min(0),
   pagesVisited: z.number().int().min(0),
+  attemptCount: z.number().int().min(0),
   lastErrorCode: z.string().nullable(),
   terminalReasonCode: z.enum([
     "PUBLIC_EMAIL_FOUND",
@@ -99,7 +100,10 @@ const fitDecisionSchema = z.object({
   decision: z.literal("eligible"),
   matchTier: z.enum(["high_fit", "qualified_fit"]),
   overallFit: z.number().min(0).max(100),
-  scoreModelVersion: z.literal("recommendation-commercial-fit.v3"),
+  scoreModelVersion: z.enum([
+    "recommendation-commercial-fit.v4",
+    "recommendation-commercial-fit.v3",
+  ]),
   ruleVersion: nonBlank,
   reasonCodes: z.array(nonBlank),
   matchedProducts: z.array(nonBlank),
@@ -112,7 +116,11 @@ const fitDecisionSchema = z.object({
     candidateCountry: nonBlank.nullable(),
     targetLanguage: nonBlank,
     candidateLanguage: nonBlank.nullable(),
-    tier: z.enum(["target_market", "same_language_expansion"]),
+    tier: z.enum([
+      "target_market",
+      "same_language_expansion",
+      "market_language_mismatch",
+    ]),
     reasonCode: nonBlank,
   }).strict(),
   cooperationAngles: z.array(nonBlank),
@@ -122,6 +130,16 @@ const fitDecisionSchema = z.object({
     backlinks: z.number().nullable(),
     referringDomains: z.number().nullable(),
     spamScore: z.number().min(0).max(100).nullable(),
+    backlinkPageEvidence: z.array(z.object({
+      sourceUrl: z.url(),
+      targetUrl: z.url(),
+      anchorText: z.string().nullable(),
+      linkStatus: z.enum(["active", "lost"]),
+      firstSeenAt: z.string().datetime().nullable(),
+      lastSeenAt: z.string().datetime().nullable(),
+      sourceHttpStatus: z.number().int().nullable(),
+      targetHttpStatus: z.number().int().nullable(),
+    }).strict()),
     evidenceRefs: z.array(nonBlank),
     collectedAt: z.string().datetime(),
   }).strict(),
@@ -145,6 +163,33 @@ const contactDecisionSchema = z.object({
   collectedAt: z.string().datetime(),
   rulesVersion: nonBlank,
 }).strict();
+const cooperationPathSchema = z.object({
+  factId: z.uuid(),
+  decision: z.enum(["pending", "verified", "unavailable", "manual_review"]),
+  reasonCode: nonBlank,
+  pathType: z.enum([
+    "public_email",
+    "contact_form",
+    "guest_post_submission",
+    "resource_submission",
+    "editor_author_page",
+  ]).nullable(),
+  url: z.url().nullable(),
+  action: z.enum([
+    "SEND_EMAIL",
+    "OPEN_CONTACT_FORM",
+    "OPEN_GUEST_POST_SUBMISSION",
+    "OPEN_RESOURCE_SUBMISSION",
+    "OPEN_EDITOR_AUTHOR_PAGE",
+  ]).nullable(),
+  contentType: z.enum([
+    "EMAIL",
+    "FORM_MESSAGE",
+    "SUBMISSION_PITCH",
+  ]).nullable(),
+  evidence: z.record(z.string(), z.unknown()),
+  observedAt: z.string().datetime(),
+}).strict();
 export const recommendationsParamsSchema =
   z.object({ websiteProjectKey: nonBlank }).strict();
 export const recommendationsQuerySchema = z.object({
@@ -154,6 +199,15 @@ export const recommendationsQuerySchema = z.object({
 }).strict();
 const itemSchema = z.object({
   id: nonBlank, hostname: nonBlank, score: z.number().min(0).max(100), status,
+  presentationState: z.enum(["current", "legacy_stale"]),
+  contractKind: z.literal("corrected_visibility_v1"),
+  outreachReadiness: z.enum([
+    "ready",
+    "manual_action",
+    "contact_pending",
+    "manual_review",
+    "unavailable",
+  ]),
   priority: z.enum(["high", "standard"]),
   candidateSource: z.enum([
     "paid_discovery",
@@ -183,29 +237,67 @@ const itemSchema = z.object({
       "manual",
     ]),
     observedAt: z.string().datetime(),
-  }).strict(),
-  publicationStatus: z.literal("PUBLISHED"),
-  verifiedPublicEmailCount: z.number().int().min(1),
+  }).strict().nullable(),
+  publicationStatus: z.enum([
+    "PUBLISHED",
+    "NOT_PUBLISHED",
+    "CONTACT_PENDING",
+    "CONTACT_REVIEW",
+  ]),
+  verifiedPublicEmailCount: z.number().int().min(0),
   recommendationContextVersionId: nonBlank, version: z.number().int().positive(),
   scoreModelVersion: nonBlank, ruleVersion: nonBlank,
   fitDecision: fitDecisionSchema,
-  contactDecision: contactDecisionSchema,
+  contactDecision: contactDecisionSchema.nullable(),
+  cooperationPath: cooperationPathSchema.nullable(),
+  contactPageUrl: z.url().nullable(),
   rootUrl: z.url(),
   faviconUrl: z.url(),
   acquiredAt: z.string().datetime(),
-  contactStatus: z.enum(["contactable", "running", "review", "not_found"]),
+  contactStatus: z.enum([
+    "contactable",
+    "running",
+    "review",
+    "not_found",
+    "not_started",
+  ]),
   contactJob: contactJobSchema.nullable(),
   contacts: z.array(contactCandidateSchema),
   recommendedContactCandidateId: z.uuid().nullable(),
   existingOpportunityId: z.uuid().nullable(),
   canCreateOpportunity: z.boolean(),
-  createBlockReason: z.enum([
-    "existing_opportunity",
-    "no_eligible_contact",
-  ]).nullable(),
+  createBlockReason: z.literal("existing_opportunity").nullable(),
 }).strict();
 const inventoryStatusSchema = z.object({
   contractVersion: z.literal("backlinks.recommendation-operation.v1"),
+  contractKind: z.literal("corrected_visibility_v1"),
+  productState: z.enum([
+    "running",
+    "waiting_retry",
+    "paused_provider",
+    "partial_exhausted",
+    "maintenance",
+    "blocked",
+  ]),
+  productStateReason: nonBlank,
+  recoveryCommand: z.enum([
+    "CONTINUE_SAME_CRITERIA",
+    "EDIT_PROJECT_MATCH_INPUTS",
+    "BROADEN_MARKET_OR_KEYWORDS",
+    "CHANGE_DISCOVERY_SOURCE",
+    "WAIT_PROVIDER",
+    "RESTART_SERVICE",
+    "CONTACT_SUPPORT",
+  ]).nullable(),
+  providerAvailability: z.enum(["available", "paused", "unknown"]),
+  visibleMatchCount: z.number().int().min(0),
+  activeProcessingSeconds: z.number().int().min(0),
+  providerBalanceMicros: z.number().int().min(0).nullable(),
+  aiCapacity: z.object({
+    status: z.enum(["available", "exhausted", "unconfigured"]),
+    remainingCalls: z.number().int().min(0).nullable(),
+    remainingBudgetMicros: z.number().int().min(0).nullable(),
+  }).strict(),
   runningBuildId: nonBlank,
   visiblePoolGeneration: z.number().int().positive(),
   visiblePoolState: z.enum([
@@ -291,7 +383,6 @@ const inventoryStatusSchema = z.object({
   refillState: z.enum([
     "idle",
     "running",
-    "waiting_contact",
     "completed",
     "paused",
     "exhausted",
@@ -382,7 +473,9 @@ const inventoryStatusSchema = z.object({
   }).strict().nullable(),
 }).strict();
 export const recommendationsResponseSchema = z.object({
-  items: z.array(itemSchema), nextCursor: z.string().nullable(), hasMore: z.boolean(),
+  items: z.array(itemSchema),
+  presentationState: z.enum(["current", "legacy_stale"]),
+  nextCursor: z.string().nullable(), hasMore: z.boolean(),
   meta: z.object({
     organizationId: nonBlank, workspaceId: nonBlank, websiteProjectId: nonBlank,
     requestId: nonBlank, schemaVersion: z.literal("backlinks.v1"),

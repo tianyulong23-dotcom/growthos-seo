@@ -2,11 +2,13 @@
 import * as React from "react"
 
 import {
+  archiveProject as archiveProjectRequest,
   createProject as createProjectRequest,
   deleteProject as deleteProjectRequest,
   getProject as getProjectRequest,
   listProjects,
   refreshBusinessProfile as refreshBusinessProfileRequest,
+  restoreProject as restoreProjectRequest,
   updateBusinessProfile as updateBusinessProfileRequest,
 } from "@/api/projects"
 import type { BusinessProfileInput, Project } from "@/features/projects/types"
@@ -20,7 +22,11 @@ type CreateProjectInput = {
 
 type ProjectContextValue = {
   projects: Project[]
+  archivedProjects: Project[]
+  loadState: "loading" | "ready" | "error"
   createProject: (input: CreateProjectInput) => Promise<Project>
+  archiveProject: (projectId: string) => Promise<Project>
+  restoreProject: (projectId: string) => Promise<Project>
   deleteProject: (projectId: string) => Promise<void>
   getProject: (projectId?: string) => Project
   refreshProject: (projectId: string) => Promise<Project>
@@ -63,19 +69,35 @@ const emptyProject: Project = {
 }
 
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
-  const [projects, setProjects] = React.useState<Project[]>([])
+  const [allProjects, setAllProjects] = React.useState<Project[]>([])
+  const [loadState, setLoadState] =
+    React.useState<ProjectContextValue["loadState"]>("loading")
   const deletedProjectIds = React.useRef(new Set<string>())
 
   React.useEffect(() => {
     let active = true
-    void listProjects()
-      .then((loadedProjects) => {
+    void Promise.all([listProjects("ACTIVE"), listProjects("ARCHIVED")])
+      .then(([activeProjects, archivedProjects]) => {
         if (active) {
-          setProjects(loadedProjects)
+          const loadedProjects = [...activeProjects, ...archivedProjects]
+          setAllProjects(
+            Array.from(
+              new Map(
+                loadedProjects
+                  .filter(
+                    (project) => !deletedProjectIds.current.has(project.id)
+                  )
+                  .map((project) => [project.id, project])
+              ).values()
+            )
+          )
+          setLoadState("ready")
         }
       })
       .catch(() => {
-        // The create dialog will show API errors. Keep the project list empty.
+        if (active) {
+          setLoadState("error")
+        }
       })
     return () => {
       active = false
@@ -84,7 +106,8 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const createProject = React.useCallback(async (input: CreateProjectInput) => {
     const project = await createProjectRequest(input)
-    setProjects((current) => [project, ...current])
+    setAllProjects((current) => [project, ...current])
+    setLoadState("ready")
     return project
   }, [])
 
@@ -92,7 +115,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     deletedProjectIds.current.add(projectId)
     try {
       await deleteProjectRequest(projectId)
-      setProjects((current) =>
+      setAllProjects((current) =>
         current.filter((project) => project.id !== projectId)
       )
     } catch (error) {
@@ -101,28 +124,71 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
-  const getProject = React.useCallback(
-    (projectId?: string) =>
-      projects.find((project) => project.id === projectId) ??
-      projects[0] ??
-      emptyProject,
-    [projects]
-  )
-
-  const refreshProject = React.useCallback(async (projectId: string) => {
-    const project = await getProjectRequest(projectId)
-    if (deletedProjectIds.current.has(projectId)) {
-      return project
-    }
-    setProjects((current) => {
-      const exists = current.some((item) => item.id === project.id)
-      if (!exists) {
-        return [project, ...current]
-      }
-      return current.map((item) => (item.id === project.id ? project : item))
-    })
+  const applyProject = React.useCallback((project: Project) => {
+    setAllProjects((current) =>
+      current.map((item) => (item.id === project.id ? project : item))
+    )
     return project
   }, [])
+
+  const archiveProject = React.useCallback(
+    async (projectId: string) =>
+      applyProject(await archiveProjectRequest(projectId)),
+    [applyProject]
+  )
+
+  const restoreProject = React.useCallback(
+    async (projectId: string) =>
+      applyProject(await restoreProjectRequest(projectId)),
+    [applyProject]
+  )
+
+  const projects = React.useMemo(
+    () =>
+      allProjects.filter(
+        (project) => (project.lifecycleStatus ?? "ACTIVE") === "ACTIVE"
+      ),
+    [allProjects]
+  )
+  const archivedProjects = React.useMemo(
+    () =>
+      allProjects.filter((project) => project.lifecycleStatus === "ARCHIVED"),
+    [allProjects]
+  )
+
+  const getProject = React.useCallback(
+    (projectId?: string) =>
+      allProjects.find((project) => project.id === projectId) ?? emptyProject,
+    [allProjects]
+  )
+
+  const loadProject = React.useCallback(
+    async (projectId: string, shouldApply: () => boolean) => {
+      const project = await getProjectRequest(projectId)
+      if (project.id !== projectId) {
+        throw new Error(
+          "Project response does not match the requested project."
+        )
+      }
+      if (!shouldApply() || deletedProjectIds.current.has(projectId)) {
+        return project
+      }
+      setAllProjects((current) => {
+        const exists = current.some((item) => item.id === project.id)
+        if (!exists) {
+          return [project, ...current]
+        }
+        return current.map((item) => (item.id === project.id ? project : item))
+      })
+      return project
+    },
+    []
+  )
+
+  const refreshProject = React.useCallback(
+    (projectId: string) => loadProject(projectId, () => true),
+    [loadProject]
+  )
 
   const activeUnderstandingProjectIds = React.useMemo(
     () =>
@@ -150,7 +216,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
     async function poll() {
       await Promise.allSettled(
-        projectIds.map((projectId) => refreshProject(projectId))
+        projectIds.map((projectId) => loadProject(projectId, () => active))
       )
       if (active) {
         timer = window.setTimeout(() => {
@@ -167,14 +233,14 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       active = false
       window.clearTimeout(timer)
     }
-  }, [activeUnderstandingProjectKey, refreshProject])
+  }, [activeUnderstandingProjectKey, loadProject])
 
   const updateProject = React.useCallback(
     (
       projectId: string,
       changes: Partial<Pick<Project, "domain" | "country" | "language">>
     ) => {
-      setProjects((current) =>
+      setAllProjects((current) =>
         current.map((project) =>
           project.id === projectId ? { ...project, ...changes } : project
         )
@@ -186,7 +252,12 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const updateBusinessProfile = React.useCallback(
     async (projectId: string, input: BusinessProfileInput) => {
       const project = await updateBusinessProfileRequest(projectId, input)
-      setProjects((current) =>
+      if (project.id !== projectId) {
+        throw new Error(
+          "Business profile response does not match the requested project."
+        )
+      }
+      setAllProjects((current) =>
         current.map((item) => (item.id === project.id ? project : item))
       )
       return project
@@ -197,7 +268,12 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const refreshBusinessProfile = React.useCallback(
     async (projectId: string) => {
       const project = await refreshBusinessProfileRequest(projectId)
-      setProjects((current) =>
+      if (project.id !== projectId) {
+        throw new Error(
+          "Business profile response does not match the requested project."
+        )
+      }
+      setAllProjects((current) =>
         current.map((item) => (item.id === project.id ? project : item))
       )
       return project
@@ -208,7 +284,11 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const value = React.useMemo(
     () => ({
       projects,
+      archivedProjects,
+      loadState,
       createProject,
+      archiveProject,
+      restoreProject,
       deleteProject,
       getProject,
       refreshProject,
@@ -218,7 +298,11 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       projects,
+      archivedProjects,
+      loadState,
       createProject,
+      archiveProject,
+      restoreProject,
       deleteProject,
       getProject,
       refreshProject,

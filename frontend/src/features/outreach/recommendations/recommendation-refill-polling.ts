@@ -56,7 +56,11 @@ type PollOptions<T extends RecommendationRefillPollSnapshot> = Readonly<{
   shouldContinue(inventory: T): boolean
   onTerminal(inventory: T): void | Promise<void>
   onError?(error: unknown): void
+  onBackgroundContinuation?(reason: "timeout" | "read_errors"): void
   sleep?: (intervalMs: number, signal: AbortSignal) => Promise<boolean>
+  now?: () => number
+  maximumActivePollingMs?: number
+  maximumConsecutiveErrors?: number
 }>
 
 export const recommendationRefillPollDelaysMs = [
@@ -116,24 +120,14 @@ export function isRecommendationRefillActive(
   now = Date.now()
 ) {
   if (inventory.terminal) return false
-  const batchActivity = recommendationContactBatchActivity(inventory, now)
   const jobActive =
     inventory.refillJob !== null &&
     activeJobStatuses.has(inventory.refillJob.status)
-  if (
-    !jobActive &&
-    (batchActivity === "recovery_required" ||
-      batchActivity === "completed" ||
-      batchActivity === "stale_context")
-  ) {
-    return false
-  }
   const operationObservedAt =
     parseTime(inventory.serverUpdatedAt) ??
     parseTime(inventory.refillJob?.updatedAt)
   if (
     !jobActive &&
-    batchActivity === "none" &&
     (operationObservedAt === null ||
       now - operationObservedAt >= operationRecoveryGraceMs)
   ) {
@@ -142,16 +136,12 @@ export function isRecommendationRefillActive(
   return (
     inventory.refillInFlight ||
     inventory.refillState === "running" ||
-    inventory.refillState === "waiting_contact" ||
-    jobActive ||
-    batchActivity === "processing" ||
-    batchActivity === "waiting_retry"
+    jobActive
   )
 }
 
 function snapshotFingerprint(inventory: RecommendationRefillPollSnapshot) {
   const job = inventory.refillJob
-  const batch = inventory.contactBatch
   return [
     inventory.operationId,
     inventory.stage,
@@ -164,11 +154,6 @@ function snapshotFingerprint(inventory: RecommendationRefillPollSnapshot) {
     job?.status,
     job?.progress,
     job?.updatedAt,
-    batch?.id,
-    batch?.status,
-    batch?.terminalJobCount,
-    batch?.totalJobCount,
-    batch?.nextRetryAt,
   ].join(":")
 }
 
@@ -195,18 +180,32 @@ const waitForInterval = (
 
 export async function pollRecommendationRefill<
   T extends RecommendationRefillPollSnapshot,
->(options: PollOptions<T>): Promise<"terminal" | "aborted"> {
+>(options: PollOptions<T>): Promise<"terminal" | "aborted" | "background"> {
   const sleep = options.sleep ?? waitForInterval
+  const now = options.now ?? Date.now
+  const maximumActivePollingMs = options.maximumActivePollingMs ?? 120_000
+  const maximumConsecutiveErrors = options.maximumConsecutiveErrors ?? 8
+  const startedAt = now()
   let backoffIndex = 0
+  let consecutiveErrors = 0
   let previousFingerprint: string | null = null
 
   while (!options.signal.aborted) {
+    if (now() - startedAt >= maximumActivePollingMs) {
+      options.onBackgroundContinuation?.("timeout")
+      return "background"
+    }
     let inventory: T
     try {
       inventory = await options.getInventory(options.signal)
     } catch (error) {
       if (options.signal.aborted) return "aborted"
+      consecutiveErrors += 1
       options.onError?.(error)
+      if (consecutiveErrors >= maximumConsecutiveErrors) {
+        options.onBackgroundContinuation?.("read_errors")
+        return "background"
+      }
       const delay =
         recommendationRefillPollDelaysMs[
           Math.min(backoffIndex, recommendationRefillPollDelaysMs.length - 1)
@@ -216,6 +215,8 @@ export async function pollRecommendationRefill<
       continue
     }
 
+    if (options.signal.aborted) return "aborted"
+    consecutiveErrors = 0
     options.onInventory(inventory)
     if (!options.shouldContinue(inventory)) {
       await options.onTerminal(inventory)

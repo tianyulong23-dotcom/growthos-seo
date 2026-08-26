@@ -26,8 +26,9 @@ import {
   type BacklinkTransactionClient,
 } from "../db/tenant-transaction.js";
 import { secretKinds } from "../ports/secret-store.port.js";
-import type {
-  LocalProductDataForSeoConfiguration,
+import {
+  localProductDataForSeoAvailabilityDecision,
+  type LocalProductDataForSeoConfiguration,
 } from "./local-product-dataforseo-runtime.js";
 
 const summaryEndpoint = "/v3/backlinks/summary/live";
@@ -994,6 +995,16 @@ export function createLocalProductBacklinkProfileRuntime(options: Readonly<{
   });
   return Object.freeze({
     async execute(input: BacklinkProfileSyncActivityInput) {
+      const availability = localProductDataForSeoAvailabilityDecision(
+        options.configuration,
+      );
+      if (availability.decision === "deny") {
+        return setWaitingProvider(
+          options.pool,
+          input,
+          availability.reasonCode,
+        );
+      }
       let credential: z.output<typeof credentialSchema>;
       try {
         credential = credentialSchema.parse(JSON.parse(

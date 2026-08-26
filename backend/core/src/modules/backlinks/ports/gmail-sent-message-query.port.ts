@@ -1,5 +1,10 @@
 export type GmailSentMessageQueryInput = Readonly<{
+  organizationId: string;
+  workspaceId: string;
+  websiteProjectId: string;
   gmailConnectionId: string;
+  actorId: string;
+  sendIntentId: string;
   rfcMessageId: string;
 }>;
 

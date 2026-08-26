@@ -23,6 +23,10 @@ import {
   draftRequestSchema,
 } from "../application/schemas/draft-request.schema.js";
 import {
+  draftFreshnessStates,
+  draftStaleReasons,
+} from "../application/read-models/draft-freshness.js";
+import {
   backlinkProblemContentType,
   backlinkProblemDetailsSchema,
   toBacklinkProblemDetails,
@@ -62,6 +66,16 @@ const jobStatuses = [
   "SUCCEEDED",
   "FAILED",
   "REFUSED",
+] as const;
+const jobReadiness = [
+  "QUEUED",
+  "GENERATING",
+  "RETRYING",
+  "AI_DRAFT_READY",
+  "BASIC_DRAFT_READY",
+  "POLICY_BLOCKED",
+  "BUDGET_BLOCKED",
+  "FAILED",
 ] as const;
 const metaSchema = z.object({
   organizationId: nonBlank,
@@ -104,6 +118,9 @@ const jobSchema = z.object({
   persistenceLatencyMs: z.number().int().nonnegative().nullable(),
   attemptCount: z.number().int().nonnegative(),
   lastErrorCategory: nonBlank.nullable(),
+  diagnosticCode: nonBlank.nullable(),
+  readiness: z.enum(jobReadiness),
+  fallbackReason: nonBlank.nullable(),
 }).strict();
 const jobResponseSchema = z.object({
   job: jobSchema,
@@ -122,6 +139,27 @@ const draftResponseSchema = z.object({
     status: z.enum(["generating", "draft", "approved", "rejected", "sent"]),
     draftVersion: z.number().int().positive(),
     approvedVersionId: z.uuid().nullable(),
+    inputSnapshot: z.object({
+      evidenceSnapshotId: z.uuid(),
+      evidenceSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/u),
+      requestSnapshotId: z.uuid(),
+      request: draftRequestSchema,
+      requestHash: z.string().regex(/^[a-f0-9]{64}$/u),
+      recommendationId: z.uuid().nullable(),
+      profileVersionId: nonBlank.nullable(),
+      promotionTargetVersionId: nonBlank.nullable(),
+      opportunityVersion: z.number().int().positive().nullable(),
+      contactId: z.uuid(),
+      contactVersion: z.number().int().positive(),
+      createdAt: z.string().datetime(),
+    }).strict().nullable(),
+    freshness: z.object({
+      state: z.enum(draftFreshnessStates),
+      staleReasons: z.array(z.enum(draftStaleReasons)),
+      unknownReason: z.literal("SNAPSHOT_CONTEXT_INCOMPLETE").nullable(),
+      regenerateRequired: z.boolean(),
+      manualEditsPreserved: z.literal(true),
+    }).strict(),
     currentVersion: z.object({
       id: z.uuid(),
       versionNo: z.number().int().positive(),
@@ -134,6 +172,12 @@ const draftResponseSchema = z.object({
         "MANUAL",
         "RESTORED",
       ]),
+      readiness: z.enum([
+        "AI_DRAFT_READY",
+        "BASIC_DRAFT_READY",
+        "EDITED_DRAFT_READY",
+      ]),
+      fallbackReason: nonBlank.nullable(),
       createdAt: z.string().datetime(),
     }).strict().nullable(),
   }).strict(),
@@ -168,6 +212,12 @@ function sendError(
   request: FastifyRequest,
   reply: FastifyReply,
 ): void {
+  if (!(error instanceof BacklinkError) && error.validation === undefined) {
+    request.log.error(
+      { err: error, requestId: request.id },
+      "backlinks.draft.request.failed",
+    );
+  }
   const normalized = error instanceof BacklinkError
     ? error
     : error.validation === undefined

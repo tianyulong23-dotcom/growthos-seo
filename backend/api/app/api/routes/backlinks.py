@@ -136,6 +136,18 @@ async def start_backlinks_contact_enrichment(
     return await _forward(request, websiteProjectKey)
 
 
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/"
+    "contact-enrichment-batches/current/run",
+    include_in_schema=False,
+)
+async def run_current_pool_backlinks_contact_enrichment(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
 @router.get(
     "/api/v1/projects/{websiteProjectKey}/backlinks/contact-enrichment-jobs/{jobId}",
     include_in_schema=False,
@@ -549,6 +561,34 @@ async def create_backlinks_recommendation_refill_job(
 
 @router.post(
     "/api/v1/projects/{websiteProjectKey}/backlinks/"
+    "recommendation-refill-jobs/{jobId}/cancel",
+    include_in_schema=False,
+)
+async def cancel_backlinks_recommendation_refill_job(
+    request: Request,
+    websiteProjectKey: str,
+    jobId: str,
+) -> Response:
+    del jobId
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/"
+    "recommendation-refill-jobs/{jobId}/close-duplicate",
+    include_in_schema=False,
+)
+async def close_duplicate_backlinks_recommendation_refill_job(
+    request: Request,
+    websiteProjectKey: str,
+    jobId: str,
+) -> Response:
+    del jobId
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/"
     "recommendation-pools/{visiblePoolGeneration}/archive",
     include_in_schema=False,
 )
@@ -695,6 +735,17 @@ async def create_backlinks_send_intent(
 
 
 @router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/send-intents",
+    include_in_schema=False,
+)
+async def list_backlinks_send_intents(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.get(
     "/api/v1/projects/{websiteProjectKey}/backlinks/send-intents/{sendIntentId}",
     include_in_schema=False,
 )
@@ -743,6 +794,9 @@ async def connect_backlinks_gmail(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:
+    origin_problem = _gmail_oauth_origin_problem(request)
+    if origin_problem is not None:
+        return origin_problem
     resolver: PlatformContextResolver = request.app.state.platform_context_resolver
     gateway: BacklinksGateway = request.app.state.backlinks_gateway
     try:
@@ -821,8 +875,9 @@ async def complete_backlinks_gmail_connection_stable(
         response = _gmail_oauth_callback_response(
             request,
             upstream,
+            resolved,
         )
-        delete_ticket = 200 <= upstream.status_code < 300
+        delete_ticket = True
     if delete_ticket:
         _delete_gmail_oauth_callback_ticket(response, callback_query["state"])
     return response
@@ -873,8 +928,9 @@ async def complete_backlinks_gmail_connection_legacy(
         response = _gmail_oauth_callback_response(
             request,
             upstream,
+            resolved,
         )
-        delete_ticket = 200 <= upstream.status_code < 300
+        delete_ticket = True
     if delete_ticket:
         _delete_gmail_oauth_callback_ticket(response, callback_query["state"])
     return response
@@ -978,6 +1034,7 @@ def _gmail_oauth_denied_response(
 def _gmail_oauth_callback_response(
     request: Request,
     response: Response,
+    resolved: ResolvedPlatformRequestContext,
 ) -> Response:
     frontend_origin = request.app.state.oauth_callback_frontend_origin
     if frontend_origin is None:
@@ -987,24 +1044,39 @@ def _gmail_oauth_callback_response(
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
         return response
     if not 200 <= response.status_code < 300:
-        return response
+        callback_status = (
+            "provider_unavailable"
+            if payload.get("code") == "GMAIL_OAUTH_PROVIDER_UNAVAILABLE"
+            else "failed"
+        )
+        return_path = (
+            f"/projects/{quote(resolved.project.website_project_key, safe='')}"
+            f"/backlinks/email?gmailOAuth={callback_status}"
+        )
+        return RedirectResponse(
+            url=f"{frontend_origin.rstrip('/')}{return_path}",
+            status_code=303,
+        )
     return_path = payload.get("returnPath")
+    meta = payload.get("meta")
     segments = return_path.split("/") if isinstance(return_path, str) else []
     if (
         len(segments) != 5
         or segments[0] != ""
         or segments[1] != "projects"
-        or not segments[2]
+        or segments[2] != resolved.project.website_project_key
         or segments[3:] != ["backlinks", "email"]
         or "?" in return_path
         or "#" in return_path
+        or not isinstance(meta, dict)
+        or meta.get("websiteProjectId") != resolved.project.website_project_id
     ):
         return problem_response(
             status=502,
-            problem_type="urn:growthos:problem:platform:oauth-return-path-invalid",
-            title="OAuth return path invalid",
-            detail="The OAuth callback returned an invalid application path.",
-            code="OAUTH_RETURN_PATH_INVALID",
+            problem_type="urn:growthos:problem:platform:oauth-project-context-mismatch",
+            title="OAuth project context mismatch",
+            detail="The OAuth callback did not match the project that started authorization.",
+            code="OAUTH_PROJECT_CONTEXT_MISMATCH",
             request_id=request.headers.get("x-request-id", "oauth-callback"),
             retryable=False,
         )
@@ -1083,6 +1155,12 @@ def _valid_oauth_state(value: str) -> bool:
 
 
 def _oauth_callback_problem(request: Request, *, detail: str) -> Response:
+    frontend_origin = request.app.state.oauth_callback_frontend_origin
+    if frontend_origin is not None:
+        return RedirectResponse(
+            url=f"{frontend_origin.rstrip('/')}/?gmailOAuth=invalid_or_expired",
+            status_code=303,
+        )
     return problem_response(
         status=400,
         problem_type="urn:growthos:problem:platform:oauth-callback-invalid",
@@ -1091,6 +1169,87 @@ def _oauth_callback_problem(request: Request, *, detail: str) -> Response:
         code="OAUTH_CALLBACK_INVALID",
         request_id=request.headers.get("x-request-id", "oauth-callback"),
         retryable=False,
+    )
+
+
+def _oauth_origin_key(value: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return (
+        scheme,
+        parsed.hostname.lower(),
+        port or (443 if scheme == "https" else 80),
+    )
+
+
+def _gmail_oauth_origin_problem(request: Request) -> Response | None:
+    callback_url = request.app.state.oauth_callback_url
+    frontend_origin = request.app.state.oauth_callback_frontend_origin
+    frontend_origin_key = (
+        _oauth_origin_key(frontend_origin) if frontend_origin is not None else None
+    )
+    callback_host = (
+        urlparse(callback_url).hostname.lower() if callback_url is not None else None
+    )
+    if frontend_origin_key is None or callback_host is None:
+        return problem_response(
+            status=503,
+            problem_type=(
+                "urn:growthos:problem:platform:oauth-configuration-invalid"
+            ),
+            title="OAuth configuration invalid",
+            detail=(
+                "Gmail authorization is unavailable because its public callback "
+                "configuration is incomplete."
+            ),
+            code="OAUTH_CONFIGURATION_INVALID",
+            request_id=request.headers.get("x-request-id", "unresolved"),
+            retryable=False,
+        )
+    frontend_host = frontend_origin_key[1]
+    browser_origin = request.headers.get("origin")
+    browser_origin_matches = (
+        _oauth_origin_key(browser_origin) == frontend_origin_key
+        if browser_origin is not None
+        else False
+    )
+    request_host = request.url.hostname
+    request_host_matches = (
+        request_host is not None and request_host.lower() == frontend_host
+    )
+    if (
+        callback_host == frontend_host
+        and (
+            browser_origin_matches
+            if browser_origin is not None
+            else request_host_matches
+        )
+    ):
+        return None
+    return problem_response(
+        status=409,
+        problem_type="urn:growthos:problem:platform:oauth-origin-mismatch",
+        title="OAuth origin mismatch",
+        detail="Gmail authorization must start from the configured public hostname.",
+        code="OAUTH_ORIGIN_MISMATCH",
+        request_id=request.headers.get("x-request-id", "unresolved"),
+        retryable=True,
+        extensions={"canonicalFrontendOrigin": frontend_origin.rstrip("/")},
     )
 
 

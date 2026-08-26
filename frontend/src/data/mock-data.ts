@@ -1,5 +1,4 @@
 import {
-  BarChart3,
   FileText,
   KeyRound,
   SearchCheck,
@@ -9,6 +8,7 @@ import {
 } from "lucide-react"
 
 import { backlinksNavigation } from "@/features/outreach/manifest"
+import { performanceNavigation } from "@/features/performance/manifest"
 import type { Project } from "@/features/projects/types"
 
 export type ModuleTab = {
@@ -137,17 +137,7 @@ export const modules: ModuleConfig[] = [
     action: "创建内容",
   },
   backlinksNavigation,
-  {
-    id: "performance",
-    label: "效果",
-    description: "查看平台文章在 Google 搜索中的真实表现",
-    icon: BarChart3,
-    tabs: [
-      { id: "overview", label: "总览" },
-      { id: "articles", label: "文章效果" },
-    ],
-    action: "",
-  },
+  performanceNavigation,
   {
     id: "settings",
     label: "设置",

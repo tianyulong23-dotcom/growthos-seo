@@ -38,7 +38,11 @@ const fail = (
 
 const providerMetadata = (
   error: unknown,
-): Readonly<{ httpStatus?: number; providerRequestId?: string }> => {
+): Readonly<{
+  httpStatus?: number;
+  providerRequestId?: string;
+  transportCode?: string;
+}> => {
   if (typeof error !== "object" || error === null) return {};
   const response = "response" in error
     && typeof error.response === "object"
@@ -53,10 +57,14 @@ const providerMetadata = (
   const status = response?.status;
   const requestId = headers?.["x-request-id"]
     ?? headers?.["x-guploader-uploadid"];
+  const errorCode = "code" in error ? error.code : undefined;
   return {
     ...(typeof status === "number" ? { httpStatus: status } : {}),
     ...(typeof requestId === "string" && requestId.length > 0
       ? { providerRequestId: requestId }
+      : {}),
+    ...(typeof errorCode === "string" && errorCode.length > 0
+      ? { transportCode: errorCode }
       : {}),
   };
 };

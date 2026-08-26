@@ -7,13 +7,13 @@ import {
 } from "../../src/modules/backlinks/domain/recommendations/resource-library-authority.js";
 
 describe("resource library authority matching", () => {
-  it("uses a conservative threshold when the project profile is unavailable", () => {
+  it("uses neutral low-confidence authority when the project profile is unavailable", () => {
     expect(calculateProjectAuthority(null)).toEqual({
-      score: 75,
+      score: 50,
       band: "unknown",
-      confidence: "conservative_default",
+      confidence: "neutral_default",
       referringDomains: null,
-      minimumResourceAuthorityScore: 72,
+      minimumResourceAuthorityScore: 35,
     });
   });
 
@@ -35,10 +35,17 @@ describe("resource library authority matching", () => {
     })).toBe(80);
   });
 
-  it("does not classify below-threshold resources as matched", () => {
-    const projectAuthority = calculateProjectAuthority(null);
-    expect(resourceAuthorityMatch(84, projectAuthority)).toBe("stronger");
-    expect(resourceAuthorityMatch(72, projectAuthority)).toBe("matched");
-    expect(resourceAuthorityMatch(71, projectAuthority)).toBe("below");
+  it("accepts the normal relative authority range instead of an absolute floor", () => {
+    const projectAuthority = {
+      score: 20,
+      band: "emerging",
+      confidence: "backlink_profile",
+      referringDomains: 15,
+      minimumResourceAuthorityScore: 5,
+    } as const;
+
+    expect(resourceAuthorityMatch(60, projectAuthority)).toBe("stronger");
+    expect(resourceAuthorityMatch(5, projectAuthority)).toBe("matched");
+    expect(resourceAuthorityMatch(4, projectAuthority)).toBe("below");
   });
 });

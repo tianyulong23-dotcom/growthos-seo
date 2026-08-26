@@ -17,6 +17,10 @@ import {
 } from "../../domain/sending/progressive-verification.js";
 import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
 import type { SecretStoreReference } from "../../ports/secret-store.port.js";
+import {
+  createGmailSendReadinessSnapshot,
+  type GmailSendReadinessSnapshot,
+} from "../services/send-policy-gate.js";
 
 export type CreateSendIntentCommand = Readonly<{
   context: ResolvedProjectContext;
@@ -28,17 +32,24 @@ export type CreateSendIntentCommand = Readonly<{
   messagePurpose: SendIntentMessagePurpose;
   followUpIndex: number;
   idempotencyKey: string;
+  readinessSnapshot: GmailSendReadinessSnapshot;
+  humanConfirmation: Readonly<{
+    confirmed: true;
+    confirmedAt: string;
+    readinessSnapshotVersion: string;
+  }>;
 }>;
 
 export type PreflightSendIntentCommand = Omit<
   CreateSendIntentCommand,
-  "idempotencyKey"
+  "idempotencyKey" | "readinessSnapshot" | "humanConfirmation"
 >;
 
 export type SendIntentPreflight = Readonly<{
   allowed: true;
   deliveryState: "NOT_SENT";
   checkedAt: string;
+  readinessSnapshot: GmailSendReadinessSnapshot;
   gmail: Readonly<{
     connectionId: string;
     primaryEmail: string;
@@ -203,6 +214,15 @@ const requireCreated = (
       retryable: result.retryAt !== null,
     });
   }
+  if (result.state === "readiness_changed") {
+    throw new BacklinkError({
+      code: backlinkErrorCodes.sendReadinessStale,
+      message:
+        "The confirmed send readiness conditions changed. Run preflight and confirm again.",
+      retryable: true,
+      changedConditions: result.changedConditions,
+    });
+  }
   if (
     result.state === "quota_exceeded"
     || result.state === "initial_outreach_cooldown"
@@ -246,6 +266,7 @@ export function createSendIntentCommands(dependencies: Readonly<{
     rolling24HourSendLimit: number;
     minimumIntervalSeconds: number;
   }>;
+  readinessTtlSeconds?: number;
 }>) {
   const quotaProfile = dependencies.quotaProfile ?? defaultQuotaProfile;
   const preflight = async (
@@ -300,13 +321,35 @@ export function createSendIntentCommands(dependencies: Readonly<{
       allowed: true,
       deliveryState: "NOT_SENT",
       checkedAt: checkedAt.toISOString(),
+      readinessSnapshot: createGmailSendReadinessSnapshot({
+        evaluatedAt: checkedAt,
+        conditions: allowed.readinessConditions,
+        ...(dependencies.readinessTtlSeconds === undefined
+          ? {}
+          : { ttlSeconds: dependencies.readinessTtlSeconds }),
+      }),
       gmail: allowed.gmail,
     });
   };
   return Object.freeze({
     preflight,
     async create(input: CreateSendIntentCommand) {
-      await preflight(input);
+      authorize(input.context);
+      assertPurposeIndex(input.messagePurpose, input.followUpIndex);
+      const confirmedAt = new Date(input.humanConfirmation.confirmedAt);
+      if (
+        input.humanConfirmation.confirmed !== true
+        || !Number.isFinite(confirmedAt.getTime())
+      ) {
+        throw new BacklinkError({
+          code: backlinkErrorCodes.invalidRequest,
+          message: "A valid human send confirmation is required.",
+          fieldErrors: [{
+            field: "humanConfirmation.confirmedAt",
+            message: "A valid human send confirmation is required.",
+          }],
+        });
+      }
       const sendIntentId = dependencies.newId();
       const quotaReservationId = dependencies.newId();
       const outboxEventId = dependencies.newId();
@@ -336,6 +379,13 @@ export function createSendIntentCommands(dependencies: Readonly<{
           quotaProfile.minimumIntervalSeconds,
         reservationTtlSeconds,
         actorId: input.context.actor.userId,
+        readinessSnapshot: input.readinessSnapshot,
+        humanConfirmation: {
+          confirmed: true,
+          confirmedAt,
+          readinessSnapshotVersion:
+            input.humanConfirmation.readinessSnapshotVersion,
+        },
       }));
     },
   });

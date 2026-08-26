@@ -1,4 +1,12 @@
-import { readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
 
@@ -12,35 +20,24 @@ const quiescedWorkerSource = readFileSync(
 );
 const processSource = readFileSync(
   new URL(
-    "../../../../ops/local-product/Invoke-LocalProductProcess.ps1",
+    "../../../../scripts/dev-up.ps1",
     import.meta.url,
   ),
   "utf8",
 );
 const startSource = readFileSync(
   new URL(
-    "../../../../ops/local-product/Start-GrowthOS-LocalProduct.ps1",
+    "../../../../scripts/dev-up.ps1",
     import.meta.url,
   ),
   "utf8",
 );
 const statusSource = readFileSync(
   new URL(
-    "../../../../ops/local-product/Status-GrowthOS-LocalProduct.ps1",
+    "../../../../scripts/dev-up.ps1",
     import.meta.url,
   ),
   "utf8",
-);
-const quiescedStartIndex = startSource.indexOf(
-  'if ($WorkerExecutionMode -eq "quiesced")',
-);
-const quiescedStartSource = startSource.slice(
-  quiescedStartIndex,
-  startSource.indexOf("Invoke-LocalProductAlembicUpgrade", quiescedStartIndex),
-);
-const maintenanceStatusSource = statusSource.slice(
-  statusSource.indexOf("$maintenanceReady = ("),
-  statusSource.indexOf("$result = [pscustomobject]"),
 );
 
 describe("LOCAL_PRODUCT quiesced Worker", () => {
@@ -70,7 +67,7 @@ describe("LOCAL_PRODUCT quiesced Worker", () => {
     expect(quiescedWorkerSource).toContain(
       "await runtime.createWorkerRegistrations",
     );
-    expect(quiescedWorkerSource).not.toContain("startBacklinksWorker");
+    expect(quiescedWorkerSource).not.toContain("startBacklinksWorker(");
     expect(quiescedWorkerSource).not.toContain("backgroundService.start");
     expect(quiescedWorkerSource).not.toContain("worker.run");
     expect(quiescedWorkerSource).toContain(
@@ -89,57 +86,174 @@ describe("LOCAL_PRODUCT quiesced Worker", () => {
     expect(quiescedWorkerSource).toContain("postgresReady: true");
     expect(quiescedWorkerSource).toContain("temporalReady: true");
     expect(startSource).toContain(
-      '$WorkerExecutionMode -eq "quiesced"',
+      '$workerExecutionMode -eq "quiesced"',
     );
     expect(startSource).toContain(
-      'if ($finalStatus.status -eq "maintenance_ready")',
+      '$runtimeStatus.status -ne "maintenance"',
     );
-    expect(statusSource).toContain("apiBuildId = $apiBuildId");
-    expect(statusSource).toContain("workerBuildId = $workerBuildId");
+    expect(statusSource).toContain("core_api");
+    expect(statusSource).toContain("worker");
     expect(statusSource).toContain(
-      "workerExecutionMode = $workerExecutionMode",
+      "execution_mode",
     );
     expect(statusSource).toContain(
-      "businessConsumersRunning = $businessConsumersRunning",
+      "business_consumers_running",
     );
-    expect(statusSource).toContain("postgresReady = $postgresReady");
-    expect(statusSource).toContain("temporalReady = $temporalReady");
+    expect(statusSource).toContain("postgres_ready");
+    expect(statusSource).toContain("temporal_ready");
   });
 
-  it("keeps the user-facing stack available without business consumers", () => {
-    expect(quiescedStartSource).toContain(
-      '$state.fastApiGroupPid = Start-Component',
+  it("starts recovery through the standard Worker without normal consumers", () => {
+    expect(startSource).toContain(
+      '"RECOVERY" {',
     );
-    expect(quiescedStartSource).toContain(
-      '$state.frontendGroupPid = Start-Component',
+    expect(startSource).toContain(
+      '$desiredWorkerExecutionMode = "recovery"',
     );
-    expect(quiescedStartSource).toContain(
-      'Wait-HttpReady "http://127.0.0.1:7200/ready"',
+    expect(startSource).toContain(
+      '$desiredPlatformBackgroundDispatchEnabled = "false"',
     );
-    expect(quiescedStartSource).toContain(
-      'Wait-HttpAvailable "http://127.0.0.1:5173"',
+  });
+
+  it("keeps PRODUCT providers configured with business dispatch enabled", () => {
+    expect(startSource).toContain(
+      '"app.main:app"',
     );
-    expect(quiescedStartSource).toContain("if ($EnableBrowser)");
-    expect(quiescedStartSource).toContain(
-      '$state.browserGroupPid = Start-Component',
+    expect(startSource).toContain(
+      '"node_modules\\vite\\bin\\vite.js"',
     );
-    expect(maintenanceStatusSource).toContain(
-      "$processes.fastApi.running",
+    expect(startSource).toContain('-ExpectedCommand "vite.js"');
+    expect(startSource).toContain(
+      'Wait-ForUrl "Platform API"',
     );
-    expect(maintenanceStatusSource).toContain(
-      "$processes.frontend.running",
+    expect(startSource).toContain(
+      'Wait-ForUrl "Frontend"',
     );
-    expect(maintenanceStatusSource).toContain(
-      "$fastApiStatus -eq 200",
+    expect(startSource).toContain(
+      '$desiredPlatformBackgroundDispatchEnabled = "true"',
     );
-    expect(maintenanceStatusSource).toContain(
-      "$frontendStatus -eq 200",
+    expect(startSource).toContain(
+      '$desiredBacklinksProjectProjectionEnabled = "true"',
     );
-    expect(maintenanceStatusSource).not.toContain(
-      "-not $processes.fastApi.running",
+    expect(startSource).toContain(
+      "Assert-ProviderEnabled $providerFlag",
     );
-    expect(maintenanceStatusSource).not.toContain(
-      "-not $processes.frontend.running",
+    expect(startSource).toContain(
+      '$dataForSeoDefaultAvailability = if ($growthosRuntimeMode -eq "PRODUCT")',
+    );
+    expect(startSource).toContain(
+      '"DATAFORSEO_EXTERNAL_AVAILABILITY" `\n    $dataForSeoDefaultAvailability',
+    );
+    expect(startSource).toContain(
+      'Get-LocalSetting "BROWSER_PROVIDER_EXTERNAL_AVAILABILITY" "not_checked"',
+    );
+    expect(startSource).toContain(
+      'Get-LocalSetting "AI_PROVIDER_ENABLED" "false"',
+    );
+    expect(startSource).not.toContain(
+      'Assert-ProviderDisabled "AI_PROVIDER_ENABLED"',
+    );
+    expect(startSource).not.toContain('AI_PROVIDER_ENABLED = "false"');
+    expect(startSource).toContain(
+      'AI_PROVIDER_ENABLED = $aiProviderEnabled',
+    );
+    expect(startSource).toContain('"backlinks-worker.env"');
+    expect(startSource).toContain(
+      '"AI_PROVIDER_CREDENTIAL_SECRET_REF"',
+    );
+    expect(startSource).toContain(
+      "LOCAL_PRODUCT_AI_MANAGED_CONFIGURATION_MISSING",
+    );
+    expect(startSource).not.toContain(
+      '$env:DATAFORSEO_EXTERNAL_AVAILABILITY = $null',
+    );
+    expect(startSource).not.toContain(
+      '$env:BROWSER_PROVIDER_EXTERNAL_AVAILABILITY = $null',
+    );
+  });
+
+  it("fails closed before startup when enabled AI has no managed configuration", () => {
+    const root = mkdtempSync(join(tmpdir(), "growthos-ai-startup-"));
+    try {
+      const environmentPath = join(root, ".env");
+      const repositoryRoot = resolve(process.cwd(), "..", "..");
+      const environment = readFileSync(
+        join(repositoryRoot, "deploy", "compose", ".env.example"),
+        "utf8",
+      );
+      writeFileSync(
+        environmentPath,
+        [
+          environment,
+          "AI_PROVIDER_ENABLED=true",
+          "GOOGLE_OAUTH_CLIENT_ID=test-client-id",
+          "GOOGLE_OAUTH_CLIENT_SECRET_REF=secret://test/google-oauth",
+          "GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/v1/backlinks/gmail-connections/callback",
+          "BACKLINKS_OAUTH_FRONTEND_ORIGIN=http://localhost:5173",
+          `PLATFORM_SECRET_STORE_ROOT=${join(root, "missing", "secrets")}`,
+          `COMPOSE_PROJECT_NAME=ai-missing-${process.pid}`,
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const result = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          join(repositoryRoot, "scripts", "dev-up.ps1"),
+          "-EnvironmentFile",
+          environmentPath,
+        ],
+        {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain(
+        "LOCAL_PRODUCT_AI_MANAGED_CONFIGURATION_MISSING",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves managed process timestamp precision across restarts", () => {
+    expect(processSource).toContain(
+      "[datetime]$Record.startedAtUtc",
+    );
+    expect(processSource).not.toContain(
+      "[datetime]::Parse(",
+    );
+    expect(processSource).toContain("$startDeltaSeconds -lt 1");
+    expect(processSource).toContain("Assert-PortAvailable");
+    expect(
+      processSource.split("Assert-ManagedProcessRunning `").length - 1,
+    ).toBe(8);
+  });
+
+  it("keeps the Platform API process tree rooted in the managed Python process", () => {
+    expect(processSource).toContain(
+      '$platformPython = Join-Path $apiDir ".venv\\Scripts\\python.exe"',
+    );
+    expect(processSource).toContain(
+      '-FilePath $platformPython `',
+    );
+    expect(processSource).toMatch(
+      /"-m",\r?\n\s+"uvicorn",\r?\n\s+"app\.main:app"/u,
+    );
+    expect(processSource).toContain(
+      '-ExpectedCommand "-m uvicorn app.main:app"',
+    );
+    expect(processSource).not.toContain(
+      '-FilePath $uvicorn `',
     );
   });
 });

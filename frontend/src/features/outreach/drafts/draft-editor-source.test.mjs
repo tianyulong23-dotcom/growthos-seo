@@ -45,6 +45,27 @@ test("BL-AI-097 uses backend expectedVersion and keeps the editor free of send c
   assert.doesNotMatch(editor, /\/send|sendDraft|autoSend/)
   assert.match(page, /snapshot\.draftVersion/)
   assert.match(page, /人工批准/)
-  assert.match(page, /disabled=\{[\s\S]*fallbackDiagnostic/)
+  assert.match(page, /disabled=\{[\s\S]*basicDraftNeedsEdit/)
   assert.match(registration, /backlinks\/drafts\/:draftId/)
+})
+
+test("draft editing UI presents generation truth without exposing raw diagnostics first", () => {
+  const editor = read("./draft-editor.tsx")
+  const page = read("./draft-page.tsx")
+
+  assert.match(editor, /role="toolbar"/)
+  assert.match(editor, /aria-label="邮件格式"/)
+  assert.match(page, /AI 未参与当前版本/)
+  assert.match(page, /草稿语言需要校对/)
+  assert.match(page, /发送邮件/)
+  assert.doesNotMatch(page, /版本与生成详情|快照哈希|技术详情/)
+  assert.doesNotMatch(page, /失败分类：/)
+})
+
+test("draft editor keeps the email center return action visible while scrolling", () => {
+  const page = read("./draft-page.tsx")
+
+  assert.match(page, /sticky top-0 z-20/)
+  assert.match(page, /返回邮件中心/)
+  assert.match(page, /<ArrowLeft className="size-4" \/>/)
 })

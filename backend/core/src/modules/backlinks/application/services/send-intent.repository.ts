@@ -8,6 +8,21 @@ import {
   secretStoreReferenceSchema,
   type SecretStoreReference,
 } from "../../ports/secret-store.port.js";
+import {
+  containsInternalDraftMetadataMarker,
+} from "../../domain/drafts/evidence-policy.js";
+import {
+  compareGmailSendReadinessSnapshot,
+  describeGmailSendReadinessChange,
+  describeGmailSendReadinessSnapshotValidity,
+  type GmailSendReadinessChangedCondition,
+  type GmailSendReadinessCondition,
+  type GmailSendReadinessConditionCode,
+  type GmailSendReadinessSnapshot,
+} from "./send-policy-gate.js";
+import {
+  canReplaceFailedSendIntent,
+} from "./send-resubmission-policy.js";
 
 export const sendIntentMessagePurposes = [
   "INITIAL_OUTREACH",
@@ -40,6 +55,7 @@ export type SendIntentPreflightRepositoryResult =
   | Readonly<{
       state: "allowed";
       tokenSecretReference: SecretStoreReference;
+      readinessConditions: readonly GmailSendReadinessCondition[];
       gmail: Readonly<{
         connectionId: string;
         primaryEmail: string;
@@ -82,6 +98,12 @@ export type CreateSendIntentRecordInput = Readonly<{
   minimumIntervalSeconds: number;
   reservationTtlSeconds: number;
   actorId: string;
+  readinessSnapshot: GmailSendReadinessSnapshot;
+  humanConfirmation: Readonly<{
+    confirmed: true;
+    confirmedAt: Date;
+    readinessSnapshotVersion: string;
+  }>;
 }>;
 
 export type SendIntentRecord = Readonly<{
@@ -118,6 +140,10 @@ export type SendIntentRepositoryResult =
       message: string;
       retryAt: string | null;
     }>
+  | Readonly<{
+      state: "readiness_changed";
+      changedConditions: readonly GmailSendReadinessChangedCondition[];
+    }>
   | Readonly<{ state: "conflict" }>;
 
 export interface SendIntentPreflightRepository {
@@ -134,6 +160,13 @@ export interface SendIntentRepository {
 
 export const sendIntentCreatedEventType =
   "backlinks.send-intent.created.v1";
+
+const internalDraftMetadataSendRejection = Object.freeze({
+  state: "send_policy_rejected" as const,
+  message:
+    "The approved Draft contains internal evidence metadata. Edit and reapprove it before sending.",
+  retryAt: null,
+});
 
 const asDate = (value: unknown, field: string): Date => {
   const date = value instanceof Date
@@ -172,6 +205,40 @@ const canonicalJson = (value: unknown): string => {
 
 const sha256 = (value: string): string =>
   createHash("sha256").update(value, "utf8").digest("hex");
+
+const readinessCondition = (
+  code: GmailSendReadinessConditionCode,
+  revision: string,
+): GmailSendReadinessCondition => Object.freeze({ code, revision });
+
+const readinessChanged = (
+  input: CreateSendIntentRecordInput,
+  code: GmailSendReadinessConditionCode,
+  currentRevision: string | null,
+): SendIntentRepositoryResult => ({
+  state: "readiness_changed",
+  changedConditions: Object.freeze([
+    describeGmailSendReadinessChange({
+      expected: input.readinessSnapshot,
+      code,
+      currentRevision,
+    }),
+  ]),
+});
+
+const asRevisionPart = (value: unknown): string | null => {
+  if (
+    typeof value === "string"
+    || (
+      typeof value === "number"
+      && Number.isSafeInteger(value)
+    )
+  ) {
+    const revision = String(value).trim();
+    return revision.length === 0 ? null : revision;
+  }
+  return null;
+};
 
 const intentFromRow = (
   row: Record<string, unknown>,
@@ -279,11 +346,13 @@ implements SendIntentRepository, SendIntentPreflightRepository {
              version.contact_id AS "versionContactId",
              version.contact_version AS "versionContactVersion",
              version.source AS "draftSource",
+             version.subject_text AS "subjectText",
+             version.body_text AS "bodyText",
              opportunity.prospect_id AS "prospectId",
              opportunity.recommendation_context_version_id
                AS "recommendationContextVersionId",
-             EXISTS (
-               SELECT 1
+             (
+               SELECT event.id
                  FROM backlinks.backlink_lifecycle_events AS event
                 WHERE event.organization_id=draft.organization_id
                   AND event.workspace_id=draft.workspace_id
@@ -292,7 +361,9 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                   AND event.aggregate_id=draft.id
                   AND event.event_type='draft.approval.recorded'
                   AND event.after_state->>'approvedVersionId'=$5
-             ) AS "approvalRecorded"
+                ORDER BY event.sequence DESC
+                LIMIT 1
+             ) AS "approvalFactId"
            FROM backlinks.backlink_email_drafts AS draft
            JOIN backlinks.backlink_opportunities AS opportunity
              ON opportunity.organization_id=draft.organization_id
@@ -323,10 +394,24 @@ implements SendIntentRepository, SendIntentPreflightRepository {
           draft.status !== "approved"
           || draft.currentVersionId !== input.approvedDraftVersionId
           || draft.approvedVersionId !== input.approvedDraftVersionId
-          || draft.approvalRecorded !== true
+          || typeof draft.approvalFactId !== "string"
           || draft.draftSource === "TEMPLATE_FALLBACK"
         ) {
           return { state: "draft_version_stale" };
+        }
+        if (
+          typeof draft.subjectText !== "string"
+          || typeof draft.bodyText !== "string"
+        ) {
+          throw new TypeError(
+            "Send Intent preflight returned an invalid Draft.",
+          );
+        }
+        if (
+          containsInternalDraftMetadataMarker(draft.subjectText)
+          || containsInternalDraftMetadataMarker(draft.bodyText)
+        ) {
+          return internalDraftMetadataSendRejection;
         }
         if (
           draft.draftContactId !== input.contactId
@@ -370,7 +455,11 @@ implements SendIntentRepository, SendIntentPreflightRepository {
              connection.send_availability AS "sendAvailability",
              connection.mail_sync_capability AS "mailSyncCapability",
              connection.granted_scopes AS "grantedScopes",
+             connection.version AS "connectionVersion",
+             binding.version AS "workspaceBindingVersion",
+             project_binding.version AS "projectBindingVersion",
              identity.id AS "identityId",
+             identity.version AS "identityVersion",
              secret.provider AS "secretProvider",
              secret.secret_kind AS "secretKind",
              secret.external_secret_id AS "externalSecretId",
@@ -391,7 +480,7 @@ implements SendIntentRepository, SendIntentPreflightRepository {
             AND secret.secret_kind='GMAIL_TOKEN_SET'
             AND secret.status = 'ACTIVE'
            LEFT JOIN LATERAL (
-             SELECT candidate.id
+             SELECT candidate.id, candidate.version
                FROM backlinks.backlink_gmail_send_identities AS candidate
               WHERE candidate.organization_id=connection.organization_id
                 AND candidate.gmail_connection_id=connection.id
@@ -467,6 +556,22 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                   )
              ) AS suppressed,
              (
+               SELECT string_agg(
+                 entry.id::text || ':' || entry.version::text,
+                 ',' ORDER BY entry.id
+               )
+                 FROM backlinks.backlink_suppression_entries AS entry
+                WHERE entry.organization_id=$1
+                  AND entry.status='ACTIVE'
+                  AND (
+                    entry.workspace_id IS NULL
+                    OR (
+                      entry.workspace_id=$2
+                      AND entry.website_project_id=$3
+                    )
+                  )
+             ) AS "suppressionRevision",
+             (
                SELECT switch.blocked
                  FROM backlinks.backlink_kill_switch_versions AS switch
                 WHERE switch.organization_id=$1
@@ -476,6 +581,16 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                 ORDER BY switch.version DESC
                 LIMIT 1
              ) AS "sendBlocked",
+             (
+               SELECT switch.version
+                 FROM backlinks.backlink_kill_switch_versions AS switch
+                WHERE switch.organization_id=$1
+                  AND switch.workspace_id=$2
+                  AND switch.website_project_id=$3
+                  AND switch.capability='GMAIL_SEND'
+                ORDER BY switch.version DESC
+                LIMIT 1
+             ) AS "sendBlockVersion",
              (
                SELECT max(
                  intent.requested_send_at + interval '30 days'
@@ -590,6 +705,12 @@ implements SendIntentRepository, SendIntentPreflightRepository {
         if (
           typeof binding.primaryEmail !== "string"
           || typeof binding.mailSyncCapability !== "boolean"
+          || !Number.isSafeInteger(binding.connectionVersion)
+          || !Number.isSafeInteger(binding.workspaceBindingVersion)
+          || !Number.isSafeInteger(binding.projectBindingVersion)
+          || !Number.isSafeInteger(binding.identityVersion)
+          || typeof binding.externalSecretVersion !== "string"
+          || !Number.isSafeInteger(policy.sendBlockVersion)
         ) {
           throw new TypeError(
             "Send Intent preflight returned an invalid Gmail binding.",
@@ -598,6 +719,40 @@ implements SendIntentRepository, SendIntentPreflightRepository {
         return {
           state: "allowed",
           tokenSecretReference: tokenSecretReference.data,
+          readinessConditions: Object.freeze([
+            readinessCondition(
+              "DRAFT_APPROVAL",
+              `${input.approvedDraftVersionId}:${draft.approvalFactId}`,
+            ),
+            readinessCondition(
+              "CONTACT_VERSION",
+              `${input.contactId}:${input.contactVersion}`,
+            ),
+            readinessCondition(
+              "GMAIL_BINDING",
+              [
+                input.gmailConnectionId,
+                binding.connectionVersion,
+                binding.workspaceBindingVersion,
+                binding.projectBindingVersion,
+                binding.externalSecretVersion,
+              ].join(":"),
+            ),
+            readinessCondition(
+              "GMAIL_IDENTITY",
+              `${binding.identityId}:${binding.identityVersion}`,
+            ),
+            readinessCondition("SUPPRESSION", "CLEAR"),
+            readinessCondition(
+              "KILL_SWITCH",
+              `${policy.sendBlockVersion}:OPEN`,
+            ),
+            readinessCondition("COOLDOWN", "CLEAR"),
+            readinessCondition(
+              "QUOTA",
+              `${usedSlots}/${input.rolling24HourSendLimit}`,
+            ),
+          ]),
           gmail: Object.freeze({
             connectionId: input.gmailConnectionId,
             primaryEmail: binding.primaryEmail,
@@ -615,6 +770,16 @@ implements SendIntentRepository, SendIntentPreflightRepository {
   ): Promise<SendIntentRepositoryResult> {
     if (!Number.isFinite(input.requestedSendAt.getTime())) {
       throw new TypeError("Send Intent requestedSendAt must be valid.");
+    }
+    if (
+      input.humanConfirmation.confirmed !== true
+      || !Number.isFinite(input.humanConfirmation.confirmedAt.getTime())
+      || input.humanConfirmation.readinessSnapshotVersion
+        !== input.readinessSnapshot.snapshotVersion
+    ) {
+      throw new TypeError(
+        "Send Intent requires confirmation of the submitted readiness snapshot.",
+      );
     }
     for (const [name, value] of [
       ["rolling24HourSendLimit", input.rolling24HourSendLimit],
@@ -730,6 +895,53 @@ implements SendIntentRepository, SendIntentPreflightRepository {
             };
           };
 
+          const replayBlockingExisting = async (
+            rows: readonly Record<string, unknown>[],
+            expectedLogicalMessageKey: string,
+            allowClientKeyMatch: boolean,
+          ): Promise<SendIntentRepositoryResult | null> => {
+            const clientMatches = allowClientKeyMatch
+              ? rows.filter(
+                  (row) =>
+                    row.clientIdempotencyKey
+                      === input.clientIdempotencyKey,
+                )
+              : [];
+            if (clientMatches.length > 1) {
+              return { state: "conflict" };
+            }
+            if (clientMatches[0] !== undefined) {
+              return replayExisting(
+                clientMatches[0],
+                expectedLogicalMessageKey,
+                true,
+              );
+            }
+
+            const blockingLogicalMatches = rows.filter(
+              (row) =>
+                row.logicalMessageKey === expectedLogicalMessageKey
+                && !canReplaceFailedSendIntent({
+                  intentStatus: row.intentStatus,
+                  attemptStatus: row.attemptStatus,
+                  errorCode: row.errorCode,
+                  providerMessageId: row.providerMessageId,
+                  providerThreadId: row.providerThreadId,
+                }),
+            );
+            if (blockingLogicalMatches.length > 1) {
+              return { state: "conflict" };
+            }
+            if (blockingLogicalMatches[0] !== undefined) {
+              return replayExisting(
+                blockingLogicalMatches[0],
+                expectedLogicalMessageKey,
+                false,
+              );
+            }
+            return null;
+          };
+
           const existingResult = await transaction.query(
             `SELECT
                intent.id AS "sendIntentId",
@@ -745,8 +957,26 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                intent.logical_message_key AS "logicalMessageKey",
                intent.message_purpose AS "messagePurpose",
                intent.follow_up_index AS "followUpIndex",
-               intent.requested_send_at AS "requestedSendAt"
+               intent.requested_send_at AS "requestedSendAt",
+               intent.status AS "intentStatus",
+               attempt.status AS "attemptStatus",
+               attempt.provider_error_code AS "errorCode",
+               attempt.provider_message_id AS "providerMessageId",
+               attempt.provider_thread_id AS "providerThreadId"
              FROM backlinks.backlink_send_intents AS intent
+             LEFT JOIN LATERAL (
+               SELECT latest.status,
+                      latest.provider_error_code,
+                      latest.provider_message_id,
+                      latest.provider_thread_id
+                 FROM backlinks.backlink_send_attempts AS latest
+                WHERE latest.organization_id = intent.organization_id
+                  AND latest.workspace_id = intent.workspace_id
+                  AND latest.website_project_id = intent.website_project_id
+                  AND latest.send_intent_id = intent.id
+                ORDER BY latest.attempt_no DESC
+                LIMIT 1
+             ) AS attempt ON TRUE
             WHERE intent.organization_id = $1
               AND intent.workspace_id = $2
               AND intent.website_project_id = $3
@@ -754,8 +984,8 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                 intent.client_idempotency_key = $4
                 OR intent.logical_message_key = $5
               )
-            ORDER BY intent.id
-            FOR UPDATE`,
+            ORDER BY intent.requested_send_at DESC, intent.id DESC
+            FOR UPDATE OF intent`,
             [
               input.organizationId,
               input.workspaceId,
@@ -764,16 +994,47 @@ implements SendIntentRepository, SendIntentPreflightRepository {
               input.logicalMessageKey,
             ],
           );
-          if (existingResult.rows.length > 1) {
-            return { state: "conflict" };
+          const existingReplay = await replayBlockingExisting(
+            existingResult.rows,
+            input.logicalMessageKey,
+            true,
+          );
+          if (existingReplay !== null) {
+            return existingReplay;
           }
-          const existing = existingResult.rows[0];
-          if (existing !== undefined) {
-            return replayExisting(
-              existing,
-              input.logicalMessageKey,
-              true,
-            );
+
+          const snapshotValidityChanges =
+            compareGmailSendReadinessSnapshot({
+              expected: input.readinessSnapshot,
+              currentConditions: input.readinessSnapshot.conditions,
+              comparedAt: input.requestedSendAt,
+            });
+          if (snapshotValidityChanges.length > 0) {
+            return {
+              state: "readiness_changed",
+              changedConditions: snapshotValidityChanges,
+            };
+          }
+          const snapshotEvaluatedAt = asDate(
+            input.readinessSnapshot.evaluatedAt,
+            "readiness evaluated_at",
+          );
+          if (
+            input.humanConfirmation.confirmedAt.getTime()
+              < snapshotEvaluatedAt.getTime()
+            || input.humanConfirmation.confirmedAt.getTime()
+              > input.requestedSendAt.getTime() + 60_000
+          ) {
+            return {
+              state: "readiness_changed",
+              changedConditions: Object.freeze([
+                describeGmailSendReadinessSnapshotValidity({
+                  expected: input.readinessSnapshot,
+                  reason: "CHANGED",
+                  currentRevision: "HUMAN_CONFIRMATION_OUT_OF_WINDOW",
+                }),
+              ]),
+            };
           }
 
           const draftResult = await transaction.query(
@@ -821,7 +1082,7 @@ implements SendIntentRepository, SendIntentPreflightRepository {
           );
           const draft = draftResult.rows[0];
           if (draft === undefined) {
-            return { state: "draft_not_found" };
+            return readinessChanged(input, "DRAFT_APPROVAL", null);
           }
           if (
             draft.status !== "approved"
@@ -829,7 +1090,7 @@ implements SendIntentRepository, SendIntentPreflightRepository {
             || draft.approvedVersionId !== input.approvedDraftVersionId
             || draft.draftSource === "TEMPLATE_FALLBACK"
           ) {
-            return { state: "draft_not_approved" };
+            return readinessChanged(input, "DRAFT_APPROVAL", null);
           }
           if (
             draft.draftContactId !== input.contactId
@@ -837,7 +1098,13 @@ implements SendIntentRepository, SendIntentPreflightRepository {
             || draft.versionContactId !== input.contactId
             || draft.versionContactVersion !== input.contactVersion
           ) {
-            return { state: "contact_version_conflict" };
+            return readinessChanged(
+              input,
+              "CONTACT_VERSION",
+              asRevisionPart(draft.draftContactVersion) === null
+                ? null
+                : `${input.contactId}:${draft.draftContactVersion}`,
+            );
           }
           const opportunityId = draft.opportunityId;
           if (
@@ -852,6 +1119,12 @@ implements SendIntentRepository, SendIntentPreflightRepository {
             throw new TypeError(
               "Send Intent persistence returned an invalid Draft.",
             );
+          }
+          if (
+            containsInternalDraftMetadataMarker(draft.subjectText)
+            || containsInternalDraftMetadataMarker(draft.bodyText)
+          ) {
+            return internalDraftMetadataSendRejection;
           }
 
           const approvalResult = await transaction.query(
@@ -883,7 +1156,7 @@ implements SendIntentRepository, SendIntentPreflightRepository {
           );
           const approval = approvalResult.rows[0];
           if (approval === undefined) {
-            return { state: "draft_not_approved" };
+            return readinessChanged(input, "DRAFT_APPROVAL", null);
           }
           if (
             typeof approval.approvalFactId !== "string"
@@ -924,10 +1197,16 @@ implements SendIntentRepository, SendIntentPreflightRepository {
           );
           const contact = contactResult.rows[0];
           if (contact === undefined) {
-            return { state: "contact_unavailable" };
+            return readinessChanged(input, "CONTACT_VERSION", null);
           }
           if (contact.contactVersion !== input.contactVersion) {
-            return { state: "contact_version_conflict" };
+            return readinessChanged(
+              input,
+              "CONTACT_VERSION",
+              asRevisionPart(contact.contactVersion) === null
+                ? null
+                : `${input.contactId}:${contact.contactVersion}`,
+            );
           }
           if (typeof contact.normalizedEmail !== "string") {
             throw new TypeError(
@@ -960,14 +1239,32 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                intent.logical_message_key AS "logicalMessageKey",
                intent.message_purpose AS "messagePurpose",
                intent.follow_up_index AS "followUpIndex",
-               intent.requested_send_at AS "requestedSendAt"
+               intent.requested_send_at AS "requestedSendAt",
+               intent.status AS "intentStatus",
+               attempt.status AS "attemptStatus",
+               attempt.provider_error_code AS "errorCode",
+               attempt.provider_message_id AS "providerMessageId",
+               attempt.provider_thread_id AS "providerThreadId"
              FROM backlinks.backlink_send_intents AS intent
+             LEFT JOIN LATERAL (
+               SELECT latest.status,
+                      latest.provider_error_code,
+                      latest.provider_message_id,
+                      latest.provider_thread_id
+                 FROM backlinks.backlink_send_attempts AS latest
+                WHERE latest.organization_id = intent.organization_id
+                  AND latest.workspace_id = intent.workspace_id
+                  AND latest.website_project_id = intent.website_project_id
+                  AND latest.send_intent_id = intent.id
+                ORDER BY latest.attempt_no DESC
+                LIMIT 1
+             ) AS attempt ON TRUE
             WHERE intent.organization_id = $1
               AND intent.workspace_id = $2
               AND intent.website_project_id = $3
               AND intent.logical_message_key = $4
-            ORDER BY intent.id
-            FOR UPDATE`,
+            ORDER BY intent.requested_send_at DESC, intent.id DESC
+            FOR UPDATE OF intent`,
             [
               input.organizationId,
               input.workspaceId,
@@ -975,20 +1272,21 @@ implements SendIntentRepository, SendIntentPreflightRepository {
               logicalMessageKey,
             ],
           );
-          if (logicalExistingResult.rows.length > 1) {
-            return { state: "conflict" };
-          }
-          const logicalExisting = logicalExistingResult.rows[0];
-          if (logicalExisting !== undefined) {
-            return replayExisting(
-              logicalExisting,
-              logicalMessageKey,
-              false,
-            );
+          const logicalReplay = await replayBlockingExisting(
+            logicalExistingResult.rows,
+            logicalMessageKey,
+            false,
+          );
+          if (logicalReplay !== null) {
+            return logicalReplay;
           }
 
           const bindingResult = await transaction.query(
             `SELECT connection.version AS "gmailConnectionVersion",
+                    binding.version AS "workspaceBindingVersion",
+                    project_binding.version AS "projectBindingVersion",
+                    secret.external_secret_version
+                      AS "externalSecretVersion",
                     identity.id AS "gmailIdentityId",
                     identity.version AS "gmailIdentityVersion"
                FROM backlinks.backlink_gmail_workspace_bindings AS binding
@@ -1005,9 +1303,17 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                 AND secret.secret_kind = connection.token_secret_kind
                 AND secret.secret_kind = 'GMAIL_TOKEN_SET'
                 AND secret.status = 'ACTIVE'
-               JOIN backlinks.backlink_gmail_send_identities AS identity
-                 ON identity.organization_id = connection.organization_id
-                AND identity.gmail_connection_id = connection.id
+               LEFT JOIN LATERAL (
+                 SELECT candidate.id, candidate.version
+                   FROM backlinks.backlink_gmail_send_identities AS candidate
+                  WHERE candidate.organization_id=connection.organization_id
+                    AND candidate.gmail_connection_id=connection.id
+                    AND candidate.verification_status='accepted'
+                  ORDER BY candidate.is_default DESC,
+                           candidate.is_primary DESC,
+                           candidate.id
+                  LIMIT 1
+               ) AS identity ON true
                 WHERE binding.organization_id = $1
                   AND binding.workspace_id = $2
                   AND binding.gmail_connection_id = $3
@@ -1018,12 +1324,8 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                 AND connection.connection_status = 'CONNECTED'
                 AND connection.send_availability = 'AVAILABLE'
                 AND connection.granted_scopes @> $5::jsonb
-                AND identity.verification_status = 'accepted'
-              ORDER BY identity.is_default DESC,
-                       identity.is_primary DESC,
-                       identity.id
               LIMIT 1
-              FOR SHARE OF binding, connection, secret, identity`,
+              FOR SHARE OF binding, project_binding, connection, secret`,
             [
                 input.organizationId,
                 input.workspaceId,
@@ -1034,18 +1336,24 @@ implements SendIntentRepository, SendIntentPreflightRepository {
           );
           const gmailBinding = bindingResult.rows[0];
           if (gmailBinding === undefined) {
-            return { state: "gmail_connection_unavailable" };
+            return readinessChanged(input, "GMAIL_BINDING", null);
           }
           if (
             typeof gmailBinding.gmailConnectionVersion !== "number"
             || !Number.isSafeInteger(gmailBinding.gmailConnectionVersion)
-            || typeof gmailBinding.gmailIdentityId !== "string"
-            || typeof gmailBinding.gmailIdentityVersion !== "number"
-            || !Number.isSafeInteger(gmailBinding.gmailIdentityVersion)
+            || !Number.isSafeInteger(gmailBinding.workspaceBindingVersion)
+            || !Number.isSafeInteger(gmailBinding.projectBindingVersion)
+            || typeof gmailBinding.externalSecretVersion !== "string"
           ) {
             throw new TypeError(
               "Send Intent persistence returned an invalid Gmail binding.",
             );
+          }
+          if (
+            typeof gmailBinding.gmailIdentityId !== "string"
+            || !Number.isSafeInteger(gmailBinding.gmailIdentityVersion)
+          ) {
+            return readinessChanged(input, "GMAIL_IDENTITY", null);
           }
 
           const policyResult = await transaction.query(
@@ -1064,6 +1372,22 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                     )
                ) AS suppressed,
                (
+                 SELECT string_agg(
+                   entry.id::text || ':' || entry.version::text,
+                   ',' ORDER BY entry.id
+                 )
+                   FROM backlinks.backlink_suppression_entries AS entry
+                  WHERE entry.organization_id=$1
+                    AND entry.status='ACTIVE'
+                    AND (
+                      entry.workspace_id IS NULL
+                      OR (
+                        entry.workspace_id=$2
+                        AND entry.website_project_id=$3
+                      )
+                    )
+               ) AS "suppressionRevision",
+               (
                  SELECT switch.blocked
                    FROM backlinks.backlink_kill_switch_versions AS switch
                   WHERE switch.organization_id=$1
@@ -1072,7 +1396,17 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                     AND switch.capability='GMAIL_SEND'
                   ORDER BY switch.version DESC
                   LIMIT 1
-               ) AS "sendBlocked"`,
+               ) AS "sendBlocked",
+               (
+                 SELECT switch.version
+                   FROM backlinks.backlink_kill_switch_versions AS switch
+                  WHERE switch.organization_id=$1
+                    AND switch.workspace_id=$2
+                    AND switch.website_project_id=$3
+                    AND switch.capability='GMAIL_SEND'
+                  ORDER BY switch.version DESC
+                  LIMIT 1
+               ) AS "sendBlockVersion"`,
             [
               input.organizationId,
               input.workspaceId,
@@ -1080,20 +1414,32 @@ implements SendIntentRepository, SendIntentPreflightRepository {
             ],
           );
           const policy = policyResult.rows[0];
+          if (policy === undefined) {
+            throw new TypeError(
+              "Send Intent persistence returned no send policy.",
+            );
+          }
+          if (policy.suppressed === true) {
+            return readinessChanged(
+              input,
+              "SUPPRESSION",
+              asRevisionPart(policy.suppressionRevision),
+            );
+          }
           if (
-            policy === undefined
-            || policy.suppressed === true
-            || policy.sendBlocked !== false
+            policy.sendBlocked !== false
+            || !Number.isSafeInteger(policy.sendBlockVersion)
           ) {
-            return {
-              state: "send_policy_rejected",
-              message: policy?.suppressed === true
-                ? "Sending is blocked by an active suppression or unsubscribe record."
-                : "The Gmail Send Kill Switch is closed for this project.",
-              retryAt: null,
-            };
+            return readinessChanged(
+              input,
+              "KILL_SWITCH",
+              asRevisionPart(policy.sendBlockVersion) === null
+                ? null
+                : `${policy.sendBlockVersion}:BLOCKED`,
+            );
           }
 
+          let cooldownRevision = "CLEAR";
           if (input.messagePurpose === "INITIAL_OUTREACH") {
             await transaction.query(
               `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
@@ -1127,10 +1473,12 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                 "initial outreach retry_at",
               );
               if (retryAt.getTime() > input.requestedSendAt.getTime()) {
-                return {
-                  state: "initial_outreach_cooldown",
-                  retryAt: retryAt.toISOString(),
-                };
+                cooldownRevision = retryAt.toISOString();
+                return readinessChanged(
+                  input,
+                  "COOLDOWN",
+                  cooldownRevision,
+                );
               }
             }
           }
@@ -1214,10 +1562,56 @@ implements SendIntentRepository, SendIntentPreflightRepository {
             );
           }
           if (usedSlots >= input.rolling24HourSendLimit) {
+            return readinessChanged(
+              input,
+              "QUOTA",
+              `${usedSlots}/${input.rolling24HourSendLimit}`,
+            );
+          }
+
+          const readinessChanges = compareGmailSendReadinessSnapshot({
+            expected: input.readinessSnapshot,
+            comparedAt: input.requestedSendAt,
+            currentConditions: [
+              readinessCondition(
+                "DRAFT_APPROVAL",
+                `${input.approvedDraftVersionId}:${approval.approvalFactId}`,
+              ),
+              readinessCondition(
+                "CONTACT_VERSION",
+                `${input.contactId}:${contact.contactVersion}`,
+              ),
+              readinessCondition(
+                "GMAIL_BINDING",
+                [
+                  input.gmailConnectionId,
+                  gmailBinding.gmailConnectionVersion,
+                  gmailBinding.workspaceBindingVersion,
+                  gmailBinding.projectBindingVersion,
+                  gmailBinding.externalSecretVersion,
+                ].join(":"),
+              ),
+              readinessCondition(
+                "GMAIL_IDENTITY",
+                `${gmailBinding.gmailIdentityId}:`
+                  + gmailBinding.gmailIdentityVersion,
+              ),
+              readinessCondition("SUPPRESSION", "CLEAR"),
+              readinessCondition(
+                "KILL_SWITCH",
+                `${policy.sendBlockVersion}:OPEN`,
+              ),
+              readinessCondition("COOLDOWN", cooldownRevision),
+              readinessCondition(
+                "QUOTA",
+                `${usedSlots}/${input.rolling24HourSendLimit}`,
+              ),
+            ],
+          });
+          if (readinessChanges.length > 0) {
             return {
-              state: "quota_exceeded",
-              dailyLimit: input.rolling24HourSendLimit,
-              retryAt: asNullableIso(usage.nextSlotAt),
+              state: "readiness_changed",
+              changedConditions: readinessChanges,
             };
           }
 

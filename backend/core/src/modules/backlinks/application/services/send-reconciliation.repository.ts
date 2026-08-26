@@ -10,8 +10,11 @@ import type { SendExecutionContext } from "./send-attempt.repository.js";
 export type UnknownSendResultAttempt = Readonly<{
   sendIntentId: string;
   attemptId: string;
+  attemptNo: number;
+  fencingToken: number;
   rfcMessageId: string;
   errorCode: string;
+  status: "DISPATCHING" | "DELIVERY_UNKNOWN";
 }>;
 
 export type SendReconciliationDecision =
@@ -72,6 +75,8 @@ type PostgresqlSendReconciliationRepositoryDependencies = Readonly<{
 
 type AggregateRow = Readonly<{
   attemptId: string;
+  attemptNo: number;
+  fencingToken: number;
   rfcMessageId: string;
   attemptStatus: string;
   errorCode: string | null;
@@ -119,8 +124,20 @@ const aggregateFromRow = (row: Record<string, unknown>): AggregateRow => {
       throw new TypeError("Send reconciliation returned an invalid row.");
     }
   }
+  if (
+    typeof row.attemptNo !== "number"
+    || !Number.isSafeInteger(row.attemptNo)
+    || row.attemptNo < 1
+    || typeof row.fencingToken !== "number"
+    || !Number.isSafeInteger(row.fencingToken)
+    || row.fencingToken < 1
+  ) {
+    throw new TypeError("Send reconciliation returned invalid attempt data.");
+  }
   return {
     attemptId: row.attemptId as string,
+    attemptNo: row.attemptNo,
+    fencingToken: row.fencingToken,
     rfcMessageId: row.rfcMessageId as string,
     attemptStatus: row.attemptStatus as string,
     errorCode: optionalString(row.errorCode, "provider_error_code"),
@@ -148,6 +165,8 @@ const aggregateFromRow = (row: Record<string, unknown>): AggregateRow => {
 
 const selectAggregate = `
   attempt.id AS "attemptId",
+  attempt.attempt_no AS "attemptNo",
+  attempt.fencing_token AS "fencingToken",
   attempt.rfc_message_id AS "rfcMessageId",
   attempt.status AS "attemptStatus",
   attempt.provider_error_code AS "errorCode",
@@ -253,17 +272,31 @@ const pendingFromAggregate = (
     return { state: "reconciled", ...resultFromAggregate(row) };
   }
   if (
-    row.attemptStatus === "DELIVERY_UNKNOWN"
-    && row.intentStatus === "DELIVERY_UNKNOWN"
-    && row.reservationStatus === "CONSUMED"
+    (
+      row.attemptStatus === "DISPATCHING"
+      && row.intentStatus === "DISPATCHING"
+      && row.reservationStatus === "RESERVED"
+    )
+    || (
+      row.attemptStatus === "DELIVERY_UNKNOWN"
+      && row.intentStatus === "DELIVERY_UNKNOWN"
+      && row.reservationStatus === "CONSUMED"
+    )
   ) {
     return {
       state: "pending",
       attempt: {
         sendIntentId: "",
         attemptId: row.attemptId,
+        attemptNo: row.attemptNo,
+        fencingToken: row.fencingToken,
         rfcMessageId: row.rfcMessageId,
-        errorCode: row.errorCode ?? "GMAIL_SEND_AMBIGUOUS_RESULT",
+        errorCode: row.errorCode ?? (
+          row.attemptStatus === "DISPATCHING"
+            ? "GMAIL_SEND_DISPATCH_STALLED"
+            : "GMAIL_SEND_AMBIGUOUS_RESULT"
+        ),
+        status: row.attemptStatus,
       },
     };
   }

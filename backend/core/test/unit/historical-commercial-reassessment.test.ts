@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   reassessHistoricalCommercialCandidate,
 } from "../../src/modules/backlinks/domain/recommendations/historical-commercial-reassessment.js";
+import {
+  commercialRecommendationFitRuleVersion,
+} from "../../src/modules/backlinks/domain/recommendations/commercial-score-v4.js";
 
 const componentIds = [
   "relevance",
@@ -33,7 +36,7 @@ function historicalScore(
 }
 
 describe("historical commercial reassessment", () => {
-  it("reuses immutable v2 evidence in a traceable generic v3 decision", () => {
+  it("reuses immutable v2 evidence in a traceable generic v4 decision", () => {
     const staticAssessment = {
       evidenceRefs: ["static:v2"],
       unsafeOrMalicious: false,
@@ -59,9 +62,9 @@ describe("historical commercial reassessment", () => {
 
     expect(result).toMatchObject({
       decision: "eligible",
-      scoreModelVersion: "recommendation-commercial-fit.v3",
-      ruleVersion: "recommendation-commercial-fit-rules.v3",
-      total: 80,
+      scoreModelVersion: "recommendation-commercial-fit.v4",
+      ruleVersion: commercialRecommendationFitRuleVersion,
+      total: 81,
       details: {
         reassessmentReason: "HISTORICAL_V2_REASSESSED",
         sourceCandidateId: "candidate-v2",
@@ -79,12 +82,12 @@ describe("historical commercial reassessment", () => {
       evidenceRefs: ["v2:relevance"],
       collectedAt: "2026-07-01T00:00:00.000Z",
       normalizationRuleVersion:
-        "historical-v2-reuse|commercial-fit-normalization.v2",
+        "historical-v2-to-v4.semantic_relevance.v1",
     });
     expect({ staticAssessment, gateDecision, commercialScore }).toEqual(before);
   });
 
-  it("preserves a historical hard-gate outcome under v3", () => {
+  it("preserves a historical hard-gate outcome under v4", () => {
     const commercialScore = historicalScore();
     const relevance = (
       commercialScore.components as Record<string, unknown>[]
@@ -109,7 +112,33 @@ describe("historical commercial reassessment", () => {
     });
   });
 
-  it("fails closed when critical historical evidence is unavailable", () => {
+  it("converts a historical market mismatch gate into a score penalty", () => {
+    const result = reassessHistoricalCommercialCandidate({
+      candidateId: "market-mismatch",
+      staticAssessment: {},
+      gateDecision: { hitGates: ["strict_market_mismatch"] },
+      commercialScore: historicalScore(),
+      fallbackCollectedAt: "2026-07-02T00:00:00.000Z",
+      locale: "en-ZA",
+      countryCode: "ZA",
+    });
+
+    expect(result).toMatchObject({
+      decision: "eligible",
+      hitGates: [],
+      total: 69,
+    });
+    expect(
+      result.components.find(({ id }) => id === "market_language_tier"),
+    ).toMatchObject({
+      normalizedValue: 0,
+      points: 0,
+      normalizationRuleVersion:
+        "historical-v2-to-v4.market_language_tier.v1",
+    });
+  });
+
+  it("scores partial historical evidence when safety evidence is available", () => {
     const commercialScore = historicalScore();
     const technical = (
       commercialScore.components as Record<string, unknown>[]
@@ -129,10 +158,33 @@ describe("historical commercial reassessment", () => {
       locale: "de-DE",
       countryCode: "DE",
     })).toMatchObject({
-      decision: "insufficient_data",
-      total: null,
-      missingEvidence: expect.arrayContaining([
-        "score.safefetch_technical_access",
+      decision: "eligible",
+      total: 80.2857,
+      missingEvidence: [],
+    });
+  });
+
+  it("applies the generic mega-platform gate only with explicit relative authority evidence", () => {
+    const commercialScore = historicalScore(0.9);
+    commercialScore.details = {
+      authority: { projectAuthority: 20 },
+    };
+
+    expect(reassessHistoricalCommercialCandidate({
+      candidateId: "large-platform",
+      staticAssessment: {
+        siteType: "code_hosting",
+        cooperationPages: [],
+      },
+      gateDecision: { hitGates: [] },
+      commercialScore,
+      fallbackCollectedAt: "2026-07-02T00:00:00.000Z",
+      locale: "en-US",
+      countryCode: "US",
+    })).toMatchObject({
+      decision: "ineligible",
+      hitGates: expect.arrayContaining([
+        "mega_platform_without_placement_evidence",
       ]),
     });
   });

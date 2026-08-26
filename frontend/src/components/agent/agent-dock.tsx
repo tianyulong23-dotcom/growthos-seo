@@ -2,14 +2,11 @@ import * as React from "react"
 import {
   Bot,
   Check,
-  CheckCircle2,
-  ChevronDown,
   CircleDot,
   CircleStop,
   CircleX,
   Ellipsis,
   History,
-  LayoutGrid,
   LoaderCircle,
   Pencil,
   Plus,
@@ -19,17 +16,14 @@ import {
 } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { useLocation, useNavigate, useParams } from "react-router"
+import { useNavigate, useParams } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -62,7 +56,6 @@ import {
   type BusinessProgressItem,
 } from "@/components/agent/agent-dock-utils"
 import { useAgentConversation } from "@/features/agent/use-agent-conversation"
-import { CreateProjectDialog } from "@/features/projects/create-project-dialog"
 import { ProjectFavicon } from "@/features/projects/project-favicon"
 import { useProjects } from "@/features/projects/project-context"
 import type {
@@ -440,12 +433,10 @@ function isSafeAgentLink(href: string | undefined): href is string {
 }
 
 function AgentDockContent({ onClose }: AgentDockContentProps) {
-  const location = useLocation()
   const navigate = useNavigate()
-  const { projects, getProject, refreshBusinessProfile } = useProjects()
-  const { projectId = projects[0]?.id ?? "" } = useParams()
+  const { getProject, refreshBusinessProfile } = useProjects()
+  const { projectId = "" } = useParams()
   const project = getProject(projectId)
-  const [createOpen, setCreateOpen] = React.useState(false)
   const agent = useAgentConversation(project.id, project.understandingStatus)
   const [draft, setDraft] = React.useState("")
   const [sending, setSending] = React.useState(false)
@@ -480,14 +471,6 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
     (message) => message.role === "assistant" && message.streaming
   )
   const hasPersistedReply = hasVisibleAssistantReply(messages, run?.id)
-  function switchProject(nextProjectId: string) {
-    const suffix = location.pathname
-      .replace(`/projects/${projectId}`, "")
-      .replace(/^\/+/, "")
-    navigate(`/projects/${nextProjectId}/${suffix || "audit/overview"}`)
-    onClose?.()
-  }
-
   React.useEffect(() => {
     viewportRef.current?.scrollTo?.({
       top: viewportRef.current.scrollHeight,
@@ -572,60 +555,11 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="flex h-14 shrink-0 items-center gap-3 border-b px-3">
-        <div className="flex min-w-0 flex-1 items-center gap-0.5">
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 max-w-full min-w-0 shrink justify-start gap-0.5 rounded-sm px-1 hover:bg-transparent aria-expanded:bg-transparent dark:hover:bg-transparent"
-                  aria-label={`切换目标网站，当前为 ${project.domain}`}
-                />
-              }
-            >
-              <span className="truncate text-left font-semibold">
-                {project.domain}
-              </span>
-              <ChevronDown className="size-3.5 text-muted-foreground" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent className="w-64" align="start" sideOffset={4}>
-              <DropdownMenuGroup>
-                <DropdownMenuLabel>切换项目</DropdownMenuLabel>
-                {projects.map((item) => (
-                  <DropdownMenuItem
-                    key={item.id}
-                    onClick={() => switchProject(item.id)}
-                  >
-                    <ProjectFavicon project={item} className="size-7" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">{item.name}</span>
-                      <span className="block truncate text-xs font-normal text-muted-foreground">
-                        {item.domain}
-                      </span>
-                    </span>
-                    {item.id === project.id && (
-                      <CheckCircle2 className="size-4 text-primary" />
-                    )}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuGroup>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onClick={() => {
-                  navigate("/projects")
-                  onClose?.()
-                }}
-              >
-                <LayoutGrid />
-                所有项目
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setCreateOpen(true)}>
-                <Plus />
-                新建项目
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+        <div className="flex min-w-0 flex-1 items-center gap-2 px-1">
+          <ProjectFavicon project={project} className="size-6" />
+          <span className="truncate text-sm font-semibold">
+            {project.domain}
+          </span>
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger
@@ -698,8 +632,6 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
           </Button>
         )}
       </div>
-
-      <CreateProjectDialog open={createOpen} onOpenChange={setCreateOpen} />
 
       <div
         ref={viewportRef}

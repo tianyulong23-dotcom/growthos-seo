@@ -15,11 +15,11 @@ import {
   type RecommendationScoreComponentId,
   type RecommendationScoreComponentInput,
 } from "../../../src/modules/backlinks/domain/recommendations/scoring.js";
-import { commercialSupplyPublishedTarget } from "../../../src/modules/backlinks/domain/recommendations/commercial-refill-cycle.js";
 import {
   runBacklinkRecommendationRefillWorkflow,
   type BacklinkRecommendationRefillActivities,
   type BacklinkRecommendationRefillInput,
+  type RecommendationRefillSupersessionSignal,
 } from "../../../src/modules/backlinks/workflows/definitions/backlink-recommendation-refill.orchestration.js";
 import {
   backlinksRuntimeContract,
@@ -49,6 +49,34 @@ const input: BacklinkRecommendationRefillInput = {
   refillWindowKey: "2026-07-25T08:00Z/15m",
   lowWatermark: 9,
   highWatermark: 10,
+};
+const supersession: RecommendationRefillSupersessionSignal = {
+  contractVersion: 1,
+  ...inputScope,
+  jobId: input.jobId,
+  workflowId: input.workflowId,
+  oldContext: {
+    contextVersionId: input.recommendationContextVersionId,
+    snapshotVersion: 7,
+    profileVersionId: "profile-v3",
+    promotionTargetVersionId: "promotion-v2",
+    generationInputFingerprint: "generation-v7",
+  },
+  authoritativeContext: {
+    contextVersionId: "018f0000-0000-7000-8000-000000000006",
+    snapshotVersion: 8,
+    profileVersionId: "profile-v4",
+    promotionTargetVersionId: "promotion-v2",
+    generationInputFingerprint: "generation-v8",
+  },
+  actorId: "reconciler-061",
+  correlationId: "supersede-correlation-061",
+  requestId: "supersede-request-061",
+  idempotencyKey:
+    `recommendation-refill.supersede:${input.jobId}:`
+    + "018f0000-0000-7000-8000-000000000006",
+  lifecycleEventId: "018f0000-0000-7000-8000-000000000007",
+  auditEventId: "018f0000-0000-7000-8000-000000000008",
 };
 
 function observed<T>(value: T, evidenceRef: string): EvidenceValue<T> {
@@ -153,6 +181,7 @@ function fakeActivities(
   readyIds: readonly string[],
   options: Readonly<{
     fail?: boolean;
+    failure?: Error;
     candidates?: readonly RecommendationEvidenceCandidate[];
     outcome?: "TARGET_REACHED" | "SUPPLY_FLOOR_REACHED";
   }> = {},
@@ -170,7 +199,7 @@ function fakeActivities(
         jobId: existingJobId,
       } as const;
     }
-    if (inventory.size >= commercialSupplyPublishedTarget) {
+    if (inventory.size >= request.highWatermark) {
       return {
         status: "inventory_sufficient", readyCount: inventory.size,
       } as const;
@@ -186,6 +215,9 @@ function fakeActivities(
     >[0],
   ) => {
     void request;
+    if (options.failure !== undefined) {
+      throw options.failure;
+    }
     if (options.fail === true) {
       throw new Error("FAKE_PROVIDER_UNAVAILABLE");
     }
@@ -229,14 +261,21 @@ function fakeActivities(
     } as const;
   });
   const completeRecommendationRefillSupply = vi.fn(async () => undefined);
+  const completeRecommendationRefillSupersession = vi.fn(async () => ({
+    status: "cancelled" as const,
+    replayed: false,
+  }));
   const waitForRecommendationRefillRetry = vi.fn(async () => undefined);
-  const recordRecommendationRefillFailure = vi.fn(async () => undefined);
+  const recordRecommendationRefillFailure = vi.fn(async () => ({
+    status: "failed" as const,
+  }));
   const activities: BacklinkRecommendationRefillActivities = {
     reserveRecommendationRefill,
     executeRecommendationRefill,
     storeReadyRecommendations,
     planRecommendationRefillSupply,
     completeRecommendationRefillSupply,
+    completeRecommendationRefillSupersession,
     waitForRecommendationRefillRetry,
     recordRecommendationRefillFailure,
   };
@@ -248,6 +287,8 @@ function fakeActivities(
     storeReadyRecommendations,
     planRecommendationRefillSupply,
     completeRecommendationRefillSupply,
+    completeRecommendationRefillSupersession,
+    waitForRecommendationRefillRetry,
     recordRecommendationRefillFailure,
   };
 }
@@ -262,6 +303,33 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
     expect(bundle.code).toContain(
       backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
     );
+    expect(bundle.code).toContain(
+      backlinksRuntimeContract.signals.recommendationRefillSuperseded,
+    );
+    expect(bundle.code).toContain(
+      backlinksRuntimeContract.queries.recommendationRefillSupersessionStatus,
+    );
+    expect(bundle.code).toContain(
+      "backlinks-recommendation-refill-existing-window-once-v2",
+    );
+    expect(bundle.code).toContain(
+      "backlinks-recommendation-refill-existing-window-terminal-v1",
+    );
+
+    const recoveryBundle = await bundleWorkflowCode({
+      workflowsPath: resolve(
+        "src/modules/backlinks/workflows/definitions/recovery.ts",
+      ),
+    });
+    expect(recoveryBundle.code).toContain(
+      backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
+    );
+    const recoveryWorkflows = await import(
+      "../../../src/modules/backlinks/workflows/definitions/recovery.js"
+    );
+    expect(Object.keys(recoveryWorkflows)).toEqual([
+      backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
+    ]);
 
     const readyIds = Array.from({ length: 8 }, (_, index) => `ready-${index + 1}`);
     const fake = fakeActivities(readyIds);
@@ -302,9 +370,9 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
     expect(fake.completeRecommendationRefillSupply).toHaveBeenCalledOnce();
   }, 60_000);
 
-  it("does not refill when published inventory is at the fixed target", async () => {
+  it("does not refill when published inventory reaches the requested target", async () => {
     const readyIds = Array.from(
-      { length: commercialSupplyPublishedTarget },
+      { length: input.highWatermark },
       (_, index) => `ready-${index + 1}`,
     );
     const fake = fakeActivities(readyIds);
@@ -312,7 +380,7 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
       input, fake.activities,
     )).resolves.toEqual({
       status: "inventory_sufficient",
-      readyCount: commercialSupplyPublishedTarget,
+      readyCount: input.highWatermark,
     });
     expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
     expect(fake.storeReadyRecommendations).not.toHaveBeenCalled();
@@ -364,6 +432,398 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
     expect(fake.completeRecommendationRefillSupply).toHaveBeenCalledOnce();
   });
 
+  it("finishes the current job when its approved budget is exhausted", async () => {
+    const fake = fakeActivities([]);
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "wait",
+      outcome: "PAUSED_BUDGET",
+      reason: "budget",
+      retryAfterMs: 60_000,
+      publishedCount: 0,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+    )).resolves.toEqual({
+      status: "incomplete",
+      readyCount: 0,
+      jobId: input.jobId,
+      addedCount: 0,
+      evaluatedCount: 0,
+      excludedCount: 0,
+      insufficientDataCount: 0,
+      outcome: "PAUSED_BUDGET",
+      publishedCount: 0,
+    });
+    expect(fake.completeRecommendationRefillSupply).toHaveBeenCalledWith({
+      ...input,
+      jobId: input.jobId,
+      outcome: "PAUSED_BUDGET",
+      publishedCount: 0,
+      addedCount: 0,
+      evaluatedCount: 0,
+      excludedCount: 0,
+      insufficientDataCount: 0,
+    });
+    expect(fake.waitForRecommendationRefillRetry).not.toHaveBeenCalled();
+    expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
+  });
+
+  it("waits once for provider recovery and continues as new", async () => {
+    const fake = fakeActivities([]);
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "wait",
+      outcome: "PROVIDER_PAUSED",
+      reason: "provider",
+      retryAfterMs: 60_000,
+      publishedCount: 0,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+    )).resolves.toEqual({
+      status: "continue_as_new",
+      reason: "wait",
+      input: {
+        ...input,
+        continuation: {
+          jobId: input.jobId,
+          readyCount: 0,
+          addedCount: 0,
+          evaluatedCount: 0,
+          excludedCount: 0,
+          insufficientDataCount: 0,
+        },
+      },
+    });
+    expect(fake.planRecommendationRefillSupply).toHaveBeenCalledOnce();
+    expect(fake.waitForRecommendationRefillRetry).toHaveBeenCalledOnce();
+    expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
+  });
+
+  it("preserves counters and skips reservation after a bounded slice", async () => {
+    const fake = fakeActivities([]);
+    const first = await runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+      { maxSteps: 1 },
+    );
+    expect(first).toMatchObject({
+      status: "continue_as_new",
+      reason: "step_limit",
+      input: {
+        continuation: {
+          jobId: input.jobId,
+          readyCount: 0,
+          addedCount: 2,
+          evaluatedCount: 4,
+          excludedCount: 1,
+          insufficientDataCount: 1,
+          lastExecutedRefillWindowKey: input.refillWindowKey,
+        },
+      },
+    });
+    if (first.status !== "continue_as_new") {
+      throw new Error("Expected recommendation refill continuation");
+    }
+    expect(first.input.continuation).not.toHaveProperty("refillTier");
+    expect(first.input.continuation).not.toHaveProperty("refillRound");
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      first.input,
+      fake.activities,
+      { maxSteps: 1 },
+    )).resolves.toEqual({
+      status: "incomplete",
+      readyCount: 0,
+      jobId: input.jobId,
+      addedCount: 2,
+      evaluatedCount: 4,
+      excludedCount: 1,
+      insufficientDataCount: 1,
+      outcome: "TARGET_REACHED",
+      publishedCount: 2,
+    });
+    expect(fake.reserveRecommendationRefill).toHaveBeenCalledOnce();
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
+    expect(fake.planRecommendationRefillSupply).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits instead of executing the same refill window twice", async () => {
+    const fake = fakeActivities([]);
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "execute",
+      source: "paid",
+      refillWindowKey: input.refillWindowKey,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      refillWindow: 1,
+      requestedCandidateCount: 10,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow({
+      ...input,
+      continuation: {
+        jobId: input.jobId,
+        readyCount: 0,
+        addedCount: 0,
+        evaluatedCount: 0,
+        excludedCount: 0,
+        insufficientDataCount: 0,
+        lastExecutedRefillWindowKey: input.refillWindowKey,
+      },
+    }, fake.activities)).resolves.toMatchObject({
+      status: "continue_as_new",
+      reason: "wait",
+      input: {
+        continuation: {
+          lastExecutedRefillWindowKey: input.refillWindowKey,
+        },
+      },
+    });
+    expect(fake.waitForRecommendationRefillRetry).toHaveBeenCalledWith({
+      retryAfterMs: 60_000,
+      reason: "provider",
+    });
+    expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
+    expect(fake.storeReadyRecommendations).not.toHaveBeenCalled();
+  });
+
+  it("executes and publishes an existing-evidence window only once", async () => {
+    const fake = fakeActivities([]);
+    const existingEvidenceWindow =
+      "commercial-existing:project-1:context-1:g1";
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "execute",
+      source: "existing",
+      refillWindowKey: existingEvidenceWindow,
+      requestedCandidateCount: 10,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      {
+        ...input,
+        refillWindowKey: existingEvidenceWindow,
+      },
+      fake.activities,
+    )).resolves.toEqual({
+      status: "incomplete",
+      readyCount: 0,
+      jobId: input.jobId,
+      addedCount: 2,
+      evaluatedCount: 4,
+      excludedCount: 1,
+      insufficientDataCount: 1,
+      outcome: "SUPPLY_FLOOR_REACHED",
+      terminalReason: "EXISTING_EVIDENCE_WINDOW_COMPLETED",
+      publishedCount: 2,
+    });
+    expect(fake.planRecommendationRefillSupply).toHaveBeenCalledOnce();
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
+    expect(fake.storeReadyRecommendations).toHaveBeenCalledOnce();
+    expect(fake.completeRecommendationRefillSupply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        terminalReason: "EXISTING_EVIDENCE_WINDOW_COMPLETED",
+        publishedCount: 2,
+      }),
+    );
+    expect(fake.waitForRecommendationRefillRetry).not.toHaveBeenCalled();
+  });
+
+  it("terminates an existing-evidence window with explicit no progress", async () => {
+    const fake = fakeActivities([]);
+    const existingEvidenceWindow =
+      "commercial-existing:project-1:context-1:g1";
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "execute",
+      source: "existing",
+      refillWindowKey: existingEvidenceWindow,
+      requestedCandidateCount: 10,
+    });
+    fake.storeReadyRecommendations.mockResolvedValueOnce({ addedCount: 0 });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      {
+        ...input,
+        refillWindowKey: existingEvidenceWindow,
+      },
+      fake.activities,
+    )).resolves.toMatchObject({
+      status: "incomplete",
+      addedCount: 0,
+      outcome: "SUPPLY_FLOOR_REACHED",
+      terminalReason: "EXISTING_EVIDENCE_NO_PROGRESS",
+      publishedCount: 0,
+    });
+    expect(fake.planRecommendationRefillSupply).toHaveBeenCalledOnce();
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
+    expect(fake.storeReadyRecommendations).toHaveBeenCalledOnce();
+  });
+
+  it("does not re-execute an existing-evidence key carried by continuation", async () => {
+    const fake = fakeActivities([]);
+    const existingEvidenceWindow =
+      "commercial-existing:project-1:context-1:g1";
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "execute",
+      source: "existing",
+      refillWindowKey: existingEvidenceWindow,
+      requestedCandidateCount: 10,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow({
+      ...input,
+      continuation: {
+        jobId: input.jobId,
+        readyCount: 0,
+        addedCount: 2,
+        evaluatedCount: 4,
+        excludedCount: 1,
+        insufficientDataCount: 1,
+        lastExecutedRefillWindowKey: existingEvidenceWindow,
+        executedRefillWindowKeys: [existingEvidenceWindow],
+      },
+    }, fake.activities)).resolves.toMatchObject({
+      status: "incomplete",
+      jobId: input.jobId,
+      addedCount: 2,
+      terminalReason: "EXISTING_EVIDENCE_NO_PROGRESS",
+      publishedCount: 2,
+    });
+    expect(fake.waitForRecommendationRefillRetry).not.toHaveBeenCalled();
+    expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
+    expect(fake.storeReadyRecommendations).not.toHaveBeenCalled();
+    expect(fake.completeRecommendationRefillSupply).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the existing-window command sequence for pre-patch histories", async () => {
+    const fake = fakeActivities([]);
+    const existingEvidenceWindow =
+      "commercial-existing:project-1:context-1:g1";
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "execute",
+      source: "existing",
+      refillWindowKey: existingEvidenceWindow,
+      requestedCandidateCount: 10,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow({
+      ...input,
+      continuation: {
+        jobId: input.jobId,
+        readyCount: 0,
+        addedCount: 0,
+        evaluatedCount: 0,
+        excludedCount: 0,
+        insufficientDataCount: 0,
+        lastExecutedRefillWindowKey: existingEvidenceWindow,
+        executedRefillWindowKeys: [existingEvidenceWindow],
+      },
+    }, fake.activities, {
+      maxSteps: 1,
+      allowExistingEvidenceWindowReplay: true,
+      enforceExistingEvidenceWindowOnce: false,
+      completeExistingEvidenceWindow: () => false,
+    })).resolves.toMatchObject({
+      status: "continue_as_new",
+      reason: "step_limit",
+      input: {
+        continuation: {
+          lastExecutedRefillWindowKey: existingEvidenceWindow,
+          executedRefillWindowKeys: [existingEvidenceWindow],
+        },
+      },
+    });
+    expect(fake.waitForRecommendationRefillRetry).not.toHaveBeenCalled();
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
+    expect(fake.storeReadyRecommendations).toHaveBeenCalledOnce();
+  });
+
+  it("does not repeat a paid window after an existing-evidence step", async () => {
+    const fake = fakeActivities([]);
+    const existingEvidenceWindow =
+      "commercial-existing:project-1:context-1:g1";
+    fake.planRecommendationRefillSupply
+      .mockResolvedValueOnce({
+        status: "execute",
+        source: "paid",
+        refillWindowKey: input.refillWindowKey,
+        refillTier: "exact_product_target_market",
+        refillRound: 1,
+        refillWindow: 1,
+        requestedCandidateCount: 10,
+      })
+      .mockResolvedValueOnce({
+        status: "execute",
+        source: "existing",
+        refillWindowKey: existingEvidenceWindow,
+        requestedCandidateCount: 10,
+      })
+      .mockResolvedValueOnce({
+        status: "execute",
+        source: "paid",
+        refillWindowKey: input.refillWindowKey,
+        refillTier: "exact_product_target_market",
+        refillRound: 1,
+        refillWindow: 1,
+        requestedCandidateCount: 10,
+      });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+    )).resolves.toMatchObject({
+      status: "incomplete",
+      terminalReason: "EXISTING_EVIDENCE_WINDOW_COMPLETED",
+    });
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledTimes(2);
+    expect(fake.executeRecommendationRefill.mock.calls.map(
+      ([request]) => [request.source, request.refillWindowKey],
+    )).toEqual([
+      ["paid", input.refillWindowKey],
+      ["existing", existingEvidenceWindow],
+    ]);
+    expect(fake.planRecommendationRefillSupply).toHaveBeenCalledTimes(2);
+    expect(fake.waitForRecommendationRefillRetry).not.toHaveBeenCalled();
+  });
+
+  it("preserves historical execution before the no-progress patch", async () => {
+    const fake = fakeActivities([]);
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "execute",
+      source: "paid",
+      refillWindowKey: input.refillWindowKey,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      refillWindow: 1,
+      requestedCandidateCount: 10,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow({
+      ...input,
+      continuation: {
+        jobId: input.jobId,
+        readyCount: 0,
+        addedCount: 0,
+        evaluatedCount: 0,
+        excludedCount: 0,
+        insufficientDataCount: 0,
+        lastExecutedRefillWindowKey: input.refillWindowKey,
+      },
+    }, fake.activities, {
+      maxSteps: 1,
+      enableNoProgressGuard: false,
+    })).resolves.toMatchObject({
+      status: "continue_as_new",
+      reason: "step_limit",
+    });
+    expect(fake.waitForRecommendationRefillRetry).not.toHaveBeenCalled();
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
+    expect(fake.storeReadyRecommendations).toHaveBeenCalledOnce();
+  });
+
   it("records failure without clearing existing Ready inventory", async () => {
     const fake = fakeActivities(["ready-1"], { fail: true });
     await expect(runBacklinkRecommendationRefillWorkflow(
@@ -381,5 +841,199 @@ describe("BacklinkRecommendationRefillWorkflow", () => {
       message:
         "The recommendation provider is unavailable. Retry after recovery.",
     });
+  });
+
+  it("lets authoritative supersession win after a historical provider failure", async () => {
+    const failure = new Error("FAKE_PROVIDER_TIMEOUT");
+    const fake = fakeActivities(["ready-1"], { failure });
+    fake.recordRecommendationRefillFailure.mockResolvedValue({
+      status: "superseded",
+      supersession,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+    )).resolves.toEqual({
+      status: "cancelled",
+      reason: "superseded_project_context",
+      jobId: input.jobId,
+      supersession,
+    });
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
+    expect(fake.recordRecommendationRefillFailure).toHaveBeenCalledOnce();
+    expect(fake.storeReadyRecommendations).not.toHaveBeenCalled();
+  });
+
+  it("waits for provider reconciliation instead of recording ordinary failure", async () => {
+    const failure = new Error("FAKE_PROVIDER_TIMEOUT");
+    const fake = fakeActivities(["ready-1"], { failure });
+    fake.recordRecommendationRefillFailure.mockResolvedValue({
+      status: "awaiting_provider_reconciliation",
+      supersession,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+    )).resolves.toMatchObject({
+      status: "continue_as_new",
+      reason: "wait",
+      input: {
+        continuation: { supersession },
+      },
+    });
+    expect(fake.waitForRecommendationRefillRetry).toHaveBeenCalledWith({
+      retryAfterMs: 30_000,
+      reason: "project_context",
+    });
+  });
+
+  it("records language input requirements as project context recovery", async () => {
+    const failure = new Error(
+      "WEBSITE_PROJECT_DISCOVERY_LANGUAGE_INPUT_REQUIRED "
+        + "owner=WEBSITE_PROJECT",
+    );
+    const fake = fakeActivities(["ready-1"], { failure });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input, fake.activities,
+    )).rejects.toBe(failure);
+    expect(fake.recordRecommendationRefillFailure).toHaveBeenCalledWith({
+      ...input,
+      jobId: input.jobId,
+      errorCode: "BACKLINK_RECOMMENDATION_REFILL_FAILED",
+      rootCause: "PROJECT_CONTEXT_REQUIRED",
+      recovery: "COMPLETE_PROJECT_CONTEXT",
+      diagnosticId: expect.stringMatching(/^refill-/),
+      message:
+        "Complete the current project context before resuming this operation.",
+    });
+  });
+
+  it("cooperatively cancels before reserving or calling a provider", async () => {
+    const fake = fakeActivities([]);
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+      { readSupersession: () => supersession },
+    )).resolves.toEqual({
+      status: "cancelled",
+      reason: "superseded_project_context",
+      jobId: input.jobId,
+      supersession,
+    });
+    expect(fake.completeRecommendationRefillSupersession).toHaveBeenCalledOnce();
+    expect(fake.reserveRecommendationRefill).not.toHaveBeenCalled();
+    expect(fake.planRecommendationRefillSupply).not.toHaveBeenCalled();
+    expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
+  });
+
+  it("checks supersession after planning and before provider execution", async () => {
+    const fake = fakeActivities([]);
+    let reads = 0;
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+      {
+        readSupersession: () => (++reads >= 3 ? supersession : undefined),
+      },
+    )).resolves.toMatchObject({
+      status: "cancelled",
+      reason: "superseded_project_context",
+    });
+    expect(fake.planRecommendationRefillSupply).toHaveBeenCalledOnce();
+    expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
+    expect(fake.storeReadyRecommendations).not.toHaveBeenCalled();
+  });
+
+  it("settles a completed provider activity before storing stale candidates", async () => {
+    const fake = fakeActivities([]);
+    let reads = 0;
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+      {
+        readSupersession: () => (++reads >= 4 ? supersession : undefined),
+      },
+    )).resolves.toMatchObject({
+      status: "cancelled",
+      reason: "superseded_project_context",
+    });
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
+    expect(fake.storeReadyRecommendations).not.toHaveBeenCalled();
+  });
+
+  it("wakes a waiting workflow and prevents continuation after supersession", async () => {
+    const fake = fakeActivities([]);
+    let received: RecommendationRefillSupersessionSignal | undefined;
+    fake.planRecommendationRefillSupply.mockResolvedValue({
+      status: "wait",
+      outcome: "PROVIDER_PAUSED",
+      reason: "provider",
+      retryAfterMs: 60_000,
+      publishedCount: 0,
+    });
+    fake.waitForRecommendationRefillRetry.mockImplementation(async () => {
+      received = supersession;
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+      { readSupersession: () => received },
+    )).resolves.toMatchObject({
+      status: "cancelled",
+      reason: "superseded_project_context",
+    });
+    expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
+  });
+
+  it("carries supersession across continue-as-new while provider reconciliation is pending", async () => {
+    const fake = fakeActivities([]);
+    fake.completeRecommendationRefillSupersession.mockResolvedValue({
+      status: "awaiting_provider_reconciliation",
+      replayed: false,
+    });
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+      { readSupersession: () => supersession },
+    )).resolves.toMatchObject({
+      status: "continue_as_new",
+      reason: "wait",
+      input: {
+        continuation: { supersession },
+      },
+    });
+    expect(fake.waitForRecommendationRefillRetry).toHaveBeenCalledWith({
+      retryAfterMs: 30_000,
+      reason: "project_context",
+    });
+    expect(fake.reserveRecommendationRefill).not.toHaveBeenCalled();
+    expect(fake.executeRecommendationRefill).not.toHaveBeenCalled();
+  });
+
+  it("ignores a mismatched project signal and keeps the current workflow", async () => {
+    const fake = fakeActivities([]);
+    const mismatched = {
+      ...supersession,
+      websiteProjectId: "018f0000-0000-7000-8000-000000000099",
+    };
+
+    await expect(runBacklinkRecommendationRefillWorkflow(
+      input,
+      fake.activities,
+      { readSupersession: () => mismatched },
+    )).resolves.toMatchObject({
+      status: "incomplete",
+      outcome: "TARGET_REACHED",
+    });
+    expect(fake.completeRecommendationRefillSupersession).not.toHaveBeenCalled();
+    expect(fake.executeRecommendationRefill).toHaveBeenCalledOnce();
   });
 });

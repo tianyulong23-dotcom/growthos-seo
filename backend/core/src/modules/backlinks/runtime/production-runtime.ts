@@ -18,6 +18,9 @@ import {
 } from "../application/commands/draft.command.js";
 import type { createGmailConnectionCommands } from "../application/commands/gmail-connection.command.js";
 import { createGmailConnectionCommands as createProductionGmailConnectionCommands } from "../application/commands/gmail-connection.command.js";
+import {
+  createCooperationPathOpportunityCommands,
+} from "../application/commands/cooperation-path-opportunities.command.js";
 import { createOpportunityCommands } from "../application/commands/opportunities.command.js";
 import {
   createPlacementCandidateCommand,
@@ -26,6 +29,10 @@ import {
 import { createPlacementReverifyCommand } from "../application/commands/placement-reverify.command.js";
 import { createPlacementReviewCommand } from "../application/commands/placement-review.command.js";
 import { createRecommendationCommands } from "../application/commands/recommendations.command.js";
+import type {
+  ProviderOperationBudgetAuthorization,
+  ProviderOperationBudgetGrant,
+} from "../domain/recommendations/provider-operation-budget.js";
 import { createProjectContextProjectionCommand } from "../application/commands/project-context-projection.command.js";
 import { createReplyMatchCommands } from "../application/commands/reply-match.command.js";
 import type { createSendIntentCommands } from "../application/commands/send-intent.command.js";
@@ -65,7 +72,9 @@ import {
 import {
   createSendIntentQuery,
   type SendIntentQuery,
+  type SendIntentWorkerMode,
 } from "../application/queries/send-intent.query.js";
+import type { SendIntentListQuery } from "../application/queries/send-intent.query.js";
 import {
   createReportOverviewQuery,
   type ReportOverviewQuery,
@@ -83,16 +92,30 @@ import { createPlacementInitialValidationRepository } from "../application/repos
 import { createPlacementStaticMonitorActivity } from "../application/activities/placement-static-monitor.activity.js";
 import { PostgresqlReplyMatchRepository } from "../application/services/reply-match.repository.js";
 import {
+  createPostgresqlNegotiationFactsService,
+} from "../application/services/negotiation-facts.service.js";
+import {
   createBacklinkProfileService,
   createBacklinkProfileStore,
 } from "../application/services/backlink-profile.service.js";
 import { SecretBackedGmailConnectionRepository } from "../application/services/gmail-connection-secret.repository.js";
 import { reserveRecommendationRefillJob } from "../application/services/recommendation-refill-reservation.service.js";
-import { ensureCommercialRecommendationRefill } from "../application/services/commercial-inventory-refill.service.js";
+import {
+  arbitrateRecommendationRefillFailure,
+  assertRecommendationRefillProviderExecutionCurrent,
+  completeRecommendationRefillSupersession,
+} from "../application/services/recommendation-refill-supersession.service.js";
 import {
   completeCommercialSupplyOperation,
   planCommercialSupplyOperationStep,
 } from "../application/services/commercial-supply-operation.service.js";
+import {
+  ensureCommercialRecommendationRefill,
+  hasRecoverableAcceptedCommercialRecommendationRefill,
+} from "../application/services/commercial-inventory-refill.service.js";
+import {
+  ensureCurrentCommercialStaticAssessmentRecovery,
+} from "../application/services/current-commercial-static-assessment-recovery-scheduler.service.js";
 import { runProjectScopedLane } from "../application/services/project-scope-scheduler.js";
 import { GmailConnectionDisconnectWorkflow } from "../application/workflows/gmail-connection-disconnect.workflow.js";
 import {
@@ -121,7 +144,6 @@ import {
   BacklinkError,
   backlinkErrorCodes,
 } from "../domain/errors/backlink-error.js";
-import { commercialSupplyPublishedTarget } from "../domain/recommendations/commercial-refill-cycle.js";
 import {
   PostgresqlGmailConnectionRefreshLock,
   PostgresqlGmailConnectionRepository,
@@ -132,6 +154,9 @@ import {
   createMonitoringScheduleRepository,
 } from "../db/repositories/monitoring-schedule.repository.js";
 import { createOpportunityRepository } from "../db/repositories/opportunity.repository.js";
+import {
+  createCooperationPathOpportunityRepository,
+} from "../db/repositories/cooperation-path-opportunity.repository.js";
 import { createProjectContextSnapshotRepository } from "../db/repositories/project-context-snapshot.repository.js";
 import {
   createOutboxRelayRepository,
@@ -154,6 +179,7 @@ import { createContactEnrichmentActivity } from "../activities/contact-enrichmen
 import { createSharedBrowserWorkerAdapter } from "../adapters/browser/shared-browser-worker.adapter.js";
 import { SafeFetchAdapter } from "../adapters/http/safe-fetch.adapter.js";
 import {
+  BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
   createBacklinkOutboxRelay,
   createContactEnrichmentOutboxRelay,
   createPlacementMonitoringRequestedOutboxRelay,
@@ -165,7 +191,10 @@ import {
   createTemporalPlacementMonitoringStarter,
   createTemporalRecommendationRefillConsumer,
 } from "../workflows/outbox-relay.js";
-import { backlinksRuntimeContract } from "../workflows/namespaces.js";
+import {
+  backlinksRuntimeContract,
+  buildBacklinksRecoveryTaskQueue,
+} from "../workflows/namespaces.js";
 import { createTemporalDraftGenerationScheduler } from "../workflows/draft-generation.starter.js";
 import { createTemporalBacklinkProfileSyncScheduler } from "../workflows/backlink-profile-sync.starter.js";
 import { createPlacementTemporalActivities } from "../workflows/placement.activities.js";
@@ -177,13 +206,22 @@ import {
 } from "../adapters/security/local-product-secret-store-client.js";
 import { SecretStoreClientAdapter } from "../adapters/security/secret-store-client.js";
 import { OAuthAttemptService } from "../domain/sending/oauth-attempt.js";
+import { GoogleAuthError } from "../ports/google-auth.port.js";
 import { secretKinds } from "../ports/secret-store.port.js";
 import { readBacklinksLiveCapabilities } from "./live-capabilities.js";
+import { createBacklinksProvidersHealth } from "./runtime-health.js";
+import {
+  combineProjectTaskHealth,
+  createGlobalProjectAnalysisRecovery,
+  createScopedProjectAnalysisRecovery,
+  type ProjectTaskHealth,
+} from "./project-analysis-recovery.js";
 import {
   createLocalProductAiRuntime,
   readLocalProductAiConfiguration,
 } from "./local-product-ai-runtime.js";
 import {
+  assertLocalProductDataForSeoCredentialReady,
   createLocalProductDataForSeoRuntime,
   readLocalProductDataForSeoConfiguration,
 } from "./local-product-dataforseo-runtime.js";
@@ -218,6 +256,8 @@ type ContactEnrichmentCommands = ReturnType<
 type DraftCommands = ReturnType<typeof createDraftCommands>;
 type DraftEditingCommands = ReturnType<typeof createDraftEditingCommands>;
 type GmailConnectionCommands = ReturnType<typeof createGmailConnectionCommands>;
+type CooperationPathOpportunityCommands =
+  ReturnType<typeof createCooperationPathOpportunityCommands>;
 type OpportunityCommands = ReturnType<typeof createOpportunityCommands>;
 type PlacementCandidateCommand = ReturnType<
   typeof createPlacementCandidateCommand
@@ -268,6 +308,28 @@ function dataForSeoInputRequired(): never {
   });
 }
 
+function readPersistentDataForSeoBudgetGrant(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): ProviderOperationBudgetGrant {
+  const positiveInteger = (name: string, fallback: number) => {
+    const value = environment[name]?.trim();
+    if (value === undefined || value.length === 0) return fallback;
+    if (!/^[1-9][0-9]*$/u.test(value)) {
+      throw new Error(`INPUT_REQUIRED: ${name}`);
+    }
+    return Number(value);
+  };
+  return Object.freeze({
+    provider: "dataforseo",
+    reasonCode: "user_authorized_persistent_discovery",
+    maxPaidCalls: positiveInteger("DATAFORSEO_MAX_PAID_CALLS", 6),
+    maxCostMicros: positiveInteger(
+      "DATAFORSEO_ABSOLUTE_BUDGET_MICROS",
+      1_000_000,
+    ),
+  });
+}
+
 function tenantPool(
   context: BacklinksRuntimeFactoryContext,
 ): BacklinkTenantPool {
@@ -307,6 +369,24 @@ function tenantScopeFrom(value: unknown): BacklinkTenantContext {
     };
   }
   throw new TypeError("A tenant-scoped runtime operation has invalid scope.");
+}
+
+async function listContactEnrichmentRecoveryScopes(
+  pool: BacklinksRuntimeFactoryContext["pool"],
+  limit: number,
+): Promise<readonly BacklinkTenantContext[]> {
+  const result = await pool.query(
+    `SELECT organization_id "organizationId",
+            workspace_id "workspaceId",
+            website_project_id "websiteProjectId"
+       FROM backlinks.backlink_list_contact_enrichment_recovery_scopes($1)`,
+    [limit],
+  );
+  return Object.freeze(result.rows.map((row) => Object.freeze({
+    organizationId: String(row.organizationId),
+    workspaceId: String(row.workspaceId),
+    websiteProjectId: String(row.websiteProjectId),
+  })));
 }
 
 function localProductWorkerAuthority(): Readonly<{
@@ -415,6 +495,18 @@ function boundedEnvironmentInteger(
   const value = Number(raw);
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new Error(`BACKLINKS_RUNTIME_INTEGER_INVALID:${name}`);
+  }
+  return value;
+}
+
+function requiredRecoveryUuid(name: string): string {
+  const value = process.env[name]?.trim();
+  if (
+    value === undefined
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+      .test(value)
+  ) {
+    throw new Error(`BACKLINKS_RECOVERY_IDENTITY_INVALID:${name}`);
   }
   return value;
 }
@@ -595,6 +687,7 @@ function createPlacementCandidateRepository(
            INSERT INTO backlink_placement_candidates (
              id,organization_id,workspace_id,website_project_id,
              opportunity_id,
+             reply_id,planned_placement_id,
              source_type,source_external_id,source_page_url,
              normalized_source_url,normalized_source_url_hash,
              target_url,normalized_target_url,normalized_target_url_hash,
@@ -604,7 +697,7 @@ function createPlacementCandidateRepository(
              evidence_schema_version,created_by,updated_by
            )
            SELECT
-             $5,$1,$2,$3,$25,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+             $5,$1,$2,$3,$25,$26,$27,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
              $17,$18::jsonb,$19,$20,$21,$4,$4
              FROM guard
             WHERE NOT EXISTS (SELECT 1 FROM prior)
@@ -612,8 +705,38 @@ function createPlacementCandidateRepository(
                 $25::uuid IS NULL
                 OR EXISTS (SELECT 1 FROM matched_opportunity)
               )
+              AND (
+                $26::uuid IS NULL
+                OR EXISTS (
+                  SELECT 1
+                    FROM backlink_inbound_messages inbound
+                    JOIN backlink_reply_match_candidates assignment
+                      ON (
+                        assignment.organization_id,
+                        assignment.workspace_id,
+                        assignment.website_project_id,
+                        assignment.inbound_message_id,
+                        assignment.opportunity_id
+                      )=(
+                        inbound.organization_id,
+                        inbound.workspace_id,
+                        inbound.website_project_id,
+                        inbound.id,
+                        $25::uuid
+                      )
+                   WHERE (
+                     inbound.organization_id,
+                     inbound.workspace_id,
+                     inbound.website_project_id,
+                     inbound.id
+                   )=($1,$2,$3,$26::uuid)
+                     AND inbound.match_status='MATCH_CONFIRMED'
+                     AND assignment.requires_manual_confirmation=false
+                )
+              )
            RETURNING id,opportunity_id,status,match_status,
-                     initial_validation_status,version
+                     initial_validation_status,version,
+                     reply_id,planned_placement_id
          ), completed AS (
            INSERT INTO backlink_idempotency_records (
              id,organization_id,workspace_id,website_project_id,
@@ -626,6 +749,12 @@ function createPlacementCandidateRepository(
              jsonb_build_object(
                'candidateId',created.id,
                'opportunityId',created.opportunity_id,
+               'replyId',created.reply_id,
+               'placementId',created.planned_placement_id,
+               'lineageStatus',CASE
+                 WHEN created.reply_id IS NULL THEN 'UNATTRIBUTED'
+                 ELSE 'OUTREACH_DERIVED'
+               END,
                'status',created.status,
                'matchStatus',created.match_status,
                'initialValidationStatus',created.initial_validation_status,
@@ -665,6 +794,8 @@ function createPlacementCandidateRepository(
           input.idempotencyRecordId,
           input.requestHash,
           input.opportunityId ?? null,
+          input.replyId ?? null,
+          input.plannedPlacementId,
         ],
       );
       const row = result.rows[0];
@@ -682,6 +813,20 @@ function createPlacementCandidateRepository(
               rawResponse.opportunityId === undefined
                 ? {}
                 : { opportunityId: String(rawResponse.opportunityId) }),
+              ...(rawResponse.replyId === null ||
+              rawResponse.replyId === undefined
+                ? {}
+                : { replyId: String(rawResponse.replyId) }),
+              placementId:
+                rawResponse.placementId === null ||
+                rawResponse.placementId === undefined
+                  ? String(rawResponse.candidateId)
+                  : String(rawResponse.placementId),
+              lineageStatus:
+                rawResponse.replyId === null ||
+                rawResponse.replyId === undefined
+                  ? "UNATTRIBUTED" as const
+                  : "OUTREACH_DERIVED" as const,
               status: rawResponse.status as
                 "PENDING_MATCH" | "PENDING_VALIDATION",
               matchStatus: rawResponse.matchStatus as
@@ -1052,6 +1197,13 @@ async function createApiDependencies(
   context: BacklinksRuntimeFactoryContext,
 ): Promise<BacklinksPrivateApiDependencies> {
   const capabilities = readBacklinksLiveCapabilities();
+  const providerHealth = createBacklinksProvidersHealth();
+  const dataForSeoAvailable =
+    capabilities.dataForSeoEnabled
+    && providerHealth.dataForSeo.externalAvailability === "available";
+  const browserProviderAvailable =
+    capabilities.browserProviderEnabled
+    && providerHealth.browser.externalAvailability === "available";
   if (context.process !== "api") {
     throw new Error("BACKLINKS_RUNTIME_PROCESS_MISMATCH");
   }
@@ -1086,8 +1238,18 @@ async function createApiDependencies(
       client,
       contentReader: replyMailContentReader,
     });
-  const sendIntentFactory: QueryFactory<SendIntentQuery> =
-    createSendIntentQuery;
+  let readGmailWorkerMode: () => Promise<SendIntentWorkerMode> =
+    async () => "unknown";
+  const sendIntentFactory: QueryFactory<SendIntentQuery> = (client) =>
+    createSendIntentQuery(client, {
+      buildIdentity: context.buildIdentity.buildId,
+      workerMode: () => readGmailWorkerMode(),
+    });
+  const sendIntentListFactory: QueryFactory<SendIntentListQuery> = (client) =>
+    createSendIntentQuery(client, {
+      buildIdentity: context.buildIdentity.buildId,
+      workerMode: () => readGmailWorkerMode(),
+    });
   const summaryFactory: QueryFactory<SummaryQuery> = (client) => ({
     async getSummary() {
       await client.query("SELECT 1");
@@ -1097,13 +1259,15 @@ async function createApiDependencies(
   const profileConfiguration = capabilities.dataForSeoEnabled
     ? readLocalProductDataForSeoConfiguration()
     : null;
+  const persistentProviderBudgetGrant =
+    readPersistentDataForSeoBudgetGrant();
   const profileEstimatedCostMicros =
     (profileConfiguration?.estimatedCostMicros ??
       Number(process.env.DATAFORSEO_ESTIMATED_COST_MICROS ?? 27_600)) * 2;
   const profileFactory: QueryFactory<BacklinkProfileStore> = (client) =>
     createBacklinkProfileStore(client, {
       providerEnabled: capabilities.dataForSeoEnabled,
-      providerAvailable: capabilities.dataForSeoEnabled,
+      providerAvailable: dataForSeoAvailable,
       estimatedCostMicros: profileEstimatedCostMicros,
     });
 
@@ -1158,6 +1322,7 @@ async function createApiDependencies(
     getMailMessage: scopedMethod(pool, replyMailFactory, "getMailMessage"),
     getMailThread: scopedMethod(pool, replyMailFactory, "getMailThread"),
     getSendIntent: scopedMethod(pool, sendIntentFactory, "getSendIntent"),
+    listSendIntents: scopedMethod(pool, sendIntentListFactory, "listSendIntents"),
     getSummary: scopedMethod(pool, summaryFactory, "getSummary"),
   });
 
@@ -1183,9 +1348,14 @@ async function createApiDependencies(
       maxPages: capabilities.contactEnrichmentMaxPages,
       maxDepth: capabilities.contactEnrichmentMaxDepth,
       maxAttempts: capabilities.contactEnrichmentMaxAttempts,
-      browserAllowed: capabilities.browserProviderEnabled,
+      browserAllowed: browserProviderAvailable,
     });
   const contactEnrichmentCommands: ContactEnrichmentCommands = Object.freeze({
+    runCurrentPool: scopedMethod(
+      pool,
+      contactEnrichmentFactory,
+      "runCurrentPool",
+    ),
     start: scopedMethod(pool, contactEnrichmentFactory, "start"),
     get: scopedMethod(pool, contactEnrichmentFactory, "get"),
     retry: scopedMethod(pool, contactEnrichmentFactory, "retry"),
@@ -1244,7 +1414,57 @@ async function createApiDependencies(
     approve: scopedMethod(pool, draftEditingFactory, "approve"),
   });
 
-  const gmailRepository = new PostgresqlGmailConnectionRepository({ pool });
+  const gmailRepository = new PostgresqlGmailConnectionRepository({
+    pool,
+    projectGovernance: {
+      gmailSendEnabled: capabilities.gmailSendEnabled,
+      gmailSyncEnabled: capabilities.gmailSyncEnabled,
+    },
+  });
+  const gmailSecretStore = capabilities.secretStoreRoot === null
+    ? null
+    : new SecretStoreClientAdapter({
+        config: {
+          enabled: true,
+          provider: "platform-secret-store",
+        },
+        client: new LocalProductSecretStoreClient({
+          rootDirectory: capabilities.secretStoreRoot,
+        }),
+      });
+  const gmailWorkerAvailable = async (): Promise<boolean> => {
+    try {
+      const workflowService = context.temporal.connection
+        .workflowService as Readonly<{
+        describeTaskQueue(
+          input: Readonly<{
+            namespace: string;
+            taskQueue: Readonly<{ name: string; kind: number }>;
+            taskQueueType: number;
+            reportStats: boolean;
+          }>,
+        ): Promise<Readonly<{ pollers?: readonly unknown[] }>>;
+      }>;
+      const status = await workflowService.describeTaskQueue({
+        namespace: context.temporal.workflow.options.namespace,
+        taskQueue: {
+          name: backlinksRuntimeContract.taskQueue,
+          kind: 1,
+        },
+        taskQueueType: 1,
+        reportStats: false,
+      });
+      return (status.pollers?.length ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  };
+  readGmailWorkerMode = async () => {
+    if (process.env.BACKLINKS_WORKER_EXECUTION_MODE !== "normal") {
+      return "quiesced";
+    }
+    return await gmailWorkerAvailable() ? "normal" : "unavailable";
+  };
   let gmailConnectionCommands: GmailConnectionCommands;
   if (!capabilities.googleOauthEnabled) {
     gmailConnectionCommands = Object.freeze({
@@ -1254,17 +1474,8 @@ async function createApiDependencies(
       disconnect: async () => providerDisabled("Gmail connection"),
     });
   } else {
-    const secretStoreClient = new LocalProductSecretStoreClient({
-      rootDirectory:
-        capabilities.secretStoreRoot ?? providerDisabled("Secret Store"),
-    });
-    const secretStore = new SecretStoreClientAdapter({
-      config: {
-        enabled: true,
-        provider: "platform-secret-store",
-      },
-      client: secretStoreClient,
-    });
+    const secretStore =
+      gmailSecretStore ?? providerDisabled("Secret Store");
     const clientSecretReference = parseLocalProductSecretReference(
       capabilities.googleOauthClientSecretReference ??
         providerDisabled("Google OAuth Client Secret"),
@@ -1323,14 +1534,37 @@ async function createApiDependencies(
         providerDisabled("Google OAuth Redirect URI"),
     });
   }
-  const gmailConnectionQuery = createGmailConnectionQuery({
-    reader: gmailRepository,
-  });
   const gmailPollingSyncCommands = createLocalProductGmailPollingSyncCommands({
     pool,
     workflowClient: context.temporal.workflow,
     taskQueue: backlinksRuntimeContract.taskQueue,
     capabilities,
+  });
+  const gmailConnectionQuery = createGmailConnectionQuery({
+    reader: gmailRepository,
+    readiness: {
+      infrastructure: gmailRepository,
+      sendRuntimeEnabled: capabilities.gmailSendEnabled,
+      syncRuntimeEnabled: capabilities.gmailSyncEnabled,
+      workerAvailable: gmailWorkerAvailable,
+      async credentialAvailable(input) {
+        if (gmailSecretStore === null) return false;
+        try {
+          const plaintext = await gmailSecretStore.resolve({
+            reference: input.tokenSecretReference,
+            context: {
+              organizationId: input.organizationId,
+              subjectProvider: "google",
+              connectionId: input.gmailConnectionId,
+            },
+          });
+          return plaintext.trim().length > 0;
+        } catch {
+          return false;
+        }
+      },
+      syncStatus: (input) => gmailPollingSyncCommands.status(input),
+    },
   });
 
   const opportunityFactory: QueryFactory<OpportunityCommands> = (client) =>
@@ -1348,6 +1582,29 @@ async function createApiDependencies(
     ),
     patchManagement: scopedMethod(pool, opportunityFactory, "patchManagement"),
   });
+  const cooperationPathOpportunityFactory:
+    QueryFactory<CooperationPathOpportunityCommands> = (client) =>
+      createCooperationPathOpportunityCommands(
+        createCooperationPathOpportunityRepository(client),
+      );
+  const cooperationPathOpportunityCommands:
+    CooperationPathOpportunityCommands = Object.freeze({
+      createFromVerifiedPath: scopedMethod(
+        pool,
+        cooperationPathOpportunityFactory,
+        "createFromVerifiedPath",
+      ),
+      patchManualContent: scopedMethod(
+        pool,
+        cooperationPathOpportunityFactory,
+        "patchManualContent",
+      ),
+      transitionManualAction: scopedMethod(
+        pool,
+        cooperationPathOpportunityFactory,
+        "transitionManualAction",
+      ),
+    });
 
   const placementCandidateFactory: QueryFactory<PlacementCandidateCommand> = (
     client,
@@ -1393,11 +1650,23 @@ async function createApiDependencies(
   });
 
   const recommendationFactory: QueryFactory<RecommendationCommands> =
-    createRecommendationCommands;
+    (client) => createRecommendationCommands(client, {
+      persistentProviderBudgetGrant,
+    });
   const recommendationCommands: RecommendationCommands = Object.freeze({
     reject: scopedMethod(pool, recommendationFactory, "reject"),
     requestRefill: scopedMethod(pool, recommendationFactory, "requestRefill"),
     archivePool: scopedMethod(pool, recommendationFactory, "archivePool"),
+    cancelQueuedRefill: scopedMethod(
+      pool,
+      recommendationFactory,
+      "cancelQueuedRefill",
+    ),
+    closeDuplicateRefill: scopedMethod(
+      pool,
+      recommendationFactory,
+      "closeDuplicateRefill",
+    ),
   });
 
   const metricDashboardQuery: MetricDashboardQuery = Object.freeze({
@@ -1445,38 +1714,14 @@ async function createApiDependencies(
   const replyMatchCommands = createReplyMatchCommands({
     repository: new PostgresqlReplyMatchRepository({ pool }),
   });
+  const negotiationFactsService =
+    createPostgresqlNegotiationFactsService({ pool });
   const sendIntentCommands: SendIntentCommands =
-    createLocalProductSendIntentCommands(pool, capabilities, async () => {
-      try {
-        const workflowService = context.temporal.connection
-          .workflowService as Readonly<{
-          describeTaskQueue(
-            input: Readonly<{
-              namespace: string;
-              taskQueue: Readonly<{ name: string; kind: number }>;
-              taskQueueType: number;
-              reportStats: boolean;
-            }>,
-          ): Promise<
-            Readonly<{
-              pollers?: readonly unknown[];
-            }>
-          >;
-        }>;
-        const status = await workflowService.describeTaskQueue({
-          namespace: context.temporal.workflow.options.namespace,
-          taskQueue: {
-            name: backlinksRuntimeContract.taskQueue,
-            kind: 1,
-          },
-          taskQueueType: 1,
-          reportStats: false,
-        });
-        return (status.pollers?.length ?? 0) > 0;
-      } catch {
-        return false;
-      }
-    });
+    createLocalProductSendIntentCommands(
+      pool,
+      capabilities,
+      gmailWorkerAvailable,
+    );
   const inventoryMonitoringStarter = createTemporalPlacementMonitoringStarter(
     context.temporal.workflow,
     backlinksRuntimeContract.taskQueue,
@@ -1519,25 +1764,7 @@ async function createApiDependencies(
             );
           const gate = await client.query(
             `
-            WITH budget AS (
-              SELECT COALESCE(bool_or(
-                limit_micros-spent_micros-reserved_micros >= $4
-              ),false) available,
-              max(period_start) period_start,max(period_end) period_end
-                FROM backlink_provider_budgets
-               WHERE organization_id=$1 AND workspace_id=$2
-                 AND provider='dataforseo'
-                 AND period_start<=now() AND period_end>now()
-            ), calls AS (
-              SELECT count(*)::integer count
-                FROM backlink_provider_requests request,budget
-               WHERE budget.period_start IS NOT NULL
-                 AND request.organization_id=$1
-                 AND request.workspace_id=$2
-                 AND request.provider='dataforseo'
-                 AND request.started_at>=budget.period_start
-                 AND request.started_at<budget.period_end
-            ), switches AS (
+            WITH switches AS (
               SELECT
                 COALESCE((
                   SELECT NOT blocked
@@ -1558,21 +1785,17 @@ async function createApiDependencies(
                    ORDER BY version DESC LIMIT 1
                 ),false) available
             )
-            SELECT budget.available
-                   AND switches.available
-                   AND calls.count+2 <= $5 AS available
-              FROM budget CROSS JOIN calls CROSS JOIN switches
+            SELECT switches.available
+              FROM switches
           `,
             [
               profileContext.tenant.organizationId,
               profileContext.tenant.workspaceId,
               profileContext.project.websiteProjectId,
-              profileEstimatedCostMicros,
-              profileConfiguration?.maxPaidCalls ?? 0,
             ],
           );
           const providerAvailable =
-            capabilities.dataForSeoEnabled &&
+            dataForSeoAvailable &&
             endpointsAllowed &&
             gate.rows[0]?.available === true;
           return createBacklinkProfileStore(client, {
@@ -1601,6 +1824,7 @@ async function createApiDependencies(
     gmailConnectionCommands,
     gmailConnectionQuery,
     gmailPollingSyncCommands,
+    cooperationPathOpportunityCommands,
     opportunityCommands,
     placementCandidateCommand,
     placementReverifyCommand,
@@ -1610,6 +1834,7 @@ async function createApiDependencies(
     reportOverviewQuery,
     reportExportWorkflow,
     replyMatchCommands,
+    negotiationFactsService,
     sendIntentCommands,
     settingsGovernanceService: createSettingsGovernanceService(pool),
     backlinkProfileService,
@@ -1629,13 +1854,45 @@ async function createApiDependencies(
 async function createWorkerRegistrations(
   context: BacklinksRuntimeFactoryContext,
 ) {
+  const recoveryMode =
+    process.env.BACKLINKS_WORKER_EXECUTION_MODE === "recovery";
+  const recoveryIdentity = recoveryMode
+    ? Object.freeze({
+        websiteProjectId: requiredRecoveryUuid(
+          "BACKLINKS_RECOVERY_WEBSITE_PROJECT_ID",
+        ),
+        jobId: requiredRecoveryUuid("BACKLINKS_RECOVERY_REFILL_JOB_ID"),
+        outboxEventId: requiredRecoveryUuid(
+          "BACKLINKS_RECOVERY_REFILL_OUTBOX_EVENT_ID",
+        ),
+      })
+    : null;
   const capabilities = readBacklinksLiveCapabilities();
+  const providerHealth = createBacklinksProvidersHealth();
+  const dataForSeoAvailable =
+    capabilities.dataForSeoEnabled
+    && providerHealth.dataForSeo.externalAvailability === "available";
+  const browserProviderAvailable =
+    capabilities.browserProviderEnabled
+    && providerHealth.browser.externalAvailability === "available";
   if (context.process !== "worker") {
     throw new Error("BACKLINKS_RUNTIME_PROCESS_MISMATCH");
   }
   const pool = tenantPool(context);
   const workerId = `backlinks-worker:${process.pid}`;
   const workerAuthority = localProductWorkerAuthority();
+  console.log(JSON.stringify({
+    event: "backlinks.worker.product-runtime.configured",
+    runtimeMode: process.env.BACKLINKS_RUNTIME_MODE ?? "DISABLED",
+    projectConsumersEnabled: workerAuthority !== null,
+    dataForSeoAvailable,
+  }));
+  if (recoveryIdentity !== null && workerAuthority === null) {
+    throw new Error("BACKLINKS_RECOVERY_LOCAL_PRODUCT_AUTHORITY_REQUIRED");
+  }
+  const recommendationTaskQueue = recoveryIdentity === null
+    ? backlinksRuntimeContract.taskQueue
+    : buildBacklinksRecoveryTaskQueue(recoveryIdentity.jobId);
   const projectScopeProvider =
     workerAuthority === null
       ? null
@@ -1657,6 +1914,10 @@ async function createWorkerRegistrations(
           workflowStarter: projectAnalysisStarter,
         })
       : null;
+  const projectAnalysisRecovery =
+    workerAuthority === null
+      ? createGlobalProjectAnalysisRecovery(context.pool)
+      : null;
   const relay =
     workerAuthority === null
       ? createPlacementMonitoringRequestedOutboxRelay({
@@ -1665,7 +1926,7 @@ async function createWorkerRegistrations(
         })
       : null;
   const recommendationRefillRelay =
-    capabilities.dataForSeoEnabled && workerAuthority === null
+    workerAuthority === null
       ? createRecommendationRefillOutboxRelay({
           repository: createOutboxRelayRepository(context.pool),
           consumer: createTemporalRecommendationRefillConsumer(
@@ -1677,8 +1938,67 @@ async function createWorkerRegistrations(
   const recommendationRefillConsumer =
     createTemporalRecommendationRefillConsumer(
       context.temporal.workflow,
-      backlinksRuntimeContract.taskQueue,
+      recommendationTaskQueue,
+      recoveryIdentity === null
+        ? null
+        : { expectedJobId: recoveryIdentity.jobId },
     );
+  const recoveryRefillRelay =
+    recoveryIdentity === null || workerAuthority === null
+      ? null
+      : createRecommendationRefillOutboxRelay({
+          repository: createScopedOutboxRelayRepository(pool, {
+            organizationId: workerAuthority.organizationId,
+            workspaceId: workerAuthority.workspaceId,
+            websiteProjectId: recoveryIdentity.websiteProjectId,
+          }),
+          consumer: recommendationRefillConsumer,
+        });
+  const recoveryWorkflowAlreadyDispatched =
+    recoveryIdentity === null || workerAuthority === null
+      ? null
+      : () =>
+          withBacklinkTenantTransaction(
+            pool,
+            {
+              organizationId: workerAuthority.organizationId,
+              workspaceId: workerAuthority.workspaceId,
+              websiteProjectId: recoveryIdentity.websiteProjectId,
+            },
+            async (client) => {
+              const result = await client.query(
+                `SELECT job.workflow_id AS "workflowId"
+                   FROM backlink_outbox_events AS event
+                   JOIN backlink_jobs AS job
+                     ON (
+                       job.organization_id,job.workspace_id,
+                       job.website_project_id,job.id
+                     )=(
+                       event.organization_id,event.workspace_id,
+                       event.website_project_id,event.aggregate_id
+                     )
+                  WHERE (
+                    event.organization_id,event.workspace_id,
+                    event.website_project_id,event.id
+                  )=($1,$2,$3,$4)
+                    AND event.event_type=$5
+                    AND event.status='published'
+                    AND event.aggregate_id=$6
+                    AND event.payload->>'jobId'=$6::text
+                    AND event.payload->>'workflowId'=job.workflow_id
+                    AND job.status IN ('queued','running','waiting_provider')`,
+                [
+                  workerAuthority.organizationId,
+                  workerAuthority.workspaceId,
+                  recoveryIdentity.websiteProjectId,
+                  recoveryIdentity.outboxEventId,
+                  BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
+                  recoveryIdentity.jobId,
+                ],
+              );
+              return typeof result.rows[0]?.workflowId === "string";
+            },
+          );
   const contactEnrichmentConsumer = createTemporalContactEnrichmentConsumer(
     context.temporal.workflow,
     backlinksRuntimeContract.taskQueue,
@@ -1690,7 +2010,7 @@ async function createWorkerRegistrations(
           consumer: contactEnrichmentConsumer,
         })
       : null;
-  const browserWorker = capabilities.browserProviderEnabled
+  const browserWorker = browserProviderAvailable
     ? createSharedBrowserWorkerAdapter({
         endpoint:
           capabilities.browserWorkerEndpoint ??
@@ -1787,25 +2107,53 @@ async function createWorkerRegistrations(
   const dataForSeoConfiguration = capabilities.dataForSeoEnabled
     ? readLocalProductDataForSeoConfiguration()
     : null;
-  const dataForSeoRuntime =
+  const persistentProviderBudgetGrant =
+    readPersistentDataForSeoBudgetGrant();
+  const automaticRecommendationEstimatedCostMicros = Math.min(
+    dataForSeoConfiguration?.estimatedCostMicros ?? 27_600,
+    persistentProviderBudgetGrant.maxCostMicros,
+  );
+  const automaticRecommendationCandidateLimit =
+    dataForSeoConfiguration?.candidateLimit ?? 25;
+  const dataForSeoSecretStoreRoot =
     dataForSeoConfiguration === null
+      ? null
+      : capabilities.secretStoreRoot
+        ?? providerDisabled("DataForSEO Secret Store");
+  if (
+    dataForSeoConfiguration !== null
+    && dataForSeoSecretStoreRoot !== null
+    && dataForSeoAvailable
+  ) {
+    await assertLocalProductDataForSeoCredentialReady({
+      secretStoreRoot: dataForSeoSecretStoreRoot,
+      configuration: dataForSeoConfiguration,
+    });
+  }
+  const dataForSeoRuntime =
+    dataForSeoConfiguration === null || dataForSeoSecretStoreRoot === null
       ? null
       : createLocalProductDataForSeoRuntime({
           pool,
-          secretStoreRoot:
-            capabilities.secretStoreRoot ??
-            providerDisabled("DataForSEO Secret Store"),
+          secretStoreRoot: dataForSeoSecretStoreRoot,
           configuration: dataForSeoConfiguration,
           blueprintGenerator: aiRuntime?.blueprint,
+          contactEnrichment: {
+            limit: dataForSeoConfiguration.candidateLimit,
+            options: {
+              maxPages: capabilities.contactEnrichmentMaxPages,
+              maxDepth: capabilities.contactEnrichmentMaxDepth,
+              maxAttempts: capabilities.contactEnrichmentMaxAttempts,
+              browserAllowed: browserProviderAvailable,
+            },
+          },
         });
   const backlinkProfileRuntime =
-    dataForSeoConfiguration === null
+    dataForSeoConfiguration === null || dataForSeoSecretStoreRoot === null
       ? null
       : createLocalProductBacklinkProfileRuntime({
           pool,
-          secretStoreRoot:
-            capabilities.secretStoreRoot ??
-            providerDisabled("DataForSEO Secret Store"),
+          secretStoreRoot: dataForSeoSecretStoreRoot,
           configuration: dataForSeoConfiguration,
         });
   let relayTimer: NodeJS.Timeout | undefined;
@@ -1813,9 +2161,10 @@ async function createWorkerRegistrations(
   const maxConcurrentContactEnrichmentJobs = 2;
   let nextContactScanAt = 0;
   let nextPlacementMonitorScanAt = 0;
-  let nextRecommendationInventoryScanAt = 0;
+  let nextRecommendationRecoveryScanAt = 0;
   let nextBacklinkProfileScanAt = 0;
   let nextGmailTokenHealthCheckAt = 0;
+  let nextGmailSendRecoveryAt = 0;
   const gmailTokenHealthRetryByConnection = new Map<
     string,
     Readonly<{
@@ -1831,6 +2180,8 @@ async function createWorkerRegistrations(
       scope.websiteProjectId,
       lane,
     ].join(":");
+  const projectAnalysisStaleBefore = () =>
+    new Date(Date.now() - 15 * 60_000);
   const logProjectFailure = (
     lane: string,
     scope: BacklinkTenantContext,
@@ -1879,6 +2230,17 @@ async function createWorkerRegistrations(
       .then(async () => {
         const staleClaimBefore = new Date(Date.now() - 30_000);
         if (projectAnalysisRelay !== null) {
+          const rearmed = await projectAnalysisRecovery?.rearm({
+            workerId,
+            limit: 10,
+            staleBefore: projectAnalysisStaleBefore(),
+          }) ?? 0;
+          if (rearmed > 0) {
+            console.log(JSON.stringify({
+              event: "backlinks.project-analysis.recovered",
+              rearmed,
+            }));
+          }
           const outcome = await projectAnalysisRelay.runOnce({
             workerId,
             limit: 10,
@@ -1894,11 +2256,30 @@ async function createWorkerRegistrations(
           }
         } else {
           await runLocalProjectLane("project-analysis", async (scope) => {
+            const projectWorkerId = scopedWorkerId(scope, "project-analysis");
+            const rearmed = await withBacklinkTenantTransaction(
+              pool,
+              scope,
+              (client) => createScopedProjectAnalysisRecovery(client).rearm({
+                workerId: projectWorkerId,
+                limit: 10,
+                staleBefore: projectAnalysisStaleBefore(),
+              }),
+            );
+            if (rearmed > 0) {
+              console.log(JSON.stringify({
+                event: "backlinks.project-analysis.recovered",
+                organizationId: scope.organizationId,
+                workspaceId: scope.workspaceId,
+                websiteProjectId: scope.websiteProjectId,
+                rearmed,
+              }));
+            }
             const outcome = await createBacklinkOutboxRelay({
               repository: createScopedOutboxRelayRepository(pool, scope),
               workflowStarter: projectAnalysisStarter,
             }).runOnce({
-              workerId: scopedWorkerId(scope, "project-analysis"),
+              workerId: projectWorkerId,
               limit: 10,
               staleClaimBefore,
             });
@@ -2035,11 +2416,10 @@ async function createWorkerRegistrations(
           }
         } else if (
           workerAuthority !== null &&
-          capabilities.dataForSeoEnabled &&
           dataForSeoConfiguration !== null
         ) {
-          const shouldScanRecommendationInventory =
-            Date.now() >= nextRecommendationInventoryScanAt;
+          const shouldScanRecommendationRecovery =
+            Date.now() >= nextRecommendationRecoveryScanAt;
           const recommendationScopes: Array<
             Readonly<{
               scope: ActiveProjectScope;
@@ -2048,6 +2428,110 @@ async function createWorkerRegistrations(
             }>
           > = [];
           await runLocalProjectLane("recommendation-refill", async (scope) => {
+            if (shouldScanRecommendationRecovery) {
+              try {
+                const projectContext = await createWorkerProjectContext(
+                  pool,
+                  scope,
+                  workerAuthority.actorId,
+                );
+                if (projectContext !== null) {
+                  const staticRecovery =
+                    await withBacklinkTenantTransaction(
+                      pool,
+                      scope,
+                      (client) =>
+                        ensureCurrentCommercialStaticAssessmentRecovery(
+                          client,
+                          {
+                            context: projectContext,
+                            recommendationContextVersionId:
+                              scope.projectContextSnapshotId,
+                            maximumCandidates:
+                              automaticRecommendationCandidateLimit,
+                            now: new Date(),
+                          },
+                        ),
+                    );
+                  if (staticRecovery.status === "queued") {
+                    console.log(
+                      JSON.stringify({
+                        event:
+                          "backlinks.recommendation-refill.static-assessment-recovery-queued",
+                        organizationId: scope.organizationId,
+                        workspaceId: scope.workspaceId,
+                        websiteProjectId: scope.websiteProjectId,
+                        jobId: staticRecovery.jobId,
+                        recoverableCandidateCount:
+                          staticRecovery.recoverableCandidateCount,
+                        replayed: staticRecovery.replayed,
+                      }),
+                    );
+                  }
+                }
+                if (!dataForSeoAvailable) return;
+                const refill = await withBacklinkTenantTransaction(
+                  pool,
+                  scope,
+                  async (client) => {
+                    const recoverable =
+                      await hasRecoverableAcceptedCommercialRecommendationRefill(
+                        client,
+                        {
+                          organizationId: scope.organizationId,
+                          workspaceId: scope.workspaceId,
+                          websiteProjectId: scope.websiteProjectId,
+                          projectContextVersionId:
+                            scope.projectContextSnapshotId,
+                        },
+                      );
+                    return {
+                      recoverable,
+                      outcome: await ensureCommercialRecommendationRefill(
+                        client,
+                        {
+                          organizationId: scope.organizationId,
+                          workspaceId: scope.workspaceId,
+                          websiteProjectId: scope.websiteProjectId,
+                          projectContextVersionId:
+                            scope.projectContextSnapshotId,
+                          actorId: workerAuthority.actorId,
+                          estimatedCostMicros:
+                            automaticRecommendationEstimatedCostMicros,
+                          absoluteBudgetMicros:
+                            persistentProviderBudgetGrant.maxCostMicros,
+                          maxPaidCalls:
+                            persistentProviderBudgetGrant.maxPaidCalls,
+                          providerBudgetGrant: persistentProviderBudgetGrant,
+                          candidateLimit:
+                            automaticRecommendationCandidateLimit,
+                          now: new Date(),
+                        },
+                      ),
+                    };
+                  },
+                );
+                if (refill.outcome.status === "queued") {
+                  console.log(
+                    JSON.stringify({
+                      event: refill.recoverable
+                        ? "backlinks.recommendation-refill.accepted-provider-recovered"
+                        : "backlinks.recommendation-refill.inventory-refill-queued",
+                      organizationId: scope.organizationId,
+                      workspaceId: scope.workspaceId,
+                      websiteProjectId: scope.websiteProjectId,
+                      jobId: refill.outcome.jobId,
+                    }),
+                  );
+                }
+              } catch (error) {
+                await logProjectFailure(
+                  "recommendation-refill",
+                  scope,
+                  error,
+                );
+              }
+            }
             const priority = await withBacklinkTenantTransaction(
               pool,
               scope,
@@ -2091,6 +2575,9 @@ async function createWorkerRegistrations(
               }),
             );
           });
+          if (shouldScanRecommendationRecovery) {
+            nextRecommendationRecoveryScanAt = Date.now() + 5_000;
+          }
           recommendationScopes.sort(
             (left, right) =>
               right.contextCreatedAtEpoch - left.contextCreatedAtEpoch ||
@@ -2102,36 +2589,6 @@ async function createWorkerRegistrations(
           for (const candidate of recommendationScopes) {
             const scope = candidate.scope;
             try {
-              let refillQueued = false;
-              if (shouldScanRecommendationInventory) {
-                const refill = await withBacklinkTenantTransaction(
-                  pool,
-                  scope,
-                  (client) =>
-                    ensureCommercialRecommendationRefill(client, {
-                      ...scope,
-                      projectContextVersionId: scope.projectContextSnapshotId,
-                      actorId: workerAuthority.actorId,
-                      estimatedCostMicros:
-                        dataForSeoConfiguration.estimatedCostMicros,
-                      candidateLimit: dataForSeoConfiguration.candidateLimit,
-                      now: new Date(),
-                    }),
-                );
-                if (refill.status === "queued") {
-                  refillQueued = true;
-                  console.log(
-                    JSON.stringify({
-                      event: "backlinks.commercial-inventory.refill.queued",
-                      organizationId: scope.organizationId,
-                      workspaceId: scope.workspaceId,
-                      websiteProjectId: scope.websiteProjectId,
-                      jobId: refill.jobId,
-                      requestedCandidateCount: refill.requestedCandidateCount,
-                    }),
-                  );
-                }
-              }
               const outcome = await createRecommendationRefillOutboxRelay({
                 repository: createScopedOutboxRelayRepository(pool, scope),
                 consumer: recommendationRefillConsumer,
@@ -2175,7 +2632,7 @@ async function createWorkerRegistrations(
                          organization_id,workspace_id,website_project_id,
                          project_context_version_id
                        )=($1,$2,$3,$4)
-                         AND refill_state IN ('running','waiting_contact')
+                         AND refill_state='running'
                     ) pending
                   `,
                     [
@@ -2189,18 +2646,15 @@ async function createWorkerRegistrations(
               const scopeWorkPending = Boolean(priorityWork.rows[0]?.pending);
               projectRecommendationWorkPending =
                 projectRecommendationWorkPending || scopeWorkPending;
-              if (refillQueued || scopeWorkPending) break;
+              if (scopeWorkPending) break;
             } catch (error) {
               await logProjectFailure("recommendation-refill", scope, error);
             }
           }
-          if (shouldScanRecommendationInventory) {
-            nextRecommendationInventoryScanAt = Date.now() + 15_000;
-          }
         }
         if (
           workerAuthority !== null &&
-          capabilities.dataForSeoEnabled &&
+          dataForSeoAvailable &&
           dataForSeoConfiguration !== null &&
           !projectRecommendationWorkPending &&
           Date.now() >= nextBacklinkProfileScanAt
@@ -2275,7 +2729,7 @@ async function createWorkerRegistrations(
                     : String(row.searchAfterToken);
                 return createBacklinkProfileStore(client, {
                   providerEnabled: true,
-                  providerAvailable: true,
+                  providerAvailable: dataForSeoAvailable,
                   estimatedCostMicros:
                     dataForSeoConfiguration.estimatedCostMicros * 2,
                 }).createSyncJob(projectContext, {
@@ -2304,7 +2758,7 @@ async function createWorkerRegistrations(
           nextBacklinkProfileScanAt = Date.now() + 15_000;
         } else if (
           workerAuthority !== null &&
-          capabilities.dataForSeoEnabled &&
+          dataForSeoAvailable &&
           dataForSeoConfiguration !== null &&
           projectRecommendationWorkPending &&
           Date.now() >= nextBacklinkProfileScanAt
@@ -2318,6 +2772,39 @@ async function createWorkerRegistrations(
           nextBacklinkProfileScanAt = Date.now() + 15_000;
         }
         if (contactEnrichmentRelay !== null) {
+          if (Date.now() >= nextContactScanAt) {
+            const scopes = await listContactEnrichmentRecoveryScopes(
+              context.pool,
+              100,
+            );
+            for (const scope of scopes) {
+              const created = await withBacklinkTenantTransaction(
+                pool,
+                scope,
+                (client) => ensureReadyContactEnrichmentJobs(client, {
+                  scope,
+                  actorId: workerId,
+                  limit: maxConcurrentContactEnrichmentJobs,
+                  options: {
+                    maxPages: capabilities.contactEnrichmentMaxPages,
+                    maxDepth: capabilities.contactEnrichmentMaxDepth,
+                    maxAttempts: capabilities.contactEnrichmentMaxAttempts,
+                    browserAllowed: browserProviderAvailable,
+                  },
+                }),
+              );
+              if (created > 0) {
+                console.log(
+                  JSON.stringify({
+                    event: "backlinks.contact-enrichment.jobs.recovered",
+                    ...scope,
+                    created,
+                  }),
+                );
+              }
+            }
+            nextContactScanAt = Date.now() + 5_000;
+          }
           const contactOutcome = await contactEnrichmentRelay.runOnce({
             workerId,
             limit: maxConcurrentContactEnrichmentJobs,
@@ -2356,7 +2843,7 @@ async function createWorkerRegistrations(
                           maxDepth: capabilities.contactEnrichmentMaxDepth,
                           maxAttempts:
                             capabilities.contactEnrichmentMaxAttempts,
-                          browserAllowed: capabilities.browserProviderEnabled,
+                          browserAllowed: browserProviderAvailable,
                         },
                       })
                     : 0;
@@ -2486,6 +2973,34 @@ async function createWorkerRegistrations(
           }
         }
         if (gmailSendRuntime !== null) {
+          if (Date.now() >= nextGmailSendRecoveryAt) {
+            await runLocalProjectLane("gmail-sync", async (scope) => {
+              if (workerAuthority === null) return;
+              const projectContext = await createWorkerProjectContext(
+                pool,
+                scope,
+                workerAuthority.actorId,
+              );
+              if (projectContext === null) return;
+              const recovered = await gmailSendRuntime.recoverStaleSends({
+                context: projectContext,
+                staleBefore: new Date(Date.now() - 5 * 60_000),
+                limit: 10,
+              });
+              if (recovered > 0) {
+                console.log(
+                  JSON.stringify({
+                    event: "backlinks.gmail-send.recovery.scheduled",
+                    organizationId: scope.organizationId,
+                    workspaceId: scope.workspaceId,
+                    websiteProjectId: scope.websiteProjectId,
+                    recovered,
+                  }),
+                );
+              }
+            });
+            nextGmailSendRecoveryAt = Date.now() + 60_000;
+          }
           if (Date.now() >= nextGmailTokenHealthCheckAt) {
             const checkedConnections = new Set<string>();
             await runLocalProjectLane("gmail-sync", async (scope) => {
@@ -2546,10 +3061,16 @@ async function createWorkerRegistrations(
                   consecutiveFailures,
                   nextAttemptAt,
                 });
-                const errorCategory =
-                  typeof error === "object" && error !== null && "code" in error
-                    ? String(error.code)
-                    : "UNKNOWN";
+                const authError =
+                  error instanceof GoogleAuthError ? error : null;
+                const errorCategory = authError?.code
+                  ?? (
+                    typeof error === "object"
+                    && error !== null
+                    && "code" in error
+                      ? String(error.code)
+                      : "UNKNOWN"
+                  );
                 console.error(
                   JSON.stringify({
                     event: "backlinks.gmail-token-health.failed",
@@ -2557,6 +3078,10 @@ async function createWorkerRegistrations(
                     workspaceId: scope.workspaceId,
                     connectionId: connection.connectionId,
                     errorCategory,
+                    httpStatus: authError?.httpStatus ?? null,
+                    providerRequestId:
+                      authError?.providerRequestId ?? null,
+                    transportCode: authError?.transportCode ?? null,
                     consecutiveFailures,
                     nextAttemptAt: new Date(nextAttemptAt).toISOString(),
                   }),
@@ -2589,11 +3114,7 @@ async function createWorkerRegistrations(
         );
       });
   };
-  return Object.freeze({
-    workflowsPath: fileURLToPath(
-      new URL("../workflows/definitions/index.js", import.meta.url),
-    ),
-    activities: Object.freeze({
+  const activities = Object.freeze({
       backlinksRunContactEnrichmentV1: contactEnrichmentActivity,
       async backlinksLoadProjectAnalysisContextV1(
         input: Readonly<{
@@ -2611,6 +3132,21 @@ async function createWorkerRegistrations(
             createProjectContextSnapshotRepository(client),
             undefined,
             createProjectAnalysisJobWriter(client),
+            {
+              ensure: async (refillInput) => {
+                await ensureCommercialRecommendationRefill(client, {
+                  ...refillInput,
+                  estimatedCostMicros:
+                    automaticRecommendationEstimatedCostMicros,
+                  absoluteBudgetMicros:
+                    persistentProviderBudgetGrant.maxCostMicros,
+                  maxPaidCalls: persistentProviderBudgetGrant.maxPaidCalls,
+                  providerBudgetGrant: persistentProviderBudgetGrant,
+                  candidateLimit: automaticRecommendationCandidateLimit,
+                  now: new Date(),
+                });
+              },
+            },
           ).loadBacklinkProjectAnalysisContext(input),
         );
       },
@@ -2624,15 +3160,43 @@ async function createWorkerRegistrations(
             null,
           );
         }
-        await aiRuntime.reserve(input);
+        let reservation: "active" | "terminal" | null = null;
+        const draft = aiRuntime.draft(input);
         try {
-          return await runDraftGenerationWorkflow(
+          const result = await runDraftGenerationWorkflow(
             input,
             draftGenerationRepository,
-            aiRuntime.ai,
+            {
+              async generate(prompt) {
+                if (reservation === null) {
+                  reservation = await aiRuntime.reserve(input);
+                }
+                return draft.generate(prompt);
+              },
+            },
           );
+          if (
+            reservation === "active"
+            && (
+              result.outcome === "completed"
+              || result.outcome === "already_completed"
+            )
+          ) {
+            await aiRuntime.settle(input);
+          } else if (
+            reservation === "active"
+            && (
+              result.outcome === "failed"
+              || result.outcome === "completed_with_basic_draft"
+            )
+          ) {
+            await aiRuntime.release(input);
+          }
+          return result;
         } catch (error) {
-          await aiRuntime.release(input);
+          if (reservation === "active") {
+            await aiRuntime.release(input);
+          }
           throw error;
         }
       },
@@ -2646,6 +3210,9 @@ async function createWorkerRegistrations(
           jobId: string;
           lowWatermark: number;
           highWatermark: number;
+          providerOperationId?: string;
+          providerBudgetAuthorization?: ProviderOperationBudgetAuthorization;
+          supplyMode?: "existing_evidence";
         }>,
       ) {
         const scope = tenantScopeFrom(input);
@@ -2656,7 +3223,7 @@ async function createWorkerRegistrations(
               input.recommendationContextVersionId,
             visiblePoolGeneration: input.visiblePoolGeneration,
             jobId: input.jobId,
-            targetPublishedCount: commercialSupplyPublishedTarget,
+            targetPublishedCount: input.highWatermark,
           }),
         );
       },
@@ -2665,9 +3232,21 @@ async function createWorkerRegistrations(
           ReturnType<typeof createLocalProductDataForSeoRuntime>["execute"]
         >[0],
       ) {
-        if (dataForSeoRuntime === null) {
+        if (
+          dataForSeoRuntime === null
+          || (!dataForSeoAvailable && input.source === "paid")
+        ) {
           dataForSeoInputRequired();
         }
+        const scope = tenantScopeFrom(input);
+        await withBacklinkTenantTransaction(pool, scope, (client) =>
+          assertRecommendationRefillProviderExecutionCurrent(client, {
+            ...scope,
+            jobId: input.jobId,
+            recommendationContextVersionId:
+              input.recommendationContextVersionId,
+          })
+        );
         return dataForSeoRuntime.execute(input);
       },
       async backlinksStoreReadyRecommendationsV1(
@@ -2691,6 +3270,9 @@ async function createWorkerRegistrations(
           actorId: string;
           lowWatermark: number;
           highWatermark: number;
+          providerOperationId?: string;
+          providerBudgetAuthorization?: ProviderOperationBudgetAuthorization;
+          supplyMode?: "existing_evidence";
         }>,
       ) {
         const scope = tenantScopeFrom(input);
@@ -2701,10 +3283,22 @@ async function createWorkerRegistrations(
             visiblePoolGeneration: input.visiblePoolGeneration,
             jobId: input.jobId,
             actorId: input.actorId,
-            targetPublishedCount: commercialSupplyPublishedTarget,
+            targetPublishedCount: input.highWatermark,
             candidateLimit: dataForSeoConfiguration?.candidateLimit ?? 25,
             estimatedCostMicros:
               dataForSeoConfiguration?.estimatedCostMicros ?? 1,
+            ...(input.providerOperationId === undefined
+              ? {}
+              : { providerOperationId: input.providerOperationId }),
+            ...(input.providerBudgetAuthorization === undefined
+              ? {}
+              : {
+                providerBudgetAuthorization:
+                  input.providerBudgetAuthorization,
+              }),
+            ...(input.supplyMode === undefined
+              ? {}
+              : { supplyMode: input.supplyMode }),
             now: new Date(),
           }),
         );
@@ -2718,7 +3312,13 @@ async function createWorkerRegistrations(
           visiblePoolGeneration: number;
           jobId: string;
           actorId: string;
-          outcome: "TARGET_REACHED" | "SUPPLY_FLOOR_REACHED";
+          outcome:
+            | "TARGET_REACHED"
+            | "SUPPLY_FLOOR_REACHED"
+            | "PAUSED_BUDGET";
+          terminalReason?:
+            | "EXISTING_EVIDENCE_WINDOW_COMPLETED"
+            | "EXISTING_EVIDENCE_NO_PROGRESS";
           lowWatermark: number;
           highWatermark: number;
           publishedCount: number;
@@ -2737,13 +3337,38 @@ async function createWorkerRegistrations(
             visiblePoolGeneration: input.visiblePoolGeneration,
             actorId: input.actorId,
             outcome: input.outcome,
-            targetPublishedCount: commercialSupplyPublishedTarget,
+            ...(input.terminalReason === undefined
+              ? {}
+              : { terminalReason: input.terminalReason }),
+            targetPublishedCount: input.highWatermark,
             publishedCount: input.publishedCount,
             addedCount: input.addedCount,
             evaluatedCount: input.evaluatedCount,
             excludedCount: input.excludedCount,
             insufficientDataCount: input.insufficientDataCount,
             now: new Date(),
+          }),
+        );
+      },
+      async backlinksCompleteRecommendationRefillSupersessionV1(
+        input: Readonly<{
+          organizationId: string;
+          workspaceId: string;
+          websiteProjectId: string;
+          supersession: Parameters<
+            typeof completeRecommendationRefillSupersession
+          >[1]["signal"];
+        }>,
+      ) {
+        const scope = tenantScopeFrom(input);
+        const integrityHash = createHash("sha256")
+          .update(JSON.stringify(input.supersession), "utf8")
+          .digest("hex");
+        return withBacklinkTenantTransaction(pool, scope, (client) =>
+          completeRecommendationRefillSupersession(client, {
+            signal: input.supersession,
+            now: new Date(),
+            integrityHash,
           }),
         );
       },
@@ -2762,6 +3387,7 @@ async function createWorkerRegistrations(
           organizationId: string;
           workspaceId: string;
           websiteProjectId: string;
+          recommendationContextVersionId: string;
           jobId: string;
           errorCode: string;
           rootCause: string;
@@ -2772,123 +3398,29 @@ async function createWorkerRegistrations(
         }>,
       ) {
         const scope = tenantScopeFrom(input);
-        await withBacklinkTenantTransaction(pool, scope, async (client) => {
-          await client.query(
-            `WITH failed_refill AS (
-                SELECT refill.refill_window_key "refillWindowKey",
-                       refill.recommendation_context_version_id
-                         "recommendationContextVersionId",
-                       refill.visible_pool_generation
-                         "visiblePoolGeneration"
-                  FROM backlink_jobs AS job
-                  JOIN backlink_recommendation_refills AS refill
-                    ON (
-                      refill.organization_id,refill.workspace_id,
-                      refill.website_project_id,refill.job_id
-                    )=(
-                      job.organization_id,job.workspace_id,
-                      job.website_project_id,job.id
-                    )
-                 WHERE job.organization_id=$1 AND job.workspace_id=$2
-                   AND job.website_project_id=$3 AND job.id=$4::uuid
-              ),
-              provider_call AS (
-                SELECT (
-                  EXISTS (
-                    SELECT 1
-                      FROM failed_refill
-                      JOIN backlink_provider_usage_ledger AS usage
-                        ON usage.organization_id=$1
-                       AND usage.workspace_id=$2
-                       AND usage.website_project_id=$3
-                       AND usage.provider='dataforseo'
-                       AND usage.reservation_key LIKE
-                           failed_refill."refillWindowKey"||':%'
-                       AND usage.status IN ('reserved','settled')
-                  )
-                  OR EXISTS (
-                    SELECT 1
-                      FROM failed_refill
-                      JOIN provider_batch_requests AS request
-                        ON request.organization_id=$1
-                       AND request.workspace_id=$2
-                       AND request.website_project_id=$3
-                       AND request.request_id LIKE
-                           failed_refill."refillWindowKey"||':%'
-                       AND (
-                         request.status<>'failed'
-                         OR request.actual_cost_micros IS NOT NULL
-                         OR request.provider_task_id IS NOT NULL
-                       )
-                  )
-                ) occurred
-              ),
-              failed_job AS (
-                UPDATE backlink_jobs
-                  SET status='failed',step='provider_request_failed',
-                      progress=100,error=jsonb_build_object(
-                        'code',$5::text,
-                        'rootCause',$6::text,
-                        'recovery',$7::text,
-                        'providerCallOccurred',provider_call.occurred,
-                        'diagnosticId',$8::text,
-                        'message',$9::text
-                      ),
-                      finished_at=now(),updated_at=now(),version=version+1
-                 FROM provider_call
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3 AND id=$4::uuid
-              RETURNING id
-              ),
-              failed_policy AS (
-                UPDATE backlink_commercial_inventory_policies AS policy
-                   SET refill_state='paused',
-                       termination_reason=CASE $6::text
-                         WHEN 'BUDGET_PAUSED' THEN 'BUDGET'
-                         WHEN 'PROVIDER_UNAVAILABLE'
-                           THEN 'PROVIDER_UNAVAILABLE'
-                         WHEN 'PROJECT_CONTEXT_REQUIRED'
-                           THEN 'PROJECT_CONTEXT'
-                         ELSE NULL
-                       END,
-                       pause_reason=lower($6::text)||':'||$8::text,
-                       next_refill_at=CASE
-                         WHEN $6::text IN (
-                           'BUDGET_PAUSED','PROVIDER_UNAVAILABLE'
-                         ) THEN now()+interval '5 minutes'
-                         ELSE NULL
-                       END,
-                       updated_at=now(),updated_by=$10,version=version+1
-                  FROM failed_refill,failed_job
-                 WHERE (
-                   policy.organization_id,policy.workspace_id,
-                   policy.website_project_id,
-                   policy.project_context_version_id
-                 )=(
-                   $1,$2,$3,
-                   failed_refill."recommendationContextVersionId"
-                 )
-                   AND policy.visible_pool_generation=
-                       failed_refill."visiblePoolGeneration"
-              RETURNING policy.project_context_version_id
-              )
-              SELECT
-                (SELECT count(*) FROM failed_job) "failedJobCount",
-                (SELECT count(*) FROM failed_policy) "failedPolicyCount"`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-              input.jobId,
-              input.errorCode,
-              input.rootCause,
-              input.recovery,
-              input.diagnosticId,
-              input.message,
-              input.actorId,
-            ],
-          );
-        });
+        const now = new Date();
+        const integrityHash = createHash("sha256")
+          .update(JSON.stringify({
+            ...input,
+            recordedAt: now.toISOString(),
+          }), "utf8")
+          .digest("hex");
+        return withBacklinkTenantTransaction(pool, scope, (client) =>
+          arbitrateRecommendationRefillFailure(client, {
+            ...scope,
+            recommendationContextVersionId:
+              input.recommendationContextVersionId,
+            jobId: input.jobId,
+            errorCode: input.errorCode,
+            rootCause: input.rootCause,
+            recovery: input.recovery,
+            diagnosticId: input.diagnosticId,
+            message: input.message,
+            actorId: input.actorId,
+            now,
+            integrityHash,
+          })
+        );
       },
       backlinksRunPlacementInitialValidationV1:
         placementActivities.backlinksRunPlacementInitialValidationV1,
@@ -2953,7 +3485,7 @@ async function createWorkerRegistrations(
               placementMonitoringConfiguration.normalIntervalSeconds,
               placementMonitoringConfiguration.suspectedRecheckIntervalSeconds,
               placementMonitoringConfiguration.jitterWindowSeconds,
-              capabilities.browserProviderEnabled,
+              browserProviderAvailable,
             ],
           );
           const created = inserted.rows[0];
@@ -3025,6 +3557,26 @@ async function createWorkerRegistrations(
                 typeof gmailSendRuntime.activity.settleAttempt
               >[0],
             ) => gmailSendRuntime.activity.settleAttempt(input),
+            backlinksLoadGmailSendReconciliationV1: (
+              input: Parameters<
+                typeof gmailSendRuntime.reconciliationActivity.load
+              >[0],
+            ) => gmailSendRuntime.reconciliationActivity.load(input),
+            backlinksQueryGmailSentMessageV1: (
+              input: Parameters<
+                typeof gmailSendRuntime.reconciliationActivity.query
+              >[0],
+            ) => gmailSendRuntime.reconciliationActivity.query(input),
+            backlinksRecoverGmailDispatchV1: (
+              input: Parameters<
+                typeof gmailSendRuntime.reconciliationActivity.recoverDispatch
+              >[0],
+            ) => gmailSendRuntime.reconciliationActivity.recoverDispatch(input),
+            backlinksReconcileGmailSendResultV1: (
+              input: Parameters<
+                typeof gmailSendRuntime.reconciliationActivity.reconcile
+              >[0],
+            ) => gmailSendRuntime.reconciliationActivity.reconcile(input),
           }),
       backlinksRunGmailPollingSyncV1: (
         input: GmailPollingSyncWorkflowInput,
@@ -3033,8 +3585,113 @@ async function createWorkerRegistrations(
             createGmailPollingSyncCapabilityPausedResult(input),
           )
         : gmailSyncRuntime.run(input),
-    }),
-    backgroundServices: Object.freeze([
+    });
+  const recoveryActivities = Object.freeze({
+    backlinksReserveRecommendationRefillV1:
+      activities.backlinksReserveRecommendationRefillV1,
+    backlinksExecuteRecommendationRefillV1:
+      activities.backlinksExecuteRecommendationRefillV1,
+    backlinksStoreReadyRecommendationsV1:
+      activities.backlinksStoreReadyRecommendationsV1,
+    backlinksPlanRecommendationRefillSupplyV1:
+      activities.backlinksPlanRecommendationRefillSupplyV1,
+    backlinksCompleteRecommendationRefillSupplyV1:
+      activities.backlinksCompleteRecommendationRefillSupplyV1,
+    backlinksCompleteRecommendationRefillSupersessionV1:
+      activities.backlinksCompleteRecommendationRefillSupersessionV1,
+    backlinksRecordRecommendationRefillFailureV1:
+      activities.backlinksRecordRecommendationRefillFailureV1,
+  });
+  return Object.freeze({
+    workflowsPath: fileURLToPath(
+      new URL(
+        recoveryMode
+          ? "../workflows/definitions/recovery.js"
+          : "../workflows/definitions/index.js",
+        import.meta.url,
+      ),
+    ),
+    activities: recoveryMode ? recoveryActivities : activities,
+    ...(recoveryIdentity === null
+      ? {}
+      : { taskQueue: recommendationTaskQueue }),
+    healthSnapshot: async () => {
+      const staleBefore = projectAnalysisStaleBefore();
+      let tasks: ProjectTaskHealth;
+      if (projectAnalysisRecovery !== null) {
+        tasks = await projectAnalysisRecovery.health(staleBefore);
+      } else if (
+        workerAuthority !== null
+        && projectScopeProvider !== null
+      ) {
+        const snapshots: ProjectTaskHealth[] = [];
+        const outcome = await runProjectScopedLane({
+          provider: projectScopeProvider,
+          organizationId: workerAuthority.organizationId,
+          workspaceId: workerAuthority.workspaceId,
+          lane: "project-analysis",
+          pageLimit: 25,
+          run: async (scope) => {
+            snapshots.push(await withBacklinkTenantTransaction(
+              pool,
+              scope,
+              (client) =>
+                createScopedProjectAnalysisRecovery(client).health(staleBefore),
+            ));
+          },
+          onProjectError: (scope, error) =>
+            logProjectFailure("project-analysis", scope, error),
+        });
+        if (outcome.failed > 0) {
+          throw new Error("BACKLINK_PROJECT_TASK_HEALTH_PARTIAL");
+        }
+        tasks = combineProjectTaskHealth(snapshots);
+      } else {
+        tasks = combineProjectTaskHealth([]);
+      }
+      return { status: "ok", ...tasks };
+    },
+    backgroundServices: recoveryMode
+      ? Object.freeze([
+          Object.freeze({
+            async start() {
+              if (recoveryRefillRelay === null || recoveryIdentity === null) {
+                throw new Error("BACKLINKS_RECOVERY_RELAY_UNAVAILABLE");
+              }
+              const outcome = await recoveryRefillRelay.runOnce({
+                workerId: `${workerId}:recovery`,
+                limit: 1,
+                staleClaimBefore: new Date(Date.now() - 30_000),
+                eventId: recoveryIdentity.outboxEventId,
+              });
+              const dispatched =
+                outcome.claimed !== 1
+                ? false
+                : outcome.published === 1 && outcome.failed === 0;
+              const attached =
+                outcome.claimed === 0
+                && outcome.published === 0
+                && outcome.failed === 0
+                && recoveryWorkflowAlreadyDispatched !== null
+                && await recoveryWorkflowAlreadyDispatched();
+              if (!dispatched && !attached) {
+                throw new Error("BACKLINKS_RECOVERY_EXACT_DISPATCH_FAILED");
+              }
+              console.log(JSON.stringify({
+                event: dispatched
+                  ? "backlinks.recommendation-refill.recovery.dispatched"
+                  : "backlinks.recommendation-refill.recovery.attached",
+                websiteProjectId: recoveryIdentity.websiteProjectId,
+                jobId: recoveryIdentity.jobId,
+                outboxEventId: recoveryIdentity.outboxEventId,
+                taskQueue: recommendationTaskQueue,
+                ...outcome,
+              }));
+            },
+            async stop() {},
+          }),
+        ])
+      : Object.freeze([
       Object.freeze({
         async start() {
           if (relayTimer !== undefined) return;

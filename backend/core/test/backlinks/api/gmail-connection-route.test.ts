@@ -31,11 +31,14 @@ import {
   OAuthAttemptService,
   gmailOAuthScopes,
 } from "../../../src/modules/backlinks/domain/sending/oauth-attempt.js";
-import type {
-  GoogleAuthCallbackInput,
-  GoogleAuthPort,
-  GoogleAuthRequestInput,
+import {
+  GoogleAuthError,
+  googleAuthFailureCodes,
+  type GoogleAuthCallbackInput,
+  type GoogleAuthPort,
+  type GoogleAuthRequestInput,
 } from "../../../src/modules/backlinks/ports/google-auth.port.js";
+import { secretKinds } from "../../../src/modules/backlinks/ports/secret-store.port.js";
 import type {
   GmailPollingSyncCommands,
 } from "../../../src/modules/backlinks/application/workflows/gmail-polling-sync-workflow.js";
@@ -140,9 +143,15 @@ afterEach(async () => {
 });
 
 function setup(options?: Readonly<{
+  callbackFailure?: GoogleAuthError;
   grantedScopes?: readonly string[];
   syncError?: Error;
   syncStatus?: Awaited<ReturnType<GmailPollingSyncCommands["status"]>>;
+  credentialAvailable?: boolean;
+  workerAvailable?: boolean;
+  verifiedSendIdentity?: boolean;
+  sendRuntimeEnabled?: boolean;
+  syncRuntimeEnabled?: boolean;
 }>) {
   const repository = new FakeOAuthAttemptRepository();
   let randomValue = 1;
@@ -164,6 +173,9 @@ function setup(options?: Readonly<{
     },
     async callback(input) {
       callbackCalls.push(input);
+      if (options?.callbackFailure !== undefined) {
+        throw options.callbackFailure;
+      }
       return {
         identity: {
           subject: "google-subject-103",
@@ -244,10 +256,52 @@ function setup(options?: Readonly<{
     },
   });
   const statusContexts: string[][] = [];
+  const readinessContexts: string[][] = [];
+  const credentialContexts: string[][] = [];
   const syncInputs: {
     readonly connectionId: string;
     readonly contextIds: readonly string[];
   }[] = [];
+  const syncCommands: GmailPollingSyncCommands = {
+    async start(input) {
+      syncInputs.push({
+        connectionId: input.connectionId,
+        contextIds: [
+          input.context.tenant.organizationId,
+          input.context.tenant.workspaceId,
+          input.context.project.websiteProjectId,
+          input.context.actor.userId,
+        ],
+      });
+      if (options?.syncError !== undefined) {
+        throw options.syncError;
+      }
+      return {
+        status: "ACCEPTED",
+        workflowId: id(40),
+      };
+    },
+    async status() {
+      return options?.syncStatus ?? {
+        state: "POLLING",
+        workflowId: id(40),
+        pollingIntervalSeconds: 60,
+        killSwitchOpen: true,
+        acceptedSendCount: 2,
+        lastSuccessfulSyncAt: "2026-08-04T00:01:00.000Z",
+        lastError: null,
+        lastErrorCategory: null,
+        nextRetryAt: null,
+        consecutiveFailures: 0,
+        cursor: {
+          historyId: "166995",
+          initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",
+          lastSyncedAt: "2026-08-04T00:01:00.000Z",
+          version: 3,
+        },
+      };
+    },
+  };
   const query = createGmailConnectionQuery({
     reader: {
       async findProjectMailboxState(context) {
@@ -262,6 +316,43 @@ function setup(options?: Readonly<{
         };
       },
     },
+    readiness: {
+      infrastructure: {
+        async findProjectReadinessInfrastructure(context, connectionId) {
+          readinessContexts.push([
+            context.tenant.organizationId,
+            context.tenant.workspaceId,
+            context.project.websiteProjectId,
+            connectionId,
+          ]);
+          return {
+            connectionId,
+            projectBindingActive: true,
+            verifiedSendIdentity:
+              options?.verifiedSendIdentity ?? true,
+            tokenSecretReference: {
+              provider: "platform-secret-store",
+              secretKind: secretKinds.gmailTokenSet,
+              externalSecretId: "secret-id-103",
+              externalSecretVersion: "7",
+            },
+          };
+        },
+      },
+      sendRuntimeEnabled: options?.sendRuntimeEnabled ?? true,
+      syncRuntimeEnabled: options?.syncRuntimeEnabled ?? true,
+      workerAvailable: async () => options?.workerAvailable ?? true,
+      async credentialAvailable(input) {
+        credentialContexts.push([
+          input.organizationId,
+          input.gmailConnectionId,
+          input.tokenSecretReference.secretKind,
+        ]);
+        return options?.credentialAvailable ?? true;
+      },
+      syncStatus: (input) => syncCommands.status(input),
+      now: () => new Date("2026-08-18T02:00:00.000Z"),
+    },
   });
   const app = Fastify({ logger: false, genReqId: () => "request-103" });
   apps.push(app);
@@ -274,6 +365,8 @@ function setup(options?: Readonly<{
     completionFacts,
     disconnectInputs,
     statusContexts,
+    readinessContexts,
+    credentialContexts,
     syncInputs,
     async ready() {
       await registerBacklinksOpenApi(app);
@@ -329,46 +422,7 @@ function setup(options?: Readonly<{
         }),
         commands,
         query,
-        syncCommands: {
-          async start(input) {
-            syncInputs.push({
-              connectionId: input.connectionId,
-              contextIds: [
-                input.context.tenant.organizationId,
-                input.context.tenant.workspaceId,
-                input.context.project.websiteProjectId,
-                input.context.actor.userId,
-              ],
-            });
-            if (options?.syncError !== undefined) {
-              throw options.syncError;
-            }
-            return {
-              status: "ACCEPTED",
-              workflowId: id(40),
-            };
-          },
-          async status() {
-            return options?.syncStatus ?? {
-              state: "POLLING",
-              workflowId: id(40),
-              pollingIntervalSeconds: 60,
-              killSwitchOpen: true,
-              acceptedSendCount: 2,
-              lastSuccessfulSyncAt: "2026-08-04T00:01:00.000Z",
-              lastError: null,
-              lastErrorCategory: null,
-              nextRetryAt: null,
-              consecutiveFailures: 0,
-              cursor: {
-                historyId: "166995",
-                initialSyncCompletedAt: "2026-08-04T00:00:00.000Z",
-                lastSyncedAt: "2026-08-04T00:01:00.000Z",
-                version: 3,
-              },
-            };
-          },
-        },
+        syncCommands,
       });
       await app.ready();
     },
@@ -445,9 +499,29 @@ describe("BL-AI-103 Gmail connection APIs", () => {
     expect(status.json()).toMatchObject({
       connection,
       accounts: [connection],
+      readiness: {
+        evaluatedAt: "2026-08-18T02:00:00.000Z",
+        connection: { state: "CONNECTED", ready: true },
+        send: { state: "WAITING_FOR_SEND_CONTEXT", ready: false },
+        sync: { state: "SYNC_READY", ready: true },
+        blockers: [{
+          code: "SEND_CONTEXT_REQUIRED",
+          capability: "SEND",
+          recoveryAction: "OPEN_APPROVED_DRAFT",
+        }],
+        primaryBlocker: {
+          code: "SEND_CONTEXT_REQUIRED",
+        },
+      },
       meta: { websiteProjectId: id(3), requestId: "request-103" },
     });
     expect(test.statusContexts).toEqual([[id(1), id(2), id(3)]]);
+    expect(test.readinessContexts).toEqual([
+      [id(1), id(2), id(3), connection.connectionId],
+    ]);
+    expect(test.credentialContexts).toEqual([
+      [id(1), connection.connectionId, secretKinds.gmailTokenSet],
+    ]);
 
     const callbackText = callback.body;
     const statusText = status.body;
@@ -548,6 +622,155 @@ describe("BL-AI-103 Gmail connection APIs", () => {
       cursor: null,
       lastError: null,
     });
+
+    const projectStatus = await test.app.inject({
+      method: "GET",
+      url: `${routeBase}/status`,
+    });
+    expect(projectStatus.statusCode).toBe(200);
+    expect(projectStatus.json()).toMatchObject({
+      readiness: {
+        connection: { state: "CONNECTED", ready: true },
+        send: { state: "WAITING_FOR_SEND_CONTEXT", ready: false },
+        sync: { state: "WAITING_FOR_ACCEPTED_SEND", ready: true },
+      },
+    });
+  });
+
+  it("fails closed when the project credential cannot be resolved", async () => {
+    const test = setup({ credentialAvailable: false });
+    await test.ready();
+
+    const response = await test.app.inject({
+      method: "GET",
+      url: `${routeBase}/status`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      readiness: {
+        connection: { state: "CONNECTED", ready: true },
+        send: { state: "BLOCKED", ready: false },
+        blockers: expect.arrayContaining([
+          {
+            code: "GMAIL_SECRET_UNRESOLVABLE",
+            capability: "SEND",
+            owner: "ADMIN",
+            retrySafe: true,
+            recoveryAction: "REPAIR_GMAIL_SECRET",
+            detail:
+              "The selected Gmail credential cannot be resolved from Secret Store.",
+          },
+          {
+            code: "GMAIL_SECRET_UNRESOLVABLE",
+            capability: "SYNC",
+            owner: "ADMIN",
+            retrySafe: true,
+            recoveryAction: "REPAIR_GMAIL_SECRET",
+            detail:
+              "The selected Gmail credential cannot be resolved from Secret Store.",
+          },
+        ]),
+        primaryBlocker: {
+          code: "GMAIL_SECRET_UNRESOLVABLE",
+        },
+      },
+    });
+    expect(response.body).not.toMatch(
+      /secret-id-103|externalSecretId|tokenSecretReference/,
+    );
+  });
+
+  it("keeps readiness inspection isolated to the resolved project", async () => {
+    const test = setup();
+    await test.ready();
+
+    const response = await test.app.inject({
+      method: "GET",
+      url:
+        "/api/v1/projects/other-project/backlinks/gmail-connections/status",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      meta: { websiteProjectId: id(30) },
+    });
+    expect(test.statusContexts).toEqual([[id(1), id(2), id(30)]]);
+    expect(test.readinessContexts).toEqual([
+      [id(1), id(2), id(30), connection.connectionId],
+    ]);
+  });
+
+  it("binds a new OAuth attempt to the project selected after a project switch", async () => {
+    const test = setup();
+    await test.ready();
+
+    const connect = await test.app.inject({
+      method: "POST",
+      url:
+        "/api/v1/projects/other-project/backlinks/gmail-connections/connect",
+      payload: {
+        returnPath: "/projects/other-project/backlinks/email",
+      },
+    });
+    expect(connect.statusCode).toBe(200);
+    const state = test.authorizeCalls[0]?.state ?? "";
+
+    const callback = await test.app.inject({
+      method: "GET",
+      url: `/api/v1/backlinks/gmail-connections/callback`
+        + `?code=authorization-code-103&state=${state}`,
+    });
+
+    expect(callback.statusCode).toBe(200);
+    expect(callback.json()).toMatchObject({
+      returnPath: "/projects/other-project/backlinks/email",
+      meta: { websiteProjectId: id(30) },
+    });
+    expect(test.completionFacts).toEqual([{
+      contextIds: [id(1), id(2), id(30), "user-103"],
+      sawAccessToken: true,
+      sawRefreshToken: true,
+    }]);
+
+    const status = await test.app.inject({
+      method: "GET",
+      url:
+        "/api/v1/projects/other-project/backlinks/gmail-connections/status",
+    });
+    expect(status.statusCode).toBe(200);
+    expect(test.statusContexts).toEqual([[id(1), id(2), id(30)]]);
+  });
+
+  it("returns a retryable provider status when Google token exchange is temporarily unavailable", async () => {
+    const test = setup({
+      callbackFailure: new GoogleAuthError({
+        operation: "callback",
+        code: googleAuthFailureCodes.temporaryFailure,
+        retryable: true,
+        transportCode: "ECONNRESET",
+      }),
+    });
+    await test.ready();
+    await test.app.inject({
+      method: "POST",
+      url: `${routeBase}/connect`,
+      payload: {},
+    });
+    const state = test.authorizeCalls[0]?.state ?? "";
+
+    const response = await test.app.inject({
+      method: "GET",
+      url: `/api/v1/backlinks/gmail-connections/callback`
+        + `?code=authorization-code-103&state=${state}`,
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      code: backlinkErrorCodes.gmailOAuthProviderUnavailable,
+      retryable: true,
+    });
+    expect(test.completionFacts).toHaveLength(0);
   });
 
   it("returns persisted cursor and provider recovery details", async () => {

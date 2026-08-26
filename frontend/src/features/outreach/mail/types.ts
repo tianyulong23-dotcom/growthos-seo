@@ -12,6 +12,14 @@ export type ReplyMatchConfirmResponse =
   BacklinksResponse<"backlinksConfirmReplyMatchCandidateV1">
 export type ReplyMatchUnbindResponse =
   BacklinksResponse<"backlinksUnbindReplyMatchV1">
+export type NegotiationFactsResponse =
+  BacklinksResponse<"backlinksListNegotiationFactsV1">
+export type NegotiationFactDecisionResponse =
+  BacklinksResponse<"backlinksReviewNegotiationFactV1">
+export type SendIntentListResponse =
+  BacklinksResponse<"backlinksListSendIntentsV1">
+export type SendIntentDetailResponse =
+  BacklinksResponse<"backlinksGetSendIntentV1">
 export type GmailPollingSyncStatus =
   BacklinksResponse<"backlinksGetGmailPollingSyncStatusV1">
 
@@ -26,3 +34,9 @@ export type SanitizedMailHtml = NonNullable<SafeMailBody["sanitizedHtml"]>
 export type MailThread = MailThreadResponse["item"]
 export type ReplyMatchCandidate =
   ReplyMatchCandidateListResponse["items"][number]
+export type NegotiationFact = NegotiationFactsResponse["items"][number]
+export type NegotiationFactDecision =
+  NegotiationFactDecisionResponse["decision"]
+export type SendIntentListItem = SendIntentListResponse["items"][number]
+export type SendIntentQueueKind = NonNullable<SendIntentListItem["queueKind"]>
+export type SendIntentDetail = SendIntentDetailResponse["sendIntent"]

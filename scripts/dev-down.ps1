@@ -1,11 +1,57 @@
+param(
+    [string]$EnvironmentFile = "",
+    [string]$ComposeProjectName = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $composeFile = Join-Path $root "deploy\compose\compose.yaml"
-$apiDir = Join-Path $root "backend\api"
-$apiMarker = Join-Path $root "backend\api\.venv\Scripts\uvicorn.exe"
-$frontendMarker = Join-Path $root "frontend\node_modules"
-$crawlerMarker = Join-Path $root "storage\runtime\crawler-worker-docker.exe"
+if (-not $EnvironmentFile) {
+    $EnvironmentFile = Join-Path $root "deploy\compose\.env"
+}
+if (-not (Test-Path -LiteralPath $EnvironmentFile)) {
+    throw "Configuration file not found: $EnvironmentFile"
+}
+$composeEnvFile = (Resolve-Path -LiteralPath $EnvironmentFile).Path
+
+function Get-LocalSetting {
+    param(
+        [string]$Name,
+        [string]$Default = ""
+    )
+
+    $line = Get-Content -LiteralPath $composeEnvFile |
+        Where-Object {
+            $_ -match "^\s*$([regex]::Escape($Name))\s*="
+        } |
+        Select-Object -Last 1
+    if (-not $line) {
+        return $Default
+    }
+    $value = ($line -split "=", 2)[1].Trim()
+    if (
+        $value.Length -ge 2 -and
+        (
+            ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'"))
+        )
+    ) {
+        return $value.Substring(1, $value.Length - 2)
+    }
+    return $value
+}
+
+if (-not $ComposeProjectName) {
+    $ComposeProjectName = Get-LocalSetting "COMPOSE_PROJECT_NAME" "seo-v4"
+}
+$runtimeProfile = [regex]::Replace(
+    $ComposeProjectName,
+    "[^A-Za-z0-9_.-]",
+    "_"
+)
+$runtimeDir = Join-Path $root "storage\runtime\m1c\$runtimeProfile"
+$pidFile = Join-Path $runtimeDir "processes.json"
 
 function Stop-ProcessTree {
     param([int]$ProcessId)
@@ -13,28 +59,76 @@ function Stop-ProcessTree {
     & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
 }
 
-$projectProcesses = Get-CimInstance Win32_Process -Property ProcessId, Name, CommandLine |
-Where-Object {
-    $commandLine = $_.CommandLine
-    ($_.Name -eq "crawler-worker-docker.exe") -or
-    ($commandLine -and (
-            $commandLine.Contains($apiMarker) -or
-            ($commandLine.Contains($apiDir) -and $commandLine -match "(?i)\buvicorn\b\s+app\.main:app\b") -or
-            $commandLine.Contains($frontendMarker) -or
-            $commandLine.Contains($crawlerMarker) -or
-            $commandLine -match "(?i)\bgo(?:\.exe)?\b.*\brun\b.*cmd[\\/]+crawler"
+function Get-RecordedProcess {
+    param([pscustomobject]$Record)
+
+    $process = Get-Process `
+        -Id ([int]$Record.processId) `
+        -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return $null
+    }
+
+    $processInfo = Get-CimInstance Win32_Process `
+        -Filter "ProcessId = $($Record.processId)" `
+        -ErrorAction SilentlyContinue
+    if (
+        -not $processInfo -or
+        -not $processInfo.CommandLine -or
+        -not $processInfo.CommandLine.Contains(
+            [string]$Record.expectedCommand
         )
+    ) {
+        return $null
+    }
+
+    if ($Record.startedAtUtc -and $Record.processName) {
+        $recordedStart = (
+            [datetime]$Record.startedAtUtc
+        ).ToUniversalTime()
+        $startDeltaSeconds = [Math]::Abs(
+            (
+                $process.StartTime.ToUniversalTime() -
+                $recordedStart
+            ).TotalSeconds
+        )
+        if (
+            $process.ProcessName -eq [string]$Record.processName -and
+            $startDeltaSeconds -lt 1
+        ) {
+            return $process
+        }
+        return $null
+    }
+    return $process
+}
+
+if (Test-Path -LiteralPath $pidFile) {
+    $parsedRecords = (
+        Get-Content -LiteralPath $pidFile -Raw |
+            ConvertFrom-Json
     )
+    $records = @($parsedRecords)
+    foreach ($record in $records) {
+        if (Get-RecordedProcess -Record $record) {
+            Write-Host "Stopping $($record.name)..."
+            Stop-ProcessTree -ProcessId ([int]$record.processId)
+        }
+    }
+    Remove-Item -LiteralPath $pidFile -Force
 }
 
-foreach ($process in $projectProcesses) {
-    Stop-ProcessTree -ProcessId $process.ProcessId
-}
-
-Start-Sleep -Milliseconds 500
+$composeArguments = @(
+    "compose",
+    "--env-file",
+    $composeEnvFile,
+    "-f",
+    $composeFile
+)
+$composeArguments += @("-p", $ComposeProjectName)
 
 Write-Host "Stopping Docker services..."
-& docker compose -f $composeFile stop
+& docker @composeArguments stop
 if ($LASTEXITCODE -ne 0) {
     throw "Docker Compose stop failed."
 }

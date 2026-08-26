@@ -1,11 +1,20 @@
 from enum import IntEnum
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
+from app.core.backlinks_gateway import (
+    BacklinksGateway,
+    PlatformContextResolutionError,
+    PlatformContextResolver,
+    problem_response,
+)
 from app.modules.performance.schemas import (
     PerformanceArticleCollection,
     PerformanceArticleDetail,
+    PerformanceBacklinksResponse,
+    PerformanceBacklinkView,
     PerformanceOverview,
     PerformanceSort,
     PerformanceSyncResponse,
@@ -55,6 +64,53 @@ def performance_error(exc: Exception) -> HTTPException:
     if isinstance(exc, GSCUpstreamError):
         return HTTPException(status_code=503, detail="Search Console 暂时不可用")
     return HTTPException(status_code=500, detail="效果数据请求失败")
+
+
+@router.get(
+    "/backlinks",
+    response_model=PerformanceBacklinksResponse,
+    operation_id="get_project_backlink_performance_v1",
+)
+async def get_performance_backlinks(
+    request: Request,
+    project_id: str,
+    view: PerformanceBacklinkView = "all",
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    cursor: str | None = None,
+) -> Response:
+    resolver: PlatformContextResolver = request.app.state.platform_context_resolver
+    gateway: BacklinksGateway = request.app.state.backlinks_gateway
+    try:
+        resolved = await resolver.resolve(
+            request=request,
+            website_project_key=project_id,
+            required_permission="backlinks:read",
+        )
+    except PlatformContextResolutionError as error:
+        return problem_response(
+            status=error.status,
+            problem_type=(
+                "urn:growthos:problem:platform:"
+                f"{error.code.lower().replace('_', '-')}"
+            ),
+            title=error.title,
+            detail=error.detail,
+            code=error.code,
+            request_id=request.headers.get("x-request-id", "unresolved"),
+            retryable=False,
+        )
+    query_params = [("view", view), ("limit", str(limit))]
+    if cursor is not None:
+        query_params.append(("cursor", cursor))
+    return await gateway.forward(
+        request,
+        resolved=resolved,
+        website_project_key=project_id,
+        query_params=query_params,
+        upstream_path=(
+            f"/api/v1/projects/{quote(project_id, safe='')}/backlinks/links"
+        ),
+    )
 
 
 @router.get("/overview", response_model=PerformanceOverview)

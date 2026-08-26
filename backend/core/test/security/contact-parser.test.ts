@@ -110,6 +110,17 @@ describe("BL-AI-070 contact Candidate parser", () => {
     expect(parseContactPage(page(body)).candidates).toEqual([]);
   });
 
+  it("tolerates malformed UTF-8 bytes without losing valid public contacts", () => {
+    const prefix = new TextEncoder().encode(
+      "<body><p>Contact press@example.com for media enquiries. ",
+    );
+    const suffix = new TextEncoder().encode("</p></body>");
+    const body = Uint8Array.from([...prefix, 0xff, ...suffix]);
+
+    expect(parseContactPage(page(body)).candidates.map(({ email }) => email))
+      .toEqual(["press@example.com"]);
+  });
+
   it("retains a restricted verified email without promoting short substrings", () => {
     const body = new TextEncoder().encode(`
       <title>No Smart TV? No Problem</title>

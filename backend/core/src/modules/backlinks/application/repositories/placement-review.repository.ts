@@ -8,6 +8,8 @@ export type PlacementReviewValidationStatus =
 export type PlacementReviewCandidate = Readonly<{
   candidateId: string;
   opportunityId: string | null;
+  replyId: string | null;
+  plannedPlacementId: string;
   sourceType: string;
   candidateStatus: string;
   matchStatus: string;
@@ -181,6 +183,8 @@ function mapCandidate(
     opportunityId: row.opportunityId === null
       ? null
       : String(row.opportunityId),
+    replyId: row.replyId === null ? null : String(row.replyId),
+    plannedPlacementId: String(row.plannedPlacementId),
     sourceType: String(row.sourceType),
     candidateStatus: String(row.candidateStatus),
     matchStatus: String(row.matchStatus),
@@ -327,7 +331,8 @@ async function confirm(
     ), inserted_placement AS (
       INSERT INTO backlink_placements (
         id,organization_id,workspace_id,website_project_id,candidate_id,
-        opportunity_id,initial_validation_id,initial_validation_status,
+        opportunity_id,reply_id,
+        initial_validation_id,initial_validation_status,
         source_page_url,normalized_source_url,normalized_source_url_hash,
         target_url,normalized_target_url,normalized_target_url_hash,
         url_normalization_version,initial_evidence_snapshot_hash,
@@ -335,7 +340,7 @@ async function confirm(
         created_at,updated_at,created_by,updated_by
       )
       SELECT $8,t.organization_id,t.workspace_id,t.website_project_id,t.id,
-        t.opportunity_id,v.id,v.status,t.source_page_url,
+        t.opportunity_id,t.reply_id,v.id,v.status,t.source_page_url,
         t.normalized_source_url,t.normalized_source_url_hash,t.target_url,
         t.normalized_target_url,t.normalized_target_url_hash,
         t.url_normalization_version,v.evidence_snapshot_hash,
@@ -343,6 +348,7 @@ async function confirm(
         $14,$14,$12,$12
       FROM target t
       JOIN inserted_validation v ON true
+      WHERE $8::uuid=t.planned_placement_id
       ON CONFLICT (
         website_project_id,normalized_source_url_hash,
         normalized_target_url_hash
@@ -395,6 +401,7 @@ async function confirm(
           'placementId',p.id,
           'candidateId',p.candidate_id,
           'opportunityId',p.opportunity_id,
+          'replyId',p.reply_id,
           'initialValidationId',p.initial_validation_id,
           'websiteProjectId',p.website_project_id,
           'countsTowardKpi',true,
@@ -626,6 +633,8 @@ export function createPlacementReviewRepository(
     async getCandidate(input) {
       const result = await client.query(`
         SELECT c.id AS "candidateId",c.opportunity_id AS "opportunityId",
+          c.reply_id AS "replyId",
+          c.planned_placement_id AS "plannedPlacementId",
           c.source_type AS "sourceType",
           c.status AS "candidateStatus",c.match_status AS "matchStatus",
           c.initial_validation_status AS "initialValidationStatus",

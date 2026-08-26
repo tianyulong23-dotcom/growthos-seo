@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { basename } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createOpportunitiesQuery } from "../../../src/modules/backlinks/application/queries/opportunities.query.js";
 import { createActorContext, createProjectContext,
@@ -16,6 +17,16 @@ const migration = (name: string) => new URL(
   `../../../src/modules/backlinks/db/migrations/${name}`, import.meta.url);
 const roles = new URL("../../../../database/roles/0001_growthos_schema_roles.sql",
   import.meta.url);
+const manifestUrl = new URL(
+  "../../../../database/deployment-manifest.v1.json",
+  import.meta.url,
+);
+type DeploymentManifest = Readonly<{
+  steps: readonly Readonly<{
+    migrationId: string;
+    path: string;
+  }>[];
+}>;
 const id = (value: number) =>
   `018f0000-0000-7000-8000-${String(value).padStart(12, "0")}`;
 const organizationId = id(1), workspaceId = id(2);
@@ -55,39 +66,37 @@ describe("BL-AI-080 Opportunity PostgreSQL query", () => {
     await harness.migrate();
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
-    for (const name of ["0002_backlink_provider_seo.sql",
-      "0003_backlink_recommendations.sql", "0004_backlink_contacts_opportunities.sql"])
-      await client.query(await readFile(migration(name), "utf8"));
     await client.query(await readFile(roles, "utf8"));
-    for (const name of ["0005_backlink_schema_role_ownership.sql",
-      "0006_backlink_opportunities.sql",
-      "0007_backlink_opportunity_counter.sql",
-      "0010_backlink_assessments.sql",
-      "0011_backlink_contact_purpose_correction.sql",
-      "0012_backlink_gmail_connections.sql",
-      "0013_backlink_drafts.sql",
-      "0014_backlink_send_intents.sql",
-      "0015_backlink_gmail_sync_capabilities.sql",
-      "0016_backlink_mail_sync.sql",
-      "0022_backlink_draft_documents.sql",
-      "0023_backlink_send_quota_connection_scope.sql",
-      "0024_backlink_send_attempt_settlement.sql",
-      "0025_backlink_send_reconciliation.sql",
-      "0026_backlink_suppression_feedback.sql",
-      "0027_backlink_negotiation_facts.sql",
-      "0028_backlink_placements.sql",
-      "0029_backlink_monitoring.sql",
-      "0030_backlink_metrics_reports.sql",
-      "0031_backlink_tasks_notifications.sql",
-      "0032_dataforseo_cost_control.sql",
-      "0033_backlink_runtime_governance.sql",
-      "0034_backlink_outbox_temporal_projection.sql",
-      "0035_backlink_contact_send_snapshots.sql",
-      "0036_backlink_opportunity_counter_reconciliation.sql",
-      "0037_dataforseo_worker_execution.sql",
-      "0038_backlink_contact_enrichment.sql",
-      "0039_backlink_opportunity_contact_gate.sql"])
-      await client.query(await readFile(migration(name), "utf8"));
+    await client.query(`
+      SET ROLE growthos_platform_owner;
+      SET search_path = platform, pg_catalog;
+      CREATE FUNCTION backlink_list_active_website_projects(text, text)
+      RETURNS TABLE (website_project_id text, context_version integer)
+      LANGUAGE sql STABLE SECURITY DEFINER
+      SET search_path = platform, pg_catalog
+      AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
+      REVOKE ALL
+        ON FUNCTION backlink_list_active_website_projects(text, text)
+        FROM PUBLIC;
+      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
+      GRANT EXECUTE
+        ON FUNCTION backlink_list_active_website_projects(text, text)
+        TO growthos_backlinks_owner;
+      RESET ROLE;
+      RESET search_path;
+    `);
+    const manifest = JSON.parse(
+      await readFile(manifestUrl, "utf8"),
+    ) as DeploymentManifest;
+    for (const step of manifest.steps.filter(
+      ({ migrationId }) =>
+        migrationId.startsWith("backlinks-")
+        && migrationId !== "backlinks-0001",
+    )) {
+      await client.query(
+        await readFile(migration(basename(step.path)), "utf8"),
+      );
+    }
     await client.query("SET search_path = backlinks, pg_catalog");
 
     await seed(projectA, 100, 1);

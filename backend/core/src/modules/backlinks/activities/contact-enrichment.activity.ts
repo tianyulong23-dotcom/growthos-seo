@@ -15,8 +15,8 @@ import {
   reassessStoredContactEvidence,
 } from "../application/services/contact-evidence-reassessment.service.js";
 import {
-  synchronizeRecommendationPublication,
-} from "../application/services/recommendation-publication.service.js";
+  synchronizeRecommendationContactState,
+} from "../application/services/recommendation-contact-synchronization.service.js";
 import {
   createContactDiscoveryRepository,
 } from "../db/repositories/contact-discovery.repository.js";
@@ -26,6 +26,7 @@ import {
 import {
   withBacklinkTenantTransaction,
   type BacklinkTenantPool,
+  type BacklinkTransactionClient,
 } from "../db/tenant-transaction.js";
 import {
   classifyContactConvergence,
@@ -116,13 +117,45 @@ type CrawlSignals = {
     ContactConvergenceSignals[Key];
 };
 
-function inspectHtml(html: string): Readonly<{
+export async function lockContactBatchCompletion(
+  client: BacklinkTransactionClient,
+  input: ContactEnrichmentActivityInput,
+  batchId: string,
+): Promise<void> {
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+    [
+      [
+        input.organizationId,
+        input.workspaceId,
+        input.websiteProjectId,
+        batchId,
+        "contact-enrichment-batch-completion",
+      ].join(":"),
+    ],
+  );
+}
+
+export function inspectContactHtml(html: string): Readonly<{
   contactForm: boolean;
   loginRequired: boolean;
   challenge: boolean;
 }> {
   const $ = load(html);
   const text = $("body").text().replace(/\s+/gu, " ").trim().toLowerCase();
+  const loginForm = $("form").filter((_, form) => {
+    const node = $(form);
+    const action = (node.attr("action") ?? "").toLowerCase();
+    const formText = node.text().replace(/\s+/gu, " ").trim().toLowerCase();
+    return node.find("input[type='password']").length > 0
+      || (
+        node.find("input[type='email'],input[name*='email']").length > 0
+        && (
+          /(?:sign-?in|log-?in|login)/iu.test(action)
+          || /\b(?:sign in|log in)\b/iu.test(formText)
+        )
+      );
+  }).length > 0;
   return {
     contactForm: $("form").filter((_, form) => {
       const node = $(form);
@@ -131,8 +164,8 @@ function inspectHtml(html: string): Readonly<{
       ).length > 0;
     }).length > 0,
     loginRequired:
-      $("input[type='password']").length > 0
-      || /\b(?:sign in|log in|login required|members only|subscribe to continue|paywall)\b/iu
+      loginForm
+      || /\b(?:login required|members only|subscribe to continue|paywall)\b/iu
         .test(text),
     challenge:
       $(
@@ -321,6 +354,7 @@ async function finishJob(
   }>,
 ): Promise<ContactEnrichmentActivityResult> {
   return withBacklinkTenantTransaction(pool, input, async (client) => {
+    await lockContactBatchCompletion(client, input, job.batchId);
     await reassessStoredContactEvidence(client, {
       organizationId: input.organizationId,
       workspaceId: input.workspaceId,
@@ -435,7 +469,7 @@ async function finishJob(
         lastErrorCategory,
       ],
     );
-    await synchronizeRecommendationPublication(client, {
+    await synchronizeRecommendationContactState(client, {
       organizationId: input.organizationId,
       workspaceId: input.workspaceId,
       websiteProjectId: input.websiteProjectId,
@@ -707,7 +741,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
             retryableFailures += 1;
             signals.transportFailures += 1;
           }
-          const pageSignals = inspectHtml(decoder.decode(fetched.body));
+          const pageSignals = inspectContactHtml(decoder.decode(fetched.body));
           signals.challenge ||= pageSignals.challenge;
           signals.loginRequired ||=
             fetched.status === 401 || pageSignals.loginRequired;
@@ -730,7 +764,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
         }
         pagesVisited += 1;
         const html = decoder.decode(fetched.body);
-        const pageSignals = inspectHtml(html);
+        const pageSignals = inspectContactHtml(html);
         signals.contactForm ||= pageSignals.contactForm;
         signals.loginRequired ||= pageSignals.loginRequired;
         signals.challenge ||= pageSignals.challenge;

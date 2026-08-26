@@ -34,7 +34,7 @@ const querySchema = z.object({
 const projectAuthoritySchema = z.object({
   score: z.number().int().min(0).max(100),
   band: z.enum(["high", "established", "growing", "emerging", "unknown"]),
-  confidence: z.enum(["backlink_profile", "conservative_default"]),
+  confidence: z.enum(["backlink_profile", "neutral_default"]),
   referringDomains: nullableNumber,
   minimumResourceAuthorityScore: z.number().int().min(0).max(100),
 }).strict();

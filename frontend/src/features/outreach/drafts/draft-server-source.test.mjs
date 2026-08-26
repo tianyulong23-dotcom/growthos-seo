@@ -23,6 +23,7 @@ test("BL-AI-184 uses generated Draft operations and backend evidence", async () 
     "backlinksSaveDraftVersionV1",
     "backlinksApproveDraftV1",
     "backlinksGetSendIntentV1",
+    "backlinksListSendIntentsV1",
     "backlinksPreflightSendIntentV1",
   ]) {
     assert.match(api, new RegExp(operation))
@@ -78,13 +79,46 @@ test("LOCAL-PRODUCT-026 keeps Send disabled until typed server preflight passes"
   }
   assert.match(page, /sendPreflightReady/)
   assert.match(page, /sendPreconditionsReady[\s\S]*sendPreflightReady/)
-  assert.match(page, /QUEUED/)
-  assert.match(page, /SUBMITTED\/SENT/)
-  assert.match(page, /UNKNOWN/)
+  assert.match(page, /pendingSendConfirmationKey/)
+  assert.match(page, /onCheckedChange=\{updateSendConfirmation\}/)
+  assert.match(page, /isSendReadinessSnapshotUsable/)
+  assert.match(api, /query: \{ draftId, limit: 1 \}/)
+  assert.match(page, /listDraftSendIntents/)
+  assert.match(page, /sendHistoryStatus === "ready"/)
+  assert.match(page, /sendIntentView\?\.diagnostics\.resubmittable/)
+  assert.match(page, /GMAIL_SEND_TOKEN_REFRESH_FAILED/)
+  assert.match(page, /GMAIL_SEND_PROVIDER_NETWORK/)
+  assert.match(page, /persistedSendStatus === "FAILED_RETRYABLE"/)
+  assert.doesNotMatch(
+    page,
+    /case "GMAIL_SEND_PRE_REQUEST_FAILED":[\s\S]{0,180}自动重试/
+  )
+  assert.match(page, /prepareSendResubmission/)
+  assert.match(page, /已加入发送队列/)
+  assert.match(page, /邮件发送成功/)
+  assert.doesNotMatch(page, />邮件版本</)
+  assert.match(
+    page,
+    /const gmailReady =[\s\S]*gmailConnection\.readiness\?\.connection\.ready === true/
+  )
+  assert.match(page, /\{gmailReady \? "Gmail 已连接" : "Gmail 尚未就绪"\}/)
+  assert.doesNotMatch(
+    page,
+    /sendPreflight\?\.gmail\.connectionStatus === "CONNECTED"\s*\|\|/
+  )
+  assert.match(
+    page,
+    /persistedSendStatus === "PROVIDER_ACCEPTED"[\s\S]*\? "sent"/
+  )
+  assert.match(page, /effectiveDraftStatus === "sent"[\s\S]*邮件已发送/)
+  assert.doesNotMatch(page, /Gmail 已接受邮件/)
+  assert.match(page, /发送结果需要核对/)
+  assert.match(page, /重新准备发送/)
   assert.match(page, /本次预检不会创建 Send Intent/)
   assert.match(page, /currentVersion\?\.source === "TEMPLATE_FALLBACK"/)
-  assert.match(page, /sendPreconditionsReady[\s\S]*!fallbackDiagnostic/)
-  assert.match(page, /模板诊断稿不计为 AI 生成成功/)
+  assert.match(page, /sendPreconditionsReady[\s\S]*!basicDraftNeedsEdit/)
+  assert.match(page, /AI 未参与当前版本[\s\S]*系统改用基础模板/)
+  assert.match(page, /新版本会标记为人工编辑后再进入审批/)
   assert.equal([...page.matchAll(/createSendIntent\(/g)].length, 1)
 })
 
@@ -114,7 +148,8 @@ test("LOCAL-PRODUCT-018 polls durable states and distinguishes deterministic fal
   assert.doesNotMatch(`${generation}\n${page}\n${parent}`, /initialDrafts/)
   assert.doesNotMatch(`${generation}\n${page}`, /mock-data/i)
   assert.match(generation, /TEMPLATE_FALLBACK/)
-  assert.match(generation, /不是 AI 生成成功/)
+  assert.match(generation, /BASIC_DRAFT_READY/)
+  assert.match(generation, /非 AI 基础草稿/)
 })
 
 test("LP-FINAL requires explicit confirmation when an opportunity has no contact", async () => {
@@ -128,4 +163,15 @@ test("LP-FINAL requires explicit confirmation when an opportunity has no contact
   assert.match(generation, /确认并保存联系人/)
   assert.match(generation, /pendingCandidate/)
   assert.doesNotMatch(generation, /example\.invalid|Canary 收件人|固定收件人/i)
+})
+
+test("Draft generation keeps the opportunity return action prominent", async () => {
+  const generation = await read("draft-generation.tsx")
+
+  assert.match(generation, /size="sm"[\s\S]{0,500}返回外链机会/)
+  assert.match(generation, /sticky top-0 z-20/)
+  assert.doesNotMatch(
+    generation,
+    /text-xs text-muted-foreground hover:text-foreground/
+  )
 })

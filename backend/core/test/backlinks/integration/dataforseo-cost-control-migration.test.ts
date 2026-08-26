@@ -35,6 +35,7 @@ import {
 } from "../../../src/modules/backlinks/db/repositories/provider-bulk-artifact.repository.js";
 import {
   createProviderBudgetRepository,
+  ensureProviderBudgetCycle,
 } from "../../../src/modules/backlinks/db/repositories/provider-budget.repository.js";
 import {
   createProviderCostBaselineRepository,
@@ -549,7 +550,11 @@ describe("DFS-COST-003/004 PostgreSQL cost control", () => {
           const decision = await createProviderBudgetRepository(
             opened,
             () => observedAt,
-          ).reserveBudgetWithinPaidCallCeiling(reservationInput(index), 3);
+          ).reserveBudgetWithinPaidCallCeiling(
+            reservationInput(index),
+            3,
+            1_000_000,
+          );
           await opened.query("COMMIT");
           return decision;
         } catch (error) {
@@ -579,6 +584,7 @@ describe("DFS-COST-003/004 PostgreSQL cost control", () => {
       ).reserveBudgetWithinPaidCallCeiling(
         reservationInput(allowedIndex),
         3,
+        1_000_000,
       );
       await retryClient.query("COMMIT");
       expect(retryDecision).toBe("allow");
@@ -596,6 +602,776 @@ describe("DFS-COST-003/004 PostgreSQL cost control", () => {
       await Promise.all(clients.map((opened) => opened.end()));
     }
   }, 30_000);
+
+  it("raises an active budget to the automatic overage limit without lowering it", async () => {
+    const observedAt = new Date("2026-08-12T08:00:00.000Z");
+    const budgetId = id(405);
+    await insertBudget(client, workspaceA, budgetId);
+
+    await ensureProviderBudgetCycle(client, {
+      organizationId: organization,
+      workspaceId: workspaceA,
+      provider: "dataforseo",
+      limitMicros: 2_000_000,
+      createdBy: "automatic-overage-test",
+      observedAt,
+    });
+    await ensureProviderBudgetCycle(client, {
+      organizationId: organization,
+      workspaceId: workspaceA,
+      provider: "dataforseo",
+      limitMicros: 1_000_000,
+      createdBy: "automatic-overage-test",
+      observedAt,
+    });
+
+    expect((await client.query(`
+      SELECT limit_micros AS "limitMicros"
+        FROM backlink_provider_budgets
+       WHERE id=$1::uuid
+    `, [budgetId])).rows).toEqual([{ limitMicros: "2000000" }]);
+  });
+
+  it("shares one concurrent ceiling across discovery, qualification, and windows", async () => {
+    const observedAt = new Date("2026-08-12T09:00:00.000Z");
+    const budgetId = id(410);
+    const historicalPrefix = `commercial-qualification-v4:${id(411)}`;
+    const operationPrefix = `commercial-refill-operation:${id(412)}`;
+    const historicalIds = Array.from(
+      { length: 3 },
+      (_, index) => id(413 + index),
+    );
+    const operationIds = Array.from(
+      { length: 5 },
+      (_, index) => id(416 + index),
+    );
+    await insertBudget(client, workspaceA, budgetId);
+
+    const insertRequest = async (
+      requestId: string,
+      reservationKey: string,
+      requestFingerprint: string,
+    ) => {
+      await client.query(`
+        INSERT INTO provider_batch_requests (
+          id,organization_id,workspace_id,website_project_id,provider,endpoint,
+          request_intent,refresh_mode,location_code,language_code,
+          request_schema_version,response_schema_version,
+          normalized_request_hash,request_count,estimated_cost_micros,status,
+          started_at,request_id,budget_reservation_id,created_by
+        ) VALUES (
+          $1::uuid,$2::uuid,$3::uuid,$4::uuid,'dataforseo','endpoint',
+          'DISCOVERY','BACKGROUND_REFRESH','US','en-US',1,'response.v1',
+          $5,1,10,'running',$6,$7,$7,'test'
+        )
+      `, [
+        requestId,
+        organization,
+        workspaceA,
+        projectA,
+        requestFingerprint,
+        observedAt,
+        reservationKey,
+      ]);
+      await createProviderBudgetRepository(client, () => observedAt)
+        .recordRequest({
+          batchRequestId: requestId,
+          context: {
+            organizationId: organization,
+            workspaceId: workspaceA,
+            websiteProjectId: projectA,
+            requestId: reservationKey,
+            idempotencyKey: reservationKey,
+            budgetReservationId: reservationKey,
+          },
+          endpoint: "endpoint",
+          requestFingerprint,
+          requestSchemaVersion: 1,
+          requestPayload: { reservationKey },
+          startedAt: observedAt,
+        });
+    };
+
+    for (const [index, requestId] of historicalIds.entries()) {
+      const key = `${historicalPrefix}:traffic:${index}`;
+      await insertRequest(requestId, key, String(index + 1).repeat(64));
+      await expect(createProviderBudgetRepository(
+        client,
+        () => observedAt,
+      ).reserveBudgetWithinPaidCallCeiling({
+        context: {
+          organizationId: organization,
+          workspaceId: workspaceA,
+          websiteProjectId: projectA,
+          requestId: key,
+          idempotencyKey: key,
+          budgetReservationId: key,
+        },
+        provider: "dataforseo",
+        requestFingerprint: String(index + 1).repeat(64),
+        reservationKey: key,
+        estimatedCostMicros: 10,
+      }, 10, 1_000_000)).resolves.toBe("allow");
+    }
+    const requestKind = (index: number) => [
+      "w1:discovery:exact",
+      "w1:qualification:traffic",
+      "w2:qualification:spam",
+      "w2:qualification:rank",
+      "w3:qualification:traffic",
+    ][index] as string;
+    for (const [index, requestId] of operationIds.entries()) {
+      await insertRequest(
+        requestId,
+        `${operationPrefix}:${requestKind(index)}:${index}`,
+        String(index + 4).repeat(64),
+      );
+    }
+
+    const clients = operationIds.map(
+      () => new PgClient({ connectionString: harness.connectionString }),
+    );
+    await Promise.all(clients.map(async (opened) => {
+      await opened.connect();
+      await configureOwner(opened);
+    }));
+    const reservationInput = (index: number) => {
+      const reservationKey = `${operationPrefix}:${requestKind(index)}:${index}`;
+      return {
+        context: {
+          organizationId: organization,
+          workspaceId: workspaceA,
+          websiteProjectId: projectA,
+          requestId: reservationKey,
+          idempotencyKey: reservationKey,
+          budgetReservationId: reservationKey,
+        },
+        provider: "dataforseo" as const,
+        requestFingerprint: String(index + 4).repeat(64),
+        reservationKey,
+        estimatedCostMicros: 10,
+      };
+    };
+    try {
+      const decisions = await Promise.all(clients.map(async (opened, index) => {
+        await opened.query("BEGIN");
+        try {
+          await opened.query(`
+            SELECT set_config('app.current_organization_id',$1,true),
+              set_config('app.current_workspace_id',$2,true),
+              set_config('app.current_website_project_id',$3,true)
+          `, [organization, workspaceA, projectA]);
+          const decision = await createProviderBudgetRepository(
+            opened,
+            () => observedAt,
+          ).reserveBudgetWithinOperationCeiling(
+            reservationInput(index),
+            operationPrefix,
+            3,
+            1_000_000,
+            1_000_000,
+          );
+          await opened.query("COMMIT");
+          return decision;
+        } catch (error) {
+          await opened.query("ROLLBACK");
+          throw error;
+        }
+      }));
+      expect(decisions.filter((decision) => decision === "allow")).toHaveLength(3);
+      expect(decisions.filter((decision) => decision === "deny")).toHaveLength(2);
+
+      const allowedIndex = decisions.findIndex(
+        (decision) => decision === "allow",
+      );
+      const replayClient = clients[allowedIndex];
+      if (replayClient === undefined) {
+        throw new Error("Missing allowed operation reservation client");
+      }
+      await replayClient.query("BEGIN");
+      await replayClient.query(`
+        SELECT set_config('app.current_organization_id',$1,true),
+          set_config('app.current_workspace_id',$2,true),
+          set_config('app.current_website_project_id',$3,true)
+      `, [organization, workspaceA, projectA]);
+      await expect(createProviderBudgetRepository(
+        replayClient,
+        () => observedAt,
+      ).reserveBudgetWithinOperationCeiling(
+        reservationInput(allowedIndex),
+        operationPrefix,
+        3,
+        1_000_000,
+        1_000_000,
+      )).resolves.toBe("allow");
+      await replayClient.query("COMMIT");
+
+      expect((await client.query(`
+        SELECT count(*)::integer count
+          FROM backlink_provider_usage_ledger
+         WHERE budget_id=$1::uuid
+           AND status='reserved'
+           AND reservation_key LIKE $2 || '%'
+      `, [budgetId, `${operationPrefix}:`])).rows).toEqual([{ count: 3 }]);
+
+      const deniedIndex = decisions.findIndex(
+        (decision) => decision === "deny",
+      );
+      const settledRequestId = operationIds[allowedIndex];
+      if (deniedIndex < 0 || settledRequestId === undefined) {
+        throw new Error("Missing operation ceiling fixture");
+      }
+      await replayClient.query("BEGIN");
+      await replayClient.query(`
+        SELECT set_config('app.current_organization_id',$1,true),
+          set_config('app.current_workspace_id',$2,true),
+          set_config('app.current_website_project_id',$3,true)
+      `, [organization, workspaceA, projectA]);
+      const repository = createProviderBudgetRepository(
+        replayClient,
+        () => observedAt,
+      );
+      await repository.settle({
+        batchRequestId: settledRequestId,
+        actualCostMicros: 8,
+        settledAt: observedAt,
+      });
+      await expect(repository.reserveBudgetWithinOperationCeiling(
+        reservationInput(deniedIndex),
+        operationPrefix,
+        3,
+        1_000_000,
+        1_000_000,
+      )).resolves.toBe("deny");
+      await replayClient.query("COMMIT");
+
+      expect((await client.query(`
+        SELECT count(*) FILTER (WHERE status='reserved')::integer reserved,
+               count(*) FILTER (WHERE status='settled')::integer settled
+          FROM backlink_provider_usage_ledger
+         WHERE budget_id=$1::uuid
+           AND reservation_key LIKE $2 || '%'
+      `, [budgetId, `${operationPrefix}:`])).rows).toEqual([{
+        reserved: 2,
+        settled: 1,
+      }]);
+    } finally {
+      await Promise.all(clients.map((opened) => opened.end()));
+    }
+  }, 30_000);
+
+  it("keeps one operation ceiling across daily budget cycles", async () => {
+    const firstObservedAt = new Date("2026-08-12T23:59:00.000Z");
+    const secondObservedAt = new Date("2026-08-13T00:01:00.000Z");
+    const firstBudgetId = id(450);
+    const secondBudgetId = id(451);
+    const operationPrefix = `commercial-refill-operation:${id(452)}`;
+    const firstRequestId = id(453);
+    const secondRequestId = id(454);
+    const firstKey = `${operationPrefix}:w1:discovery:serp`;
+    const secondKey = `${operationPrefix}:w2:qualification:traffic`;
+
+    await client.query(`
+      INSERT INTO backlink_provider_budgets (
+        id,organization_id,workspace_id,provider,period_start,period_end,
+        limit_micros,created_by
+      ) VALUES
+        (
+          $1::uuid,$3::uuid,$4::uuid,'dataforseo',
+          '2026-08-12T00:00:00.000Z','2026-08-13T00:00:00.000Z',
+          1000000,'test'
+        ),
+        (
+          $2::uuid,$3::uuid,$4::uuid,'dataforseo',
+          '2026-08-13T00:00:00.000Z','2026-08-14T00:00:00.000Z',
+          1000000,'test'
+        )
+    `, [firstBudgetId, secondBudgetId, organization, workspaceA]);
+
+    const insertRequest = async (
+      requestId: string,
+      reservationKey: string,
+      requestFingerprint: string,
+      observedAt: Date,
+    ) => {
+      await client.query(`
+        INSERT INTO provider_batch_requests (
+          id,organization_id,workspace_id,website_project_id,provider,endpoint,
+          request_intent,refresh_mode,location_code,language_code,
+          request_schema_version,response_schema_version,
+          normalized_request_hash,request_count,estimated_cost_micros,status,
+          started_at,request_id,budget_reservation_id,created_by
+        ) VALUES (
+          $1::uuid,$2::uuid,$3::uuid,$4::uuid,'dataforseo','endpoint',
+          'DISCOVERY','BACKGROUND_REFRESH','ZA','en',1,'response.v1',
+          $5,1,10,'running',$6,$7,$7,'test'
+        )
+      `, [
+        requestId,
+        organization,
+        workspaceA,
+        projectA,
+        requestFingerprint,
+        observedAt,
+        reservationKey,
+      ]);
+      await createProviderBudgetRepository(client, () => observedAt)
+        .recordRequest({
+          batchRequestId: requestId,
+          context: {
+            organizationId: organization,
+            workspaceId: workspaceA,
+            websiteProjectId: projectA,
+            requestId: reservationKey,
+            idempotencyKey: reservationKey,
+            budgetReservationId: reservationKey,
+          },
+          endpoint: "endpoint",
+          requestFingerprint,
+          requestSchemaVersion: 1,
+          requestPayload: { reservationKey },
+          startedAt: observedAt,
+        });
+    };
+
+    await insertRequest(
+      firstRequestId,
+      firstKey,
+      "a".repeat(64),
+      firstObservedAt,
+    );
+    const firstRepository = createProviderBudgetRepository(
+      client,
+      () => firstObservedAt,
+    );
+    await expect(firstRepository.reserveBudgetWithinOperationCeiling(
+      {
+        context: {
+          organizationId: organization,
+          workspaceId: workspaceA,
+          websiteProjectId: projectA,
+          requestId: firstKey,
+          idempotencyKey: firstKey,
+          budgetReservationId: firstKey,
+        },
+        provider: "dataforseo",
+        requestFingerprint: "a".repeat(64),
+        reservationKey: firstKey,
+        estimatedCostMicros: 10,
+      },
+      operationPrefix,
+      1,
+      1_000_000,
+      1_000_000,
+    )).resolves.toBe("allow");
+    await firstRepository.settle({
+      batchRequestId: firstRequestId,
+      actualCostMicros: 8,
+      settledAt: firstObservedAt,
+    });
+    await expect(createProviderBudgetRepository(
+      client,
+      () => secondObservedAt,
+    ).reserveBudgetWithinOperationCeiling(
+      {
+        context: {
+          organizationId: organization,
+          workspaceId: workspaceA,
+          websiteProjectId: projectA,
+          requestId: firstKey,
+          idempotencyKey: firstKey,
+          budgetReservationId: firstKey,
+        },
+        provider: "dataforseo",
+        requestFingerprint: "a".repeat(64),
+        reservationKey: firstKey,
+        estimatedCostMicros: 10,
+      },
+      operationPrefix,
+      1,
+      1_000_000,
+      1_000_000,
+    )).resolves.toBe("allow");
+
+    await insertRequest(
+      secondRequestId,
+      secondKey,
+      "b".repeat(64),
+      secondObservedAt,
+    );
+    await expect(createProviderBudgetRepository(
+      client,
+      () => secondObservedAt,
+    ).reserveBudgetWithinOperationCeiling(
+      {
+        context: {
+          organizationId: organization,
+          workspaceId: workspaceA,
+          websiteProjectId: projectA,
+          requestId: secondKey,
+          idempotencyKey: secondKey,
+          budgetReservationId: secondKey,
+        },
+        provider: "dataforseo",
+        requestFingerprint: "b".repeat(64),
+        reservationKey: secondKey,
+        estimatedCostMicros: 10,
+      },
+      operationPrefix,
+      1,
+      1_000_000,
+      1_000_000,
+    )).resolves.toBe("deny");
+
+    expect((await client.query(`
+      SELECT budget_id::text AS "budgetId",status,reservation_key
+        FROM backlink_provider_usage_ledger
+       WHERE organization_id=$1::uuid
+         AND workspace_id=$2::uuid
+         AND website_project_id=$3::uuid
+         AND reservation_key LIKE $4 || '%'
+       ORDER BY reservation_key
+    `, [
+      organization,
+      workspaceA,
+      projectA,
+      `${operationPrefix}:`,
+    ])).rows).toEqual([{
+      budgetId: firstBudgetId,
+      status: "settled",
+      reservation_key: firstKey,
+    }]);
+  });
+
+  it("atomically preserves paid-call and cost headroom for later qualification", async () => {
+    const observedAt = new Date("2026-08-12T10:00:00.000Z");
+    const budgetId = id(460);
+    const operationPrefix = `commercial-refill-operation:${id(461)}`;
+    const requestIds = [id(462), id(463), id(464)];
+    await insertBudget(client, workspaceA, budgetId);
+
+    const insertRequest = async (requestId: string, reservationKey: string) => {
+      await client.query(`
+        INSERT INTO provider_batch_requests (
+          id,organization_id,workspace_id,website_project_id,provider,endpoint,
+          request_intent,refresh_mode,location_code,language_code,
+          request_schema_version,response_schema_version,
+          normalized_request_hash,request_count,estimated_cost_micros,status,
+          started_at,request_id,budget_reservation_id,created_by
+        ) VALUES (
+          $1::uuid,$2::uuid,$3::uuid,$4::uuid,'dataforseo','endpoint',
+          'DISCOVERY','BACKGROUND_REFRESH','ZA','en',1,'response.v1',
+          $5,1,10,'running',$6,$7,$7,'test'
+        )
+      `, [
+        requestId,
+        organization,
+        workspaceA,
+        projectA,
+        String(Number(requestId.slice(-2)) + 1).repeat(64).slice(0, 64),
+        observedAt,
+        reservationKey,
+      ]);
+      await createProviderBudgetRepository(client, () => observedAt)
+        .recordRequest({
+          batchRequestId: requestId,
+          context: {
+            organizationId: organization,
+            workspaceId: workspaceA,
+            websiteProjectId: projectA,
+            requestId: reservationKey,
+            idempotencyKey: reservationKey,
+            budgetReservationId: reservationKey,
+          },
+          endpoint: "endpoint",
+          requestFingerprint:
+            String(Number(requestId.slice(-2)) + 1).repeat(64).slice(0, 64),
+          requestSchemaVersion: 1,
+          requestPayload: { reservationKey },
+          startedAt: observedAt,
+        });
+    };
+    const reservationKeys = requestIds.map(
+      (_, index) => `${operationPrefix}:discovery:${index}`,
+    );
+    await Promise.all(requestIds.map((requestId, index) => {
+      const reservationKey = reservationKeys[index];
+      if (reservationKey === undefined) {
+        throw new Error("Missing reservation key for request");
+      }
+      return insertRequest(requestId, reservationKey);
+    }));
+
+    const clients = requestIds.map(
+      () => new PgClient({ connectionString: harness.connectionString }),
+    );
+    await Promise.all(clients.map(async (opened) => {
+      await opened.connect();
+      await configureOwner(opened);
+    }));
+    const reservationInput = (index: number) => {
+      const reservationKey = reservationKeys[index];
+      const requestId = requestIds[index];
+      if (reservationKey === undefined || requestId === undefined) {
+        throw new Error("Missing request reservation input");
+      }
+      return {
+        context: {
+          organizationId: organization,
+          workspaceId: workspaceA,
+          websiteProjectId: projectA,
+          requestId: reservationKey,
+          idempotencyKey: reservationKey,
+          budgetReservationId: reservationKey,
+        },
+        provider: "dataforseo" as const,
+        requestFingerprint:
+          String(Number(requestId.slice(-2)) + 1).repeat(64).slice(0, 64),
+        reservationKey,
+        estimatedCostMicros: 10,
+      };
+    };
+
+    try {
+      const decisions = await Promise.all(clients.map(async (opened, index) => {
+        await opened.query("BEGIN");
+        try {
+          await opened.query(`
+            SELECT set_config('app.current_organization_id',$1,true),
+              set_config('app.current_workspace_id',$2,true),
+              set_config('app.current_website_project_id',$3,true)
+          `, [organization, workspaceA, projectA]);
+          const decision = await createProviderBudgetRepository(
+            opened,
+            () => observedAt,
+          ).reserveBudgetWithinOperationCeiling(
+            reservationInput(index),
+            operationPrefix,
+            3,
+            30,
+            1_000_000,
+            {
+              requiredRemainingPaidCalls: 2,
+              requiredRemainingCostMicros: 20,
+            },
+          );
+          await opened.query("COMMIT");
+          return decision;
+        } catch (error) {
+          await opened.query("ROLLBACK");
+          throw error;
+        }
+      }));
+      expect(decisions.filter((decision) => decision === "allow")).toHaveLength(1);
+      expect(decisions.filter((decision) => decision === "deny")).toHaveLength(2);
+
+      const allowedIndex = decisions.findIndex(
+        (decision) => decision === "allow",
+      );
+      const replayClient = clients[allowedIndex];
+      if (replayClient === undefined) {
+        throw new Error("Missing allowed headroom reservation client");
+      }
+      await replayClient.query("BEGIN");
+      await replayClient.query(`
+        SELECT set_config('app.current_organization_id',$1,true),
+          set_config('app.current_workspace_id',$2,true),
+          set_config('app.current_website_project_id',$3,true)
+      `, [organization, workspaceA, projectA]);
+      await expect(createProviderBudgetRepository(
+        replayClient,
+        () => observedAt,
+      ).reserveBudgetWithinOperationCeiling(
+        reservationInput(allowedIndex),
+        operationPrefix,
+        3,
+        30,
+        1_000_000,
+        {
+          requiredRemainingPaidCalls: 2,
+          requiredRemainingCostMicros: 20,
+        },
+      )).resolves.toBe("allow");
+      await replayClient.query("COMMIT");
+
+      expect((await client.query(`
+        SELECT count(*)::integer count
+          FROM backlink_provider_usage_ledger
+         WHERE budget_id=$1::uuid
+           AND status='reserved'
+           AND reservation_key LIKE $2 || '%'
+      `, [budgetId, `${operationPrefix}:`])).rows).toEqual([{ count: 1 }]);
+    } finally {
+      await Promise.all(clients.map((opened) => opened.end()));
+    }
+  }, 30_000);
+
+  it("replenishes the formal daily and operation windows for persistent discovery", async () => {
+    const observedAt = new Date("2026-08-12T11:00:00.000Z");
+    const budgetId = id(465);
+    const requestId = id(466);
+    const operationPrefix = `commercial-refill-operation:${id(467)}`;
+    const reservationKey = `${operationPrefix}:discovery:semantic`;
+    const requestFingerprint = "7".repeat(64);
+    await insertBudget(client, workspaceA, budgetId);
+    await client.query(
+      "UPDATE backlink_provider_budgets SET limit_micros=10 WHERE id=$1::uuid",
+      [budgetId],
+    );
+    await client.query(`
+      INSERT INTO provider_batch_requests (
+        id,organization_id,workspace_id,website_project_id,provider,endpoint,
+        request_intent,refresh_mode,location_code,language_code,
+        request_schema_version,response_schema_version,
+        normalized_request_hash,request_count,estimated_cost_micros,status,
+        started_at,request_id,budget_reservation_id,created_by
+      ) VALUES (
+        $1::uuid,$2::uuid,$3::uuid,$4::uuid,'dataforseo','endpoint',
+        'DISCOVERY','BACKGROUND_REFRESH','ZA','en',1,'response.v1',
+        $5,1,10,'running',$6,$7,$7,'test'
+      )
+    `, [
+      requestId,
+      organization,
+      workspaceA,
+      projectA,
+      requestFingerprint,
+      observedAt,
+      reservationKey,
+    ]);
+    const repository = createProviderBudgetRepository(client, () => observedAt);
+    await repository.recordRequest({
+      batchRequestId: requestId,
+      context: {
+        organizationId: organization,
+        workspaceId: workspaceA,
+        websiteProjectId: projectA,
+        requestId: reservationKey,
+        idempotencyKey: reservationKey,
+        budgetReservationId: reservationKey,
+      },
+      endpoint: "endpoint",
+      requestFingerprint,
+      requestSchemaVersion: 1,
+      requestPayload: { reservationKey },
+      startedAt: observedAt,
+    });
+
+    await expect(repository.reserveBudgetWithinOperationCeiling({
+      context: {
+        organizationId: organization,
+        workspaceId: workspaceA,
+        websiteProjectId: projectA,
+        requestId: reservationKey,
+        idempotencyKey: reservationKey,
+        budgetReservationId: reservationKey,
+      },
+      provider: "dataforseo",
+      requestFingerprint,
+      reservationKey,
+      estimatedCostMicros: 10,
+    }, operationPrefix, 1, 10, 10, {
+      requiredRemainingPaidCalls: 3,
+      requiredRemainingCostMicros: 30,
+      authorization: {
+        provider: "dataforseo",
+        reasonCode: "user_authorized_persistent_discovery",
+        maxPaidCalls: 1,
+        maxCostMicros: 10,
+        authorizedBy: "integration-test",
+      },
+    })).resolves.toBe("deny");
+
+    expect((await client.query(`
+      SELECT limit_micros AS "limitMicros",
+             reserved_micros AS "reservedMicros"
+        FROM backlink_provider_budgets
+       WHERE id=$1::uuid
+    `, [budgetId])).rows).toEqual([{
+      limitMicros: "10",
+      reservedMicros: "0",
+    }]);
+    expect((await client.query(`
+      SELECT status,reservation_key
+        FROM backlink_provider_usage_ledger
+       WHERE budget_id=$1::uuid
+    `, [budgetId])).rows).toEqual([]);
+  });
+
+  it("creates a bounded UTC daily budget when the prior cycle expired", async () => {
+    const observedAt = new Date("2028-08-12T08:00:00.000Z");
+    const requestId = id(396);
+    const requestFingerprint = "9".repeat(64);
+    const reservationKey = "daily-budget-cycle";
+    await client.query(`
+      INSERT INTO provider_batch_requests (
+        id,organization_id,workspace_id,website_project_id,provider,endpoint,
+        request_intent,refresh_mode,location_code,language_code,
+        request_schema_version,response_schema_version,
+        normalized_request_hash,request_count,estimated_cost_micros,status,
+        started_at,request_id,budget_reservation_id,created_by
+      ) VALUES (
+        $1::uuid,$2::uuid,$3::uuid,$4::uuid,'dataforseo','endpoint',
+        'DISCOVERY','BACKGROUND_REFRESH','US','en-US',1,'response.v1',
+        $5,1,10,'running',$6,$7,$8,'test'
+      )
+    `, [
+      requestId,
+      organization,
+      workspaceA,
+      projectA,
+      requestFingerprint,
+      observedAt,
+      "daily-budget-request",
+      reservationKey,
+    ]);
+    const repository = createProviderBudgetRepository(client, () => observedAt);
+    await repository.recordRequest({
+      batchRequestId: requestId,
+      context: {
+        organizationId: organization,
+        workspaceId: workspaceA,
+        websiteProjectId: projectA,
+        requestId: "daily-budget-request",
+        idempotencyKey: reservationKey,
+        budgetReservationId: reservationKey,
+      },
+      endpoint: "endpoint",
+      requestFingerprint,
+      requestSchemaVersion: 1,
+      requestPayload: { cycle: "daily" },
+      startedAt: observedAt,
+    });
+
+    await expect(repository.reserveBudgetWithinPaidCallCeiling({
+      context: {
+        organizationId: organization,
+        workspaceId: workspaceA,
+        websiteProjectId: projectA,
+        requestId: "daily-budget-request",
+        idempotencyKey: reservationKey,
+        budgetReservationId: reservationKey,
+      },
+      provider: "dataforseo",
+      requestFingerprint,
+      reservationKey,
+      estimatedCostMicros: 10,
+    }, 3, 1_000_000)).resolves.toBe("allow");
+
+    expect((await client.query(`
+      SELECT period_start AS "periodStart",period_end AS "periodEnd",
+             limit_micros AS "limitMicros",reserved_micros AS "reservedMicros"
+        FROM backlink_provider_budgets
+       WHERE organization_id=$1::uuid AND workspace_id=$2::uuid
+         AND provider='dataforseo'
+         AND period_start<=$3 AND period_end>$3
+    `, [organization, workspaceA, observedAt])).rows).toEqual([{
+      periodStart: new Date("2028-08-12T00:00:00.000Z"),
+      periodEnd: new Date("2028-08-13T00:00:00.000Z"),
+      limitMicros: "1000000",
+      reservedMicros: "10",
+    }]);
+  });
 
   it("persists partial Bulk results for later single-domain reuse", async () => {
     await configureOwner(client);
@@ -751,7 +1527,10 @@ describe("DFS-COST-003/004 PostgreSQL cost control", () => {
     const single = new DataForSeoRequestService({
       coordinator: singleRepository,
       provider: { fetchBacklinkSnapshot: fetchSingle },
-      gate: { authorize: async () => undefined },
+      gate: {
+        preflight: async () => undefined,
+        authorize: async () => undefined,
+      },
       now: () => new Date("2026-07-30T10:01:00.000Z"),
     });
     await expect(single.execute({

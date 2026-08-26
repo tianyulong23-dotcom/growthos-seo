@@ -26,6 +26,47 @@ func TestSiteProfileReadyRequiresEveryEditableBusinessField(t *testing.T) {
 	}
 }
 
+func TestSiteProfileForPersistenceRejectsEmptyResult(t *testing.T) {
+	task := Task{TargetURL: "https://example.com"}
+	empty := SiteProfile{BusinessName: "example.com"}
+
+	for _, scenario := range []string{
+		"existing profile remains unchanged",
+		"first crawl does not create an empty authority profile",
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			profile, persist := siteProfileForPersistence(
+				task,
+				Result{SiteProfile: &empty},
+			)
+
+			if persist {
+				t.Fatalf("empty profile was selected for persistence: %#v", profile)
+			}
+		})
+	}
+}
+
+func TestSiteProfileForPersistenceAcceptsSubstantiveResult(t *testing.T) {
+	task := Task{TargetURL: "https://example.com"}
+	resultProfile := SiteProfile{
+		BusinessName:    "Example",
+		BusinessSummary: "Example provides analytics software.",
+	}
+
+	profile, persist := siteProfileForPersistence(
+		task,
+		Result{SiteProfile: &resultProfile},
+	)
+
+	if !persist {
+		t.Fatal("substantive profile was not selected for persistence")
+	}
+	if profile.BusinessSummary != resultProfile.BusinessSummary {
+		t.Fatalf("persisted profile = %#v", profile)
+	}
+}
+
 func TestBuildSiteProfileUsesRepresentativePagesAndEvidence(t *testing.T) {
 	task := Task{
 		TargetURL: "https://example.com",

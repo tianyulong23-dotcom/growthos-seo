@@ -34,14 +34,72 @@ export async function synchronizeRecommendationPublication(
         WHERE (inventory.organization_id,inventory.workspace_id,
                inventory.website_project_id)=($1,$2,$3)
           AND inventory.recommendation_context_version_id=$5
-          AND inventory.publication_status='PUBLISHED'
-          AND inventory.fit_decision='eligible'
-          AND inventory.fit_score_model_version=
-            'recommendation-commercial-fit.v3'
-          AND inventory.contact_decision='eligible'
-          AND inventory.contact_reason_code='PUBLIC_EMAIL_FOUND'
-          AND inventory.verified_public_email_count>=1
-          AND inventory.status IN ('ready','shown','accepted')
+           AND inventory.publication_status='PUBLISHED'
+           AND inventory.fit_decision='eligible'
+           AND inventory.fit_score_model_version=
+             'recommendation-commercial-fit.v4'
+           AND inventory.status IN ('ready','shown','accepted')
+           AND inventory.prospect_id<>$4
+     ),
+     generation_contract AS (
+       SELECT contract.id
+         FROM backlink_recommendation_generation_contracts AS contract
+         JOIN pool_policy ON
+           contract.visible_pool_generation=
+             pool_policy.visible_pool_generation
+        WHERE (
+          contract.organization_id,contract.workspace_id,
+          contract.website_project_id,
+          contract.recommendation_context_version_id
+        )=($1,$2,$3,$5)
+          AND contract.qualification_contract_version=
+            'recommendation-qualification.v1'
+          AND contract.visibility_contract_version=
+            'recommendation-visibility.v1'
+        LIMIT 1
+     ),
+     corrected_visibility_capacity AS (
+       SELECT count(*)::integer visible_count
+         FROM (
+           SELECT DISTINCT ON (qualification.canonical_domain)
+                  qualification.id,qualification.canonical_domain,
+                  qualification.decision
+             FROM backlink_recommendation_qualification_facts
+               AS qualification
+            WHERE qualification.generation_contract_id=(
+                    SELECT id FROM generation_contract
+                  )
+              AND (
+                qualification.organization_id,
+                qualification.workspace_id,
+                qualification.website_project_id,
+                qualification.recommendation_context_version_id
+              )=($1,$2,$3,$5)
+              AND qualification.recommendation_id IS NOT NULL
+            ORDER BY qualification.canonical_domain,
+                     qualification.attempt DESC,
+                     qualification.observed_at DESC,
+                     qualification.id DESC
+         ) AS qualification
+         JOIN LATERAL (
+           SELECT visibility.decision
+             FROM backlink_recommendation_visibility_facts AS visibility
+            WHERE visibility.generation_contract_id=(
+                    SELECT id FROM generation_contract
+                  )
+              AND (
+                visibility.organization_id,visibility.workspace_id,
+                visibility.website_project_id,
+                visibility.recommendation_context_version_id,
+                visibility.qualification_fact_id
+              )=($1,$2,$3,$5,qualification.id)
+            ORDER BY visibility.attempt DESC,
+                     visibility.observed_at DESC,
+                     visibility.id DESC
+            LIMIT 1
+         ) AS visibility ON true
+        WHERE qualification.decision='eligible'
+          AND visibility.decision='visible'
      ),
      latest_job AS (
        SELECT terminal_reason_code,status
@@ -62,7 +120,7 @@ export async function synchronizeRecommendationPublication(
           AND visible_pool_generation=(
             SELECT visible_pool_generation FROM pool_policy
           )
-          AND score_model_version='recommendation-commercial-fit.v3'
+          AND score_model_version='recommendation-commercial-fit.v4'
         ORDER BY updated_at DESC,id DESC
         LIMIT 1
      ),
@@ -114,7 +172,6 @@ export async function synchronizeRecommendationPublication(
           AND inventory.visible_pool_generation=(
             SELECT visible_pool_generation FROM pool_policy
           )
-          AND inventory.publication_status<>'PUBLISHED'
           AND candidate.status IN ('candidate','promoted')
           AND candidate.invalidated_at IS NULL
           AND candidate.guessed=false
@@ -137,17 +194,14 @@ export async function synchronizeRecommendationPublication(
        SELECT count(DISTINCT candidate_id)::integer email_count
          FROM eligible_contacts
      ),
-     selected AS (
-       SELECT eligible_contacts.*
-         FROM eligible_contacts
-         CROSS JOIN pool_policy
-         CROSS JOIN published_capacity
-        WHERE pool_policy.visible_pool_state='building'
-          AND published_capacity.published_count<
-            pool_policy.visible_pool_target_count
-        ORDER BY contact_confidence DESC,purpose_confidence DESC,
-                 evidence_confidence DESC,candidate_id
-        LIMIT 1
+      selected AS (
+        SELECT eligible_contacts.*
+          FROM eligible_contacts
+          CROSS JOIN pool_policy
+         WHERE pool_policy.visible_pool_state IN ('building','active')
+         ORDER BY contact_confidence DESC,purpose_confidence DESC,
+                  evidence_confidence DESC,candidate_id
+         LIMIT 1
      ),
      inserted_snapshot AS (
        INSERT INTO backlink_contact_evidence_snapshots (
@@ -206,16 +260,10 @@ export async function synchronizeRecommendationPublication(
      ),
      inventory AS (
        UPDATE backlink_recommendation_inventory
-          SET publication_status=CASE
-                WHEN snapshot.id IS NOT NULL
-                  AND fit_candidate.fit_decision='eligible'
-                  THEN 'PUBLISHED'
-                WHEN backlink_recommendation_inventory.publication_status=
-                     'PUBLISHED' THEN 'CONTACT_REVIEW'
-                WHEN latest_job.terminal_reason_code IS NULL
-                     THEN 'CONTACT_PENDING'
+           SET publication_status=CASE
+                WHEN fit_candidate.fit_decision='eligible' THEN 'PUBLISHED'
                 ELSE 'NOT_PUBLISHED'
-              END,
+               END,
               fit_decision=CASE
                 WHEN fit_candidate.recommendation_id IS NOT NULL
                   THEN fit_candidate.fit_decision
@@ -223,7 +271,7 @@ export async function synchronizeRecommendationPublication(
               END,
               fit_score_model_version=CASE
                 WHEN fit_candidate.recommendation_id IS NOT NULL
-                  THEN 'recommendation-commercial-fit.v3'
+                  THEN 'recommendation-commercial-fit.v4'
                 ELSE NULL
               END,
               contact_decision=CASE
@@ -291,11 +339,7 @@ export async function synchronizeRecommendationPublication(
                  .recommendation_context_version_id=$5
            AND backlink_recommendation_inventory.visible_pool_generation=
                  pool_policy.visible_pool_generation
-           AND pool_policy.visible_pool_state='building'
-           AND (
-             backlink_recommendation_inventory.publication_status<>'PUBLISHED'
-             OR EXISTS (SELECT 1 FROM selected)
-           )
+           AND pool_policy.visible_pool_state IN ('building','active')
        RETURNING verified_public_email_count
      ),
      commercial AS (
@@ -307,8 +351,8 @@ export async function synchronizeRecommendationPublication(
                      'insufficient_data' THEN 'insufficient_data'
                 WHEN commercial.commercial_score->>'decision'='manual_review'
                   THEN 'manual_review'
-                WHEN EXISTS (SELECT 1 FROM chosen_snapshot) THEN 'published'
-                WHEN commercial.state='published' THEN 'candidate_ready'
+                WHEN commercial.commercial_score->>'decision'='eligible'
+                  THEN 'published'
                 ELSE commercial.state
               END,
               updated_at=now(),updated_by=$6,version=version+1
@@ -323,9 +367,13 @@ export async function synchronizeRecommendationPublication(
           AND EXISTS (
             SELECT 1 FROM pool_policy
              WHERE visible_pool_state='building'
+                OR (
+                  EXISTS (SELECT 1 FROM generation_contract)
+                  AND visible_pool_state='active'
+                )
           )
           AND commercial.score_model_version=
-            'recommendation-commercial-fit.v3'
+            'recommendation-commercial-fit.v4'
           AND commercial.state IS DISTINCT FROM CASE
                 WHEN commercial.commercial_score->>'decision'='ineligible'
                   THEN 'excluded'
@@ -333,28 +381,47 @@ export async function synchronizeRecommendationPublication(
                      'insufficient_data' THEN 'insufficient_data'
                 WHEN commercial.commercial_score->>'decision'='manual_review'
                   THEN 'manual_review'
-                WHEN EXISTS (SELECT 1 FROM chosen_snapshot) THEN 'published'
-                WHEN commercial.state='published' THEN 'candidate_ready'
+                WHEN commercial.commercial_score->>'decision'='eligible'
+                  THEN 'published'
                 ELSE commercial.state
               END
        RETURNING commercial.id
      ),
      current_pool AS (
-       SELECT published_capacity.published_count
-              + CASE WHEN EXISTS (
-                  SELECT 1 FROM inventory
-                   WHERE verified_public_email_count>=1
-                ) THEN 1 ELSE 0 END AS published_count
+       SELECT CASE WHEN generation_contract.id IS NULL
+                 THEN published_capacity.published_count
+                  + CASE WHEN EXISTS (SELECT 1 FROM inventory)
+                      THEN 1 ELSE 0 END
+                 ELSE corrected_visibility_capacity.visible_count
+               END AS published_count
          FROM published_capacity
+         CROSS JOIN corrected_visibility_capacity
+         LEFT JOIN generation_contract ON true
      ),
      activated AS (
        UPDATE backlink_commercial_inventory_policies AS policy
            SET visible_pool_state='active',
-               refill_state='completed',
-               termination_reason='HIGH_WATERMARK',
+               refill_state=CASE
+                 WHEN current_pool.published_count>=pool_policy.visible_pool_target_count
+                   THEN 'completed'
+                 ELSE policy.refill_state
+               END,
+               termination_reason=CASE
+                 WHEN current_pool.published_count>=pool_policy.visible_pool_target_count
+                   THEN 'HIGH_WATERMARK'
+                 ELSE policy.termination_reason
+               END,
                last_publishable_count=current_pool.published_count,
-               pause_reason=NULL,
-               next_refill_at=NULL,
+               pause_reason=CASE
+                 WHEN current_pool.published_count>=pool_policy.visible_pool_target_count
+                   THEN NULL
+                 ELSE policy.pause_reason
+               END,
+               next_refill_at=CASE
+                 WHEN current_pool.published_count>=pool_policy.visible_pool_target_count
+                   THEN NULL
+                 ELSE policy.next_refill_at
+               END,
               updated_at=now(),updated_by=$6,version=version+1
          FROM pool_policy,current_pool
         WHERE (policy.organization_id,policy.workspace_id,
@@ -363,8 +430,7 @@ export async function synchronizeRecommendationPublication(
           AND policy.visible_pool_generation=
                 pool_policy.visible_pool_generation
           AND policy.visible_pool_state='building'
-          AND current_pool.published_count>=
-                pool_policy.visible_pool_target_count
+          AND current_pool.published_count>0
        RETURNING policy.visible_pool_generation
      )
      SELECT eligible.email_count "emailCount",

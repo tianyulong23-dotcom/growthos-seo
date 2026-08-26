@@ -3,7 +3,15 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import type { BacklinksModule } from "../application/backlinks.module.js";
 import type { OpportunitiesQuery } from "../application/queries/opportunities.query.js";
+import {
+  engagementPathStates,
+  opportunityPrimaryNextActionKinds,
+} from "../application/read-models/opportunity-handoff.js";
 import { BacklinkError, backlinkErrorCodes } from "../domain/errors/backlink-error.js";
+import {
+  manualActionStates,
+  nonEmailCooperationPathTypes,
+} from "../domain/opportunities/cooperation-path.js";
 import {
   opportunityBusinessStages,
   opportunityFulfillmentStatuses,
@@ -41,9 +49,21 @@ const listItemSchema = z.object({
   managementStatus: z.enum(opportunityManagementStatuses),
   outcomeStatus: z.enum(opportunityOutcomeStatuses),
   fulfillmentStatus: z.enum(opportunityFulfillmentStatuses),
+  engagementChannel: z.enum(["EMAIL", "COOPERATION_PATH"]),
+  engagementPathState: z.enum(engagementPathStates),
+  primaryNextAction: z.object({
+    kind: z.enum(opportunityPrimaryNextActionKinds),
+    enabled: z.boolean(),
+    blockerCode: z.enum([
+      "CONTACT_OR_PATH_REQUIRED",
+      "DRAFT_GENERATING",
+    ]).nullable(),
+  }).strict(),
+  draftId: z.uuid().nullable(),
   sourceContactCandidateId: z.uuid().nullable(),
   contactEmail: nonBlank.nullable(),
   contactReviewRequired: z.boolean(),
+  manualActionState: z.enum(manualActionStates).nullable(),
   hasDownstreamFacts: z.boolean(),
   version: z.number().int().positive(),
   createdAt: z.string().datetime(),
@@ -58,6 +78,39 @@ const detailSchema = listItemSchema.extend({
   targetIdentityOverrideReason: z.string().nullable(),
   assessment: publicAssessmentSchema.nullable(),
   placementCandidate: placementCandidateSchema.nullable(),
+  cooperationPath: z.object({
+    factId: z.uuid(),
+    manualActionId: z.uuid(),
+    pathType: z.enum(nonEmailCooperationPathTypes),
+    pathUrl: z.url(),
+    contentType: z.enum(["FORM_MESSAGE", "SUBMISSION_PITCH"]),
+    editableContent: nonBlank,
+    state: z.enum(manualActionStates),
+    nextAction: nonBlank,
+    evidence: z.record(z.string(), z.unknown()),
+    version: z.number().int().positive(),
+    updatedAt: z.string().datetime(),
+  }).strict().nullable(),
+  selectionSnapshot: z.object({
+    lineageStatus: z.enum(["COMPLETE", "PARTIAL"]),
+    recommendationId: z.uuid(),
+    recommendationContextVersionId: z.uuid(),
+    visiblePoolGeneration: z.number().int().positive().nullable(),
+    generationContractId: z.uuid().nullable(),
+    inputPinId: z.uuid().nullable(),
+    scoreModelVersion: nonBlank.nullable(),
+    projectContextVersion: z.number().int().positive().nullable(),
+    siteProfileVersionId: nonBlank.nullable(),
+    outreachProfileVersionId: z.uuid().nullable(),
+    promotionTargetVersionId: nonBlank.nullable(),
+    immutableFingerprint: nonBlank.nullable(),
+    selectedTargetUrl: z.url().nullable(),
+    selectedContactCandidateId: z.uuid().nullable(),
+    selectedCooperationPathFactId: z.uuid().nullable(),
+    selectedCooperationPathVersion: z.number().int().positive().nullable(),
+    selectedBy: nonBlank,
+    selectedAt: z.string().datetime(),
+  }).strict(),
 }).strict();
 const metaSchema = z.object({
   organizationId: nonBlank,

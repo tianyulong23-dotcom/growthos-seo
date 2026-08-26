@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   approveDraftEvidence,
+  containsInternalDraftMetadataMarker,
   validateDraftOutputPolicy,
 } from "../../src/modules/backlinks/domain/drafts/evidence-policy.js";
 
@@ -161,5 +162,51 @@ describe("BL-AI-092 Draft evidence boundary", () => {
       approvedEvidence: approved,
       forbiddenValues: [],
     })).toThrow("Draft output contains a prohibited promise.");
+  });
+
+  it("keeps internal Evidence metadata out of recipient-visible content", () => {
+    expect(containsInternalDraftMetadataMarker(
+      "[profile:current, opportunity:current]",
+    )).toBe(true);
+    expect(containsInternalDraftMetadataMarker(
+      "Please contact: editorial@example.test",
+    )).toBe(false);
+    expect(containsInternalDraftMetadataMarker(
+      "A note for the [SEO team].",
+    )).toBe(false);
+
+    const approved = approveDraftEvidence(snapshot(), scope);
+    expect(() => validateDraftOutputPolicy({
+      output: {
+        subject: "GrowthOS content collaboration",
+        bodyText:
+          `${validBody}\n\n[contact:confirmed, profile:current]`,
+        factsUsed: [{
+          claim: "Evidence-backed sender context.",
+          evidenceIds: ["profile:1"],
+        }],
+        riskFlags: [],
+        requiresUserConfirmation: true,
+        canAutoSend: false,
+      },
+      approvedEvidence: approved,
+      forbiddenValues: [],
+    })).toThrow("Draft output contains internal evidence metadata.");
+
+    expect(() => validateDraftOutputPolicy({
+      output: {
+        subject: "GrowthOS content collaboration",
+        bodyText: `${validBody}\n\nInternal reference profile:1.`,
+        factsUsed: [{
+          claim: "Evidence-backed sender context.",
+          evidenceIds: ["profile:1"],
+        }],
+        riskFlags: [],
+        requiresUserConfirmation: true,
+        canAutoSend: false,
+      },
+      approvedEvidence: approved,
+      forbiddenValues: [],
+    })).toThrow("Draft output contains internal evidence metadata.");
   });
 });

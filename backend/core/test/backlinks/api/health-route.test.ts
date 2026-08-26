@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { registerBacklinksHealthRoute } from "../../../src/modules/backlinks/api/health.route.js";
 import { registerBacklinksOpenApi } from "../../../src/modules/backlinks/api/openapi.js";
+import { createBacklinksApiRuntimeHealth } from "../../../src/modules/backlinks/runtime/runtime-health.js";
 
 const apps: FastifyInstance[] = [];
 
@@ -13,7 +14,7 @@ async function createTestApp(enabled: boolean): Promise<FastifyInstance> {
   await registerBacklinksOpenApi(app);
   registerBacklinksHealthRoute(app, {
     BACKLINKS_API_ENABLED: enabled,
-  });
+  }, createBacklinksApiRuntimeHealth({}, "build-health-test"));
   await app.ready();
 
   return app;
@@ -32,7 +33,37 @@ describe("registerBacklinksHealthRoute", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ status: "ok" });
+    expect(response.json()).toEqual({
+      status: "ok",
+      process: "api",
+      buildId: "build-health-test",
+      providers: {
+        dataForSeo: {
+          configured: false,
+          externalAvailability: "disabled",
+          reasonCode: "provider_disabled",
+          recoveryAction: "enable_provider",
+        },
+        browser: {
+          configured: false,
+          externalAvailability: "disabled",
+          reasonCode: "provider_disabled",
+          recoveryAction: "enable_provider",
+        },
+        ai: {
+          configured: false,
+          externalAvailability: "disabled",
+          reasonCode: "provider_disabled",
+          recoveryAction: "enable_provider",
+        },
+        gmail: {
+          configured: false,
+          externalAvailability: "disabled",
+          reasonCode: "provider_disabled",
+          recoveryAction: "enable_provider",
+        },
+      },
+    });
     expect(app.swagger()).toMatchObject({
       paths: {
         "/health": {
@@ -45,8 +76,19 @@ describe("registerBacklinksHealthRoute", () => {
                       type: "object",
                       properties: {
                         status: { type: "string" },
+                        process: { type: "string" },
+                        buildId: {
+                          type: "string",
+                          nullable: true,
+                        },
+                        providers: { type: "object" },
                       },
-                      required: ["status"],
+                      required: [
+                        "status",
+                        "process",
+                        "buildId",
+                        "providers",
+                      ],
                       additionalProperties: false,
                     },
                   },

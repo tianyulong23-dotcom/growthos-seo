@@ -112,7 +112,6 @@ describe("LOCAL_PRODUCT DataForSEO credential importer", () => {
     const result = await runImporter({
       login,
       password,
-      websiteProjectKey: "elephtv",
       credentialSecretRef:
         "secret://growthos/local-product/dataforseo/provider-credential/v7",
       endpointAllowlist: [...localProductDataForSeoEndpoints],
@@ -121,17 +120,11 @@ describe("LOCAL_PRODUCT DataForSEO credential importer", () => {
       absoluteBudgetMicros: 5_000,
       maxPaidCalls: 25,
       candidateLimit: 25,
-      locationCode: "2840",
-      languageCode: "en",
-      keywords: ["video streaming"],
-      products: ["streaming platform"],
-      targetUrls: ["https://elephtv.com/"],
     }, manifestPath, runtimeRoot);
 
     expect(result).toMatchObject({ exitCode: 0, stderr: "" });
     expect(JSON.parse(result.stdout)).toMatchObject({
       imported: true,
-      websiteProjectKey: "elephtv",
       credentialSecretReference:
         "secret://growthos/local-product/dataforseo/provider-credential/v7",
       maxPaidCalls: 25,

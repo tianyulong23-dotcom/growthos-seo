@@ -20,6 +20,10 @@ test("BL-AI-186 uses generated frozen mail and match operations", () => {
     "backlinksConfirmReplyMatchCandidateV1",
     "backlinksUnbindReplyMatchV1",
     "backlinksGetGmailPollingSyncStatusV1",
+    "backlinksListNegotiationFactsV1",
+    "backlinksReviewNegotiationFactV1",
+    "backlinksListSendIntentsV1",
+    "backlinksGetSendIntentV1",
   ]) {
     assert.match(api, new RegExp(operation))
   }
@@ -34,6 +38,35 @@ test("BL-AI-186 uses generated frozen mail and match operations", () => {
   assert.doesNotMatch(
     `${api}\n${types}`,
     /accessToken|refreshToken|authorizationCode|rawObjectKey/
+  )
+})
+
+test("P4 Mail Center reads the project Send Intent queue without send side effects", () => {
+  const api = read("./api.ts")
+  const center = read("./mail-center.tsx")
+  const queue = read("./send-intent-queue.tsx")
+
+  assert.match(api, /backlinksListSendIntentsV1/)
+  assert.match(api, /backlinksGetSendIntentV1/)
+  assert.match(api, /queueKind:\s*input\.queueKind \?\? undefined/)
+  assert.match(api, /\{ signal \}/)
+  assert.match(center, /SendIntentQueue/)
+  assert.match(queue, /"send-intents"/)
+  assert.match(queue, /"send-intent-detail"/)
+  assert.match(queue, /activeProjectRef/)
+  assert.match(queue, /backlinksProjectQueries\.invalidate\(listKey\)/)
+  assert.match(queue, /RECONCILIATION_REQUIRED/)
+  assert.match(queue, /RECONCILE_BEFORE_RETRY/)
+  assert.match(queue, /先核对 Gmail 结果，禁止自动重发/)
+  assert.match(queue, /PROVIDER_ACCEPTED:\s*"已发送"/)
+  assert.doesNotMatch(queue, /Gmail 已接受/)
+  assert.match(queue, /deliveryEnvelope/)
+  assert.match(queue, /diagnostics\.primaryNextAction/)
+  assert.match(queue, /getSendIntent/)
+  assert.match(queue, /listSendIntents/)
+  assert.doesNotMatch(
+    `${api}\n${queue}`,
+    /createSendIntent|preflightSendIntent|sendGmail|retrySendIntent/
   )
 })
 
@@ -102,12 +135,20 @@ test("BL-AI-140 exposes resilient list, thread, pagination, and manual match sta
   assert.match(center, /Gmail 同步已暂停，当前显示已保存邮件/)
   assert.match(center, /applyFirstPage\(await fetchFirstPage\(\)\)/)
   assert.doesNotMatch(center, /setTimeout\(resolve,\s*5_000\)/)
+  assert.match(center, /邮件往来/)
+  assert.match(center, /同步详情/)
+  assert.match(center, /<details/)
+  assert.ok(
+    center.indexOf("邮件往来") <
+      center.indexOf("<SendIntentQueue websiteProjectKey={websiteProjectKey}")
+  )
   assert.match(panel, /MailCenter/)
   assert.match(panel, /重新授权/)
-  assert.match(panel, /连接：/)
-  assert.match(panel, /Send Ready：/)
-  assert.match(panel, /Sync Ready：/)
-  assert.match(panel, /缺少门槛：/)
+  assert.match(panel, /Gmail 已连接/)
+  assert.doesNotMatch(panel, /Connection：|Send Ready：|Sync Ready：/)
+  assert.match(panel, /GmailReadinessBlockers/)
+  assert.match(panel, /WAITING_FOR_ACCEPTED_SEND/)
+  assert.match(panel, /WAITING_FOR_SEND_CONTEXT/)
   assert.match(panel, /已保存邮件仍可读取/)
   assert.doesNotMatch(`${center}\n${panel}`, /mock|fallback|demo/i)
   assert.doesNotMatch(
@@ -130,5 +171,43 @@ test("BL-AI-140 renders only plain text or server-marked sanitized HTML", () => 
   assert.doesNotMatch(
     center,
     /autoConfirm|confirmAutomatically|发送成功|同步成功/
+  )
+})
+
+test("Mail Center always exposes Gmail reconnection after token refresh failure", () => {
+  const panel = read("./mail-sync-status-panel.tsx")
+
+  assert.match(panel, /"GMAIL_TOKEN_REFRESH_FAILED"/)
+  assert.match(panel, /重新连接 Gmail/)
+  assert.match(panel, /onClick=\{\(\) => void controller\.connect\(\)\}/)
+})
+
+test("Phase 10 keeps negotiation facts versioned, review-gated, and project attributed", () => {
+  const api = read("./api.ts")
+  const center = read("./mail-center.tsx")
+  const panel = read("./negotiation-facts-panel.tsx")
+
+  assert.match(api, /backlinksListNegotiationFactsV1/)
+  assert.match(api, /backlinksReviewNegotiationFactV1/)
+  assert.match(api, /"idempotency-key": idempotencyKey/)
+  assert.match(panel, /expectedFactVersion:\s*selectedFact\.factVersion/)
+  assert.match(panel, /reviewRequestKey\.current \?\? crypto\.randomUUID\(\)/)
+  assert.match(panel, /reviewRequestKey\.current = idempotencyKey/)
+  assert.match(panel, /decision === "CORRECT"/)
+  assert.match(panel, /JSON\.parse\(correctionNormalizedValue\)/)
+  assert.match(panel, /beginReview\(fact, "CONFIRM"\)/)
+  assert.match(panel, /beginReview\(fact, "REJECT"\)/)
+  assert.match(panel, /beginReview\(fact, "CORRECT"\)/)
+  assert.match(panel, /backlinksProjectQueries/)
+  assert.match(panel, /response\.opportunityId !== opportunityId/)
+  assert.match(panel, /isMailApiStatus\(error, 409\)/)
+  assert.match(panel, /追加版本，不覆盖原始提取记录/)
+  assert.match(center, /opportunityId/)
+  assert.match(center, /replyId/)
+  assert.match(center, /returnTo/)
+  assert.match(center, /businessContextPath/)
+  assert.doesNotMatch(
+    `${api}\n${center}\n${panel}`,
+    /accessToken|refreshToken|authorizationCode|rawObjectKey/
   )
 })

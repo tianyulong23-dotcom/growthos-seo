@@ -1097,6 +1097,11 @@ class OnboardingService:
         self.organization_id = organization_id
         self.repository = repository
 
+    def for_organization(self, organization_id: str) -> OnboardingService:
+        if organization_id == self.organization_id:
+            return self
+        return OnboardingService(organization_id, self.repository)
+
     async def get(self, project_id: str) -> OnboardingRunResponse:
         await self.repository.reconcile_project(self.organization_id, project_id)
         result = await self.repository.get(self.organization_id, project_id)

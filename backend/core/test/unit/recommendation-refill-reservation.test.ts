@@ -60,12 +60,14 @@ describe("recommendation refill reservation", () => {
     expect(fixture.queries[0]).toContain(
       "project_context_version_id)=($1,$2,$3,$4)",
     );
+    expect(fixture.queries[0]).toContain(
+      "contract.score_model_version=",
+    );
+    expect(fixture.queries[0]).toContain(
+      "'recommendation-commercial-fit.v4'",
+    );
     for (const clause of [
-      "inventory.publication_status='PUBLISHED'",
       "inventory.fit_decision='eligible'",
-      "inventory.contact_decision='eligible'",
-      "inventory.contact_reason_code='PUBLIC_EMAIL_FOUND'",
-      "inventory.verified_public_email_count>=1",
       "inventory.status IN ('ready','shown','accepted')",
       "recommendation.status IN ('ready','shown','accepted')",
       "inventory.visible_pool_generation=$5",
@@ -75,6 +77,18 @@ describe("recommendation refill reservation", () => {
     expect(fixture.queries[1]).not.toContain(
       "FROM backlink_opportunities AS opportunity",
     );
+    expect(fixture.queries[1]).toContain(
+      "contract.score_model_version=",
+    );
+    expect(fixture.queries[1]).toContain(
+      "'recommendation-commercial-fit.v4'",
+    );
+    expect(fixture.queries[3]).toContain("'providerOperationId'");
+    expect(fixture.queries[3]).toContain(
+      "'providerBudgetAuthorization'",
+    );
+    expect(fixture.queries[3]).toContain("'supplyMode'");
+    expect(fixture.queries[3]).not.toContain("ELSE NULL");
   });
 
   it.each([
@@ -104,7 +118,7 @@ describe("recommendation refill reservation", () => {
   );
 
   it.each([0, 1, 2, 3, 4, 5])(
-    "retries the same failed job at retry count %i when provider state is settled",
+    "retries the same failed job at retry count %i, including pre-batch accepted tasks",
     async (retryCount) => {
     const fixture = clientWithRows([
       [{ visiblePoolGeneration: 1, visiblePoolState: "building" }],
@@ -114,7 +128,7 @@ describe("recommendation refill reservation", () => {
         retry_count: retryCount,
         refill_window_key: "commercial-refill:project:context:t1:r1:w1",
       }],
-      [{ blocked: false }],
+      [{ recoverable: true }],
       [{ id: input.jobId }],
     ]);
 
@@ -136,25 +150,94 @@ describe("recommendation refill reservation", () => {
       "request.status IN ('running','unknown_charge')",
     );
     expect(fixture.queries[3]).toContain(
+      "request.provider_task_id IS NOT NULL",
+    );
+    expect(fixture.queries[3]).toContain(
       "lease.status='unknown_charge'",
     );
     expect(fixture.queries[3]).toContain(
-      "lease.lease_expires_at>now()",
-    );
-    expect(fixture.queries[3]).not.toContain("request.status='failed'");
-    expect(fixture.queries[3]).not.toContain(
-      "backlink_commercial_discovery_batches",
+      "lease.lease_expires_at<=now()",
     );
     expect(fixture.queries[3]).toContain(
-      "usage.reservation_key LIKE $4||':%'",
+      "usage.reservation_key=request.budget_reservation_id",
     );
+    expect(fixture.queries[3]).not.toContain("request.status='failed'");
+    const acceptedRecoverySql =
+      fixture.queries[3]?.split(
+        "completed_provider_checkpoint AS MATERIALIZED",
+      )[0] ?? "";
+    expect(acceptedRecoverySql).toContain(
+      "FROM backlink_jobs AS failed_job",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "JOIN backlink_recommendation_refills AS failed_refill",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "failed_refill.recommendation_context_version_id=$5",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "failed_refill.visible_pool_generation=$6",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "request.request_id LIKE failed_refill.refill_window_key||':%'",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "'commercial-refill-operation:'||failed_job.id::text||",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "':discovery:'||failed_refill.refill_window_key||':%'",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "request.created_at>=failed_job.created_at",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "backlink_commercial_discovery_blueprints AS blueprint",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "{__growthosDiscoveryPlannerLineage,blueprintId}",
+    );
+    expect(acceptedRecoverySql).toContain(
+      "{__growthosDiscoveryPlannerLineage,queryId}",
+    );
+    expect(acceptedRecoverySql).toContain("~'^[0-9a-f]{64}$'");
+    expect(acceptedRecoverySql).toContain(
+      "conflicting.refill_job_id<>failed_job.id",
+    );
+    expect(acceptedRecoverySql).not.toContain(
+      "FROM backlink_commercial_discovery_batches AS batch",
+    );
+    expect(acceptedRecoverySql).not.toContain("batch.refill_job_id=$4");
+    expect(fixture.queries[3]).toContain(
+      "backlink_commercial_discovery_batches",
+    );
+    expect(fixture.queries[3]).toContain("batch.refill_job_id=$4");
+    expect(fixture.queries[3]).toContain(
+      "batch.project_context_version_id=$5",
+    );
+    expect(fixture.queries[3]).toContain(
+      "batch.visible_pool_generation=$6",
+    );
+    expect(fixture.queries[3]).toContain("request.request_id LIKE");
+    expect(fixture.queries[3]).toContain("batch.idempotency_key");
+    expect(fixture.queries[3]).toContain("'^commercial-discovery:'");
+    expect(fixture.queries[3]).toContain(
+      "'commercial-refill:'||$3::text||':'||$5::text||",
+    );
+    expect(fixture.queries[3]).toContain(
+      "':g'||$6::text||':%'",
+    );
+    expect(fixture.queries[4]).toContain("'providerOperationId'");
+    expect(fixture.queries[4]).toContain(
+      "'providerBudgetAuthorization'",
+    );
+    expect(fixture.queries[4]).toContain("'supplyMode'");
+    expect(fixture.queries[4]).not.toContain("ELSE NULL");
     },
   );
 
   it.each([
-    ["a provider side effect exists", 0, true],
-    ["the failed job exhausted recovery", 6, false],
-  ])("does not retry when %s", async (_label, retryCount, blocked) => {
+    ["a provider side effect is ambiguous", 0, false],
+  ])("does not retry when %s", async (_label, retryCount, recoverable) => {
     const rows = [
       [{ visiblePoolGeneration: 1, visiblePoolState: "building" }],
       [{ count: 0 }],
@@ -163,7 +246,7 @@ describe("recommendation refill reservation", () => {
         retry_count: retryCount,
         refill_window_key: "commercial-refill:project:context:t1:r1:w1",
       }],
-      ...(retryCount < 6 ? [[{ blocked }]] : []),
+      [{ recoverable }],
     ];
     const fixture = clientWithRows(rows);
 
@@ -174,7 +257,92 @@ describe("recommendation refill reservation", () => {
       readyCount: 0,
       jobId: input.jobId,
     });
-    expect(fixture.queries).toHaveLength(retryCount < 6 ? 4 : 3);
+    expect(fixture.queries).toHaveLength(4);
+  });
+
+  it("does not retry an exhausted job after checkpoint recovery was attempted", async () => {
+    const fixture = clientWithRows([
+      [{ visiblePoolGeneration: 1, visiblePoolState: "building" }],
+      [{ count: 0 }],
+      [{
+        status: "failed",
+        retry_count: 6,
+        result_summary: {
+          completedProviderCheckpointRecoveryAttempted: true,
+        },
+      }],
+    ]);
+
+    await expect(
+      reserveRecommendationRefillJob(fixture.client, input),
+    ).resolves.toEqual({
+      status: "already_started",
+      readyCount: 0,
+      jobId: input.jobId,
+    });
+    expect(fixture.queries).toHaveLength(3);
+  });
+
+  it("does not retry an exhausted job without a completed provider checkpoint", async () => {
+    const fixture = clientWithRows([
+      [{ visiblePoolGeneration: 1, visiblePoolState: "building" }],
+      [{ count: 0 }],
+      [{
+        status: "failed",
+        retry_count: 6,
+        result_summary: {},
+      }],
+      [{
+        recoverable: true,
+        completedProviderCheckpoint: false,
+      }],
+    ]);
+
+    await expect(
+      reserveRecommendationRefillJob(fixture.client, input),
+    ).resolves.toEqual({
+      status: "already_started",
+      readyCount: 0,
+      jobId: input.jobId,
+    });
+    expect(fixture.queries).toHaveLength(4);
+  });
+
+  it("allows one recovery from a completed provider checkpoint at the retry cap", async () => {
+    const fixture = clientWithRows([
+      [{ visiblePoolGeneration: 1, visiblePoolState: "building" }],
+      [{ count: 0 }],
+      [{
+        status: "failed",
+        retry_count: 6,
+        result_summary: {},
+      }],
+      [{
+        recoverable: true,
+        completedProviderCheckpoint: true,
+      }],
+      [{ id: input.jobId }],
+    ]);
+
+    await expect(
+      reserveRecommendationRefillJob(fixture.client, input),
+    ).resolves.toEqual({
+      status: "started",
+      readyCount: 0,
+      jobId: input.jobId,
+    });
+    expect(fixture.queries).toHaveLength(5);
+    expect(fixture.queries[3]).toContain(
+      "completed_provider_checkpoint",
+    );
+    expect(fixture.queries[3]).toContain(
+      "provider_request.status='succeeded'",
+    );
+    expect(fixture.queries[3]).toContain("usage.status='settled'");
+    expect(fixture.queries[3]).toContain("lease.status='completed'");
+    expect(fixture.queries[4]).toContain(
+      "completedProviderCheckpointRecoveryAttempted",
+    );
   });
 
   it("allows a bounded recovery after a reconciled provider failure", async () => {
@@ -186,7 +354,7 @@ describe("recommendation refill reservation", () => {
         retry_count: 3,
         refill_window_key: "commercial-refill:project:context:t1:r1:w1",
       }],
-      [{ blocked: false }],
+      [{ recoverable: true }],
       [{ id: input.jobId }],
     ]);
 

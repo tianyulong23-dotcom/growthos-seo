@@ -1,7 +1,8 @@
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_camel
 
 from app.modules.performance.domain import PerformanceStatus
 
@@ -17,6 +18,19 @@ PerformanceSort = Literal[
     "change",
 ]
 SortOrder = Literal["asc", "desc"]
+PerformanceBacklinkView = Literal[
+    "all",
+    "placements",
+    "candidate",
+    "confirmed",
+    "pending_verification",
+    "active",
+    "suspected_changed",
+    "changed",
+    "suspected_lost",
+    "lost",
+    "recovered",
+]
 
 
 class PerformanceMetrics(BaseModel):
@@ -130,3 +144,122 @@ class PerformanceArticleDetail(BaseModel):
 class PerformanceSyncResponse(BaseModel):
     sync: PerformanceSyncState
     target_count: int
+
+
+class PerformanceBacklinkContract(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+
+class PerformanceBacklinkFailure(PerformanceBacklinkContract):
+    status: Literal["none", "failed"]
+    code: str | None
+
+
+class PerformanceBacklinkCandidate(PerformanceBacklinkContract):
+    record_type: Literal["candidate"]
+    display_state: Literal["candidate"]
+    candidate_id: str
+    opportunity_id: str | None
+    reply_id: str | None
+    lineage_status: Literal["OUTREACH_DERIVED", "UNATTRIBUTED"]
+    source_page_url: str | None
+    target_url: str
+    candidate_status: str
+    match_status: str
+    validation_status: str
+    evidence_source: Literal["DIRECT_VALIDATION"]
+    version: int
+    created_at: datetime
+    counts_toward_kpi: Literal[False]
+
+
+class PerformanceBacklinkPlacement(PerformanceBacklinkContract):
+    record_type: Literal["placement"]
+    display_state: Literal["confirmed", "changed", "lost", "recovered"]
+    placement_id: str
+    candidate_id: str
+    opportunity_id: str | None
+    reply_id: str | None
+    lineage_status: Literal["OUTREACH_DERIVED", "UNATTRIBUTED"]
+    source_page_url: str
+    target_url: str
+    initial_validation_status: str
+    health_status: str
+    monitoring_state: Literal[
+        "pending_verification",
+        "active",
+        "suspected_changed",
+        "changed",
+        "suspected_lost",
+        "lost",
+    ]
+    monitoring_status: str
+    latest_observed_at: datetime | None
+    last_successful_observation_at: datetime | None
+    next_check_at: datetime | None
+    freshness: Literal["fresh", "stale", "unknown"]
+    latest_failure: PerformanceBacklinkFailure
+    evidence_source: Literal["DIRECT_MONITOR"]
+    version: int
+    created_at: datetime
+    counts_toward_kpi: Literal[True]
+
+
+class PerformanceBacklinkPlacementSummary(PerformanceBacklinkContract):
+    total: int
+    pending_verification: int
+    active: int
+    suspected_changed: int
+    changed: int
+    suspected_lost: int
+    lost: int
+    recovered: int
+
+
+class PerformanceBacklinkCandidateSummary(PerformanceBacklinkContract):
+    total: int
+    counts_toward_kpi: Literal[False]
+
+
+class PerformanceBacklinkEvidenceSummary(PerformanceBacklinkContract):
+    source: Literal["DIRECT_MONITOR"]
+    data_cutoff: datetime | None
+    freshness: Literal["fresh", "stale", "unknown"]
+    last_successful_observation_at: datetime | None
+    latest_attempt_at: datetime | None
+    latest_attempt_status: Literal[
+        "idle",
+        "scheduled",
+        "running",
+        "retry_wait",
+        "failed",
+        "completed",
+    ]
+    latest_failure: PerformanceBacklinkFailure
+
+
+class PerformanceBacklinkSummary(PerformanceBacklinkContract):
+    placements: PerformanceBacklinkPlacementSummary
+    candidates: PerformanceBacklinkCandidateSummary
+    evidence: PerformanceBacklinkEvidenceSummary
+
+
+class PerformanceBacklinkMeta(PerformanceBacklinkContract):
+    organization_id: str
+    workspace_id: str
+    website_project_id: str
+    request_id: str
+    schema_version: Literal["backlinks.v1"]
+    generated_at: datetime
+
+
+class PerformanceBacklinksResponse(PerformanceBacklinkContract):
+    items: list[PerformanceBacklinkCandidate | PerformanceBacklinkPlacement]
+    next_cursor: str | None
+    has_more: bool
+    summary: PerformanceBacklinkSummary
+    meta: PerformanceBacklinkMeta

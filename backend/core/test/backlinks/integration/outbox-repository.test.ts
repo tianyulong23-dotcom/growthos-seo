@@ -110,4 +110,27 @@ describe.skipIf(databaseUrl === undefined)("BL-AI-030 Outbox Repository", () => 
       published: true,
     });
   });
+
+  it("claims only the explicitly authorized recovery event", async () => {
+    const authorized = event(20);
+    const unrelated = event(21);
+    await repositoryA.append(authorized);
+    await repositoryA.append(unrelated);
+
+    const claimed = await repositoryA.claim({
+      workerId: "recovery-worker",
+      limit: 1,
+      eventId: authorized.eventId,
+    });
+
+    expect(claimed.map((item) => item.eventId)).toEqual([
+      authorized.eventId,
+    ]);
+    expect((await clientA.query(
+      "SELECT id,status FROM backlink_outbox_events ORDER BY id",
+    )).rows).toEqual([
+      { id: authorized.eventId, status: "processing" },
+      { id: unrelated.eventId, status: "pending" },
+    ]);
+  });
 });

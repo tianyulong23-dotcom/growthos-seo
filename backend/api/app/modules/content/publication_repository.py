@@ -1046,6 +1046,18 @@ class PublicationRepository:
                 reason="remote_publish_confirmed",
                 version_number=row.version_number,
             )
+            await session.flush()
+            from app.modules.projects.service import (
+                refresh_project_promotion_target_from_authority,
+            )
+
+            await refresh_project_promotion_target_from_authority(
+                session,
+                self.sessions,
+                organization_id=row.organization_id,
+                project_id=row.project_id,
+                created_by=audit.actor_id,
+            )
             await session.commit()
             await session.refresh(row)
             return row
@@ -1197,6 +1209,18 @@ class PublicationRepository:
                 after={"status": "published", "remote_post_id": remote_post_id},
                 reason="remote_state_confirmed",
                 version_number=row.version_number,
+            )
+            await session.flush()
+            from app.modules.projects.service import (
+                refresh_project_promotion_target_from_authority,
+            )
+
+            await refresh_project_promotion_target_from_authority(
+                session,
+                self.sessions,
+                organization_id=organization_id,
+                project_id=project_id,
+                created_by=audit.actor_id,
             )
             await session.commit()
             await session.refresh(row)

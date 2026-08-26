@@ -53,6 +53,26 @@ func SiteProfileReady(profile SiteProfile) bool {
 		len(profile.ValuePropositions) > 0
 }
 
+func SiteProfileHasSubstantiveData(profile SiteProfile) bool {
+	return strings.TrimSpace(profile.BusinessType) != "" ||
+		strings.TrimSpace(profile.BusinessSummary) != "" ||
+		len(profile.ProductsServices) > 0 ||
+		len(profile.TargetAudiences) > 0 ||
+		len(profile.ValuePropositions) > 0 ||
+		len(profile.UseCases) > 0 ||
+		len(profile.ContentTopics) > 0 ||
+		len(profile.ConversionActions) > 0 ||
+		len(profile.Evidence) > 0
+}
+
+func siteProfileForPersistence(task Task, result Result) (SiteProfile, bool) {
+	profile := BuildSiteProfile(task, result.Pages)
+	if result.SiteProfile != nil {
+		profile = *result.SiteProfile
+	}
+	return profile, SiteProfileHasSubstantiveData(profile)
+}
+
 type sourcedValue struct {
 	Value     string
 	SourceURL string

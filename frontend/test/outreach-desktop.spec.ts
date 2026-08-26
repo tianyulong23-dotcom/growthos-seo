@@ -11,6 +11,7 @@ const {
   contactId,
   draftId,
   draftVersionId,
+  sendIntentId,
   replyCandidateId,
 } = outreachFixture
 
@@ -129,6 +130,18 @@ test("desktop outreach path composes from an opportunity, sends, syncs a reply, 
     gmailConnectionId: "gmail-connection-e2e",
     messagePurpose: "INITIAL_OUTREACH",
     followUpIndex: 0,
+    readinessSnapshot: expect.objectContaining({
+      schemaVersion: "gmail-send-readiness.v1",
+      policyVersion: "gmail-send-policy.v1",
+      snapshotVersion:
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }),
+    humanConfirmation: {
+      confirmed: true,
+      confirmedAt: expect.any(String),
+      readinessSnapshotVersion:
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    },
   })
 
   const replyMatchRequest = session.capturedRequests.find(
@@ -141,6 +154,81 @@ test("desktop outreach path composes from an opportunity, sends, syncs a reply, 
     reason: "Confirmed against the local E2E opportunity fixture.",
   })
   expect(session.unexpectedNetwork).toEqual([])
+})
+
+test("phase 9 persists readiness confirmation before accepted send and exposes synced mail", async ({
+  page,
+}) => {
+  const session = await installOutreachApiFixtures(page)
+
+  await page.goto(`/projects/${projectKey}/backlinks/drafts/${draftId}`)
+  await expect(page.getByLabel("邮件主题")).toHaveValue(
+    "E2E collaboration proposal"
+  )
+
+  await page.getByRole("button", { name: "人工批准" }).click()
+  await expect(page.getByText("当前草稿版本已人工批准。")).toBeVisible()
+  await page.getByRole("checkbox").check()
+  await page.getByRole("button", { name: "最终确认并发送" }).click()
+
+  await expect(page.getByText("Gmail Provider 已接受")).toBeVisible()
+  await expect(page.getByText("gmail-message-e2e")).toBeVisible()
+  await expect
+    .poll(
+      () =>
+        session.capturedRequests.filter(
+          (request) =>
+            request.method === "GET" &&
+            request.pathname.endsWith(`/send-intents/${sendIntentId}`)
+        ).length
+    )
+    .toBeGreaterThanOrEqual(2)
+
+  const preflightRequest = session.capturedRequests.find(
+    (request) =>
+      request.method === "POST" &&
+      request.pathname.endsWith(`/drafts/${draftId}/send-preflight`)
+  )
+  const sendRequest = session.capturedRequests.find(
+    (request) =>
+      request.method === "POST" &&
+      request.pathname.endsWith(`/drafts/${draftId}/send-intents`)
+  )
+
+  expect(preflightRequest?.body).toEqual({
+    approvedDraftVersionId: draftVersionId,
+    contactId,
+    contactVersion: 1,
+    gmailConnectionId: "gmail-connection-e2e",
+    messagePurpose: "INITIAL_OUTREACH",
+    followUpIndex: 0,
+  })
+  expect(sendRequest?.idempotencyKey).toBeTruthy()
+  expect(sendRequest?.body).toEqual({
+    approvedDraftVersionId: draftVersionId,
+    contactId,
+    contactVersion: 1,
+    gmailConnectionId: "gmail-connection-e2e",
+    messagePurpose: "INITIAL_OUTREACH",
+    followUpIndex: 0,
+    readinessSnapshot: expect.objectContaining({
+      schemaVersion: "gmail-send-readiness.v1",
+      policyVersion: "gmail-send-policy.v1",
+      snapshotVersion:
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }),
+    humanConfirmation: {
+      confirmed: true,
+      confirmedAt: expect.any(String),
+      readinessSnapshotVersion:
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    },
+  })
+
+  await page.goto(`/projects/${projectKey}/backlinks/email`)
+  await expect(
+    page.getByText("Re: E2E collaboration", { exact: true })
+  ).toBeVisible()
 })
 
 test("recommendation generation reconnects one server batch across navigation and refresh", async ({

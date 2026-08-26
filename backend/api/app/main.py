@@ -20,17 +20,21 @@ from app.core.config import Settings, get_settings
 from app.core.platform_auth import HmacPlatformAuthenticationAuthority
 from app.core.secure_logging import configure_sensitive_logging
 from app.db.session import session_factory
-from app.modules.audit.service import AuditService, build_audit_service
 from app.modules.agent.service import build_agent_service
-from app.modules.content.service import build_content_service
+from app.modules.audit.service import AuditService, build_audit_service
 from app.modules.content.asset_service import build_asset_dispatcher
 from app.modules.content.publication_orchestrator import build_publication_orchestrator
-from app.modules.content_plan.d6_service import build_content_plan_d6_service
+from app.modules.content.service import build_content_service
 from app.modules.content_plan.batch_service import build_content_plan_batch_service
+from app.modules.content_plan.d6_service import build_content_plan_d6_service
 from app.modules.keywords.service import KeywordService, build_keyword_service
 from app.modules.onboarding.service import OnboardingService, build_onboarding_service
 from app.modules.performance.service import PerformanceService, build_performance_service
 from app.modules.projects.authority import SQLAlchemyWebsiteProjectAuthority
+from app.modules.projects.backlinks_projection import (
+    ProjectContextProjectionDispatcher,
+    ProjectContextProjector,
+)
 from app.modules.projects.service import ProjectService, build_project_service
 from app.workflows.worker import get_crawler_worker_launcher
 
@@ -215,10 +219,54 @@ async def dispatch_content_plan_preparations() -> None:
         await asyncio.sleep(5)
 
 
+async def dispatch_backlinks_project_contexts(
+    dispatcher: ProjectContextProjectionDispatcher,
+    interval_seconds: float,
+) -> None:
+    while True:
+        try:
+            await dispatcher.dispatch_pending()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to dispatch Website Project context projections")
+        await asyncio.sleep(max(interval_seconds, 1))
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     settings = get_settings()
     configure_sensitive_logging(settings)
+    if not settings.platform_background_dispatch_enabled:
+        try:
+            yield
+        finally:
+            owned_gateway = getattr(
+                application.state,
+                "owned_backlinks_gateway",
+                None,
+            )
+            if owned_gateway is not None:
+                await owned_gateway.aclose()
+        return
+    projection_dispatcher = getattr(
+        application.state,
+        "backlinks_project_context_dispatcher",
+        None,
+    )
+    projection_dispatch_task = (
+        asyncio.create_task(
+            dispatch_backlinks_project_contexts(
+                projection_dispatcher,
+                settings.backlinks_project_projection_dispatch_interval_seconds,
+            )
+        )
+        if projection_dispatcher is not None
+        else None
+    )
+    application.state.backlinks_project_context_dispatch_task = (
+        projection_dispatch_task
+    )
     worker_launcher = get_crawler_worker_launcher()
     audit_service = build_audit_service()
     dispatch_task = asyncio.create_task(
@@ -314,6 +362,8 @@ async def lifespan(application: FastAPI):
         keyword_dispatch_task.cancel()
         keyword_reconcile_task.cancel()
         performance_sync_task.cancel()
+        if projection_dispatch_task is not None:
+            projection_dispatch_task.cancel()
         with suppress(asyncio.CancelledError):
             await dispatch_task
         with suppress(asyncio.CancelledError):
@@ -338,6 +388,10 @@ async def lifespan(application: FastAPI):
             await keyword_reconcile_task
         with suppress(asyncio.CancelledError):
             await performance_sync_task
+        if projection_dispatch_task is not None:
+            with suppress(asyncio.CancelledError):
+                await projection_dispatch_task
+        application.state.backlinks_project_context_dispatch_task = None
         await worker_launcher.stop()
         owned_gateway = getattr(application.state, "owned_backlinks_gateway", None)
         if owned_gateway is not None:
@@ -354,7 +408,9 @@ def create_platform_context_resolver(
     ):
         return LocalDevelopmentPlatformContextResolver(
             projects=projects,
-            organization_id=settings.default_organization_id,
+            organization_id=settings.local_product_organization_id,
+            workspace_id=settings.local_product_workspace_id,
+            user_id=settings.local_product_user_id,
         )
     if (
         settings.platform_auth_signing_key is None
@@ -390,11 +446,54 @@ def create_app(
         timeout_seconds=settings.backlinks_request_timeout_seconds,
     )
     application.state.backlinks_gateway = gateway
+    application.state.backlinks_project_context_dispatch_task = None
+    project_context_dispatcher = None
+    if settings.backlinks_project_projection_enabled:
+        projector = ProjectContextProjector(session_factory)
+        application.state.backlinks_project_context_projector = projector
+        project_context_dispatcher = ProjectContextProjectionDispatcher(
+            session_factory,
+            gateway,
+        )
+        application.state.backlinks_project_context_dispatcher = (
+            project_context_dispatcher
+        )
+    else:
+        application.state.backlinks_project_context_projector = None
+        application.state.backlinks_project_context_dispatcher = None
     application.state.backlinks_runtime_status = BacklinksRuntimeStatus(
+        core_api_health_url=(
+            f"{settings.backlinks_private_base_url.rstrip('/')}/health"
+        ),
+        worker_health_url=settings.backlinks_worker_health_url,
         address=settings.temporal_address,
         namespace=settings.temporal_namespace,
         task_queue=settings.backlinks_task_queue,
         timeout_seconds=settings.backlinks_runtime_status_timeout_seconds,
+        expected_build_id=settings.backlinks_expected_build_id,
+        runtime_mode=settings.growthos_runtime_mode,
+        background_dispatch_enabled=(
+            settings.platform_background_dispatch_enabled
+        ),
+        project_context_projection_enabled=(
+            settings.backlinks_project_projection_enabled
+        ),
+        project_context_dispatcher_running=lambda: (
+            (
+                task := getattr(
+                    application.state,
+                    "backlinks_project_context_dispatch_task",
+                    None,
+                )
+            )
+            is not None
+            and not task.done()
+        ),
+        project_context_dispatcher_health=(
+            project_context_dispatcher.health_snapshot
+            if project_context_dispatcher is not None
+            else None
+        ),
     )
     application.state.platform_context_resolver = (
         platform_context_resolver or create_platform_context_resolver(settings)
@@ -402,6 +501,7 @@ def create_app(
     application.state.oauth_callback_frontend_origin = (
         settings.backlinks_oauth_frontend_origin
     )
+    application.state.oauth_callback_url = settings.backlinks_oauth_callback_url
     application.state.oauth_callback_cookie_secure = settings.app_env == "production"
     application.state.owned_backlinks_gateway = gateway if owns_gateway else None
     application.add_middleware(

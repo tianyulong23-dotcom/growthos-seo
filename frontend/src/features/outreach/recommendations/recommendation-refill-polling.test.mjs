@@ -87,17 +87,15 @@ test("LOCAL-PRODUCT-032 keeps one server batch alive beyond 60 seconds", async (
   assert.deepEqual(delays, [1_500, 2_500])
 })
 
-test("LOCAL-PRODUCT-032 caps retry backoff without parallel polling", async () => {
+test("STAGE2Q stops high-frequency polling after eight consecutive read errors", async () => {
   const delays = []
   let calls = 0
-  const controller = new AbortController()
 
   const reason = await pollRecommendationRefill({
-    signal: controller.signal,
+    signal: new AbortController().signal,
     sleep: async (delay) => {
       delays.push(delay)
-      if (delays.length === 8) controller.abort()
-      return !controller.signal.aborted
+      return true
     },
     getInventory: async () => {
       calls += 1
@@ -108,18 +106,43 @@ test("LOCAL-PRODUCT-032 caps retry backoff without parallel polling", async () =
     onTerminal: () => undefined,
   })
 
-  assert.equal(reason, "aborted")
+  assert.equal(reason, "background")
   assert.equal(calls, 8)
   assert.equal(Math.max(...delays), 15_000)
   assert.equal(delays.at(-1), recommendationRefillPollDelaysMs.at(-1))
 })
 
-test("LOCAL-PRODUCT-032 recognizes contact processing as the same active batch", () => {
+test("STAGE2Q stops active polling after two minutes while the server continues", async () => {
+  let now = 0
+  let calls = 0
+
+  const reason = await pollRecommendationRefill({
+    signal: new AbortController().signal,
+    now: () => now,
+    sleep: async (delay) => {
+      now += delay
+      return true
+    },
+    getInventory: async () => {
+      calls += 1
+      return snapshot()
+    },
+    onInventory: () => undefined,
+    shouldContinue: () => true,
+    onTerminal: () => undefined,
+  })
+
+  assert.equal(reason, "background")
+  assert.ok(now >= 120_000)
+  assert.ok(calls > 1)
+})
+
+test("LOCAL-PRODUCT-032 does not keep recommendation refill active for contact processing", () => {
   assert.equal(
     isRecommendationRefillActive(
       snapshot({
         refillInFlight: false,
-        refillState: "waiting_contact",
+        refillState: "completed",
         refillJob: {
           id: "refill-job-032",
           status: "success",
@@ -137,7 +160,7 @@ test("LOCAL-PRODUCT-032 recognizes contact processing as the same active batch",
       }),
       Date.parse("2026-08-10T02:01:00.000Z")
     ),
-    true
+    false
   )
 })
 
@@ -145,6 +168,8 @@ test("LOCAL-PRODUCT-038 keeps a future scheduled contact retry connected", () =>
   const now = Date.parse("2026-08-12T02:00:00.000Z")
   const inventory = snapshot({
     stage: "contact",
+    refillInFlight: false,
+    refillState: "completed",
     refillJob: {
       id: "refill-job-038",
       status: "success",
@@ -164,7 +189,7 @@ test("LOCAL-PRODUCT-038 keeps a future scheduled contact retry connected", () =>
     recommendationContactBatchActivity(inventory, now),
     "waiting_retry"
   )
-  assert.equal(isRecommendationRefillActive(inventory, now), true)
+  assert.equal(isRecommendationRefillActive(inventory, now), false)
 })
 
 test("LOCAL-PRODUCT-038 keeps paused operations non-active without losing the operation", () => {
@@ -203,7 +228,7 @@ test("LOCAL-PRODUCT-037 stops only on an explicit terminal state", () => {
   )
 })
 
-test("LOCAL-PRODUCT-038 does not present an overdue historical contact batch as actively processing", () => {
+test("LOCAL-PRODUCT-038 keeps an independently running refill active despite stale contact work", () => {
   const now = Date.parse("2026-08-12T02:00:00.000Z")
   const inventory = snapshot({
     stage: "contact",
@@ -212,9 +237,9 @@ test("LOCAL-PRODUCT-038 does not present an overdue historical contact batch as 
     serverUpdatedAt: "2026-08-11T05:42:24.625Z",
     refillJob: {
       id: "refill-job-038",
-      status: "success",
-      progress: 100,
-      updatedAt: "2026-08-07T08:21:21.000Z",
+      status: "running",
+      progress: 60,
+      updatedAt: "2026-08-12T01:59:30.000Z",
     },
     contactBatch: {
       id: "contact-batch-038",
@@ -229,7 +254,7 @@ test("LOCAL-PRODUCT-038 does not present an overdue historical contact batch as 
     recommendationContactBatchActivity(inventory, now),
     "recovery_required"
   )
-  assert.equal(isRecommendationRefillActive(inventory, now), false)
+  assert.equal(isRecommendationRefillActive(inventory, now), true)
 })
 
 test("LOCAL-PRODUCT-038 does not treat a stale operation id as live work", () => {
@@ -250,4 +275,33 @@ test("LOCAL-PRODUCT-038 does not treat a stale operation id as live work", () =>
   })
 
   assert.equal(isRecommendationRefillActive(inventory, now), false)
+})
+
+test("Phase 5 discards a late inventory response after a project switch", async () => {
+  const controller = new AbortController()
+  let resolveInventory
+  let inventoryCalls = 0
+  let terminalCalls = 0
+  const inventoryPromise = new Promise((resolve) => {
+    resolveInventory = resolve
+  })
+
+  const polling = pollRecommendationRefill({
+    signal: controller.signal,
+    getInventory: async () => inventoryPromise,
+    onInventory: () => {
+      inventoryCalls += 1
+    },
+    shouldContinue: () => false,
+    onTerminal: () => {
+      terminalCalls += 1
+    },
+  })
+
+  controller.abort()
+  resolveInventory(snapshot())
+
+  assert.equal(await polling, "aborted")
+  assert.equal(inventoryCalls, 0)
+  assert.equal(terminalCalls, 0)
 })

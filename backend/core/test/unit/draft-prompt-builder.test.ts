@@ -82,6 +82,12 @@ describe("BL-AI-093 Draft Prompt Builder", () => {
     expect(prompt.systemInstruction).toContain("Do not invent traffic");
     expect(prompt.systemInstruction).toContain("commercial commitments");
     expect(prompt.systemInstruction).toContain("contact names");
+    expect(prompt.systemInstruction).toContain(
+      "only in factsUsed.evidenceIds",
+    );
+    expect(prompt.systemInstruction).toContain(
+      "Never include Evidence IDs",
+    );
     expect(prompt.userContext).toMatchObject({
       project: {
         products: ["Backlink workflow"],

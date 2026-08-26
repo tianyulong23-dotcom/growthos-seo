@@ -78,7 +78,8 @@ describe("BusinessProfileForm", () => {
     fireEvent.change(screen.getByLabelText("产品与服务"), {
       target: { value: "Analytics\nReporting" },
     })
-    fireEvent.click(screen.getByRole("button", { name: "保存更改" }))
+    expect(screen.getByText("待确认")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "确认并保存" }))
 
     await waitFor(() => {
       expect(onSave).toHaveBeenCalledWith({
@@ -91,6 +92,25 @@ describe("BusinessProfileForm", () => {
         aiContentRules: "Use a concise tone.",
       })
     })
+    expect(screen.getAllByText("已确认")).toHaveLength(2)
+  })
+
+  it("shows an already confirmed profile without changing its fields", () => {
+    render(
+      <BusinessProfileForm
+        project={{
+          ...project,
+          siteProfile: {
+            ...project.siteProfile!,
+            confirmedAt: "2026-08-19T08:00:00Z",
+          },
+        }}
+        onSave={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText("已确认")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "确认并保存" })).toBeTruthy()
   })
 
   it("shows only the editable business profile fields", () => {

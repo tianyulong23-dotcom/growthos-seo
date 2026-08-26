@@ -34,10 +34,108 @@ const input: ProjectContextProjectionInput = {
   inputComplete: true,
   jobId: "018f0000-0000-7000-8000-000000000007",
   outboxEventId: "018f0000-0000-7000-8000-000000000008",
+  outreachProfile: {
+    recordId: "018f0000-0000-7000-8000-000000000009",
+    immutableFingerprint: "outreach-profile-fingerprint",
+    profile: {
+      organizationId: "018f0000-0000-7000-8000-000000000001",
+      websiteProjectId: "018f0000-0000-7000-8000-000000000003",
+      profileVersionId: "018f0000-0000-7000-8000-000000000005",
+      promotionTargetVersionId:
+        "018f0000-0000-7000-8000-000000000006",
+      keywordsAndTopics: ["home cinema"],
+      productsAndServices: ["Home cinema projector"],
+      targetUrls: ["https://awolvision.com/"],
+      targetAudiences: ["home cinema buyers"],
+      partnershipGoals: ["editorial review"],
+      market: "United States home cinema",
+      location: "US",
+      language: "en-US",
+      authorizedDiscoverySources: ["KEYWORDS"],
+      immutableFingerprint: "outreach-profile-fingerprint",
+    },
+  },
+  sharedSeoEvidence: [
+    {
+      recordId: "018f0000-0000-7000-8000-000000000010",
+      snapshot: {
+        organizationId: "018f0000-0000-7000-8000-000000000001",
+        websiteProjectId: "018f0000-0000-7000-8000-000000000003",
+        evidenceType: "site-profile",
+        sourceModule: "site-profile",
+        sourceRecordId: "018f0000-0000-7000-8000-000000000005",
+        sourceVersion: "4",
+        provider: "website-project",
+        endpoint: "website-project",
+        normalizedParameters: {},
+        requestFingerprint: "site-profile-fingerprint",
+        market: "United States home cinema",
+        location: "US",
+        language: "en-US",
+        fetchedAt: "2026-08-18T00:00:00.000Z",
+        expiresAt: "2027-08-18T00:00:00.000Z",
+        providerRequestId: "website-project:site-profile",
+        providerTaskId: null,
+        costMicros: 0,
+        artifactRef: "website-project://site-profile",
+        status: "ready",
+      },
+    },
+    {
+      recordId: "018f0000-0000-7000-8000-000000000011",
+      snapshot: {
+        organizationId: "018f0000-0000-7000-8000-000000000001",
+        websiteProjectId: "018f0000-0000-7000-8000-000000000003",
+        evidenceType: "keywords",
+        sourceModule: "keywords",
+        sourceRecordId: "018f0000-0000-7000-8000-000000000011",
+        sourceVersion: "4",
+        provider: "website-project",
+        endpoint: "website-project",
+        normalizedParameters: {},
+        requestFingerprint: "keywords-fingerprint",
+        market: "United States home cinema",
+        location: "US",
+        language: "en-US",
+        fetchedAt: "2026-08-18T00:00:00.000Z",
+        expiresAt: "2027-08-18T00:00:00.000Z",
+        providerRequestId: "website-project:keywords",
+        providerTaskId: null,
+        costMicros: 0,
+        artifactRef: "website-project://keywords",
+        status: "ready",
+      },
+    },
+  ],
+  generationInputPins: {
+    recordId: "018f0000-0000-7000-8000-000000000012",
+    outreachProfileRecordId:
+      "018f0000-0000-7000-8000-000000000009",
+    immutableFingerprint: "generation-pin-fingerprint",
+    pins: {
+      organizationId: "018f0000-0000-7000-8000-000000000001",
+      websiteProjectId: "018f0000-0000-7000-8000-000000000003",
+      projectContextVersion: 4,
+      siteProfileVersionId: "018f0000-0000-7000-8000-000000000005",
+      outreachProfileVersionId:
+        "018f0000-0000-7000-8000-000000000005",
+      promotionTargetVersionId:
+        "018f0000-0000-7000-8000-000000000006",
+      keywordEvidenceSnapshotIds: [
+        "018f0000-0000-7000-8000-000000000011",
+      ],
+      sharedEvidenceSnapshotIds: [
+        "018f0000-0000-7000-8000-000000000010",
+        "018f0000-0000-7000-8000-000000000011",
+      ],
+      market: "United States home cinema",
+      qualificationContractVersion: "recommendation-qualification.v1",
+    },
+  },
 };
 
 describe("Website Project runtime governance projection", () => {
-  it("scopes project-analysis outbox deduplication by Website Project", async () => {
+  it("projects analysis without implicitly requesting a recommendation refill", async () => {
     const queries: Readonly<{
       sql: string;
       values: readonly unknown[];
@@ -58,29 +156,12 @@ describe("Website Project runtime governance projection", () => {
               return result();
             }
             if (
+              sql.includes("INSERT INTO backlinks.backlink_")
+              ||
               sql.startsWith("INSERT INTO backlink_jobs")
               || sql.startsWith("INSERT INTO backlink_outbox_events")
             ) {
               return result([{ id: values[0] }]);
-            }
-            if (
-              sql.includes("WITH guard AS")
-              && sql.includes("recommendation.refill")
-            ) {
-              return result([{
-                state: "completed",
-                requestHash: values[7],
-                responseBody: {
-                  operationId: values[10],
-                  jobId: values[9],
-                  workflowId: values[14],
-                  status: "queued",
-                  version: 1,
-                  visiblePoolGeneration: values[21],
-                  lifecycleEventId: values[11],
-                  auditEventId: values[12],
-                },
-              }]);
             }
             return result();
           },
@@ -101,19 +182,49 @@ describe("Website Project runtime governance projection", () => {
     const outbox = queries.find(({ sql }) =>
       sql.startsWith("INSERT INTO backlink_outbox_events")
     );
+    expect(outbox?.values[4]).toBe(
+      "backlinks.project-analysis.requested.v1",
+    );
     expect(outbox?.values[7]).toBe(
       `project-analysis:${input.websiteProjectId}:${input.snapshotVersion}`,
     );
-    const refill = queries.filter(({ sql }) =>
-      sql.includes("WITH guard AS") && sql.includes("recommendation.refill")
+    const demand = queries.find(({ sql }) =>
+      sql.includes("recommendation.demand.ready")
     );
-    expect(refill).toHaveLength(1);
-    expect(refill[0]?.values[15]).toBe(9);
-    expect(refill[0]?.values[16]).toBe(10);
-    expect(refill[0]?.values[17]).toBe(
-      `project-bootstrap:${input.websiteProjectId}:${input.snapshotVersion}:g1`,
+    expect(demand?.sql).toContain(
+      "'idle','idle',NULL,NULL,NULL",
     );
-    expect(refill[0]?.values[21]).toBe(1);
+    expect(demand?.sql).toContain(
+      "'authorization_gate_removed'::text \"policyAction\"",
+    );
+    expect(demand?.sql).toContain(
+      "ON CONFLICT (workspace_id,idempotency_key) DO NOTHING",
+    );
+    expect(demand?.sql).toContain(
+      "'snapshotVersion',$7::integer",
+    );
+    expect(demand?.values[6]).toBe(input.snapshotVersion);
+    expect(demand?.sql).not.toContain(
+      "INSERT INTO backlink_recommendation_refills",
+    );
+    expect(demand?.sql).not.toContain("INSERT INTO backlink_jobs");
+    expect(demand?.sql).not.toContain("INSERT INTO backlink_outbox_events");
+    expect(demand?.values[11]).toBe([
+      "recommendation-demand",
+      input.websiteProjectId,
+      input.profileVersionId,
+      input.promotionTargetVersionId,
+      input.generationInputPins.immutableFingerprint,
+    ].join(":"));
+    expect(queries.some(({ sql }) =>
+      sql.includes("INSERT INTO backlink_recommendation_refills")
+      || sql.includes("'backlinks.recommendation-refill.requested.v1'")
+    )).toBe(false);
+    expect(queries.some(({ sql }) =>
+      sql.includes("backlink_provider_requests")
+      || sql.includes("backlink_provider_usage_ledger")
+      || sql.includes("backlink_provider_budgets")
+    )).toBe(false);
   });
 
   it("initializes enabled capabilities within the projected project only", async () => {
@@ -139,6 +250,9 @@ describe("Website Project runtime governance projection", () => {
                 createdAt: new Date("2026-08-05T00:00:00.000Z"),
                 createdBy: input.actorId,
               }]);
+            }
+            if (sql.includes("INSERT INTO backlinks.backlink_")) {
+              return result([{ id: values[0] }]);
             }
             return result();
           },
@@ -202,6 +316,14 @@ describe("Website Project runtime governance projection", () => {
         input.actorId,
       ],
     ]);
+    const demand = queries.find(({ sql }) =>
+      sql.includes("recommendation.demand.ready")
+    );
+    expect(demand).toBeDefined();
+    expect(queries.some(({ sql }) =>
+      sql.includes("INSERT INTO backlink_recommendation_refills")
+      || sql.includes("'backlinks.recommendation-refill.requested.v1'")
+    )).toBe(false);
     expect(queries.at(-1)?.sql).toBe("COMMIT");
   });
 });

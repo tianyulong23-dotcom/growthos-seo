@@ -1,13 +1,17 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     app_name: str = "SEO API"
+    growthos_runtime_mode: Literal["PRODUCT", "MAINTENANCE", "RECOVERY"] = (
+        "MAINTENANCE"
+    )
+    platform_background_dispatch_enabled: bool = False
     api_prefix: str = "/api/v1"
     cors_origins: list[str] = [
         "http://localhost:5173",
@@ -175,24 +179,65 @@ class Settings(BaseSettings):
     google_ads_login_customer_id: str | None = None
     google_ads_api_version: str = "v23"
     backlinks_private_base_url: str = "http://127.0.0.1:7301"
+    backlinks_worker_health_url: str = "http://127.0.0.1:7302/health"
+    backlinks_expected_build_id: str | None = None
     backlinks_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     backlinks_task_queue: str = "growthos.backlinks.v1"
     backlinks_runtime_status_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
+    backlinks_project_projection_enabled: bool = False
+    backlinks_project_projection_dispatch_interval_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=300,
+    )
     platform_auth_issuer: str = "growthos-platform-auth"
     platform_auth_signing_key: SecretStr | None = None
     platform_auth_max_token_ttl_seconds: int = Field(default=900, ge=1, le=3600)
     platform_context_signing_key: SecretStr | None = None
     platform_local_development_auth_enabled: bool = False
+    local_product_organization_id: str = "11111111-1111-4111-8111-111111111111"
+    local_product_workspace_id: str = "22222222-2222-4222-8222-222222222222"
+    local_product_user_id: str = "44444444-4444-4444-8444-444444444444"
     google_gsc_client_id: str | None = None
     google_gsc_client_secret: str | None = None
     gsc_public_api_origin: str = "http://localhost:8000"
     gsc_frontend_origin: str = "http://localhost:8080"
     backlinks_oauth_frontend_origin: str | None = None
+    backlinks_oauth_callback_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "BACKLINKS_OAUTH_CALLBACK_URL",
+            "GOOGLE_OAUTH_REDIRECT_URI",
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_runtime_mode(self) -> Self:
+        if self.growthos_runtime_mode == "PRODUCT":
+            if not self.platform_background_dispatch_enabled:
+                raise ValueError(
+                    "GROWTHOS_PRODUCT_RUNTIME_REQUIRES_BACKGROUND_DISPATCH"
+                )
+            if not self.backlinks_project_projection_enabled:
+                raise ValueError(
+                    "GROWTHOS_PRODUCT_RUNTIME_REQUIRES_BACKLINKS_PROJECT_PROJECTION"
+                )
+        else:
+            if self.platform_background_dispatch_enabled:
+                raise ValueError(
+                    "GROWTHOS_NON_PRODUCT_RUNTIME_REQUIRES_BACKGROUND_DISPATCH_DISABLED"
+                )
+            if self.backlinks_project_projection_enabled:
+                raise ValueError(
+                    "GROWTHOS_NON_PRODUCT_RUNTIME_REQUIRES_BACKLINKS_PROJECT_PROJECTION_DISABLED"
+                )
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
 

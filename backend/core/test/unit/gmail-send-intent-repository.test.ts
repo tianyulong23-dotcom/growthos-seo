@@ -4,10 +4,45 @@ import {
   PostgresqlSendIntentRepository,
   type CreateSendIntentRecordInput,
 } from "../../src/modules/backlinks/application/services/send-intent.repository.js";
+import {
+  createGmailSendReadinessSnapshot,
+} from "../../src/modules/backlinks/application/services/send-policy-gate.js";
 import type {
   BacklinkTenantPool,
   BacklinkTransactionQueryResult,
 } from "../../src/modules/backlinks/db/tenant-transaction.js";
+
+const approvalFactId = "018f0000-0000-7000-8000-000000000417";
+const gmailIdentityId = "018f0000-0000-7000-8000-000000000515";
+const readinessSnapshot = createGmailSendReadinessSnapshot({
+  evaluatedAt: new Date("2026-07-27T10:13:30.000Z"),
+  ttlSeconds: 600,
+  conditions: [
+    {
+      code: "DRAFT_APPROVAL",
+      revision:
+        "018f0000-0000-7000-8000-000000000414:"
+        + approvalFactId,
+    },
+    {
+      code: "CONTACT_VERSION",
+      revision: "018f0000-0000-7000-8000-000000000415:3",
+    },
+    {
+      code: "GMAIL_BINDING",
+      revision:
+        "018f0000-0000-7000-8000-000000000514:2:3:4:v1",
+    },
+    {
+      code: "GMAIL_IDENTITY",
+      revision: `${gmailIdentityId}:4`,
+    },
+    { code: "SUPPRESSION", revision: "CLEAR" },
+    { code: "KILL_SWITCH", revision: "8:OPEN" },
+    { code: "COOLDOWN", revision: "CLEAR" },
+    { code: "QUOTA", revision: "0/5" },
+  ],
+});
 
 const input: CreateSendIntentRecordInput = {
   organizationId: "organization-114",
@@ -32,6 +67,12 @@ const input: CreateSendIntentRecordInput = {
   minimumIntervalSeconds: 300,
   reservationTtlSeconds: 600,
   actorId: "user-114",
+  readinessSnapshot,
+  humanConfirmation: {
+    confirmed: true,
+    confirmedAt: new Date("2026-07-27T10:13:45.000Z"),
+    readinessSnapshotVersion: readinessSnapshot.snapshotVersion,
+  },
 };
 const persistedIntent = {
   sendIntentId: input.sendIntentId,
@@ -93,7 +134,7 @@ const createFakePool = (options: FakePoolOptions = {}) => {
           queries.push(sql);
           if (
             sql.includes("FROM backlinks.backlink_send_intents AS intent")
-            && sql.endsWith("FOR UPDATE")
+            && sql.endsWith("FOR UPDATE OF intent")
           ) {
             return result(options.existingIntent === undefined
               ? []
@@ -116,8 +157,7 @@ const createFakePool = (options: FakePoolOptions = {}) => {
           }
           if (sql.includes("FROM backlinks.backlink_lifecycle_events")) {
             return result([options.approvalFact ?? {
-              approvalFactId:
-                "018f0000-0000-7000-8000-000000000417",
+              approvalFactId,
               approvalActorId: input.actorId,
               approvalRecordedAt:
                 new Date("2026-07-27T10:13:00.000Z"),
@@ -139,8 +179,11 @@ const createFakePool = (options: FakePoolOptions = {}) => {
               ? []
               : [{
                   gmailConnectionVersion: 2,
-                  gmailIdentityId:
-                    "018f0000-0000-7000-8000-000000000515",
+                  connectionVersion: 2,
+                  workspaceBindingVersion: 3,
+                  projectBindingVersion: 4,
+                  externalSecretVersion: "v1",
+                  gmailIdentityId,
                   gmailIdentityVersion: 4,
                 }]);
           }
@@ -154,7 +197,9 @@ const createFakePool = (options: FakePoolOptions = {}) => {
           ) {
             return result([{
               suppressed: false,
+              suppressionRevision: null,
               sendBlocked: false,
+              sendBlockVersion: 8,
             }]);
           }
           if (
@@ -282,7 +327,16 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     });
 
     await expect(repository.create(input)).resolves.toEqual({
-      state: "draft_not_approved",
+      state: "readiness_changed",
+      changedConditions: [{
+        code: "DRAFT_APPROVAL",
+        reason: "MISSING",
+        expectedRevision:
+          `${input.approvedDraftVersionId}:${approvalFactId}`,
+        currentRevision: null,
+        retryable: true,
+        recoveryAction: "REAPPROVE_CURRENT_DRAFT",
+      }],
     });
     expect(fake.queries.some((sql) => sql.startsWith("INSERT INTO"))).toBe(
       false,
@@ -302,7 +356,40 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     });
 
     await expect(repository.create(input)).resolves.toEqual({
-      state: "draft_not_approved",
+      state: "readiness_changed",
+      changedConditions: [{
+        code: "DRAFT_APPROVAL",
+        reason: "MISSING",
+        expectedRevision:
+          `${input.approvedDraftVersionId}:${approvalFactId}`,
+        currentRevision: null,
+        retryable: true,
+        recoveryAction: "REAPPROVE_CURRENT_DRAFT",
+      }],
+    });
+    expect(fake.queries.some((sql) => sql.startsWith("INSERT INTO"))).toBe(
+      false,
+    );
+    expect(fake.queries.at(-1)).toBe("COMMIT");
+  });
+
+  it("does not create an Intent containing internal Evidence metadata", async () => {
+    const fake = createFakePool({
+      draft: {
+        ...defaultDraft,
+        bodyText:
+          "Hello, this is an approved draft. [profile:current, opportunity:current]",
+      },
+    });
+    const repository = new PostgresqlSendIntentRepository({
+      pool: fake.pool,
+    });
+
+    await expect(repository.create(input)).resolves.toEqual({
+      state: "send_policy_rejected",
+      message:
+        "The approved Draft contains internal evidence metadata. Edit and reapprove it before sending.",
+      retryAt: null,
     });
     expect(fake.queries.some((sql) => sql.startsWith("INSERT INTO"))).toBe(
       false,
@@ -362,6 +449,13 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
       sendSnapshotId: "018f0000-0000-7000-8000-000000000996",
       quotaReservationId: "018f0000-0000-7000-8000-000000000998",
       outboxEventId: "018f0000-0000-7000-8000-000000000997",
+      readinessSnapshot: {
+        ...input.readinessSnapshot,
+        conditions: input.readinessSnapshot.conditions.map((condition) =>
+          condition.code === "QUOTA"
+            ? { ...condition, revision: "999/5" }
+            : condition),
+      },
     })).resolves.toEqual({
       state: "replayed",
       intent: {
@@ -375,6 +469,40 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     expect(fake.queries.at(-1)).toBe("COMMIT");
   });
 
+  it("creates a fresh Intent after a prior logical send was proven not sent", async () => {
+    const fake = createFakePool({
+      existingIntent: {
+        ...persistedIntent,
+        sendIntentId: "018f0000-0000-7000-8000-000000000919",
+        sendSnapshotId: "018f0000-0000-7000-8000-000000000918",
+        clientIdempotencyKey: "previous-request-key",
+        logicalMessageKey: input.logicalMessageKey,
+        messagePurpose: input.messagePurpose,
+        followUpIndex: input.followUpIndex,
+        intentStatus: "FAILED_FINAL",
+        attemptStatus: "FAILED_RETRYABLE",
+        errorCode: "GMAIL_SEND_RFC_MESSAGE_NOT_FOUND",
+        providerMessageId: null,
+        providerThreadId: null,
+      },
+    });
+    const repository = new PostgresqlSendIntentRepository({
+      pool: fake.pool,
+    });
+
+    await expect(repository.create(input)).resolves.toEqual({
+      state: "created",
+      intent: {
+        ...persistedIntent,
+        requestedSendAt: input.requestedSendAt.toISOString(),
+      },
+    });
+    expect(fake.queries.some((sql) =>
+      sql.startsWith("INSERT INTO backlinks.backlink_send_intents"),
+    )).toBe(true);
+    expect(fake.queries.at(-1)).toBe("COMMIT");
+  });
+
   it("does not create an Intent after the rolling quota is exhausted", async () => {
     const fake = createFakePool({ usedSlots: 5 });
     const repository = new PostgresqlSendIntentRepository({
@@ -382,9 +510,15 @@ describe("BL-AI-114/115 Send Intent repository transaction", () => {
     });
 
     await expect(repository.create(input)).resolves.toEqual({
-      state: "quota_exceeded",
-      dailyLimit: 5,
-      retryAt: "2026-07-28T10:14:00.000Z",
+      state: "readiness_changed",
+      changedConditions: [{
+        code: "QUOTA",
+        reason: "CHANGED",
+        expectedRevision: "0/5",
+        currentRevision: "5/5",
+        retryable: true,
+        recoveryAction: "WAIT_AND_RUN_PREFLIGHT",
+      }],
     });
     expect(fake.queries.some((sql) => sql.startsWith("INSERT INTO"))).toBe(
       false,

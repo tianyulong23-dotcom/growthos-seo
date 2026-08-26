@@ -8,7 +8,7 @@ export type ProjectAuthorityBand =
 export type ProjectAuthority = Readonly<{
   score: number;
   band: ProjectAuthorityBand;
-  confidence: "backlink_profile" | "conservative_default";
+  confidence: "backlink_profile" | "neutral_default";
   referringDomains: number | null;
   minimumResourceAuthorityScore: number;
 }>;
@@ -41,11 +41,11 @@ export function calculateProjectAuthority(
 ): ProjectAuthority {
   if (referringDomains === null) {
     return Object.freeze({
-      score: 75,
+      score: 50,
       band: "unknown",
-      confidence: "conservative_default",
+      confidence: "neutral_default",
       referringDomains: null,
-      minimumResourceAuthorityScore: 72,
+      minimumResourceAuthorityScore: 35,
     });
   }
   const score = Math.round(logarithmicVolume(referringDomains, 6));

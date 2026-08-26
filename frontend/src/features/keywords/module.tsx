@@ -14,7 +14,7 @@ const KeywordWorkspace = React.lazy(() =>
 
 export function KeywordsModulePage() {
   const { projects } = useProjects()
-  const { projectId = projects[0]?.id ?? "" } = useParams<{
+  const { projectId = "" } = useParams<{
     projectId: string
   }>()
   const project = projects.find((item) => item.id === projectId)

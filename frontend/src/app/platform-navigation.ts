@@ -1,19 +1,10 @@
-import { BarChart3, Settings2, SlidersHorizontal } from "lucide-react"
+import { Settings2, SlidersHorizontal } from "lucide-react"
 
 import type { NavigationItem } from "@/app/module-contract"
 import { registeredModuleNavigation } from "@/app/module-registry"
+import { performanceNavigation } from "@/features/performance/manifest"
 
-export const performanceNavigation: NavigationItem = {
-  id: "performance",
-  label: "效果",
-  description: "查看平台文章在 Google 搜索中的真实表现",
-  icon: BarChart3,
-  tabs: [
-    { id: "overview", label: "总览" },
-    { id: "articles", label: "文章效果" },
-  ],
-  action: "",
-}
+export { performanceNavigation } from "@/features/performance/manifest"
 
 export const settingsNavigation: NavigationItem = {
   id: "settings",

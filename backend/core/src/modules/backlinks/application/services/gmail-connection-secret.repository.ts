@@ -65,6 +65,15 @@ export type GmailConnectionSecretPersistenceReplaceInput =
     grantedScopes: readonly string[];
   }>;
 
+export type GmailConnectionSecretPersistenceRefreshFailureInput =
+  GmailConnectionSecretPersistenceLookupInput & Readonly<{
+    actorId: string;
+    expectedVersion: number;
+    reason:
+      | typeof googleAuthFailureCodes.rateLimited
+      | typeof googleAuthFailureCodes.temporaryFailure;
+  }>;
+
 type GmailConnectionSecretPersistenceReauthInput =
   GmailConnectionSecretPersistenceLookupInput & Readonly<{
     actorId: string;
@@ -89,6 +98,9 @@ export interface GmailConnectionSecretPersistence {
   ): Promise<GmailConnectionSecretPersistenceRefreshState | null>;
   replaceTokenReference(
     input: GmailConnectionSecretPersistenceReplaceInput,
+  ): Promise<GmailConnectionSecretPersistenceRefreshState | null>;
+  markRefreshFailure(
+    input: GmailConnectionSecretPersistenceRefreshFailureInput,
   ): Promise<GmailConnectionSecretPersistenceRefreshState | null>;
   markReauthRequired(
     input: GmailConnectionSecretPersistenceReauthInput,
@@ -363,6 +375,20 @@ implements GmailConnectionCompletionGateway {
         && error.code === googleAuthFailureCodes.authExpired
       ) {
         return this.markReauthRequired(input, current);
+      }
+      if (
+        error instanceof GoogleAuthError
+        && (
+          error.code === googleAuthFailureCodes.rateLimited
+          || error.code === googleAuthFailureCodes.temporaryFailure
+        )
+      ) {
+        await this.#persistence.markRefreshFailure({
+          ...lookup,
+          actorId: input.context.actor.userId,
+          expectedVersion: current.version,
+          reason: error.code,
+        });
       }
       throw error;
     }

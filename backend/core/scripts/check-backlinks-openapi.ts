@@ -14,8 +14,14 @@ import type {
   createDraftEditingCommands,
 } from "../src/modules/backlinks/application/commands/draft.command.js";
 import type { GmailConnectionView } from "../src/modules/backlinks/application/gmail-connection.gateway.js";
+import {
+  createCooperationPathOpportunityCommands,
+} from "../src/modules/backlinks/application/commands/cooperation-path-opportunities.command.js";
 import { createOpportunityCommands } from "../src/modules/backlinks/application/commands/opportunities.command.js";
 import { createReplyMatchCommands } from "../src/modules/backlinks/application/commands/reply-match.command.js";
+import type {
+  NegotiationFactsService,
+} from "../src/modules/backlinks/application/services/negotiation-facts.service.js";
 import { createPlacementLinksQuery } from "../src/modules/backlinks/application/queries/placement-links.query.js";
 import { createRecommendationCommands } from "../src/modules/backlinks/application/commands/recommendations.command.js";
 import type { createSendIntentCommands } from "../src/modules/backlinks/application/commands/send-intent.command.js";
@@ -40,6 +46,9 @@ import { registerBacklinksHealthRoute } from "../src/modules/backlinks/api/healt
 import { registerBacklinksGmailConnectionRoutes } from "../src/modules/backlinks/api/gmail-connection.route.js";
 import { registerBacklinksGmailMailPushRoute } from "../src/modules/backlinks/api/gmail-mail-push.route.js";
 import { registerBacklinksOpenApi } from "../src/modules/backlinks/api/openapi.js";
+import {
+  registerCooperationPathOpportunityCommandsRoutes,
+} from "../src/modules/backlinks/api/cooperation-path-opportunity-commands.route.js";
 import { registerBacklinksOpportunitiesRoutes } from "../src/modules/backlinks/api/opportunities.route.js";
 import { registerBacklinksOpportunityCommandsRoutes } from "../src/modules/backlinks/api/opportunity-commands.route.js";
 import { registerBacklinksPlacementCandidateRoutes } from "../src/modules/backlinks/api/placement-candidates.route.js";
@@ -49,7 +58,11 @@ import { registerBacklinksRecommendationsRoute } from "../src/modules/backlinks/
 import { registerBacklinksResourceLibraryRoute } from "../src/modules/backlinks/api/resource-library.route.js";
 import { registerBacklinksReplyMailRoutes } from "../src/modules/backlinks/api/reply-mail.route.js";
 import { registerBacklinksReplyMatchRoutes } from "../src/modules/backlinks/api/reply-match.route.js";
+import {
+  registerBacklinksNegotiationFactsRoutes,
+} from "../src/modules/backlinks/api/negotiation-facts.route.js";
 import { registerBacklinksSendIntentRoute } from "../src/modules/backlinks/api/send-intent.route.js";
+import { registerBacklinksSendIntentListRoute } from "../src/modules/backlinks/api/send-intent.route.js";
 import { registerBacklinksSummaryRoute } from "../src/modules/backlinks/api/summary.route.js";
 import { registerBacklinksLinksRoutes } from "../src/modules/backlinks/api/links.route.js";
 import { registerBacklinksMetricDashboardRoute } from "../src/modules/backlinks/api/metrics/metric-dashboard.route.js";
@@ -269,6 +282,33 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
       affectedProjectCount: 2,
       recentErrorCategory: null,
     };
+    const gmailReadiness = {
+      evaluatedAt: "2026-08-18T02:00:00.000Z",
+      connection: { state: "CONNECTED" as const, ready: true },
+      send: { state: "WAITING_FOR_SEND_CONTEXT" as const, ready: false },
+      sync: {
+        state: "WAITING_FOR_ACCEPTED_SEND" as const,
+        ready: true,
+      },
+      blockers: [{
+        code: "SEND_CONTEXT_REQUIRED" as const,
+        capability: "SEND" as const,
+        owner: "USER" as const,
+        retrySafe: true,
+        recoveryAction: "OPEN_APPROVED_DRAFT" as const,
+        detail:
+          "Open an approved draft and recipient to evaluate send-specific readiness.",
+      }],
+      primaryBlocker: {
+        code: "SEND_CONTEXT_REQUIRED" as const,
+        capability: "SEND" as const,
+        owner: "USER" as const,
+        retrySafe: true,
+        recoveryAction: "OPEN_APPROVED_DRAFT" as const,
+        detail:
+          "Open an approved draft and recipient to evaluate send-specific readiness.",
+      },
+    };
     const replyMailMessage = {
       id: "018f0000-0000-7000-8000-000000000139",
       threadId: "018f0000-0000-7000-8000-000000000239",
@@ -348,6 +388,11 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
           updatedAt: "2026-07-27T05:00:00.000Z",
           attempt: null,
         }),
+        listSendIntents: async () => ({
+          items: [],
+          nextCursor: null,
+          hasMore: false,
+        }),
         listMailMessages: async () => ({
           items: [],
           nextCursor: null,
@@ -397,6 +442,23 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         patchManagement: async () => ({
           state: "not_found", requestHash: "openapi" }),
       }) });
+    registerCooperationPathOpportunityCommandsRoutes(app, {
+      module,
+      commands: createCooperationPathOpportunityCommands({
+        createFromVerifiedPath: async () => ({
+          state: "not_found",
+          requestHash: "openapi",
+        }),
+        patchManualContent: async () => ({
+          state: "not_found",
+          requestHash: "openapi",
+        }),
+        transitionManualAction: async () => ({
+          state: "not_found",
+          requestHash: "openapi",
+        }),
+      }),
+    });
     registerBacklinksPlacementCandidateRoutes(app, {
       module,
       command: {
@@ -674,6 +736,7 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
       module,
       commands: sendIntentCommands,
     });
+    registerBacklinksSendIntentListRoute(app, { module });
     registerBacklinksGmailConnectionRoutes(app, {
       module,
       commands: {
@@ -696,7 +759,11 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         }),
       },
       query: {
-        getStatus: async () => gmailConnection,
+        getStatus: async () => ({
+          accounts: [gmailConnection],
+          selectedConnection: gmailConnection,
+          readiness: gmailReadiness,
+        }),
       },
       syncCommands: {
         start: async () => ({
@@ -731,6 +798,63 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
           unbindCandidate: async () => ({ state: "not_found" }),
         },
       }),
+    });
+    const negotiationFact = {
+      id: "018f0000-0000-7000-8000-000000000171",
+      inboundMessageId: "018f0000-0000-7000-8000-000000000172",
+      opportunityId: "018f0000-0000-7000-8000-000000000173",
+      factKey: "placement_price",
+      factVersion: 1,
+      factType: "money",
+      rawValue: "$120",
+      normalizedValue: { amount: 120, currency: "USD" },
+      factAuthority: "INFERRED" as const,
+      reviewStatus: "PENDING" as const,
+      extractorType: "RULE" as const,
+      extractorVersion: "negotiation-rule-v1",
+      confidenceScore: 0.9,
+      evidenceText: "Our placement price is $120.",
+      evidenceStart: 23,
+      evidenceEnd: 27,
+      supersedesFactVersionId: null,
+      decidedBy: null,
+      decidedAt: null,
+      schemaVersion: 1,
+      createdAt: "2026-08-18T00:00:00.000Z",
+      createdBy: "reply-classifier",
+    };
+    const negotiationFactsService: NegotiationFactsService = {
+      list: async () => ({
+        inboundMessageId: negotiationFact.inboundMessageId,
+        opportunityId: negotiationFact.opportunityId,
+        items: [negotiationFact],
+      }),
+      decide: async (input) => ({
+        decision: input.decision,
+        replayed: false,
+        appendedFactVersionIds: [
+          "018f0000-0000-7000-8000-000000000174",
+        ],
+        latestFact: {
+          ...negotiationFact,
+          id: "018f0000-0000-7000-8000-000000000174",
+          factVersion: 2,
+          factAuthority: "MANUAL",
+          reviewStatus:
+            input.decision === "REJECT" ? "REJECTED" : "CONFIRMED",
+          extractorType: "MANUAL",
+          extractorVersion: "manual-review-v1",
+          confidenceScore: 1,
+          decidedBy: "user-openapi",
+          decidedAt: "2026-08-18T00:01:00.000Z",
+          createdAt: "2026-08-18T00:01:00.000Z",
+          createdBy: "user-openapi",
+        },
+      }),
+    };
+    registerBacklinksNegotiationFactsRoutes(app, {
+      module,
+      service: negotiationFactsService,
     });
     registerBacklinksReplyMailRoutes(app, { module });
     registerBacklinksGmailMailPushRoute(app, {

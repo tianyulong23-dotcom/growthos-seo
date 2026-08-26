@@ -11,6 +11,10 @@ import type {
 import type {
   GmailSendPort,
 } from "../../src/modules/backlinks/ports/gmail-send.port.js";
+import {
+  GoogleAuthError,
+  googleAuthFailureCodes,
+} from "../../src/modules/backlinks/ports/google-auth.port.js";
 
 const context = {
   organizationId: "018f0000-0000-7000-8000-000000000001",
@@ -57,6 +61,9 @@ const createActivity = () => {
     }),
   };
   const acceptedSendHandler = {
+    run: vi.fn().mockResolvedValue(undefined),
+  };
+  const commandContextCleanup = {
     run: vi.fn().mockResolvedValue(undefined),
   };
   const policyInputLoader: GmailSendPolicyInputLoader = {
@@ -107,6 +114,7 @@ const createActivity = () => {
     connectionHealthCheck,
     policyInputLoader,
     gmail,
+    commandContextCleanup,
     acceptedSendHandler,
     clock: () => new Date("2026-07-28T09:18:00.000Z"),
   });
@@ -116,6 +124,7 @@ const createActivity = () => {
     commandLoader,
     connectionHealthCheck,
     acceptedSendHandler,
+    commandContextCleanup,
     policyInputLoader,
     gmail,
     dispatchOrder,
@@ -151,6 +160,7 @@ describe("BL-AI-118 Gmail Send Activity", () => {
     });
     expect(fixture.gmail.send).toHaveBeenCalledTimes(1);
     expect(fixture.gmail.send).toHaveBeenCalledWith(command);
+    expect(fixture.commandContextCleanup.run).not.toHaveBeenCalled();
     expect(fixture.connectionHealthCheck.run).toHaveBeenCalledWith({
       context,
       attempt,
@@ -158,7 +168,7 @@ describe("BL-AI-118 Gmail Send Activity", () => {
     expect(fixture.dispatchOrder).toEqual(["health", "policy", "send"]);
   });
 
-  it("rejects a command that does not carry the claimed RFC Message-ID", async () => {
+  it("settles a mismatched command as definitely not sent", async () => {
     const fixture = createActivity();
     vi.mocked(fixture.commandLoader.load).mockResolvedValue({
       ...command,
@@ -168,10 +178,74 @@ describe("BL-AI-118 Gmail Send Activity", () => {
     await expect(fixture.activity.dispatchAttempt({
       context,
       attempt,
-    })).rejects.toThrow(
-      "Gmail Send command does not match the claimed Attempt.",
-    );
+    })).resolves.toEqual({
+      kind: "definitely_not_sent",
+      code: "GMAIL_SEND_INVALID_REQUEST",
+      retryable: false,
+    });
     expect(fixture.gmail.send).not.toHaveBeenCalled();
+  });
+
+  it("settles a temporary OAuth refresh failure for bounded retry", async () => {
+    const fixture = createActivity();
+    vi.mocked(fixture.connectionHealthCheck.run).mockRejectedValue(
+      new GoogleAuthError({
+        operation: "refresh",
+        code: googleAuthFailureCodes.temporaryFailure,
+        retryable: true,
+      }),
+    );
+
+    await expect(fixture.activity.dispatchAttempt({
+      context,
+      attempt,
+    })).resolves.toEqual({
+      kind: "definitely_not_sent",
+      code: "GMAIL_SEND_TOKEN_REFRESH_FAILED",
+      retryable: true,
+    });
+    expect(fixture.policyInputLoader.load).not.toHaveBeenCalled();
+    expect(fixture.gmail.send).not.toHaveBeenCalled();
+    expect(fixture.commandContextCleanup.run).toHaveBeenCalledWith({
+      context,
+      attempt,
+    });
+  });
+
+  it("settles an expired OAuth grant without retrying", async () => {
+    const fixture = createActivity();
+    vi.mocked(fixture.connectionHealthCheck.run).mockRejectedValue(
+      new GoogleAuthError({
+        operation: "refresh",
+        code: googleAuthFailureCodes.authExpired,
+        retryable: false,
+      }),
+    );
+
+    await expect(fixture.activity.dispatchAttempt({
+      context,
+      attempt,
+    })).resolves.toEqual({
+      kind: "definitely_not_sent",
+      code: "GMAIL_SEND_REAUTH_REQUIRED",
+      retryable: false,
+    });
+    expect(fixture.gmail.send).not.toHaveBeenCalled();
+  });
+
+  it("marks an unexpected provider exception as acceptance unknown", async () => {
+    const fixture = createActivity();
+    vi.mocked(fixture.gmail.send).mockRejectedValue(
+      new Error("provider connection closed"),
+    );
+
+    await expect(fixture.activity.dispatchAttempt({
+      context,
+      attempt,
+    })).resolves.toEqual({
+      kind: "acceptance_unknown",
+      code: "GMAIL_SEND_AMBIGUOUS_RESULT",
+    });
   });
 
   it("persists retry eligibility and provider receipt through the repository", async () => {

@@ -16,7 +16,23 @@ describe("LOCAL-PRODUCT-034 recommendation refill failure contract", () => {
       "COMPLETE_PROJECT_CONTEXT",
     ],
     [
+      "WEBSITE_PROJECT_DISCOVERY_LANGUAGE_INPUT_REQUIRED "
+        + "owner=WEBSITE_PROJECT",
+      "PROJECT_CONTEXT_REQUIRED",
+      "COMPLETE_PROJECT_CONTEXT",
+    ],
+    [
+      "WEBSITE_PROJECT_DISCOVERY_INPUT_REQUIRED owner=WEBSITE_PROJECT",
+      "PROJECT_CONTEXT_REQUIRED",
+      "COMPLETE_PROJECT_CONTEXT",
+    ],
+    [
       "COMMERCIAL_REFILL_MANUAL_RESUME_NOT_ALLOWED",
+      "RECOVERY_CONFLICT",
+      "RESUME_OPERATION",
+    ],
+    [
+      "COMMERCIAL_SUPPLY_OPERATION_NOT_FOUND",
       "RECOVERY_CONFLICT",
       "RESUME_OPERATION",
     ],
@@ -55,6 +71,16 @@ describe("LOCAL-PRODUCT-034 recommendation refill failure contract", () => {
     });
     expect(first.diagnosticId).toMatch(/^refill-[a-f0-9]+-[a-f0-9]{8}$/);
     expect(JSON.stringify(first)).not.toContain("do-not-leak");
+  });
+
+  it("does not broadly classify unrelated input-required failures", () => {
+    expect(normalizeRecommendationRefillFailure(
+      new Error("UNRELATED_INPUT_REQUIRED"),
+      operationId,
+    )).toMatchObject({
+      rootCause: "UNKNOWN_INTERNAL",
+      recovery: "CONTACT_SUPPORT",
+    });
   });
 
   it.each([

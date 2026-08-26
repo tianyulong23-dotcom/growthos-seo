@@ -10,9 +10,18 @@ import type {
   OpportunityOutcomeStatus,
 } from "../../domain/opportunities/opportunity-state.js";
 import type {
+  ManualActionState,
+  NonEmailCooperationPathType,
+} from "../../domain/opportunities/cooperation-path.js";
+import type {
   PlacementCandidate,
 } from "../../domain/placements/placement-promotion.js";
 import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
+import {
+  deriveOpportunityHandoffState,
+  type EngagementPathState,
+  type OpportunityPrimaryNextAction,
+} from "../read-models/opportunity-handoff.js";
 
 export type OpportunityListItem = Readonly<{
   id: string;
@@ -23,13 +32,51 @@ export type OpportunityListItem = Readonly<{
   managementStatus: OpportunityManagementStatus;
   outcomeStatus: OpportunityOutcomeStatus;
   fulfillmentStatus: OpportunityFulfillmentStatus;
+  engagementChannel: "EMAIL" | "COOPERATION_PATH";
+  engagementPathState: EngagementPathState;
+  primaryNextAction: OpportunityPrimaryNextAction;
+  draftId: string | null;
   sourceContactCandidateId: string | null;
   contactEmail: string | null;
   contactReviewRequired: boolean;
+  manualActionState: ManualActionState | null;
   hasDownstreamFacts: boolean;
   version: number;
   createdAt: string;
   updatedAt: string;
+}>;
+export type OpportunityCooperationPath = Readonly<{
+  factId: string;
+  manualActionId: string;
+  pathType: NonEmailCooperationPathType;
+  pathUrl: string;
+  contentType: "FORM_MESSAGE" | "SUBMISSION_PITCH";
+  editableContent: string;
+  state: ManualActionState;
+  nextAction: string;
+  evidence: Readonly<Record<string, unknown>>;
+  version: number;
+  updatedAt: string;
+}>;
+export type OpportunitySelectionSnapshot = Readonly<{
+  lineageStatus: "COMPLETE" | "PARTIAL";
+  recommendationId: string;
+  recommendationContextVersionId: string;
+  visiblePoolGeneration: number | null;
+  generationContractId: string | null;
+  inputPinId: string | null;
+  scoreModelVersion: string | null;
+  projectContextVersion: number | null;
+  siteProfileVersionId: string | null;
+  outreachProfileVersionId: string | null;
+  promotionTargetVersionId: string | null;
+  immutableFingerprint: string | null;
+  selectedTargetUrl: string | null;
+  selectedContactCandidateId: string | null;
+  selectedCooperationPathFactId: string | null;
+  selectedCooperationPathVersion: number | null;
+  selectedBy: string;
+  selectedAt: string;
 }>;
 export type OpportunityDetail = OpportunityListItem & Readonly<{
   recommendationId: string;
@@ -40,6 +87,8 @@ export type OpportunityDetail = OpportunityListItem & Readonly<{
   targetIdentityOverrideReason: string | null;
   assessment: PublicAssessment | null;
   placementCandidate: PlacementCandidate | null;
+  cooperationPath: OpportunityCooperationPath | null;
+  selectionSnapshot: OpportunitySelectionSnapshot;
 }>;
 export type OpportunitiesListInput = Readonly<{
   businessStage?: OpportunityBusinessStage | undefined;
@@ -101,7 +150,63 @@ function toIsoString(value: unknown): string {
   return new Date(String(value)).toISOString();
 }
 
+function toDraftState(value: unknown): Readonly<{
+  id: string;
+  status: "generating" | "draft" | "approved" | "rejected" | "sent";
+  currentVersionSource:
+    | "MODEL"
+    | "TEMPLATE_FALLBACK"
+    | "MANUAL"
+    | "RESTORED"
+    | null;
+}> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const row = value as Record<string, unknown>;
+  const status = row.status;
+  if (
+    typeof row.id !== "string"
+    || !["generating", "draft", "approved", "rejected", "sent"]
+      .includes(String(status))
+  ) {
+    return null;
+  }
+  const source = row.currentVersionSource;
+  return {
+    id: row.id,
+    status: status as
+      "generating" | "draft" | "approved" | "rejected" | "sent",
+    currentVersionSource:
+      source === "MODEL"
+        || source === "TEMPLATE_FALLBACK"
+        || source === "MANUAL"
+        || source === "RESTORED"
+        ? source
+        : null,
+  };
+}
+
 function toListItem(row: Record<string, unknown>): OpportunityListItem {
+  const engagementChannel = row.engagementChannel === "COOPERATION_PATH"
+    ? "COOPERATION_PATH" as const
+    : "EMAIL" as const;
+  const contactEmail = row.contactEmail === null || row.contactEmail === undefined
+    ? null
+    : String(row.contactEmail);
+  const manualActionState = row.manualActionState === null
+      || row.manualActionState === undefined
+    ? null
+    : row.manualActionState as ManualActionState;
+  const draft = toDraftState(row.draftState);
+  const handoff = deriveOpportunityHandoffState({
+    engagementChannel,
+    contactEmail,
+    contactReviewRequired: row.contactReviewRequired === true,
+    manualActionState,
+    draftStatus: draft?.status ?? null,
+    draftVersionSource: draft?.currentVersionSource ?? null,
+  });
   return {
     id: String(row.id),
     targetSiteKey: String(row.targetSiteKey),
@@ -111,15 +216,17 @@ function toListItem(row: Record<string, unknown>): OpportunityListItem {
     managementStatus: row.managementStatus as OpportunityManagementStatus,
     outcomeStatus: row.outcomeStatus as OpportunityOutcomeStatus,
     fulfillmentStatus: row.fulfillmentStatus as OpportunityFulfillmentStatus,
+    engagementChannel,
+    ...handoff,
+    draftId: draft?.id ?? null,
     sourceContactCandidateId:
       row.sourceContactCandidateId === null
         || row.sourceContactCandidateId === undefined
       ? null
       : String(row.sourceContactCandidateId),
-    contactEmail: row.contactEmail === null || row.contactEmail === undefined
-      ? null
-      : String(row.contactEmail),
+    contactEmail,
     contactReviewRequired: row.contactReviewRequired === true,
+    manualActionState,
     hasDownstreamFacts: row.hasDownstreamFacts === true,
     version: Number(row.version),
     createdAt: toIsoString(row.createdAt),
@@ -128,11 +235,29 @@ function toListItem(row: Record<string, unknown>): OpportunityListItem {
 }
 
 function toDetail(row: Record<string, unknown>): OpportunityDetail {
+  const listItem = toListItem(row);
+  const recommendationId = String(row.recommendationId);
+  const recommendationContextVersionId =
+    String(row.recommendationContextVersionId);
+  const visiblePoolGeneration = row.selectionVisiblePoolGeneration === null
+      || row.selectionVisiblePoolGeneration === undefined
+    ? null
+    : Number(row.selectionVisiblePoolGeneration);
+  const generationContractId = row.selectionGenerationContractId === null
+      || row.selectionGenerationContractId === undefined
+    ? null
+    : String(row.selectionGenerationContractId);
+  const inputPinId = row.selectionInputPinId === null
+      || row.selectionInputPinId === undefined
+    ? null
+    : String(row.selectionInputPinId);
+  const optionalString = (value: unknown) =>
+    value === null || value === undefined ? null : String(value);
   return {
-    ...toListItem(row),
-    recommendationId: String(row.recommendationId),
+    ...listItem,
+    recommendationId,
     prospectId: String(row.prospectId),
-    recommendationContextVersionId: String(row.recommendationContextVersionId),
+    recommendationContextVersionId,
     targetIdentityKind: row.targetIdentityKind as OpportunityDetail["targetIdentityKind"],
     targetIdentityRuleVersion: String(row.targetIdentityRuleVersion),
     targetIdentityOverrideReason: row.targetIdentityOverrideReason === null
@@ -150,6 +275,58 @@ function toDetail(row: Record<string, unknown>): OpportunityDetail {
         generatedAt: row.assessmentGeneratedAt ?? row.updatedAt,
       }),
     placementCandidate: null,
+    cooperationPath: row.manualActionId === null
+        || row.manualActionId === undefined
+      ? null
+      : {
+        factId: String(row.cooperationPathFactId),
+        manualActionId: String(row.manualActionId),
+        pathType: row.cooperationPathType as NonEmailCooperationPathType,
+        pathUrl: String(row.cooperationPathUrl),
+        contentType: row.cooperationContentType as
+          OpportunityCooperationPath["contentType"],
+        editableContent: String(row.cooperationEditableContent),
+        state: row.cooperationState as ManualActionState,
+        nextAction: String(row.cooperationNextAction),
+        evidence: row.cooperationEvidence as Readonly<Record<string, unknown>>,
+        version: Number(row.cooperationVersion),
+        updatedAt: toIsoString(row.cooperationUpdatedAt),
+      },
+    selectionSnapshot: {
+      lineageStatus: generationContractId !== null
+          && inputPinId !== null
+          && row.selectionImmutableFingerprint !== null
+          && row.selectionImmutableFingerprint !== undefined
+        ? "COMPLETE"
+        : "PARTIAL",
+      recommendationId,
+      recommendationContextVersionId,
+      visiblePoolGeneration,
+      generationContractId,
+      inputPinId,
+      scoreModelVersion: optionalString(row.selectionScoreModelVersion),
+      projectContextVersion: row.selectionProjectContextVersion === null
+          || row.selectionProjectContextVersion === undefined
+        ? null
+        : Number(row.selectionProjectContextVersion),
+      siteProfileVersionId: optionalString(row.selectionSiteProfileVersionId),
+      outreachProfileVersionId: optionalString(
+        row.selectionOutreachProfileVersionId,
+      ),
+      promotionTargetVersionId: optionalString(
+        row.selectionPromotionTargetVersionId,
+      ),
+      immutableFingerprint: optionalString(row.selectionImmutableFingerprint),
+      selectedTargetUrl: optionalString(row.selectionTargetUrl),
+      selectedContactCandidateId: listItem.sourceContactCandidateId,
+      selectedCooperationPathFactId: optionalString(row.cooperationPathFactId),
+      selectedCooperationPathVersion: row.cooperationVersion === null
+          || row.cooperationVersion === undefined
+        ? null
+        : Number(row.cooperationVersion),
+      selectedBy: String(row.selectedBy),
+      selectedAt: toIsoString(row.createdAt),
+    },
   };
 }
 
@@ -158,6 +335,7 @@ const listColumns = `
   o.join_sequence "joinSequence",o.business_stage "businessStage",
   o.management_status "managementStatus",o.outcome_status "outcomeStatus",
   o.fulfillment_status "fulfillmentStatus",
+  o.engagement_channel "engagementChannel",
   o.source_contact_candidate_id "sourceContactCandidateId",
   (
     SELECT cc.normalized_email
@@ -168,6 +346,32 @@ const listColumns = `
      LIMIT 1
   ) "contactEmail",
   o.contact_review_required "contactReviewRequired",
+  (
+    SELECT manual.state
+      FROM backlink_opportunity_manual_actions manual
+     WHERE (manual.organization_id,manual.workspace_id,
+            manual.website_project_id,manual.opportunity_id)=
+           (o.organization_id,o.workspace_id,o.website_project_id,o.id)
+     LIMIT 1
+  ) "manualActionState",
+  (
+    SELECT jsonb_build_object(
+      'id',draft.id,
+      'status',draft.status,
+      'currentVersionSource',version.source
+    )
+      FROM backlink_email_drafts draft
+      LEFT JOIN backlink_draft_versions version ON
+        (version.organization_id,version.workspace_id,
+         version.website_project_id,version.id)=
+        (draft.organization_id,draft.workspace_id,
+         draft.website_project_id,draft.current_version_id)
+     WHERE (draft.organization_id,draft.workspace_id,
+            draft.website_project_id,draft.opportunity_id)=
+           (o.organization_id,o.workspace_id,o.website_project_id,o.id)
+     ORDER BY draft.updated_at DESC,draft.id DESC
+     LIMIT 1
+  ) "draftState",
   (
     EXISTS (
       SELECT 1 FROM backlink_email_drafts d
@@ -197,6 +401,12 @@ const listColumns = `
       SELECT 1 FROM backlink_placements p
        WHERE (p.organization_id,p.workspace_id,p.website_project_id,
               p.opportunity_id)=
+             (o.organization_id,o.workspace_id,o.website_project_id,o.id)
+    )
+    OR EXISTS (
+      SELECT 1 FROM backlink_opportunity_manual_actions manual
+       WHERE (manual.organization_id,manual.workspace_id,
+              manual.website_project_id,manual.opportunity_id)=
              (o.organization_id,o.workspace_id,o.website_project_id,o.id)
     )
   ) "hasDownstreamFacts",
@@ -272,7 +482,72 @@ export function createOpportunitiesQuery(
                s.rule_version "assessmentRuleVersion",
                s.components "assessmentComponents",
                s.evidence "assessmentEvidence",
-               s.generated_at "assessmentGeneratedAt"
+               s.generated_at "assessmentGeneratedAt",
+               manual.id "manualActionId",
+               manual.cooperation_path_fact_id "cooperationPathFactId",
+               manual.path_type "cooperationPathType",
+               manual.path_url "cooperationPathUrl",
+               manual.content_type "cooperationContentType",
+               manual.editable_content "cooperationEditableContent",
+               manual.state "cooperationState",
+               manual.next_action "cooperationNextAction",
+               manual.evidence "cooperationEvidence",
+               manual.version "cooperationVersion",
+               manual.updated_at "cooperationUpdatedAt",
+               COALESCE(
+                 created_event.after_state->>'selectedBy',o.created_by
+               ) "selectedBy",
+               COALESCE(
+                 NULLIF(
+                   created_event.after_state->>'visiblePoolGeneration',''
+                 )::integer,
+                 selection.visible_pool_generation
+               )
+                 "selectionVisiblePoolGeneration",
+               COALESCE(
+                 created_event.after_state->>'generationContractId',
+                 selection.generation_contract_id::text
+               )
+                 "selectionGenerationContractId",
+               COALESCE(
+                 created_event.after_state->>'inputPinId',
+                 selection.input_pin_id::text
+               ) "selectionInputPinId",
+               COALESCE(
+                 created_event.after_state->>'scoreModelVersion',
+                 selection.score_model_version
+               ) "selectionScoreModelVersion",
+               COALESCE(
+                 NULLIF(
+                   created_event.after_state->>'projectContextVersion',''
+                 )::integer,
+                 selection.project_context_version
+               )
+                 "selectionProjectContextVersion",
+               COALESCE(
+                 created_event.after_state->>'siteProfileVersionId',
+                 selection.site_profile_version_id
+               )
+                 "selectionSiteProfileVersionId",
+               COALESCE(
+                 created_event.after_state->>'outreachProfileVersionId',
+                 selection.outreach_profile_version_id::text
+               )
+                 "selectionOutreachProfileVersionId",
+               COALESCE(
+                 created_event.after_state->>'promotionTargetVersionId',
+                 selection.promotion_target_version_id
+               )
+                 "selectionPromotionTargetVersionId",
+               COALESCE(
+                 created_event.after_state->>'immutableFingerprint',
+                 selection.immutable_fingerprint
+               )
+                 "selectionImmutableFingerprint",
+               COALESCE(
+                 created_event.after_state->>'selectedTargetUrl',
+                 selection.selected_target_url
+               ) "selectionTargetUrl"
           FROM backlink_opportunities o
           LEFT JOIN LATERAL (
             SELECT id,total_score,score_model_version,rule_version,
@@ -285,6 +560,71 @@ export function createOpportunitiesQuery(
                  'recommendation-commercial-fit.v3'
              ORDER BY s.generated_at DESC,s.id DESC LIMIT 1
           ) s ON true
+          LEFT JOIN backlink_opportunity_manual_actions manual ON
+            (manual.organization_id,manual.workspace_id,
+             manual.website_project_id,manual.opportunity_id)=
+            (o.organization_id,o.workspace_id,o.website_project_id,o.id)
+          LEFT JOIN LATERAL (
+            SELECT event.after_state
+              FROM backlink_lifecycle_events event
+             WHERE (
+               event.organization_id,event.workspace_id,
+               event.website_project_id,event.aggregate_type,
+               event.aggregate_id,event.event_type
+             )=(
+               o.organization_id,o.workspace_id,o.website_project_id,
+               'opportunity',o.id,'opportunity.created'
+             )
+             ORDER BY event.sequence,event.created_at,event.id
+             LIMIT 1
+          ) created_event ON true
+          LEFT JOIN LATERAL (
+            SELECT inventory.visible_pool_generation,
+                   generation.id generation_contract_id,
+                   generation.input_pin_id,
+                   generation.score_model_version,
+                   pin.project_context_version,
+                   pin.site_profile_version_id,
+                   pin.outreach_profile_version_id,
+                   pin.promotion_target_version_id,
+                   pin.immutable_fingerprint,
+                   outreach.target_urls->>0 selected_target_url
+              FROM backlink_recommendation_inventory inventory
+              LEFT JOIN backlink_recommendation_generation_contracts generation
+                ON (
+                  generation.organization_id,generation.workspace_id,
+                  generation.website_project_id,
+                  generation.recommendation_context_version_id,
+                  generation.visible_pool_generation
+                )=(
+                  inventory.organization_id,inventory.workspace_id,
+                  inventory.website_project_id,
+                  inventory.recommendation_context_version_id,
+                  inventory.visible_pool_generation
+                )
+              LEFT JOIN backlink_generation_input_pins pin ON
+                (pin.organization_id,pin.workspace_id,pin.website_project_id,
+                 pin.id)=
+                (generation.organization_id,generation.workspace_id,
+                 generation.website_project_id,generation.input_pin_id)
+              LEFT JOIN backlink_outreach_profile_versions outreach ON
+                (outreach.organization_id,outreach.workspace_id,
+                 outreach.website_project_id,outreach.id)=
+                (pin.organization_id,pin.workspace_id,pin.website_project_id,
+                 pin.outreach_profile_version_id)
+             WHERE (
+               inventory.organization_id,inventory.workspace_id,
+               inventory.website_project_id,inventory.recommendation_id,
+               inventory.recommendation_context_version_id
+             )=(
+               o.organization_id,o.workspace_id,o.website_project_id,
+               o.recommendation_id,o.recommendation_context_version_id
+             )
+             ORDER BY
+               abs(extract(epoch FROM (inventory.updated_at-o.created_at))),
+               inventory.visible_pool_generation DESC
+             LIMIT 1
+          ) selection ON true
          WHERE (o.organization_id,o.workspace_id,o.website_project_id,o.id)=($1,$2,$3,$4)
       `, [context.tenant.organizationId, context.tenant.workspaceId,
         context.project.websiteProjectId, opportunityId]);

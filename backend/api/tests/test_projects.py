@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from httpx import ASGITransport, AsyncClient
@@ -19,12 +20,14 @@ from app.modules.projects.schemas import (
 from app.modules.projects.object_storage import StoredSiteIcon
 from app.modules.projects.service import (
     BusinessProfileRunRecord,
+    ProjectDependencyRecord,
     ProjectNotFoundError,
     ProjectRecord,
     ProjectService,
     SQLAlchemyProjectRepository,
     SiteProfileNotReadyError,
     WorkflowDispatchRecord,
+    _apply_business_profile_confirmation,
 )
 
 
@@ -61,6 +64,7 @@ class FakeProjectRepository:
         self.dispatch_errors: dict[str, str] = {}
         self.keyword_workflow_ids: list[str] = []
         self.keyword_workflow_error: Exception | None = None
+        self.dependencies: list[ProjectDependencyRecord] = []
 
     async def create_with_understanding_run(
         self,
@@ -79,10 +83,22 @@ class FakeProjectRepository:
     async def record_dispatch_failure(self, run_id: str, message: str) -> None:
         return None
 
-    async def list(self, organization_id: str) -> list[ProjectRecord]:
+    async def list(
+        self,
+        organization_id: str,
+        workspace_id: str = "local",
+        lifecycle_status: str | None = None,
+    ) -> list[ProjectRecord]:
         projects: list[ProjectRecord] = []
         for project in self.projects:
             if project.organization_id != organization_id:
+                continue
+            if project.workspace_id != workspace_id:
+                continue
+            if (
+                lifecycle_status is not None
+                and project.lifecycle_status != lifecycle_status
+            ):
                 continue
             run = self.runs.get(project.understanding_run_id or "")
             attempts = sorted(
@@ -120,9 +136,19 @@ class FakeProjectRepository:
         self,
         organization_id: str,
         project_id: str,
+        workspace_id: str | None = None,
     ) -> ProjectRecord | None:
+        workspace_id = workspace_id or "local"
         return next(
-            (project for project in await self.list(organization_id) if project.id == project_id),
+            (
+                project
+                for project in await self.list(
+                    organization_id,
+                    workspace_id,
+                    lifecycle_status=None,
+                )
+                if project.id == project_id
+            ),
             None,
         )
 
@@ -162,9 +188,21 @@ class FakeProjectRepository:
             if project.id == project_id and project.organization_id == organization_id:
                 if project.site_profile is None:
                     raise SiteProfileNotReadyError
+                current = dict(project.site_profile)
+                was_confirmed = bool(current.get("confirmed_at"))
+                business_changed = any(
+                    current.get(key) != value for key, value in updates.items()
+                )
+                if was_confirmed and not business_changed:
+                    return project
                 updated = replace(
                     project,
-                    site_profile={**project.site_profile, **updates},
+                    site_profile={
+                        **current,
+                        **updates,
+                        "confirmed_at": datetime.now(UTC).isoformat(),
+                    },
+                    context_version=project.context_version + 1,
                 )
                 self.projects[index] = updated
                 return updated
@@ -211,6 +249,52 @@ class FakeProjectRepository:
         if self.keyword_workflow_error is not None:
             raise self.keyword_workflow_error
         return list(self.keyword_workflow_ids)
+
+    async def set_lifecycle(
+        self,
+        organization_id: str,
+        workspace_id: str,
+        project_id: str,
+        expected_lifecycle_version: int,
+        lifecycle_status: str,
+        archive_reason: str | None,
+    ) -> ProjectRecord:
+        for index, project in enumerate(self.projects):
+            if (
+                project.id == project_id
+                and project.organization_id == organization_id
+                and project.workspace_id == workspace_id
+            ):
+                if project.lifecycle_version != expected_lifecycle_version:
+                    raise AssertionError("unexpected lifecycle version")
+                updated = replace(
+                    project,
+                    lifecycle_status=lifecycle_status,
+                    lifecycle_version=project.lifecycle_version + 1,
+                    context_version=project.context_version + 1,
+                    archived_at=(
+                        datetime.now(UTC)
+                        if lifecycle_status == "ARCHIVED"
+                        else None
+                    ),
+                    archive_reason=(
+                        archive_reason
+                        if lifecycle_status == "ARCHIVED"
+                        else None
+                    ),
+                )
+                self.projects[index] = updated
+                return updated
+        raise ProjectNotFoundError
+
+    async def retained_dependencies(
+        self,
+        organization_id: str,
+        workspace_id: str,
+        project_id: str,
+    ) -> list[ProjectDependencyRecord]:
+        del organization_id, workspace_id, project_id
+        return list(self.dependencies)
 
     async def delete(
         self,
@@ -261,6 +345,10 @@ class FakeOnboardingService:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
         self.reconciled_project_ids: list[str] = []
+
+    def for_organization(self, organization_id: str) -> FakeOnboardingService:
+        del organization_id
+        return self
 
     async def reconcile_project(self, project_id: str) -> None:
         self.reconciled_project_ids.append(project_id)
@@ -639,6 +727,92 @@ def test_project_response_uses_identified_business_name() -> None:
     assert response.site_profile.business_name == "Example"
 
 
+def test_project_response_uses_persisted_context_when_crawl_profile_is_missing() -> None:
+    service, _, repository, _ = build_service()
+    created = asyncio.run(
+        service.create(
+            CreateProjectRequest(
+                domain="example.com",
+                country="ZA",
+                language="en",
+            )
+        )
+    )
+    repository.projects[0] = replace(
+        repository.projects[0],
+        understanding_status="failed",
+        understanding_stage="failed",
+        site_profile=None,
+        site_profile_confidence=None,
+        outreach_products=("Streaming", "Movies"),
+        outreach_keywords=("streaming service", "movie reviews"),
+        outreach_target_urls=("https://example.com/",),
+        outreach_target_audiences=("South African viewers",),
+        outreach_partnership_goals=("Earn links from authoritative review sites",),
+        outreach_input_required=(),
+    )
+
+    response = asyncio.run(service.get(created.id))
+
+    assert response is not None
+    assert response.site_profile is not None
+    assert response.site_profile.extraction_method == "project_context"
+    assert response.site_profile.products_services == ["Streaming", "Movies"]
+    assert response.site_profile.content_topics == ["streaming service", "movie reviews"]
+    assert response.site_profile.target_audiences == ["South African viewers"]
+    assert response.site_profile.partnership_goals == [
+        "Earn links from authoritative review sites"
+    ]
+    assert [page.url for page in response.site_profile.key_pages] == [
+        "https://example.com/"
+    ]
+    assert response.site_profile.input_required == []
+    assert response.site_profile.confidence == 1.0
+
+
+def test_sql_repository_can_create_manual_profile_after_understanding_failure() -> None:
+    source_run = SimpleNamespace(run_id="understanding-1", status="failed")
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.added = None
+
+        async def get(self, model: object, key: str) -> None:
+            del model, key
+
+        async def scalar(self, query: object) -> SimpleNamespace:
+            del query
+            return source_run
+
+        def add(self, value: object) -> None:
+            self.added = value
+
+    session = FakeSession()
+    project = SimpleNamespace(
+        id="project-1",
+        organization_id="test-org",
+        understanding_run_id="understanding-1",
+        initial_crawl_run_id="understanding-1",
+        name="Example",
+        domain="example.com",
+        target_market="ZA",
+        country="ZA",
+        language="en",
+    )
+
+    profile = asyncio.run(
+        SQLAlchemyProjectRepository._editable_site_profile(  # type: ignore[arg-type]
+            session,
+            project,
+        )
+    )
+
+    assert session.added is profile
+    assert profile.source_run_id == "understanding-1"
+    assert profile.profile_json["extraction_method"] == "manual"
+    assert profile.profile_json["key_pages"][0]["url"] == "https://example.com/"
+
+
 def test_project_routes_create_list_and_get_projects() -> None:
     service, _, _, _ = build_service()
     app.dependency_overrides[get_project_service] = lambda: service
@@ -735,6 +909,79 @@ def test_delete_project_route_forces_removal_when_external_cleanup_fails() -> No
         f"crawler:site_understanding:{created.id}:{created.understanding_run_id}"
     ]
     assert cleaner.project_calls == [("test-org", created.id)]
+
+
+def test_archive_and_restore_project_preserve_the_project_record() -> None:
+    service, _, repository, _ = build_service()
+    created = asyncio.run(
+        service.create(
+            CreateProjectRequest(domain="example.com", country="US", language="en")
+        )
+    )
+    app.dependency_overrides[get_project_service] = lambda: service
+
+    async def request() -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], int]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            archived = await client.post(f"/api/v1/projects/{created.id}/archive")
+            active = await client.get("/api/v1/projects")
+            archived_list = await client.get(
+                "/api/v1/projects",
+                params={"lifecycle_status": "ARCHIVED"},
+            )
+            restored = await client.post(f"/api/v1/projects/{created.id}/restore")
+            return (
+                archived.status_code,
+                active.json(),
+                archived_list.json(),
+                restored.json()["lifecycle_version"],
+            )
+
+    try:
+        status_code, active, archived, restored_version = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_code == 200
+    assert active == []
+    assert [project["id"] for project in archived] == [created.id]
+    assert archived[0]["lifecycle_status"] == "ARCHIVED"
+    assert restored_version == 3
+    assert repository.projects[0].lifecycle_status == "ACTIVE"
+    assert repository.projects[0].archived_at is None
+
+
+def test_delete_project_route_rejects_retained_backlinks_history() -> None:
+    service, launcher, repository, _ = build_service()
+    created = asyncio.run(
+        service.create(
+            CreateProjectRequest(domain="example.com", country="US", language="en")
+        )
+    )
+    repository.dependencies = [
+        ProjectDependencyRecord(
+            owner_module="BACKLINKS",
+            record_type="opportunity",
+            record_id="opportunity-1",
+        )
+    ]
+    app.dependency_overrides[get_project_service] = lambda: service
+
+    async def request() -> tuple[int, int]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            deleted = await client.delete(f"/api/v1/projects/{created.id}")
+            loaded = await client.get(f"/api/v1/projects/{created.id}")
+            return deleted.status_code, loaded.status_code
+
+    try:
+        delete_status, get_status = asyncio.run(request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert delete_status == 409
+    assert get_status == 200
+    assert launcher.cancelled_workflow_ids == []
 
 
 def test_update_business_profile_preserves_crawler_fields() -> None:
@@ -907,6 +1154,245 @@ def test_update_business_profile_route_persists_changes() -> None:
     assert saved["site_profile"]["business_name"] == "Example"
     assert loaded["site_profile"]["business_name"] == "Example"
     assert loaded["site_profile"]["confirmed_at"] is not None
+
+
+def test_business_profile_confirmation_advances_context_once_and_replays() -> None:
+    service, _, repository, _ = build_service()
+    created = asyncio.run(
+        service.create(
+            CreateProjectRequest(
+                domain="example.com",
+                country="US",
+                language="en",
+            )
+        )
+    )
+    repository.projects[0] = replace(
+        repository.projects[0],
+        understanding_status="completed",
+        understanding_stage="completed",
+        site_profile={
+            "profile_version": 1,
+            "business_name": "Example",
+            "business_type": "SaaS",
+            "business_summary": "Original summary",
+            "products_services": ["Analytics"],
+            "confidence": 0.75,
+        },
+        site_profile_confidence=0.75,
+    )
+    request = UpdateBusinessProfileRequest(
+        business_name="Example",
+        business_type="SaaS",
+        business_summary="Original summary",
+        target_audiences=["Teams"],
+        products_services=["Analytics"],
+        value_propositions=["Fast setup"],
+        ai_content_rules="",
+    )
+
+    confirmed = asyncio.run(service.update_business_profile(created.id, request))
+    replayed = asyncio.run(service.update_business_profile(created.id, request))
+
+    assert confirmed.context_version == created.context_version + 1
+    assert replayed.context_version == confirmed.context_version
+    assert replayed.site_profile is not None
+    assert confirmed.site_profile is not None
+    assert replayed.site_profile.confirmed_at == confirmed.site_profile.confirmed_at
+
+
+def test_business_profile_confirmation_transition_is_idempotent() -> None:
+    site_profile = SimpleNamespace(
+        profile_json={
+            "business_name": "Example",
+            "business_type": "SaaS",
+            "business_summary": "Original summary",
+            "products_services": ["Analytics"],
+        },
+        user_overrides={},
+    )
+    updates = {
+        "business_name": "Example",
+        "business_type": "SaaS",
+        "business_summary": "Original summary",
+        "target_audiences": ["Teams"],
+        "products_services": ["Analytics"],
+        "value_propositions": ["Fast setup"],
+        "ai_content_rules": "",
+    }
+
+    changed, confirmation_transition = _apply_business_profile_confirmation(
+        site_profile,
+        updates,
+    )
+    confirmed_at = site_profile.profile_json["confirmed_at"]
+    replay_changed, replay_transition = _apply_business_profile_confirmation(
+        site_profile,
+        updates,
+    )
+
+    assert changed is True
+    assert confirmation_transition is True
+    assert replay_changed is False
+    assert replay_transition is False
+    assert site_profile.profile_json["confirmed_at"] == confirmed_at
+    assert site_profile.user_overrides["confirmed_at"] == confirmed_at
+
+
+def test_confirmed_profile_change_does_not_reenter_confirmation_transition() -> None:
+    site_profile = SimpleNamespace(
+        profile_json={
+            "business_name": "Example",
+            "business_type": "SaaS",
+            "business_summary": "Original summary",
+            "products_services": ["Analytics"],
+            "confirmed_at": "2026-08-19T08:00:00+00:00",
+        },
+        user_overrides={},
+    )
+
+    changed, confirmation_transition = _apply_business_profile_confirmation(
+        site_profile,
+        {
+            "business_name": "Example",
+            "business_type": "SaaS",
+            "business_summary": "Updated summary",
+            "target_audiences": ["Teams"],
+            "products_services": ["Analytics"],
+            "value_propositions": ["Fast setup"],
+            "ai_content_rules": "",
+        },
+    )
+
+    assert changed is True
+    assert confirmation_transition is False
+    assert site_profile.profile_json["business_summary"] == "Updated summary"
+
+
+def test_profile_confirmation_force_publishes_once_and_advances_context() -> None:
+    class FakeMappingsResult:
+        def __init__(self, row: dict[str, Any] | None) -> None:
+            self.row = row
+
+        def mappings(self) -> FakeMappingsResult:
+            return self
+
+        def first(self) -> dict[str, Any] | None:
+            return self.row
+
+    class FakeVersionSession:
+        def __init__(self, current: dict[str, Any]) -> None:
+            self.current = current
+            self.executions: list[tuple[str, dict[str, Any]]] = []
+            self.scalar_calls = 0
+            self.flush_calls = 0
+
+        async def execute(
+            self,
+            statement: object,
+            parameters: dict[str, Any],
+        ) -> FakeMappingsResult:
+            sql = str(statement)
+            self.executions.append((sql, parameters))
+            if "SELECT id, version, name" in sql:
+                return FakeMappingsResult(self.current)
+            return FakeMappingsResult(None)
+
+        async def scalar(
+            self,
+            statement: object,
+            parameters: dict[str, Any],
+        ) -> int:
+            del statement, parameters
+            self.scalar_calls += 1
+            return 2
+
+        async def flush(self) -> None:
+            self.flush_calls += 1
+
+    old_version_id = "profile-version-1"
+    current = {
+        "id": old_version_id,
+        "version": 1,
+        "name": "Example",
+        "canonical_domain": "example.com",
+        "country_code": "US",
+        "target_market": "US",
+        "locale": "en",
+        "products": ["Analytics"],
+        "input_required": [],
+    }
+    session = FakeVersionSession(current)
+    repository = SQLAlchemyProjectRepository(lambda: session)  # type: ignore[arg-type]
+    project = SimpleNamespace(
+        id="project-1",
+        organization_id="test-org",
+        workspace_id="local",
+        name="Example",
+        domain="example.com",
+        country="US",
+        target_market="US",
+        language="en",
+        context_version=7,
+        current_profile_version_id=old_version_id,
+    )
+    site_profile = SimpleNamespace(
+        project_id=project.id,
+        source_run_id="crawl-run-1",
+        profile_json={
+            "business_name": "Example",
+            "products_services": ["Analytics"],
+            "confirmed_at": "2026-08-19T08:00:00+00:00",
+        },
+        user_overrides={},
+    )
+
+    new_version_id = asyncio.run(
+        repository._publish_website_profile_version(  # type: ignore[arg-type]
+            session,
+            project,
+            site_profile,
+            created_by="website-project-service",
+            force_new=True,
+        )
+    )
+
+    assert new_version_id != old_version_id
+    assert project.current_profile_version_id == new_version_id
+    assert project.context_version == 8
+    assert session.scalar_calls == 1
+    assert session.flush_calls == 1
+    website_inserts = [
+        parameters
+        for sql, parameters in session.executions
+        if "INSERT INTO platform.website_profile_versions" in sql
+    ]
+    assert len(website_inserts) == 1
+    assert website_inserts[0]["id"] == new_version_id
+
+    session.current = {
+        **current,
+        "id": new_version_id,
+        "version": 2,
+    }
+    session.executions.clear()
+    replayed_version_id = asyncio.run(
+        repository._publish_website_profile_version(  # type: ignore[arg-type]
+            session,
+            project,
+            site_profile,
+            created_by="website-project-service",
+        )
+    )
+
+    assert replayed_version_id == new_version_id
+    assert project.context_version == 8
+    assert session.scalar_calls == 1
+    assert session.flush_calls == 1
+    assert all(
+        "INSERT INTO platform.website_profile_versions" not in sql
+        for sql, _parameters in session.executions
+    )
 
 
 def test_update_business_profile_returns_conflict_before_understanding_finishes() -> None:

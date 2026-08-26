@@ -11,6 +11,7 @@ import type {
   createSendIntentCommands,
 } from "../application/commands/send-intent.command.js";
 import type {
+  SendIntentListQuery,
   SendIntentQuery,
 } from "../application/queries/send-intent.query.js";
 import {
@@ -27,6 +28,10 @@ import {
   createSendIntentResponseSchema,
   getSendIntentParamsSchema,
   getSendIntentResponseSchema,
+  listSendIntentsParamsSchema,
+  listSendIntentsQuerySchema,
+  listSendIntentsResponseSchema,
+  preflightSendIntentBodySchema,
   preflightSendIntentResponseSchema,
   sendIntentHeadersSchema,
   sendIntentParamsSchema,
@@ -112,7 +117,7 @@ export function registerBacklinksSendIntentRoute(
       schema: {
         operationId: "backlinksPreflightSendIntentV1",
         params: sendIntentParamsSchema,
-        body: createSendIntentBodySchema,
+        body: preflightSendIntentBodySchema,
         response: {
           200: preflightSendIntentResponseSchema,
           ...errors,
@@ -178,6 +183,8 @@ export function registerBacklinksSendIntentRoute(
         gmailConnectionId: request.body.gmailConnectionId,
         messagePurpose: request.body.messagePurpose,
         followUpIndex: request.body.followUpIndex,
+        readinessSnapshot: request.body.readinessSnapshot,
+        humanConfirmation: request.body.humanConfirmation,
         idempotencyKey: request.headers["idempotency-key"],
       });
       return reply.code(201).send({
@@ -191,6 +198,50 @@ export function registerBacklinksSendIntentRoute(
           generatedAt: new Date().toISOString(),
         },
       });
+    },
+  );
+}
+
+export function registerBacklinksSendIntentListRoute(
+  app: FastifyInstance,
+  options: Readonly<{
+    module: BacklinksModule<SendIntentListQuery>;
+  }>,
+): void {
+  app.withTypeProvider<ZodTypeProvider>().get(
+    "/api/v1/projects/:websiteProjectKey/backlinks/send-intents",
+    {
+      schema: {
+        operationId: "backlinksListSendIntentsV1",
+        params: listSendIntentsParamsSchema,
+        querystring: listSendIntentsQuerySchema,
+        response: {
+          200: listSendIntentsResponseSchema,
+          ...errors,
+        },
+      },
+      errorHandler: sendError,
+    },
+    async (request) => {
+      const context = await options.module.projectContext.resolve({
+        actor: request.actor,
+        websiteProjectKey: request.params.websiteProjectKey,
+      });
+      const page = await options.module.queries.listSendIntents(
+        context,
+        request.query,
+      );
+      return {
+        ...page,
+        meta: {
+          organizationId: context.tenant.organizationId,
+          workspaceId: context.tenant.workspaceId,
+          websiteProjectId: context.project.websiteProjectId,
+          requestId: request.id,
+          schemaVersion: "backlinks.v1" as const,
+          generatedAt: new Date().toISOString(),
+        },
+      };
     },
   );
 }

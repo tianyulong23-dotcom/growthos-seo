@@ -2,10 +2,23 @@ import os
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
+from app.core.backlinks_gateway import (
+    PlatformContextResolutionError,
+    PlatformContextResolver,
+)
 from app.modules.audit.models import (
     AuditActivityCollection,
     AuditExternalResourceCollection,
@@ -46,8 +59,21 @@ PageNumber = Annotated[int, Query(ge=1)]
 PageSize = Annotated[int, Query(ge=1, le=1000)]
 
 
-def get_audit_service() -> AuditService:
-    return build_audit_service()
+async def get_audit_service(request: Request, project_id: str) -> AuditService:
+    resolver: PlatformContextResolver = request.app.state.platform_context_resolver
+    permission = "projects:read" if request.method in {"GET", "HEAD"} else "projects:write"
+    try:
+        resolved = await resolver.resolve(
+            request=request,
+            website_project_key=project_id,
+            required_permission=permission,
+        )
+    except PlatformContextResolutionError as error:
+        raise HTTPException(
+            status_code=error.status,
+            detail={"code": error.code, "message": error.detail},
+        ) from error
+    return build_audit_service().for_organization(resolved.tenant.organization_id)
 
 
 def audit_error(exc: Exception) -> HTTPException:

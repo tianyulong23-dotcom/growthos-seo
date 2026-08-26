@@ -140,6 +140,7 @@ class FakeSecretStore implements SecretStorePort {
 class FakePersistence implements GmailConnectionSecretPersistence {
   readonly creates: GmailConnectionSecretPersistenceCreateInput[] = [];
   readonly replaces: GmailConnectionSecretPersistenceReplaceInput[] = [];
+  readonly refreshFailures: string[] = [];
   reauths = 0;
   activeConnectionId: string | null = null;
   state: GmailConnectionSecretPersistenceRefreshState | null = null;
@@ -200,6 +201,26 @@ class FakePersistence implements GmailConnectionSecretPersistence {
         connectionStatus: "REAUTH_REQUIRED",
         sendAvailability: "PAUSED",
         recentErrorCategory: "GOOGLE_AUTH_EXPIRED",
+      },
+    };
+    return this.state;
+  }
+
+  async markRefreshFailure(
+    input: Readonly<{ expectedVersion: number; reason: string }>,
+  ) {
+    this.refreshFailures.push(input.reason);
+    if (this.state === null || this.state.version !== input.expectedVersion) {
+      return null;
+    }
+    const nextVersion = this.state.version + 1;
+    this.state = {
+      ...this.state,
+      version: nextVersion,
+      view: {
+        ...this.state.view,
+        version: nextVersion,
+        recentErrorCategory: input.reason,
       },
     };
     return this.state;
@@ -517,7 +538,9 @@ describe("BL-AI-104 Secret Store and Gmail Token repository", () => {
         expectedVersion: 1,
       })).rejects.toMatchObject({ code, retryable: true });
       expect(persistence.reauths).toBe(0);
+      expect(persistence.refreshFailures).toEqual([code]);
       expect(persistence.state?.view.connectionStatus).toBe("CONNECTED");
+      expect(persistence.state?.view.recentErrorCategory).toBe(code);
     },
   );
 

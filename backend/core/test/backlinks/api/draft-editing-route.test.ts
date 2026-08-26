@@ -115,6 +115,37 @@ describe("BL-AI-096 Draft editing and approval API", () => {
           approvedVersionId: aggregateVersion === 4
             ? currentVersionId
             : null,
+          inputSnapshot: {
+            evidenceSnapshotId: "018f0000-0000-7000-8000-000000000397",
+            evidenceSnapshotHash: "a".repeat(64),
+            requestSnapshotId: "018f0000-0000-7000-8000-000000000398",
+            request: {
+              cooperationType: "GUEST_POST",
+              linkAttributePreference: "DOFOLLOW_PREFERRED",
+              promotionTargetUrl: "https://example.com/guide",
+              anchorTextSuggestion: "example guide",
+              language: "en",
+              tone: "WARM_PROFESSIONAL",
+              subjectStyle: "CLEAR_DIRECT",
+              additionalRequirements: "",
+              forbiddenPhrases: [],
+            },
+            requestHash: "b".repeat(64),
+            recommendationId: "018f0000-0000-7000-8000-000000000399",
+            profileVersionId: "profile-v2",
+            promotionTargetVersionId: "target-v3",
+            opportunityVersion: 4,
+            contactId: "018f0000-0000-7000-8000-000000000395",
+            contactVersion: 2,
+            createdAt: "2026-07-27T09:00:00.000Z",
+          },
+          freshness: {
+            state: "FRESH",
+            staleReasons: [],
+            unknownReason: null,
+            regenerateRequired: false,
+            manualEditsPreserved: true,
+          },
           currentVersion: {
             id: currentVersionId,
             versionNo: currentVersionId === originalVersionId ? 1 : 2,
@@ -122,6 +153,10 @@ describe("BL-AI-096 Draft editing and approval API", () => {
             bodyText: current.bodyText,
             bodyDocument: current.bodyDocument,
             source: current.source,
+            readiness: current.source === "MODEL"
+              ? "AI_DRAFT_READY"
+              : "EDITED_DRAFT_READY",
+            fallbackReason: null,
             createdAt: "2026-07-27T09:30:00.000Z",
           },
         };
@@ -177,6 +212,17 @@ describe("BL-AI-096 Draft editing and approval API", () => {
               content: [{ type: "text", text: "Original body" }],
             }],
           },
+        },
+        inputSnapshot: {
+          profileVersionId: "profile-v2",
+          promotionTargetVersionId: "target-v3",
+          opportunityVersion: 4,
+          contactVersion: 2,
+        },
+        freshness: {
+          state: "FRESH",
+          regenerateRequired: false,
+          manualEditsPreserved: true,
         },
       },
     });
@@ -261,6 +307,32 @@ describe("BL-AI-096 Draft editing and approval API", () => {
         },
       },
     })).statusCode).toBe(403);
+
+    const internalMetadata = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/project-key/backlinks/drafts/${draftId}/versions`,
+      payload: {
+        expectedVersion: 4,
+        subjectText: "Edited subject",
+        bodyDocument: {
+          type: "doc",
+          content: [{
+            type: "paragraph",
+            content: [{
+              type: "text",
+              text: "[profile:current, opportunity:current]",
+            }],
+          }],
+        },
+      },
+    });
+    expect(internalMetadata.statusCode).toBe(400);
+    expect(internalMetadata.json()).toMatchObject({
+      code: "BACKLINK_INVALID_REQUEST",
+      fieldErrors: [{
+        field: "bodyDocument",
+      }],
+    });
 
     expect((await app.inject({
       method: "POST",

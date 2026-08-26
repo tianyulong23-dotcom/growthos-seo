@@ -8,6 +8,10 @@ import {
   type GmailSendPort,
   type GmailSendResult,
 } from "../../ports/gmail-send.port.js";
+import {
+  googleAuthFailureCodeSchema,
+  googleAuthFailureCodes,
+} from "../../ports/google-auth.port.js";
 
 export const gmailSendClientConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -82,6 +86,10 @@ const gmailSendProviderFailureSchema = z.discriminatedUnion("kind", [
     kind: z.literal("transport"),
     requestDispatched: z.boolean(),
   }).strict(),
+  z.object({
+    kind: z.literal("auth"),
+    authCode: googleAuthFailureCodeSchema,
+  }).strict(),
 ]);
 
 export type GmailSendProviderFailure = Readonly<
@@ -129,7 +137,9 @@ const definitelyNotSent = (
 
 const retryableDefinitelyNotSent = (
   code: typeof gmailSendFailureCodes.rateLimited
-    | typeof gmailSendFailureCodes.preRequestFailed,
+    | typeof gmailSendFailureCodes.preRequestFailed
+    | typeof gmailSendFailureCodes.tokenRefreshFailed
+    | typeof gmailSendFailureCodes.providerNetwork,
   retryAfterSeconds?: number,
 ): GmailSendResult => gmailSendResultSchema.parse({
   kind: "definitely_not_sent",
@@ -190,9 +200,7 @@ const mapHttpResponse = (
     return definitelyNotSent(gmailSendFailureCodes.invalidRequest);
   }
   if (status === 401) {
-    return retryableDefinitelyNotSent(
-      gmailSendFailureCodes.preRequestFailed,
-    );
+    return definitelyNotSent(gmailSendFailureCodes.reauthRequired);
   }
   if (status === 403) {
     return definitelyNotSent(gmailSendFailureCodes.forbidden);
@@ -217,14 +225,30 @@ const mapProviderFailure = (
       return error.failure.requestDispatched
         ? acceptanceUnknown(gmailSendFailureCodes.timeout)
         : retryableDefinitelyNotSent(
-          gmailSendFailureCodes.preRequestFailed,
+          gmailSendFailureCodes.providerNetwork,
         );
     case "transport":
       return error.failure.requestDispatched
         ? acceptanceUnknown(gmailSendFailureCodes.ambiguous)
         : retryableDefinitelyNotSent(
-          gmailSendFailureCodes.preRequestFailed,
+          gmailSendFailureCodes.providerNetwork,
         );
+    case "auth":
+      if (error.failure.authCode === googleAuthFailureCodes.temporaryFailure) {
+        return retryableDefinitelyNotSent(
+          gmailSendFailureCodes.tokenRefreshFailed,
+        );
+      }
+      if (error.failure.authCode === googleAuthFailureCodes.rateLimited) {
+        return retryableDefinitelyNotSent(gmailSendFailureCodes.rateLimited);
+      }
+      if (
+        error.failure.authCode === googleAuthFailureCodes.authExpired
+        || error.failure.authCode === googleAuthFailureCodes.authorizationDenied
+      ) {
+        return definitelyNotSent(gmailSendFailureCodes.reauthRequired);
+      }
+      return definitelyNotSent(gmailSendFailureCodes.invalidRequest);
   }
 };
 

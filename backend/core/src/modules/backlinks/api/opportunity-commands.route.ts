@@ -15,7 +15,7 @@ const projectParams = z.object({ websiteProjectKey: nonBlank }).strict();
 const params = z.object({ websiteProjectKey: nonBlank, opportunityId: z.uuid() }).strict();
 export const createOpportunityBodySchema = z.object({
   recommendationId: z.uuid(),
-  contactCandidateId: z.uuid(),
+  contactCandidateId: z.uuid().nullable().optional(),
   expectedVersion: z.number().int().positive(),
 }).strict();
 export const transitionOpportunityBodySchema = z.object({
@@ -34,7 +34,7 @@ const metaSchema = z.object({ organizationId: nonBlank, workspaceId: nonBlank,
 const createResponse = z.object({
   opportunityId: z.uuid(), recommendationId: z.uuid(), cycleId: z.uuid(),
   websiteProjectId: nonBlank, targetSiteKey: nonBlank, targetHostAscii: nonBlank,
-  contactCandidateId: z.uuid(), contactReviewRequired: z.boolean(),
+  contactCandidateId: z.uuid().nullable(), contactReviewRequired: z.boolean(),
   joinSequence: z.number().int().positive(), businessStage: z.literal("JOINED"),
   managementStatus: z.literal("ACTIVE"), outcomeStatus: z.literal("OPEN"),
   fulfillmentStatus: z.literal("NOT_EXPECTED"), version: z.number().int().positive(),
@@ -70,7 +70,9 @@ export function registerBacklinksOpportunityCommandsRoutes(app: FastifyInstance,
         websiteProjectKey: request.params.websiteProjectKey });
       const result = await options.commands.createFromRecommendation({ context,
         requestId: request.id, idempotencyKey: request.headers["idempotency-key"],
-        ...request.body });
+        recommendationId: request.body.recommendationId,
+        contactCandidateId: request.body.contactCandidateId ?? null,
+        expectedVersion: request.body.expectedVersion });
       return reply.code(201).send({ ...result, meta: {
         organizationId: context.tenant.organizationId,
         workspaceId: context.tenant.workspaceId,

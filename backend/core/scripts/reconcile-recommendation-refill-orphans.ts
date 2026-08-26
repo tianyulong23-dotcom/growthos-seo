@@ -11,15 +11,23 @@ import {
   reconcileRecommendationRefillOrphans,
   type RecommendationRefillWorkflowState,
 } from "../src/modules/backlinks/application/services/recommendation-refill-reconciliation.service.js";
+import type { RecommendationRefillSupersessionSignal } from "../src/modules/backlinks/workflows/definitions/backlink-recommendation-refill.orchestration.js";
+import { backlinksRuntimeContract } from "../src/modules/backlinks/workflows/namespaces.js";
 
 const nonBlank = z.string().trim().min(1);
+const scopeSchema = z.object({
+  organizationId: z.uuid(),
+  workspaceId: z.uuid(),
+  websiteProjectId: z.uuid(),
+}).strict();
+const operationSchema = z.object({
+  jobId: z.uuid(),
+  workflowId: nonBlank,
+}).strict();
 const commandSchema = z.object({
   action: z.enum(["dry-run", "apply"]),
-  scope: z.object({
-    organizationId: z.uuid(),
-    workspaceId: z.uuid(),
-    websiteProjectId: z.uuid(),
-  }).strict(),
+  scope: scopeSchema,
+  operation: operationSchema.optional(),
   actorId: nonBlank,
 }).strict();
 
@@ -85,6 +93,7 @@ async function main(): Promise<void> {
       scope: command.scope,
       actorId: command.actorId,
       mode: command.action,
+      operation: command.operation,
       workflowProbe: {
         async inspect(workflowId) {
           try {
@@ -95,6 +104,24 @@ async function main(): Promise<void> {
               ? "missing"
               : "unknown";
           }
+        },
+        async readSupersession(workflowId) {
+          try {
+            return await workflow.getHandle(workflowId).query<
+              RecommendationRefillSupersessionSignal | null
+            >(
+              backlinksRuntimeContract.queries
+                .recommendationRefillSupersessionStatus,
+            );
+          } catch {
+            return null;
+          }
+        },
+        async signalSuperseded(workflowId, signal) {
+          await workflow.getHandle(workflowId).signal(
+            backlinksRuntimeContract.signals.recommendationRefillSuperseded,
+            signal,
+          );
         },
       },
     });

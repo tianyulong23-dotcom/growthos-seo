@@ -11,6 +11,8 @@ export const backlinksNavigation: NavigationItem = {
     { id: "recommendations", label: "推荐池" },
     { id: "opportunities", label: "外链机会" },
     { id: "email", label: "邮件中心" },
+    { id: "links", label: "外链监控" },
+    { id: "reports", label: "指标报告" },
   ],
   action: "",
   badge: {

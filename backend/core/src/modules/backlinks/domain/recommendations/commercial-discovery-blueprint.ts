@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 
 import { createRecommendationDomainKey } from "./domain-key.js";
 
-export const commercialDiscoveryBlueprintVersion = 3;
+export const commercialDiscoveryBlueprintVersion = 5;
 export const commercialDiscoveryBlueprintSchemaVersion =
-  "commercial-discovery-blueprint.v3";
+  "commercial-discovery-blueprint.v5";
 export const commercialDiscoveryPromptVersion =
-  "commercial-discovery-blueprint-prompt.v3";
+  "commercial-discovery-blueprint-prompt.v5";
 export const commercialDiscoveryRuleVersion =
-  "commercial-discovery-blueprint-rules.v3";
+  "commercial-discovery-blueprint-rules.v5";
 export const commercialDiscoverySourceHierarchy = Object.freeze([
   "PROJECT_EXPLICIT_COMPETITORS",
   "DATAFORSEO_CURRENT_DOMAIN_COMPETITORS",
@@ -27,6 +27,10 @@ export type CommercialDiscoveryHypothesis = Readonly<{
   excludedSiteTypes: readonly string[];
   discoveredCompetitorSeeds: readonly string[];
 }>;
+
+export type CommercialDiscoveryInputReadiness =
+  | "READY"
+  | "PROJECT_EVIDENCE_REFRESH_REQUIRED";
 
 export type CommercialDiscoveryBlueprintContext = Readonly<{
   projectContextVersionId: string;
@@ -84,6 +88,7 @@ export type CommercialDiscoveryBlueprint = Readonly<{
   historicalFeedbackDomains: readonly string[];
   competitorSuggestions: readonly string[];
   discoveredCompetitorSeeds: readonly string[];
+  inputReadiness: CommercialDiscoveryInputReadiness;
   sourceHierarchy: typeof commercialDiscoverySourceHierarchy;
   inputSummary: Readonly<{
     fingerprint: string;
@@ -95,6 +100,7 @@ export type CommercialDiscoveryBlueprint = Readonly<{
     targetAudienceCount: number;
     partnershipGoalCount: number;
     explicitCompetitorCount: number;
+    semanticSeedCount: number;
   }>;
   evidenceRefs: readonly string[];
   generator: "AI" | "DETERMINISTIC_FALLBACK";
@@ -172,48 +178,48 @@ function parseHypothesis(value: unknown): CommercialDiscoveryHypothesis | null {
   ) {
     return null;
   }
-  const targetAudience = stringList(record.targetAudience, 1, 100, 2_048);
+  const targetAudience = stringList(record.targetAudience, 1, 6, 320);
   const productValuePropositions = stringList(
     record.productValuePropositions,
     1,
-    100,
-    2_048,
+    6,
+    320,
   );
-  const topicClusters = stringList(record.topicClusters, 1, 100, 2_048);
+  const topicClusters = stringList(record.topicClusters, 1, 8, 320);
   const searchQueryClusters = stringList(
     record.searchQueryClusters,
-    1,
-    100,
-    2_048,
+    4,
+    12,
+    256,
   );
   const targetSiteArchetypes = stringList(
     record.targetSiteArchetypes,
     1,
-    100,
-    2_048,
+    6,
+    320,
   );
   const cooperationAngles = stringList(
     record.cooperationAngles,
     1,
-    100,
-    2_048,
+    6,
+    320,
   );
   const negativeKeywords = stringList(
     record.negativeKeywords,
     0,
-    100,
-    2_048,
+    12,
+    320,
   );
   const excludedSiteTypes = stringList(
     record.excludedSiteTypes,
     0,
-    100,
-    2_048,
+    12,
+    320,
   );
   const discoveredCompetitorSeeds = stringList(
     record.discoveredCompetitorSeeds,
     0,
-    50,
+    8,
     253,
   );
   if (
@@ -273,66 +279,125 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function deterministicHypothesis(
+function marketName(
+  countries: readonly string[],
+  languages: readonly string[],
+): string {
+  const country = unique(countries)[0];
+  if (country === undefined) return "";
+  try {
+    return new Intl.DisplayNames(
+      [unique(languages)[0] ?? "en"],
+      { type: "region" },
+    ).of(country.toUpperCase())?.trim() || country.toUpperCase();
+  } catch {
+    return country.toUpperCase();
+  }
+}
+
+function stripProjectBrand(
+  value: string,
+  canonicalDomain: string,
+): string {
+  const brand = createRecommendationDomainKey(canonicalDomain)
+    .registrableDomain.split(".")[0]?.trim() ?? "";
+  if (brand.length < 3) return value.trim();
+  const escaped = brand.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return value
+    .replace(new RegExp(`\\b${escaped}\\b`, "giu"), " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function semanticSeeds(
+  context: CommercialDiscoveryBlueprintContext,
+): readonly string[] {
+  return unique([...context.keywords, ...context.products]
+    .map((value) => stripProjectBrand(value, context.canonicalDomain))
+    .filter(Boolean))
+    .slice(0, 4);
+}
+
+export function assessCommercialDiscoveryInputReadiness(
+  context: CommercialDiscoveryBlueprintContext,
+): CommercialDiscoveryInputReadiness {
+  const hasMarket = unique(context.countries).length > 0;
+  const hasLanguage = unique(context.languages).length > 0;
+  const hasPromotionTopic =
+    unique(context.promotionTargetUrls).length > 0
+    || unique(context.keywords).length > 0;
+  return hasMarket
+      && hasLanguage
+      && hasPromotionTopic
+      && semanticSeeds(context).length > 0
+    ? "READY"
+    : "PROJECT_EVIDENCE_REFRESH_REQUIRED";
+}
+
+function query(parts: readonly string[]): string {
+  return parts.map((part) => part.trim()).filter(Boolean).join(" ");
+}
+
+export function buildDeterministicCommercialDiscoveryHypothesis(
   context: CommercialDiscoveryBlueprintContext,
 ): CommercialDiscoveryHypothesis {
-  const canonicalDomain =
-    createRecommendationDomainKey(context.canonicalDomain).registrableDomain;
-  const subjects = unique([...context.products, ...context.keywords])
-    .slice(0, 20);
-  const boundedSubjects = subjects.length > 0 ? subjects : [canonicalDomain];
-  const countries = unique(context.countries);
-  const market = countries.length > 0 ? `${countries.join("/")} ` : "";
-  const audiences = unique(context.declaredTargetAudiences);
+  const subjects = semanticSeeds(context);
+  const market = marketName(context.countries, context.languages);
+  const ready = assessCommercialDiscoveryInputReadiness(context) === "READY";
+  const primarySubject = subjects[0] ?? "";
+  const adjacentSubject = subjects[1] ?? primarySubject;
+  const audiences = unique(context.declaredTargetAudiences).slice(0, 6);
   const goals = unique(context.partnershipGoals);
-  const topicFamilies = unique([
-    ...boundedSubjects,
-    ...boundedSubjects.map((subject) => `${subject} use cases`),
-    ...boundedSubjects.map((subject) => `${subject} buying advice`),
-    ...boundedSubjects.map((subject) => `${subject} industry trends`),
-    ...boundedSubjects.map((subject) => `${subject} customer education`),
-  ]).slice(0, 100);
+  const topicFamilies = unique([...subjects, ...audiences]).slice(0, 8);
   const siteArchetypes = [
+    "specialist blog",
     "industry publication",
-    "specialist editorial blog",
-    "consumer guide",
-    "review and comparison site",
-    "trade association",
-    "professional community",
-    "resource hub",
-    "partner directory",
-    "newsletter",
-    "podcast or expert interview site",
     "local or regional publication",
+    "resource directory",
+    "review publication",
     "adjacent industry publication",
   ];
+  const searchQueryClusters = ready
+    ? unique([
+        query([market, primarySubject, "blogs"]),
+        query([market, primarySubject, "publications"]),
+        query([market, primarySubject, "websites"]),
+        query([market, primarySubject, "industry publications"]),
+        query([`"${primarySubject}"`, "\"write for us\"", market]),
+        query([`"${primarySubject}"`, "\"contribute\"", market]),
+        query([market, primarySubject, "\"advertise with us\""]),
+        query([market, primarySubject, "\"media kit\""]),
+        query([market, primarySubject, "\"submit a resource\""]),
+        query([market, primarySubject, "useful links"]),
+        query([market, primarySubject, "resource directory"]),
+        query([
+          market,
+          adjacentSubject,
+          "adjacent industry publications",
+        ]),
+      ]).slice(0, 12)
+    : Object.freeze([]);
   return Object.freeze({
     targetAudience: audiences.length > 0
       ? audiences
-      : boundedSubjects.map(
-        (subject) => `${market}${subject} buyers and operators`,
-      ),
+      : subjects.map((subject) => query([market, subject, "audience"]))
+        .slice(0, 6),
     productValuePropositions: (context.products.length > 0
       ? context.products
-      : boundedSubjects
-    ).map((product) => `${product} practical value and use cases`),
+      : subjects
+    ).map((product) => stripProjectBrand(product, context.canonicalDomain))
+      .filter(Boolean)
+      .slice(0, 6),
     topicClusters: topicFamilies,
-    searchQueryClusters: topicFamilies.flatMap((subject) =>
-      siteArchetypes.map((archetype) =>
-        `${market}${subject} ${archetype}`,
-      )
-    ).slice(0, 100),
+    searchQueryClusters,
     targetSiteArchetypes: siteArchetypes,
     cooperationAngles: goals.length > 0
-      ? goals
+      ? goals.slice(0, 6)
       : [
         "expert contribution",
         "resource inclusion",
-        "data-backed editorial collaboration",
-        "product review or comparison",
-        "expert interview",
-        "audience education",
-        "partner directory inclusion",
+        "editorial review",
+        "media partnership",
       ],
     negativeKeywords: [
       "casino", "adult", "payday loan", "link farm", "pbn",
@@ -379,6 +444,7 @@ function inputSummary(context: CommercialDiscoveryBlueprintContext) {
     targetAudienceCount: normalized.declaredTargetAudiences.length,
     partnershipGoalCount: normalized.partnershipGoals.length,
     explicitCompetitorCount: normalized.explicitCompetitorDomains.length,
+    semanticSeedCount: semanticSeeds(context).length,
   });
 }
 
@@ -411,7 +477,8 @@ export function buildCommercialDiscoveryBlueprint(input: Readonly<{
   const parsedAi = input.aiOutput === undefined
     ? null
     : parseHypothesis(input.aiOutput);
-  const hypothesis = parsedAi ?? deterministicHypothesis(context);
+  const hypothesis = parsedAi
+    ?? buildDeterministicCommercialDiscoveryHypothesis(context);
   const observed = new Set(domains(input.observedCompetitorDomains ?? []));
   const competitorSuggestions = domains(
     hypothesis.discoveredCompetitorSeeds,
@@ -461,6 +528,7 @@ export function buildCommercialDiscoveryBlueprint(input: Readonly<{
     historicalFeedbackDomains,
     competitorSuggestions,
     discoveredCompetitorSeeds,
+    inputReadiness: assessCommercialDiscoveryInputReadiness(context),
     sourceHierarchy: commercialDiscoverySourceHierarchy,
     inputSummary: inputSummary(context),
     evidenceRefs: unique([

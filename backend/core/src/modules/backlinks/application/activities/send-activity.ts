@@ -1,9 +1,14 @@
 import {
+  gmailSendFailureCodes,
   gmailSendCommandSchema,
   type GmailSendCommand,
   type GmailSendPort,
   type GmailSendResult,
 } from "../../ports/gmail-send.port.js";
+import {
+  GoogleAuthError,
+  googleAuthFailureCodes,
+} from "../../ports/google-auth.port.js";
 import type {
   ClaimSendAttemptInput,
   SendAttemptClaimResult,
@@ -14,6 +19,7 @@ import type {
   SendExecutionContext,
 } from "../services/send-attempt.repository.js";
 import {
+  GmailSendPolicyBlockedError,
   runAfterGmailSendPolicyGate,
   type GmailSendPolicyInput,
 } from "../services/send-policy-gate.js";
@@ -33,6 +39,13 @@ export interface GmailSendPolicyInputLoader {
 }
 
 export interface GmailConnectionHealthCheck {
+  run(input: Readonly<{
+    context: SendExecutionContext;
+    attempt: SendAttemptReference;
+  }>): Promise<void>;
+}
+
+export interface GmailSendCommandContextCleanup {
   run(input: Readonly<{
     context: SendExecutionContext;
     attempt: SendAttemptReference;
@@ -60,9 +73,83 @@ type GmailSendActivityDependencies = Readonly<{
   connectionHealthCheck: GmailConnectionHealthCheck;
   policyInputLoader: GmailSendPolicyInputLoader;
   gmail: GmailSendPort;
+  commandContextCleanup?: GmailSendCommandContextCleanup;
   acceptedSendHandler?: GmailAcceptedSendHandler;
   clock?: () => Date;
 }>;
+
+const preRequestFailure = (): GmailSendResult => ({
+  kind: "definitely_not_sent",
+  code: gmailSendFailureCodes.preRequestFailed,
+  retryable: true,
+});
+
+const authFailureResult = (error: GoogleAuthError): GmailSendResult => {
+  if (error.code === googleAuthFailureCodes.rateLimited) {
+    return {
+      kind: "definitely_not_sent",
+      code: gmailSendFailureCodes.rateLimited,
+      retryable: true,
+    };
+  }
+  if (error.code === googleAuthFailureCodes.temporaryFailure) {
+    return {
+      kind: "definitely_not_sent",
+      code: gmailSendFailureCodes.tokenRefreshFailed,
+      retryable: true,
+    };
+  }
+  if (error.code === googleAuthFailureCodes.invalidRequest) {
+    return {
+      kind: "definitely_not_sent",
+      code: gmailSendFailureCodes.invalidRequest,
+      retryable: false,
+    };
+  }
+  return {
+    kind: "definitely_not_sent",
+    code: gmailSendFailureCodes.reauthRequired,
+    retryable: false,
+  };
+};
+
+const policyBlockResult = (
+  error: GmailSendPolicyBlockedError,
+  now: Date,
+): GmailSendResult => {
+  if (
+    error.decision.blockCodes.includes("GMAIL_CONNECTION_UNAVAILABLE")
+  ) {
+    return {
+      kind: "definitely_not_sent",
+      code: gmailSendFailureCodes.reauthRequired,
+      retryable: false,
+    };
+  }
+  if (
+    error.decision.blockCodes.includes("GMAIL_DAILY_QUOTA_EXCEEDED")
+    || error.decision.blockCodes.includes("GMAIL_SEND_COOLDOWN_ACTIVE")
+  ) {
+    const retryAt = error.decision.retryAt === null
+      ? null
+      : new Date(error.decision.retryAt);
+    const retryAfterSeconds = retryAt !== null
+      && Number.isFinite(retryAt.getTime())
+      ? Math.max(0, Math.ceil((retryAt.getTime() - now.getTime()) / 1_000))
+      : undefined;
+    return {
+      kind: "definitely_not_sent",
+      code: gmailSendFailureCodes.rateLimited,
+      retryable: true,
+      ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+    };
+  }
+  return {
+    kind: "definitely_not_sent",
+    code: gmailSendFailureCodes.forbidden,
+    retryable: false,
+  };
+};
 
 export class GmailSendActivity {
   readonly #repository: SendAttemptRepository;
@@ -70,6 +157,7 @@ export class GmailSendActivity {
   readonly #connectionHealthCheck: GmailConnectionHealthCheck;
   readonly #policyInputLoader: GmailSendPolicyInputLoader;
   readonly #gmail: GmailSendPort;
+  readonly #commandContextCleanup: GmailSendCommandContextCleanup | undefined;
   readonly #acceptedSendHandler: GmailAcceptedSendHandler | undefined;
   readonly #clock: () => Date;
 
@@ -79,6 +167,7 @@ export class GmailSendActivity {
     this.#connectionHealthCheck = dependencies.connectionHealthCheck;
     this.#policyInputLoader = dependencies.policyInputLoader;
     this.#gmail = dependencies.gmail;
+    this.#commandContextCleanup = dependencies.commandContextCleanup;
     this.#acceptedSendHandler = dependencies.acceptedSendHandler;
     this.#clock = dependencies.clock ?? (() => new Date());
   }
@@ -99,27 +188,69 @@ export class GmailSendActivity {
     attempt: SendAttemptReference;
   }>): Promise<GmailSendResult> {
     const { context, attempt } = input;
-    const command = gmailSendCommandSchema.parse(
-      await this.#commandLoader.load({ context, attempt }),
-    );
-    if (
-      command.gmailConnectionId !== context.gmailConnectionId
-      || command.rfcMessageId !== attempt.rfcMessageId
-      || command.requestId !== attempt.attemptId
-    ) {
-      throw new Error(
-        "Gmail Send command does not match the claimed Attempt.",
-      );
+    let providerCallStarted = false;
+    try {
+      let command: GmailSendCommand;
+      try {
+        command = gmailSendCommandSchema.parse(
+          await this.#commandLoader.load({ context, attempt }),
+        );
+      } catch {
+        return preRequestFailure();
+      }
+      if (
+        command.gmailConnectionId !== context.gmailConnectionId
+        || command.rfcMessageId !== attempt.rfcMessageId
+        || command.requestId !== attempt.attemptId
+      ) {
+        return {
+          kind: "definitely_not_sent",
+          code: gmailSendFailureCodes.invalidRequest,
+          retryable: false,
+        };
+      }
+      try {
+        await this.#connectionHealthCheck.run({ context, attempt });
+      } catch (error) {
+        return error instanceof GoogleAuthError
+          ? authFailureResult(error)
+          : preRequestFailure();
+      }
+      let policyInput: GmailSendPolicyInput;
+      try {
+        policyInput = await this.#policyInputLoader.load({
+          context,
+          attempt,
+        });
+      } catch {
+        return preRequestFailure();
+      }
+      try {
+        return await runAfterGmailSendPolicyGate(
+          policyInput,
+          () => {
+            providerCallStarted = true;
+            return this.#gmail.send(command);
+          },
+        );
+      } catch (error) {
+        if (providerCallStarted) {
+          return {
+            kind: "acceptance_unknown",
+            code: gmailSendFailureCodes.ambiguous,
+          };
+        }
+        return error instanceof GmailSendPolicyBlockedError
+          ? policyBlockResult(error, this.#clock())
+          : preRequestFailure();
+      }
+    } finally {
+      if (!providerCallStarted && this.#commandContextCleanup !== undefined) {
+        await this.#commandContextCleanup.run({ context, attempt }).catch(
+          () => undefined,
+        );
+      }
     }
-    await this.#connectionHealthCheck.run({ context, attempt });
-    const policyInput = await this.#policyInputLoader.load({
-      context,
-      attempt,
-    });
-    return runAfterGmailSendPolicyGate(
-      policyInput,
-      () => this.#gmail.send(command),
-    );
   }
 
   async settleAttempt(input: Readonly<{

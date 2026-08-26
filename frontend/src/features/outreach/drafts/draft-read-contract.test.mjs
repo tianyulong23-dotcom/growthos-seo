@@ -13,6 +13,8 @@ const openApi = JSON.parse(readFileSync(openApiPath, "utf8"))
 
 const draftReadPath =
   "/api/v1/projects/{websiteProjectKey}/backlinks/drafts/{draftId}"
+const sendIntentListPath =
+  "/api/v1/projects/{websiteProjectKey}/backlinks/send-intents"
 
 test("BL-AI-097 can reload an editable Draft snapshot from the backend", () => {
   const draftRead = openApi.paths[draftReadPath]?.get
@@ -32,6 +34,8 @@ test("BL-AI-097 can reload an editable Draft snapshot from the backend", () => {
       "status",
       "draftVersion",
       "approvedVersionId",
+      "inputSnapshot",
+      "freshness",
       "currentVersion",
     ],
     "Draft reads must expose the bound Contact and backend versions."
@@ -47,6 +51,8 @@ test("BL-AI-097 can reload an editable Draft snapshot from the backend", () => {
       "bodyText",
       "bodyDocument",
       "source",
+      "readiness",
+      "fallbackReason",
       "createdAt",
     ],
     "The current Draft version must include safe structured content."
@@ -54,5 +60,43 @@ test("BL-AI-097 can reload an editable Draft snapshot from the backend", () => {
   assert.equal(
     currentVersion?.properties?.bodyDocument?.properties?.type?.enum?.[0],
     "doc"
+  )
+  assert.deepEqual(currentVersion?.properties?.readiness?.enum, [
+    "AI_DRAFT_READY",
+    "BASIC_DRAFT_READY",
+    "EDITED_DRAFT_READY",
+  ])
+  assert.deepEqual(
+    draftSchema?.properties?.freshness?.properties?.state?.enum,
+    ["FRESH", "STALE", "UNKNOWN"]
+  )
+  assert.deepEqual(
+    draftSchema?.properties?.freshness?.properties?.staleReasons?.items?.enum,
+    ["PROJECT_CONTEXT_CHANGED", "OPPORTUNITY_CHANGED", "CONTACT_CHANGED"]
+  )
+  assert.ok(
+    draftSchema?.properties?.inputSnapshot?.properties?.request,
+    "Draft reads must expose the immutable generation request."
+  )
+})
+
+test("Send Intent reads can restore the latest status for one Draft", () => {
+  const sendIntentList = openApi.paths[sendIntentListPath]?.get
+  assert.ok(sendIntentList, `Missing GET ${sendIntentListPath}.`)
+
+  const queryNames = sendIntentList.parameters
+    .filter((parameter) => parameter.in === "query")
+    .map((parameter) => parameter.name)
+  assert.ok(queryNames.includes("draftId"))
+
+  const responseSchema =
+    sendIntentList.responses?.["200"]?.content?.["application/json"]?.schema
+  const itemSchema = responseSchema?.properties?.items?.items
+  const diagnostics = itemSchema?.properties?.diagnostics
+  assert.ok(diagnostics?.properties?.resubmittable)
+  assert.ok(
+    diagnostics?.properties?.primaryNextAction?.enum?.includes(
+      "RECHECK_BEFORE_RESUBMIT"
+    )
   )
 })

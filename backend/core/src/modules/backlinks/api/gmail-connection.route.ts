@@ -18,6 +18,7 @@ import {
   backlinkErrorCodes,
   isBacklinkError,
 } from "../domain/errors/backlink-error.js";
+import { GoogleAuthError } from "../ports/google-auth.port.js";
 import {
   backlinkProblemContentType,
   backlinkProblemDetailsSchema,
@@ -50,6 +51,7 @@ const errorResponses = {
   404: backlinkProblemDetailsSchema,
   409: backlinkProblemDetailsSchema,
   500: backlinkProblemDetailsSchema,
+  503: backlinkProblemDetailsSchema,
 };
 
 function sendGmailConnectionError(
@@ -60,12 +62,23 @@ function sendGmailConnectionError(
   const invalidTransportRequest =
     error.validation !== undefined
     || error.code?.startsWith("FST_ERR_CTP_") === true;
+  const googleAuthError =
+    error instanceof GoogleAuthError
+      ? error
+      : error instanceof BacklinkError && error.cause instanceof GoogleAuthError
+        ? error.cause
+        : null;
   request.log.warn({
     event: "backlinks.gmail-connection.request.failed",
     errorName: error.name,
     errorCode: error.code,
     backlinkError: isBacklinkError(error),
     validationError: invalidTransportRequest,
+    googleAuthOperation: googleAuthError?.operation ?? null,
+    googleAuthCode: googleAuthError?.code ?? null,
+    googleAuthHttpStatus: googleAuthError?.httpStatus ?? null,
+    googleAuthProviderRequestId: googleAuthError?.providerRequestId ?? null,
+    googleAuthTransportCode: googleAuthError?.transportCode ?? null,
   });
   const normalized =
     error instanceof BacklinkError
@@ -116,6 +129,22 @@ const serializeConnection = (
 const serializeOptionalConnection = (
   connection: GmailConnectionView | null,
 ) => connection === null ? null : serializeConnection(connection);
+
+const serializeReadiness = (
+  readiness: Awaited<
+    ReturnType<GmailConnectionQuery["getStatus"]>
+  >["readiness"],
+) => ({
+  evaluatedAt: readiness.evaluatedAt,
+  connection: { ...readiness.connection },
+  send: { ...readiness.send },
+  sync: { ...readiness.sync },
+  blockers: readiness.blockers.map((item) => ({ ...item })),
+  primaryBlocker:
+    readiness.primaryBlocker === null
+      ? null
+      : { ...readiness.primaryBlocker },
+});
 
 export function registerBacklinksGmailConnectionRoutes(
   app: FastifyInstance,
@@ -218,6 +247,7 @@ export function registerBacklinksGmailConnectionRoutes(
     return {
       connection: serializeOptionalConnection(state.selectedConnection),
       accounts: state.accounts.map(serializeConnection),
+      readiness: serializeReadiness(state.readiness),
       meta: meta(request, projectScope(context)),
     };
   });
@@ -235,13 +265,15 @@ export function registerBacklinksGmailConnectionRoutes(
       actor: request.actor,
       websiteProjectKey: request.params.websiteProjectKey,
     });
-    const state = await options.commands.select({
+    await options.commands.select({
       context,
       connectionId: request.body.connectionId,
     });
+    const state = await options.query.getStatus(context);
     return {
       connection: serializeOptionalConnection(state.selectedConnection),
       accounts: state.accounts.map(serializeConnection),
+      readiness: serializeReadiness(state.readiness),
       meta: meta(request, projectScope(context)),
     };
   });

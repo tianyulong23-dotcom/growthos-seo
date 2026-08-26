@@ -1,12 +1,26 @@
 import asyncio
+import base64
+import json
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
+import httpx
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, MockTransport, Response
 
 from app.api.routes.performance import get_performance_service, router
+from app.core.backlinks_gateway import (
+    BacklinksGateway,
+    PlatformContextResolutionError,
+)
 from app.core.config import Settings
+from app.core.platform_request_context import (
+    PLATFORM_CONTEXT_HEADER,
+    PlatformActor,
+    PlatformProject,
+    PlatformTenant,
+    ResolvedPlatformRequestContext,
+)
 from app.modules.performance.repository import DailyMetric, PublishedArticle
 from app.modules.performance.service import PerformanceService
 from app.modules.settings.gsc import GSCPerformanceDataset
@@ -45,6 +59,182 @@ class FakePerformanceService:
             "page": options["page"],
             "page_size": options["page_size"],
         }
+
+
+def test_backlink_performance_bff_uses_project_scoped_core_read_contract() -> None:
+    async def scenario() -> None:
+        calls: list[httpx.Request] = []
+        permissions: list[str | None] = []
+        signing_key = b"test-only-performance-bff-key-32-bytes"
+        resolved = ResolvedPlatformRequestContext(
+            actor=PlatformActor(
+                user_id="user-performance",
+                session_id="session-performance",
+                roles=("member",),
+            ),
+            tenant=PlatformTenant(
+                organization_id="org-performance",
+                workspace_id="workspace-performance",
+            ),
+            project=PlatformProject(
+                website_project_id="project-performance",
+                website_project_key="project-p1",
+            ),
+            permissions=("backlinks:read",),
+            correlation_id="correlation-performance",
+        )
+
+        class Resolver:
+            async def resolve(
+                self,
+                *,
+                request: object,
+                website_project_key: str,
+                required_permission: str | None = None,
+            ) -> ResolvedPlatformRequestContext:
+                del request
+                assert website_project_key == "project-p1"
+                permissions.append(required_permission)
+                return resolved
+
+        def handler(request: httpx.Request) -> Response:
+            calls.append(request)
+            return Response(
+                200,
+                json={
+                    "items": [],
+                    "nextCursor": None,
+                    "hasMore": False,
+                    "summary": {
+                        "placements": {
+                            "total": 0,
+                            "pendingVerification": 0,
+                            "active": 0,
+                            "suspectedChanged": 0,
+                            "changed": 0,
+                            "suspectedLost": 0,
+                            "lost": 0,
+                            "recovered": 0,
+                        },
+                        "candidates": {
+                            "total": 2,
+                            "countsTowardKpi": False,
+                        },
+                        "evidence": {
+                            "source": "DIRECT_MONITOR",
+                            "dataCutoff": None,
+                            "freshness": "unknown",
+                            "lastSuccessfulObservationAt": None,
+                            "latestAttemptAt": None,
+                            "latestAttemptStatus": "idle",
+                            "latestFailure": {
+                                "status": "none",
+                                "code": None,
+                            },
+                        },
+                    },
+                    "meta": {
+                        "organizationId": "org-performance",
+                        "workspaceId": "workspace-performance",
+                        "websiteProjectId": "project-performance",
+                        "requestId": "correlation-performance",
+                        "schemaVersion": "backlinks.v1",
+                        "generatedAt": "2026-08-22T12:00:00.000Z",
+                    },
+                },
+            )
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.platform_context_resolver = Resolver()
+        app.state.backlinks_gateway = BacklinksGateway(
+            base_url="http://backlinks.internal",
+            signing_key=signing_key,
+            client=AsyncClient(transport=MockTransport(handler)),
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://platform.test",
+        ) as client:
+            response = await client.get(
+                "/api/v1/projects/project-p1/performance/backlinks"
+                "?view=suspected_lost&limit=10&cursor=next-page",
+                headers={
+                    PLATFORM_CONTEXT_HEADER: "forged-browser-context",
+                    "x-growthos-platform-context-signature": "v1=forged",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["summary"]["candidates"] == {
+            "total": 2,
+            "countsTowardKpi": False,
+        }
+        assert permissions == ["backlinks:read"]
+        assert len(calls) == 1
+        forwarded = calls[0]
+        assert forwarded.url.path == (
+            "/api/v1/projects/project-p1/backlinks/links"
+        )
+        assert forwarded.url.query == (
+            b"view=suspected_lost&limit=10&cursor=next-page"
+        )
+        encoded_context = forwarded.headers[PLATFORM_CONTEXT_HEADER]
+        padding = "=" * (-len(encoded_context) % 4)
+        signed_context = json.loads(
+            base64.urlsafe_b64decode(f"{encoded_context}{padding}")
+        )
+        assert signed_context["tenant"] == {
+            "organizationId": "org-performance",
+            "workspaceId": "workspace-performance",
+        }
+        assert signed_context["project"] == {
+            "websiteProjectId": "project-performance",
+            "websiteProjectKey": "project-p1",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_backlink_performance_bff_rejects_cross_project_context() -> None:
+    async def scenario() -> None:
+        class RejectingResolver:
+            async def resolve(self, **_: object) -> ResolvedPlatformRequestContext:
+                raise PlatformContextResolutionError(
+                    status=403,
+                    code="PLATFORM_PROJECT_ACCESS_DENIED",
+                    title="Platform project access denied",
+                    detail="The project is outside the resolved tenant context.",
+                )
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.platform_context_resolver = RejectingResolver()
+        app.state.backlinks_gateway = BacklinksGateway(
+            base_url="http://backlinks.internal",
+            signing_key=b"test-only-performance-bff-key-32-bytes",
+            client=AsyncClient(
+                transport=MockTransport(
+                    lambda _: Response(500, json={"unexpected": True})
+                )
+            ),
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://platform.test",
+        ) as client:
+            response = await client.get(
+                "/api/v1/projects/foreign/performance/backlinks"
+            )
+
+        assert response.status_code == 403
+        assert response.headers["content-type"].startswith(
+            "application/problem+json"
+        )
+        assert response.json()["code"] == "PLATFORM_PROJECT_ACCESS_DENIED"
+
+    asyncio.run(scenario())
 
 
 def test_performance_range_query_parses_supported_integer_values() -> None:

@@ -37,6 +37,7 @@ type SafeLogEvent = Readonly<{
   modelId: string;
   latencyMs?: number;
   errorCode?: string;
+  diagnosticCode?: string;
 }>;
 
 const fail = (code: "UNAVAILABLE" | "MISCONFIGURED", message: string) =>
@@ -144,6 +145,9 @@ export function createAiDraftClient(options: Readonly<{
           modelId: config.modelId,
           providerRef: config.providerRef,
           errorCode: error.code,
+          ...(error.diagnosticCode === undefined
+            ? {}
+            : { diagnosticCode: error.diagnosticCode }),
         });
         throw error;
       }

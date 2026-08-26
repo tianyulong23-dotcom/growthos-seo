@@ -7,20 +7,21 @@ import type {
   CommercialDiscoveryHypothesis,
 } from "../domain/recommendations/commercial-discovery-blueprint.js";
 
-const nonBlank = z.string().trim().min(1).max(2_048);
+const nonBlank = z.string().trim().min(1).max(320);
+const searchQuery = z.string().trim().min(1).max(256);
 
 export const aiCommercialDiscoveryHypothesisSchema = z.object({
-  targetAudience: z.array(nonBlank).min(1).max(100).readonly(),
-  productValuePropositions: z.array(nonBlank).min(1).max(100).readonly(),
-  topicClusters: z.array(nonBlank).min(1).max(100).readonly(),
-  searchQueryClusters: z.array(nonBlank).min(1).max(100).readonly(),
-  targetSiteArchetypes: z.array(nonBlank).min(1).max(100).readonly(),
-  cooperationAngles: z.array(nonBlank).min(1).max(100).readonly(),
-  negativeKeywords: z.array(nonBlank).max(100).readonly(),
-  excludedSiteTypes: z.array(nonBlank).max(100).readonly(),
+  targetAudience: z.array(nonBlank).min(1).max(6).readonly(),
+  productValuePropositions: z.array(nonBlank).min(1).max(6).readonly(),
+  topicClusters: z.array(nonBlank).min(1).max(8).readonly(),
+  searchQueryClusters: z.array(searchQuery).min(4).max(12).readonly(),
+  targetSiteArchetypes: z.array(nonBlank).min(1).max(6).readonly(),
+  cooperationAngles: z.array(nonBlank).min(1).max(6).readonly(),
+  negativeKeywords: z.array(nonBlank).max(12).readonly(),
+  excludedSiteTypes: z.array(nonBlank).max(12).readonly(),
   discoveredCompetitorSeeds: z.array(
     z.string().trim().min(1).max(253),
-  ).max(50).readonly(),
+  ).max(8).readonly(),
 }).strict();
 
 export type AiCommercialDiscoveryBlueprintInput = Readonly<{

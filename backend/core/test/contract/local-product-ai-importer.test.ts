@@ -14,6 +14,21 @@ import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 
 const temporaryRoots: string[] = [];
+const importerPayload = Object.freeze({
+  apiKey: "local-smoke-secret-never-provider",
+  providerRef: "openai",
+  baseUrl: "https://sub2.indexarc.net/v1",
+  modelId: "gpt-5.6-sol",
+  discoveryModelId: "gpt-5.6-terra",
+  modelVersion: "2026-08-03",
+  maxCalls: 25,
+  timeoutMs: 45_000,
+  maxInputTokens: 8_000,
+  maxOutputTokens: 1_200,
+  absoluteBudgetUsd: 0.1,
+  inputCostUsdPerMillionTokens: 1,
+  outputCostUsdPerMillionTokens: 2,
+});
 
 async function readTree(root: string): Promise<string> {
   const values: string[] = [];
@@ -107,26 +122,16 @@ describe("LOCAL_PRODUCT AI credential importer", () => {
       ...["backlinks-api.env", "backlinks-worker.env"].map((name) =>
         writeFile(
           join(runtimeRoot, name),
-          "BACKLINKS_RUNTIME_MODE=LOCAL_PRODUCT\nAI_PROVIDER_ENABLED=false\n",
+          "BACKLINKS_RUNTIME_MODE=LOCAL_PRODUCT\n",
           "utf8",
         )),
     ]);
 
-    const apiKey = "local-smoke-secret-never-provider";
-    const result = await runImporter({
-      apiKey,
-      providerRef: "openai",
-      baseUrl: "https://sub2.indexarc.net/v1",
-      modelId: "gpt-5.6-sol",
-      modelVersion: "2026-08-03",
-      maxCalls: 25,
-      timeoutMs: 45_000,
-      maxInputTokens: 8_000,
-      maxOutputTokens: 1_200,
-      absoluteBudgetUsd: 0.1,
-      inputCostUsdPerMillionTokens: 1,
-      outputCostUsdPerMillionTokens: 2,
-    }, manifestPath, runtimeRoot);
+    const result = await runImporter(
+      importerPayload,
+      manifestPath,
+      runtimeRoot,
+    );
 
     expect(result).toMatchObject({ exitCode: 0, stderr: "" });
     expect(JSON.parse(result.stdout)).toMatchObject({
@@ -134,6 +139,7 @@ describe("LOCAL_PRODUCT AI credential importer", () => {
       providerRef: "openai",
       providerBaseUrl: "https://sub2.indexarc.net/v1",
       modelId: "gpt-5.6-sol",
+      discoveryModelId: "gpt-5.6-terra",
       credentialSecretReference:
         "secret://growthos/local-product/ai/provider-credential/v1",
       maximumReservationUsd: 0.0208,
@@ -143,6 +149,11 @@ describe("LOCAL_PRODUCT AI credential importer", () => {
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toMatchObject({
       ai: {
         baseUrl: "https://sub2.indexarc.net/v1",
+        capabilities: {
+          AI_DISCOVERY: {
+            model: "gpt-5.6-terra",
+          },
+        },
         credentialSecretRef:
           "secret://growthos/local-product/ai/provider-credential/v1",
         maxCalls: 25,
@@ -154,6 +165,59 @@ describe("LOCAL_PRODUCT AI credential importer", () => {
     expect(
       await readFile(join(runtimeRoot, "backlinks-api.env"), "utf8"),
     ).toContain("AI_PROVIDER_TIMEOUT_MS=45000");
-    expect(await readTree(root)).not.toContain(apiKey);
+    expect(
+      await readFile(join(runtimeRoot, "backlinks-api.env"), "utf8"),
+    ).toContain("AI_DISCOVERY_MODEL_ID=gpt-5.6-terra");
+    expect(await readTree(root)).not.toContain(importerPayload.apiKey);
+  });
+
+  it("preserves an explicit enabled state when rotating credentials", async () => {
+    const root = await mkdtemp(join(tmpdir(), "growthos-ai-import-enabled-"));
+    temporaryRoots.push(root);
+    const runtimeRoot = join(root, "runtime");
+    const manifestPath = join(root, "live-auth-manifest.json");
+    await mkdir(runtimeRoot, { recursive: true });
+    await Promise.all([
+      writeFile(
+        manifestPath,
+        JSON.stringify({
+          schemaVersion: "growthos.live-auth.v1",
+          authorization: {
+            approvedBy: "local-owner",
+            validUntil: new Date(Date.now() + 60_000).toISOString(),
+          },
+          runtime: { websiteProjectKey: "elephtv" },
+          ai: {
+            provider: null,
+            model: null,
+            credentialSecretRef: null,
+          },
+        }),
+        "utf8",
+      ),
+      ...["backlinks-api.env", "backlinks-worker.env"].map((name) =>
+        writeFile(
+          join(runtimeRoot, name),
+          "BACKLINKS_RUNTIME_MODE=LOCAL_PRODUCT\nAI_PROVIDER_ENABLED=true\n",
+          "utf8",
+        )),
+    ]);
+
+    const result = await runImporter(
+      importerPayload,
+      manifestPath,
+      runtimeRoot,
+    );
+
+    expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      imported: true,
+      aiProviderEnabled: true,
+    });
+    for (const name of ["backlinks-api.env", "backlinks-worker.env"]) {
+      expect(await readFile(join(runtimeRoot, name), "utf8")).toContain(
+        "AI_PROVIDER_ENABLED=true",
+      );
+    }
   });
 });

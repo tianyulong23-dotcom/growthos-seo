@@ -2,7 +2,9 @@ import { validateDraftOutputPolicy } from
   "../../domain/drafts/evidence-policy.js";
 import type { AiDraftPort, AiDraftResult } from
   "../../ports/ai-draft.port.js";
-import { AiDraftError } from "../../ports/ai-draft.port.js";
+import {
+  AiDraftError,
+} from "../../ports/ai-draft.port.js";
 import { createDraftTemplateFallback } from
   "../services/draft-template-fallback.js";
 import type {
@@ -20,6 +22,14 @@ export type DraftGenerationWorkflowInput = Readonly<{
   recordedAt: string;
   generationMode: DraftGenerationMode;
 }>;
+
+const canRetry = (
+  error: unknown,
+  attemptCount: number,
+): error is AiDraftError =>
+  error instanceof AiDraftError
+  && (error.retryable || error.code === "MALFORMED_OUTPUT")
+  && attemptCount < 2;
 
 export async function runDraftGenerationWorkflow(
   input: DraftGenerationWorkflowInput,
@@ -67,12 +77,14 @@ export async function runDraftGenerationWorkflow(
     }
     let result: AiDraftResult;
     let source: "MODEL" | "TEMPLATE_FALLBACK";
+    let basicDraftReason: string | null = null;
     if (input.generationMode !== "MODEL") {
       result = createDraftTemplateFallback(
         context.prompt,
-        ai === null ? "PROVIDER_UNAVAILABLE" : "MODEL_DISABLED",
+        "MODEL_DISABLED",
       );
       source = "TEMPLATE_FALLBACK";
+      basicDraftReason = "MODEL_DISABLED";
     } else {
       if (ai === null) {
         throw new AiDraftError({
@@ -81,15 +93,13 @@ export async function runDraftGenerationWorkflow(
           retryable: false,
         });
       }
-      source = "MODEL";
+      let modelError: unknown = null;
+      let modelResult: AiDraftResult | null = null;
       try {
-        result = await ai.generate(context.prompt);
+        modelResult = await ai.generate(context.prompt);
       } catch (error) {
-        if (
-          error instanceof AiDraftError
-          && error.retryable
-          && job.attemptCount < 2
-        ) {
+        modelError = error;
+        if (canRetry(error, job.attemptCount)) {
           await repository.scheduleRetry({
             ...mutation,
             errorClass: error.name,
@@ -100,17 +110,26 @@ export async function runDraftGenerationWorkflow(
             recordedAt: (dependencies.now ?? (() => new Date()))(),
           });
           if (!job.started || job.status !== "RUNNING") {
-            throw new AiDraftError({
+            modelError = new AiDraftError({
               code: "UNAVAILABLE",
               message: "Draft generation retry could not reclaim the Job.",
               retryable: false,
             });
+          } else {
+            try {
+              modelResult = await ai.generate(context.prompt);
+              modelError = null;
+            } catch (retryError) {
+              modelError = retryError;
+            }
           }
-          result = await ai.generate(context.prompt);
-        } else {
-          throw error;
         }
       }
+      if (modelResult === null) {
+        throw modelError;
+      }
+      result = modelResult;
+      source = "MODEL";
     }
     try {
       validateDraftOutputPolicy({
@@ -133,9 +152,12 @@ export async function runDraftGenerationWorkflow(
       recordedAt: persistenceStartedAt,
       result,
       source,
+      fallbackReason: basicDraftReason,
     });
     return {
-      outcome: "completed" as const,
+      outcome: source === "MODEL"
+        ? "completed" as const
+        : "completed_with_basic_draft" as const,
       runId: job.runId,
       draftId: job.draftId,
       ...completed,
@@ -146,6 +168,7 @@ export async function runDraftGenerationWorkflow(
       ...mutation,
       errorClass: known ? error.name : "DraftGenerationError",
       errorCode: known ? error.code : "DRAFT_GENERATION_FAILED",
+      diagnosticCode: known ? error.diagnosticCode ?? null : null,
       refused: known && error.code === "REFUSED",
     });
     throw error;

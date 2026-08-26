@@ -68,16 +68,19 @@ export type AiDraftErrorCode = (typeof aiDraftErrorCodes)[number];
 export class AiDraftError extends Error {
   readonly code: AiDraftErrorCode;
   readonly retryable: boolean;
+  readonly diagnosticCode: string | undefined;
 
   constructor(input: Readonly<{
     code: AiDraftErrorCode;
     message: string;
     retryable: boolean;
+    diagnosticCode?: string;
   }>) {
     super(input.message);
     this.name = "AiDraftError";
     this.code = input.code;
     this.retryable = input.retryable;
+    this.diagnosticCode = input.diagnosticCode;
   }
 }
 

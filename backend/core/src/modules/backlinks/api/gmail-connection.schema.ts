@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  gmailReadinessBlockerCodes,
+  gmailReadinessRecoveryActions,
+} from "../application/services/gmail-readiness.js";
+
 const nonBlank = z.string().trim().min(1);
 const timestamp = z.string().datetime({ offset: true });
 
@@ -74,9 +79,41 @@ export const gmailCallbackResponseSchema = z.object({
   meta: gmailConnectionMetaSchema,
 }).strict();
 
+export const gmailReadinessBlockerSchema = z.object({
+  code: z.enum(gmailReadinessBlockerCodes),
+  capability: z.enum(["CONNECTION", "SEND", "SYNC"]),
+  owner: z.enum(["USER", "ADMIN", "SYSTEM"]),
+  retrySafe: z.boolean(),
+  recoveryAction: z.enum(gmailReadinessRecoveryActions),
+  detail: nonBlank.max(1_000),
+}).strict();
+
+export const gmailReadinessProjectionSchema = z.object({
+  evaluatedAt: timestamp,
+  connection: z.object({
+    state: z.enum(["CONNECTED", "NOT_CONNECTED"]),
+    ready: z.boolean(),
+  }).strict(),
+  send: z.object({
+    state: z.enum(["SEND_READY", "WAITING_FOR_SEND_CONTEXT", "BLOCKED"]),
+    ready: z.boolean(),
+  }).strict(),
+  sync: z.object({
+    state: z.enum([
+      "SYNC_READY",
+      "WAITING_FOR_ACCEPTED_SEND",
+      "BLOCKED",
+    ]),
+    ready: z.boolean(),
+  }).strict(),
+  blockers: z.array(gmailReadinessBlockerSchema).max(32),
+  primaryBlocker: gmailReadinessBlockerSchema.nullable(),
+}).strict();
+
 export const gmailStatusResponseSchema = z.object({
   connection: gmailConnectionViewSchema.nullable(),
   accounts: z.array(gmailConnectionViewSchema),
+  readiness: gmailReadinessProjectionSchema,
   meta: gmailConnectionMetaSchema,
 }).strict();
 

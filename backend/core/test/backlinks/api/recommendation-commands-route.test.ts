@@ -15,33 +15,51 @@ const baseContext = {
 const recommendationId = "018f0000-0000-7000-8000-000000000001";
 const contextId = "018f0000-0000-7000-8000-000000000002";
 const operationId = "018f0000-0000-7000-8000-000000000003";
+const refillOutboxEventId = "018f0000-0000-7000-8000-000000000004";
 describe("BL-AI-063 recommendation command APIs", () => {
   it("enforces idempotency, expected versions, permissions, and audit responses", async () => {
     let rejectCalls = 0;
     let refillCreates = 0;
+    const refillRequestHashes = new Set<unknown>();
     const calls: { text: string; values?: readonly unknown[] }[] = [];
-    const commands = createRecommendationCommands({ query: async (text, values) => {
-      calls.push({ text, values });
-      const requestHash = values?.[7];
-      if (text.includes("INSERT INTO backlink_commercial_inventory_policies")) {
-        return { rows: [] };
-      }
-      if (text.includes("recommendation.rejected")) {
-        if (values?.[5] === 7) {
-          return { rows: [{ state: "version_conflict", requestHash }] };
+    const commands = createRecommendationCommands({
+      query: async (text, values) => {
+        calls.push({ text, values });
+        const requestHash = values?.[7];
+        if (text.includes("SELECT\n           pg_advisory_xact_lock")) {
+          return { rows: [] };
         }
-        rejectCalls += 1;
-        return { rows: [{ state: rejectCalls === 1 ? "completed" : "replay", requestHash,
-          responseBody: { recommendationId, status: "rejected",
-            version: 3, lifecycleEventId: "life-reject", auditEventId: "audit-reject" } }] };
-      }
-      const state = refillCreates === 0 ? "completed" : "replay";
-      refillCreates += state === "completed" ? 1 : 0;
-      return { rows: [{ state, requestHash, responseBody: {
-        operationId, jobId: "job-1", workflowId: "refill:job-1",
-        status: "queued", version: 1, visiblePoolGeneration: 1,
-        lifecycleEventId: "life-refill", auditEventId: "audit-refill" } }] };
-    } });
+        if (text.includes("INSERT INTO backlink_commercial_inventory_policies")) {
+          return { rows: [] };
+        }
+        if (text.includes("recommendation.rejected")) {
+          if (values?.[5] === 7) {
+            return { rows: [{ state: "version_conflict", requestHash }] };
+          }
+          rejectCalls += 1;
+          return { rows: [{ state: rejectCalls === 1 ? "completed" : "replay", requestHash,
+            responseBody: { recommendationId, status: "rejected",
+              version: 3, lifecycleEventId: "life-reject", auditEventId: "audit-reject" } }] };
+        }
+        const state = refillRequestHashes.has(requestHash) ? "replay" : "completed";
+        if (state === "completed") {
+          refillRequestHashes.add(requestHash);
+          refillCreates += 1;
+        }
+        return { rows: [{ state, requestHash, responseBody: {
+          operationId, jobId: "job-1", workflowId: "refill:job-1",
+          outboxEventId: refillOutboxEventId,
+          status: "queued", version: 1, visiblePoolGeneration: 1,
+          lifecycleEventId: "life-refill", auditEventId: "audit-refill" } }] };
+      },
+    }, {
+      persistentProviderBudgetGrant: {
+        provider: "dataforseo",
+        reasonCode: "user_authorized_persistent_discovery",
+        maxPaidCalls: 3,
+        maxCostMicros: 1_000_000,
+      },
+    });
     const app = Fastify({ logger: false, genReqId: () => "request-63" });
     await registerBacklinksOpenApi(app);
     app.decorateRequest("actor");
@@ -82,11 +100,10 @@ describe("BL-AI-063 recommendation command APIs", () => {
       "/api/v1/projects/project-key/backlinks/recommendation-refill-jobs";
     const refillPayload = { expectedVersion: 0,
       recommendationContextVersionId: contextId,
-      visiblePoolGeneration: 1,
-      lowWatermark: 9, highWatermark: 10 };
+      visiblePoolGeneration: 1 };
     const refillResponses = await Promise.all(Array.from(
       { length: 5 },
-      () => app.inject({ method: "POST", url: refillPath, payload: refillPayload }),
+      () => post(refillPath, "refill-logical-63", refillPayload),
     ));
     expect(refillResponses.map(({ statusCode }) => statusCode)).toEqual(
       [202, 202, 202, 202, 202],
@@ -96,6 +113,7 @@ describe("BL-AI-063 recommendation command APIs", () => {
         operationId,
         jobId: "job-1",
         workflowId: "refill:job-1",
+        outboxEventId: refillOutboxEventId,
         status: "queued",
         version: 1,
         visiblePoolGeneration: 1,
@@ -121,17 +139,31 @@ describe("BL-AI-063 recommendation command APIs", () => {
     expect(calls.at(-1)?.text).toContain(
       "backlink_commercial_discovery_batches active_discovery",
     );
-    expect(calls.at(-1)?.text).toContain(
+    expect(calls.at(-1)?.text).not.toContain(
       "backlink_contact_enrichment_batches active_contact",
     );
     expect(calls.at(-1)?.values?.[6]).toBe(
-      `recommendation-refill:manual:${contextId}:g1:blueprint-v3`,
+      `recommendation-refill:manual:${contextId}:g1:request:refill-logical-63`,
     );
     expect(calls.at(-1)?.values?.[17]).toBe(
-      `manual:${contextId}:g1:blueprint-v3`,
+      `manual:${contextId}:g1:request:refill-logical-63`,
     );
     expect(calls.at(-1)?.values?.[20]).toBeNull();
     expect(calls.at(-1)?.values?.[21]).toBe(1);
+    expect(calls.at(-1)?.values?.[22]).toEqual(JSON.stringify({
+      provider: "dataforseo",
+      reasonCode: "user_authorized_persistent_discovery",
+      maxPaidCalls: 3,
+      maxCostMicros: 1_000_000,
+      authorizedBy: "user-1",
+    }));
+    expect(calls.at(-1)?.text).toContain(
+      "'providerOperationId',CASE WHEN $23::jsonb IS NULL THEN NULL ELSE "
+        + "'commercial-refill-operation:'||$10::uuid::text END",
+    );
+    expect(calls.at(-1)?.text).toContain(
+      "'providerBudgetAuthorization',$23::jsonb",
+    );
     expect(calls.at(-1)?.text).toContain(
       `(prior."responseBody"->>'operationId')::uuid=$21::uuid`,
     );
@@ -142,9 +174,44 @@ describe("BL-AI-063 recommendation command APIs", () => {
       "attempted_refill_tiers=CASE",
     );
 
+    const reassessment = await post(
+      refillPath,
+      "refill-existing-evidence-63",
+      {
+        ...refillPayload,
+        supplyMode: "existing_evidence",
+      },
+    );
+    expect(reassessment.statusCode).toBe(202);
+    expect(calls.at(-1)?.values?.[20]).toBeNull();
+    expect(calls.at(-1)?.values?.[22]).toBeNull();
+    expect(calls.at(-1)?.values?.[23]).toBe("existing_evidence");
+    expect(calls.at(-1)?.text).toContain("'supplyMode',$24::text");
+    expect(refillCreates).toBe(2);
+
+    const missingIdempotencyKey = await app.inject({
+      method: "POST",
+      url: refillPath,
+      payload: refillPayload,
+    });
+    expect(missingIdempotencyKey.statusCode).toBe(400);
+
+    const terminalRetry = await post(
+      refillPath,
+      "refill-logical-64",
+      refillPayload,
+    );
+    expect(terminalRetry.statusCode).toBe(202);
+    expect(terminalRetry.json()).toMatchObject({ replayed: false });
+    expect(refillCreates).toBe(3);
+    expect(calls.at(-1)?.values?.[17]).toBe(
+      `manual:${contextId}:g1:request:refill-logical-64`,
+    );
+
     const invalidTarget = await app.inject({
       method: "POST",
       url: refillPath,
+      headers: { "idempotency-key": "refill-invalid-target" },
       payload: {
         ...refillPayload,
         lowWatermark: 10,
@@ -217,6 +284,116 @@ describe("BL-AI-063 recommendation command APIs", () => {
       expect.any(String),
     ]);
     expect(calls[0]?.text).toContain("visible_pool_state='awaiting_refresh'");
-    expect(calls[0]?.text).not.toContain("recommendation-refill.requested");
+    expect(calls[0]?.text).not.toContain(
+      "INSERT INTO backlink_outbox_events",
+    );
+  });
+
+  it("exposes a strict audited cancellation for an undispatched bootstrap refill", async () => {
+    const jobId = "018f0000-0000-7000-8000-000000000011";
+    const refillId = "018f0000-0000-7000-8000-000000000012";
+    const outboxEventId = "018f0000-0000-7000-8000-000000000013";
+    const calls: { text: string; values?: readonly unknown[] }[] = [];
+    const commands = createRecommendationCommands({
+      query: async (text, values) => {
+        calls.push({ text, values });
+        return {
+          rows: [{
+            state: "completed",
+            requestHash: values?.[8],
+            responseBody: {
+              jobId,
+              refillId,
+              outboxEventId,
+              recommendationContextVersionId: contextId,
+              visiblePoolGeneration: 1,
+              status: "cancelled",
+              outboxStatus: "published",
+              dispatchDisposition: "cancelled_before_dispatch",
+              policyState: "idle",
+              reasonCode: "read_side_effect_cleanup",
+              version: 2,
+              lifecycleEventId:
+                "018f0000-0000-7000-8000-000000000014",
+              auditEventId:
+                "018f0000-0000-7000-8000-000000000015",
+            },
+          }],
+        };
+      },
+    });
+    const app = Fastify({ logger: false, genReqId: () => "request-cancel" });
+    await registerBacklinksOpenApi(app);
+    app.decorateRequest("actor");
+    app.addHook("preHandler", async (request) => {
+      request.actor = member;
+    });
+    registerBacklinksRecommendationCommandsRoutes(app, {
+      module: createBacklinksModule({
+        projectContext: {
+          resolve: async () => baseContext,
+        },
+        queries: {},
+      }),
+      commands,
+    });
+    await app.ready();
+
+    const path =
+      `/api/v1/projects/project-key/backlinks/` +
+      `recommendation-refill-jobs/${jobId}/cancel`;
+    const response = await app.inject({
+      method: "POST",
+      url: path,
+      headers: { "idempotency-key": "cancel-read-side-effect-1" },
+      payload: {
+        expectedVersion: 1,
+        reasonCode: "read_side_effect_cleanup",
+      },
+    });
+    const missingIdempotency = await app.inject({
+      method: "POST",
+      url: path,
+      payload: {
+        expectedVersion: 1,
+        reasonCode: "read_side_effect_cleanup",
+      },
+    });
+    const invalidReason = await app.inject({
+      method: "POST",
+      url: path,
+      headers: { "idempotency-key": "cancel-invalid-reason" },
+      payload: {
+        expectedVersion: 1,
+        reasonCode: "manual",
+      },
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      jobId,
+      refillId,
+      outboxEventId,
+      recommendationContextVersionId: contextId,
+      visiblePoolGeneration: 1,
+      status: "cancelled",
+      outboxStatus: "published",
+      dispatchDisposition: "cancelled_before_dispatch",
+      policyState: "idle",
+      reasonCode: "read_side_effect_cleanup",
+      version: 2,
+      replayed: false,
+    });
+    expect(missingIdempotency.statusCode).toBe(400);
+    expect(invalidReason.statusCode).toBe(400);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.values?.slice(4, 9)).toEqual([
+      jobId,
+      1,
+      "read_side_effect_cleanup",
+      "cancel-read-side-effect-1",
+      expect.any(String),
+    ]);
   });
 });

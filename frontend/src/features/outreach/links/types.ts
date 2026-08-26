@@ -77,6 +77,7 @@ export type LinksClient = Readonly<{
     input: Readonly<{
       sourceType: "manual" | "import"
       opportunityId?: string
+      replyId?: string
       sourcePageUrl: string
       targetUrl: string
       sourceExternalId?: string

@@ -1,6 +1,9 @@
 package crawler
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCompletionMessageMatchesTaskType(t *testing.T) {
 	tests := []struct {
@@ -80,5 +83,18 @@ func TestTechnicalAuditCompletionMessageUsesResourceWarning(t *testing.T) {
 	summary := buildStoredAuditSummary(Result{ResourceChecksTruncated: true})
 	if summary["resource_checks_truncated"] != 1 {
 		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestSiteProfileUpsertPreservesUserOverrides(t *testing.T) {
+	if !strings.Contains(upsertSiteProfileSQL, "EXCLUDED.profile_json") ||
+		!strings.Contains(
+			upsertSiteProfileSQL,
+			"COALESCE(site_profiles.user_overrides, '{}'::jsonb)",
+		) {
+		t.Fatal("site profile upsert no longer merges existing user overrides")
+	}
+	if strings.Contains(upsertSiteProfileSQL, "user_overrides =") {
+		t.Fatal("site profile upsert overwrites the user_overrides column")
 	}
 }

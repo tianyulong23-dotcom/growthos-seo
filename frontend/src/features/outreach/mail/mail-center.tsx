@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Unlink2,
 } from "lucide-react"
+import { Link } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -29,6 +30,8 @@ import {
   startGmailPollingSync,
   unbindReplyMatch,
 } from "./api"
+import { NegotiationFactsPanel } from "./negotiation-facts-panel"
+import { SendIntentQueue } from "./send-intent-queue"
 import type {
   GmailPollingSyncStatus,
   MailListItem,
@@ -180,6 +183,20 @@ function reasonEvidence(reasonCodes: Array<Record<string, unknown>>) {
   return labels.length === 0 ? "暂无足够的匹配依据" : labels.join("、")
 }
 
+function businessContextPath(
+  websiteProjectKey: string,
+  view: "opportunities" | "links" | "reports",
+  opportunityId: string,
+  replyId: string
+) {
+  const search = new URLSearchParams({
+    opportunityId,
+    replyId,
+    returnTo: `/projects/${websiteProjectKey}/backlinks/email`,
+  })
+  return `/projects/${websiteProjectKey}/backlinks/${view}?${search.toString()}`
+}
+
 export function MailCenter({
   websiteProjectKey,
   connectionId,
@@ -195,12 +212,13 @@ export function MailCenter({
   const [loadingMore, setLoadingMore] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [syncNotice, setSyncNotice] = useState<SyncNotice>(null)
-  const [syncStatus, setSyncStatus] =
-    useState<GmailPollingSyncStatus | null>(null)
-  const [syncStatusState, setSyncStatusState] =
-    useState<LoadState>("loading")
-  const [businessConsumersRunning, setBusinessConsumersRunning] =
-    useState<boolean | null>(null)
+  const [syncStatus, setSyncStatus] = useState<GmailPollingSyncStatus | null>(
+    null
+  )
+  const [syncStatusState, setSyncStatusState] = useState<LoadState>("loading")
+  const [businessConsumersRunning, setBusinessConsumersRunning] = useState<
+    boolean | null
+  >(null)
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
     null
   )
@@ -222,7 +240,7 @@ export function MailCenter({
         filter,
         25,
         null
-    ),
+      ),
     [filter, websiteProjectKey]
   )
 
@@ -297,11 +315,7 @@ export function MailCenter({
   }
 
   const syncAndRefresh = async () => {
-    if (
-      connectionId === null ||
-      syncing ||
-      businessConsumersRunning !== true
-    ) {
+    if (connectionId === null || syncing || businessConsumersRunning !== true) {
       return
     }
     setSyncing(true)
@@ -655,21 +669,22 @@ export function MailCenter({
           <div className="flex flex-wrap items-center gap-2">
             <Mail className="size-5 text-primary" />
             <h2 id="mail-center-title" className="text-base font-semibold">
-              邮件中心
+              邮件往来
             </h2>
           </div>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            集中查看邮件往来，并处理需要确认的回复。
+            查看收发记录，并处理需要确认的回复。
           </p>
         </div>
         <div
-          className="flex max-w-full gap-1 overflow-x-auto pb-1"
+          className="flex max-w-full gap-1 overflow-x-auto rounded-md bg-muted/60 p-1"
           aria-label="邮件匹配状态筛选"
         >
           {filters.map((item) => (
             <Button
               key={item.value}
               aria-pressed={filter === item.value}
+              className="rounded-md"
               size="sm"
               variant={filter === item.value ? "secondary" : "ghost"}
               onClick={() => changeFilter(item.value)}
@@ -680,101 +695,126 @@ export function MailCenter({
         </div>
       </div>
 
-      <div
+      <details
         data-testid="mail-sync-diagnostics"
-        className="mt-4 border-y bg-muted/20 px-3 py-3 text-xs"
+        className="group mt-3 rounded-md border border-border/80 bg-muted/20 text-xs"
       >
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <Badge
-            variant={businessConsumersRunning === true ? "secondary" : "outline"}
-          >
-            {businessConsumersRunning === true
-              ? "后台 Worker 运行中"
-              : "维护模式：后台 Worker 未运行"}
-          </Badge>
-          {businessConsumersRunning !== true ? (
-            <span className="text-muted-foreground">
-              已保存邮件仍可读取；立即同步暂不可用。
-            </span>
-          ) : null}
-        </div>
-        {syncStatusState === "ready" && syncStatus ? (
-          <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,auto)]">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
-              <span className="font-medium">
-                同步状态：
-                {syncStatus.state === "POLLING"
-                  ? "持续轮询"
-                  : syncStatus.state === "WAITING_FOR_ACCEPTED_SEND"
-                    ? "等待真实发送记录"
-                    : "已暂停"}
-              </span>
-              <span className="text-muted-foreground">
-                间隔 {syncStatus.pollingIntervalSeconds} 秒
-              </span>
-              <span className="text-muted-foreground">
-                可匹配发送 {syncStatus.acceptedSendCount} 条
-              </span>
-              <span className="text-muted-foreground">
-                Kill Switch {syncStatus.killSwitchOpen ? "已开启" : "已关闭"}
-              </span>
-            </div>
-            <div className="min-w-0 text-muted-foreground lg:text-right">
-              {syncStatus.cursor ? (
-                <span className="break-all">
-                  游标 {syncStatus.cursor.historyId} · 版本{" "}
-                  {syncStatus.cursor.version} · 最近同步{" "}
-                  {dateTime(syncStatus.cursor.lastSyncedAt)}
-                </span>
-              ) : (
-                <span>当前项目尚未建立 Gmail History 游标</span>
-              )}
-            </div>
-            <div className="min-w-0 text-muted-foreground">
-              最近成功：{dateTime(syncStatus.lastSuccessfulSyncAt)}
-            </div>
-            <div
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5">
+          <span className="flex min-w-0 items-center gap-2">
+            <span
               className={
-                syncStatus.lastError
-                  ? "min-w-0 break-words text-destructive lg:text-right"
-                  : "min-w-0 text-muted-foreground lg:text-right"
+                businessConsumersRunning === true
+                  ? "size-2 shrink-0 rounded-full bg-emerald-500"
+                  : "size-2 shrink-0 rounded-full bg-amber-500"
+              }
+            />
+            <span className="font-medium">
+              {businessConsumersRunning === true
+                ? "邮件同步可用"
+                : "邮件同步已暂停"}
+            </span>
+            <span className="text-muted-foreground">
+              {businessConsumersRunning === true
+                ? "可通过邮件列表右上角刷新。"
+                : "已保存邮件仍可读取；立即同步暂不可用。"}
+            </span>
+          </span>
+          <span className="flex shrink-0 items-center gap-1 text-muted-foreground">
+            同步详情
+            <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+          </span>
+        </summary>
+        <div className="border-t px-3 py-3">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <Badge
+              className="rounded-md"
+              variant={
+                businessConsumersRunning === true ? "secondary" : "outline"
               }
             >
-              {syncStatus.lastError
-                ? `错误分类：${syncStatus.lastErrorCategory ?? "UNKNOWN"} · ` +
-                  `最近错误：${syncStatus.lastError} · ` +
-                  (syncStatus.lastErrorCategory === "GOOGLE_AUTH_EXPIRED"
-                    ? "下次重试：等待重新授权"
-                    : `下次重试 ${dateTime(syncStatus.nextRetryAt)}`)
-                : `下次重试：${dateTime(syncStatus.nextRetryAt)}`}
+              {businessConsumersRunning === true
+                ? "后台 Worker 运行中"
+                : "维护模式：后台 Worker 未运行"}
+            </Badge>
+          </div>
+          {syncStatusState === "ready" && syncStatus ? (
+            <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,auto)]">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="font-medium">
+                  同步状态：
+                  {syncStatus.state === "POLLING"
+                    ? "持续轮询"
+                    : syncStatus.state === "WAITING_FOR_ACCEPTED_SEND"
+                      ? "等待真实发送记录"
+                      : "已暂停"}
+                </span>
+                <span className="text-muted-foreground">
+                  间隔 {syncStatus.pollingIntervalSeconds} 秒
+                </span>
+                <span className="text-muted-foreground">
+                  可匹配发送 {syncStatus.acceptedSendCount} 条
+                </span>
+                <span className="text-muted-foreground">
+                  Kill Switch {syncStatus.killSwitchOpen ? "已开启" : "已关闭"}
+                </span>
+              </div>
+              <div className="min-w-0 text-muted-foreground lg:text-right">
+                {syncStatus.cursor ? (
+                  <span className="break-all">
+                    游标 {syncStatus.cursor.historyId} · 版本{" "}
+                    {syncStatus.cursor.version} · 最近同步{" "}
+                    {dateTime(syncStatus.cursor.lastSyncedAt)}
+                  </span>
+                ) : (
+                  <span>当前项目尚未建立 Gmail History 游标</span>
+                )}
+              </div>
+              <div className="min-w-0 text-muted-foreground">
+                最近成功：{dateTime(syncStatus.lastSuccessfulSyncAt)}
+              </div>
+              <div
+                className={
+                  syncStatus.lastError
+                    ? "min-w-0 break-words text-destructive lg:text-right"
+                    : "min-w-0 text-muted-foreground lg:text-right"
+                }
+              >
+                {syncStatus.lastError
+                  ? `错误分类：${syncStatus.lastErrorCategory ?? "UNKNOWN"} · ` +
+                    `最近错误：${syncStatus.lastError} · ` +
+                    (syncStatus.lastErrorCategory === "GOOGLE_AUTH_EXPIRED"
+                      ? "下次重试：等待重新授权"
+                      : `下次重试 ${dateTime(syncStatus.nextRetryAt)}`)
+                  : `下次重试：${dateTime(syncStatus.nextRetryAt)}`}
+              </div>
             </div>
-          </div>
-        ) : syncStatusState === "loading" ? (
-          <span className="inline-flex items-center gap-2 text-muted-foreground">
-            <LoaderCircle className="size-3.5 animate-spin" />
-            正在读取同步状态
-          </span>
-        ) : (
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-muted-foreground">
-              暂时无法读取同步状态，已保存邮件不受影响。
+          ) : syncStatusState === "loading" ? (
+            <span className="inline-flex items-center gap-2 text-muted-foreground">
+              <LoaderCircle className="size-3.5 animate-spin" />
+              正在读取同步状态
             </span>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={connectionId === null}
-              onClick={() => void loadSyncStatus()}
-            >
-              <RefreshCw data-icon="inline-start" />
-              重新检查
-            </Button>
-          </div>
-        )}
-      </div>
+          ) : (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-muted-foreground">
+                暂时无法读取同步状态，已保存邮件不受影响。
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={connectionId === null}
+                onClick={() => void loadSyncStatus()}
+              >
+                <RefreshCw data-icon="inline-start" />
+                重新检查
+              </Button>
+            </div>
+          )}
+        </div>
+      </details>
 
-      <div className="mt-4 grid min-h-[34rem] border-y lg:grid-cols-[minmax(17rem,0.9fr)_minmax(0,1.6fr)]">
+      <div className="mt-4 grid min-h-[34rem] overflow-hidden rounded-lg border border-border/80 shadow-sm lg:grid-cols-[minmax(18rem,0.78fr)_minmax(0,1.55fr)]">
         <div className="min-w-0 border-b lg:border-r lg:border-b-0">
-          <div className="flex h-11 items-center justify-between border-b px-3">
+          <div className="flex h-12 items-center justify-between border-b bg-muted/20 px-3">
             <div className="min-w-0">
               <span className="text-xs font-medium text-muted-foreground">
                 {filter === "ALL" ? "全部邮件" : matchLabels[filter]}
@@ -816,7 +856,11 @@ export function MailCenter({
                 {items.map((item) => (
                   <button
                     key={item.id}
-                    className="block min-h-24 w-full px-3 py-3 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                    className={`block min-h-24 w-full border-l-[3px] px-3 py-3 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset ${
+                      selectedMessageId === item.id
+                        ? "border-l-primary bg-primary/5"
+                        : "border-l-transparent"
+                    }`}
                     type="button"
                     aria-current={
                       selectedMessageId === item.id ? "true" : undefined
@@ -891,20 +935,16 @@ export function MailCenter({
           {threadState === "ready" && thread ? (
             <div>
               <header className="border-b px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <div className="text-sm font-medium">
-                      {selectedMessage?.subject || "（无主题）"}
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {thread.messageCount} 封邮件
-                    </div>
-                    <div className="mt-1 text-xs break-words text-muted-foreground">
-                      参与人：{threadParticipants.join(", ") || "未知"}
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      最新邮件：{dateTime(latestThreadMessage?.receivedAt ?? null)}
-                    </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold">
+                    {selectedMessage?.subject || "（无主题）"}
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {thread.messageCount} 封邮件 ·{" "}
+                    {dateTime(latestThreadMessage?.receivedAt ?? null)}
+                  </div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {threadParticipants.join(", ") || "参与人未知"}
                   </div>
                 </div>
               </header>
@@ -965,7 +1005,7 @@ export function MailCenter({
                       <legend className="sr-only">选择匹配候选</legend>
                       {candidates.map((candidate) => (
                         <label
-                          className="flex cursor-pointer gap-3 border p-3 hover:bg-background"
+                          className="flex cursor-pointer gap-3 rounded-md border bg-background p-3 hover:bg-muted/30"
                           key={candidate.id}
                         >
                           <input
@@ -1072,6 +1112,56 @@ export function MailCenter({
                   <div className="mt-1 break-all text-muted-foreground">
                     Opportunity：{selectedMessage.matchedOpportunityId}
                   </div>
+                  {selectedMessage.matchedOpportunityId &&
+                  selectedMessage.inboundMessageId ? (
+                    <nav
+                      className="mt-3 flex flex-wrap gap-x-4 gap-y-2"
+                      aria-label="回复业务上下文"
+                    >
+                      <Link
+                        className="text-primary hover:underline"
+                        to={businessContextPath(
+                          websiteProjectKey,
+                          "opportunities",
+                          selectedMessage.matchedOpportunityId,
+                          selectedMessage.inboundMessageId
+                        )}
+                      >
+                        查看 Opportunity
+                      </Link>
+                      <Link
+                        className="text-primary hover:underline"
+                        to={businessContextPath(
+                          websiteProjectKey,
+                          "links",
+                          selectedMessage.matchedOpportunityId,
+                          selectedMessage.inboundMessageId
+                        )}
+                      >
+                        进入 Links
+                      </Link>
+                      <Link
+                        className="text-primary hover:underline"
+                        to={businessContextPath(
+                          websiteProjectKey,
+                          "reports",
+                          selectedMessage.matchedOpportunityId,
+                          selectedMessage.inboundMessageId
+                        )}
+                      >
+                        查看项目报告
+                      </Link>
+                    </nav>
+                  ) : null}
+                  {selectedMessage.matchedOpportunityId &&
+                  selectedMessage.inboundMessageId ? (
+                    <NegotiationFactsPanel
+                      key={selectedMessage.inboundMessageId}
+                      websiteProjectKey={websiteProjectKey}
+                      inboundMessageId={selectedMessage.inboundMessageId}
+                      opportunityId={selectedMessage.matchedOpportunityId}
+                    />
+                  ) : null}
                   <label className="mt-4 block font-medium">
                     解除理由
                     <Textarea
@@ -1136,6 +1226,8 @@ export function MailCenter({
           )}
         </div>
       </div>
+
+      <SendIntentQueue websiteProjectKey={websiteProjectKey} />
     </section>
   )
 }

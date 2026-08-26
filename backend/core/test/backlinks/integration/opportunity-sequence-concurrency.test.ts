@@ -223,7 +223,7 @@ describe("BL-AI-077 project Opportunity counter", () => {
       await client.query(`UPDATE backlink_recommendation_inventory inventory
           SET publication_status='PUBLISHED',
               fit_decision='eligible',
-              fit_score_model_version='recommendation-commercial-fit.v3',
+              fit_score_model_version='recommendation-commercial-fit.v4',
               contact_decision='eligible',
               contact_reason_code='PUBLIC_EMAIL_FOUND',
               verified_public_email_count=1,

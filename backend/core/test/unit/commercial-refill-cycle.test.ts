@@ -19,7 +19,6 @@ const basePlan = {
   fitCandidateCount: 10,
   readyFitCandidateCount: 0,
   contactReadyCount: 5,
-  contactWorkPending: false,
   providerState: "available" as const,
   paidCursor: {
     tier: "exact_product_target_market" as const,
@@ -97,15 +96,13 @@ describe("commercial recommendation refill cycle", () => {
     ]);
   });
 
-  it("advances through five paid tiers and the existing resource tier", () => {
+  it("runs the existing resource tier before five paid tiers", () => {
     expect(commercialRefillTiers).toHaveLength(6);
-    expect(nextCommercialRefillTier(commercialRefillTiers[0])).toBe(
-      commercialRefillTiers[1],
+    expect(commercialRefillTiers[0]).toBe("curated_resource_library");
+    expect(nextCommercialRefillTier("curated_resource_library")).toBe(
+      "exact_product_target_market",
     );
-    expect(nextCommercialRefillTier(commercialRefillTiers[4])).toBe(
-      "curated_resource_library",
-    );
-    expect(nextCommercialRefillTier(commercialRefillTiers[5])).toBeNull();
+    expect(nextCommercialRefillTier("same_language_expansion")).toBeNull();
   });
 
   it("reuses an unfinished window on planning retries", () => {
@@ -137,7 +134,11 @@ describe("commercial recommendation refill cycle", () => {
     expect(
       planCommercialSupplyOperation({
         ...basePlan,
-        attempts: [emptyAttempt("exact_product_target_market", 1)],
+        attempts: [
+          emptyAttempt("curated_resource_library", 1),
+          emptyAttempt("curated_resource_library", 2),
+          emptyAttempt("exact_product_target_market", 1),
+        ],
       }),
     ).toMatchObject({
       kind: "execute",
@@ -151,6 +152,8 @@ describe("commercial recommendation refill cycle", () => {
       planCommercialSupplyOperation({
         ...basePlan,
         attempts: [
+          emptyAttempt("curated_resource_library", 1),
+          emptyAttempt("curated_resource_library", 2),
           emptyAttempt("exact_product_target_market", 1),
           emptyAttempt("exact_product_target_market", 2),
         ],
@@ -209,6 +212,24 @@ describe("commercial recommendation refill cycle", () => {
 
     expect(planCommercialSupplyOperation(basePlan)).toMatchObject({
       kind: "execute",
+      source: "resource",
+      cursor: {
+        tier: "curated_resource_library",
+        round: 1,
+        window: 1,
+      },
+    });
+  });
+
+  it("moves to paid discovery after the curated source is exhausted", () => {
+    expect(planCommercialSupplyOperation({
+      ...basePlan,
+      attempts: [
+        emptyAttempt("curated_resource_library", 1),
+        emptyAttempt("curated_resource_library", 2),
+      ],
+    })).toMatchObject({
+      kind: "execute",
       source: "paid",
       cursor: {
         tier: "exact_product_target_market",
@@ -248,21 +269,11 @@ describe("commercial recommendation refill cycle", () => {
       attempts: exhaustedAttempts,
     };
 
-    expect(
-      planCommercialSupplyOperation({
-        ...exhausted,
-        contactWorkPending: true,
-      }),
-    ).toEqual({
-      kind: "wait",
-      outcome: null,
-      reason: "contact_processing",
-    });
     expect(planCommercialSupplyOperation(exhausted)).toEqual({
       kind: "execute",
-      source: "paid",
+      source: "resource",
       cursor: {
-        tier: "exact_product_target_market",
+        tier: "curated_resource_library",
         round: 2,
         window: 1,
       },

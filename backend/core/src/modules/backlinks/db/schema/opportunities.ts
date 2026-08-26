@@ -34,6 +34,8 @@ export const backlinkOpportunities = pg.pgTable(
     recommendationContextVersionId: pg.uuid("recommendation_context_version_id").notNull(),
     sourceContactCandidateId: pg.uuid("source_contact_candidate_id"),
     contactReviewRequired: pg.boolean("contact_review_required").notNull().default(true),
+    engagementChannel: pg.text("engagement_channel").notNull().default("EMAIL"),
+    sourceCooperationPathFactId: pg.uuid("source_cooperation_path_fact_id"),
     targetSiteKey: pg.text("target_site_key").notNull(),
     targetHostAscii: pg.text("target_host_ascii").notNull(),
     targetIdentityKind: pg.text("target_identity_kind").notNull()

@@ -1174,11 +1174,22 @@ class AuditService:
         controller: WorkflowController,
         repository: Any,
         object_cleaner: AuditObjectCleaner | None = None,
+        organization_id: str | None = None,
     ) -> None:
         self.settings = settings
         self.controller = controller
         self.repository = repository
         self.object_cleaner = object_cleaner or NoopAuditObjectCleaner()
+        self.organization_id = organization_id or settings.default_organization_id
+
+    def for_organization(self, organization_id: str) -> "AuditService":
+        return AuditService(
+            settings=self.settings,
+            controller=self.controller,
+            repository=self.repository,
+            object_cleaner=self.object_cleaner,
+            organization_id=organization_id,
+        )
 
     async def create_run(
         self,
@@ -1259,7 +1270,7 @@ class AuditService:
         self._validate_project_id(project_id)
         await self._project(project_id)
         runs, total = await self.repository.list_runs(
-            self.settings.default_organization_id,
+            self.organization_id,
             project_id,
             include_archived,
             page,
@@ -1269,7 +1280,7 @@ class AuditService:
         )
         if await self._reconcile_visible_runs(runs):
             runs, total = await self.repository.list_runs(
-                self.settings.default_organization_id,
+                self.organization_id,
                 project_id,
                 include_archived,
                 page,
@@ -1993,7 +2004,7 @@ class AuditService:
 
     async def _project(self, project_id: str) -> AuditProjectRecord:
         project = await self.repository.get_project(
-            self.settings.default_organization_id,
+            self.organization_id,
             project_id,
         )
         if project is None:
@@ -2002,7 +2013,7 @@ class AuditService:
 
     async def _run(self, project_id: str, run_id: str) -> CrawlRun:
         run = await self.repository.get_run(
-            self.settings.default_organization_id,
+            self.organization_id,
             project_id,
             run_id,
         )
@@ -2024,7 +2035,7 @@ def build_task(
     request: CreateAuditRunRequest,
 ) -> dict[str, Any]:
     task: dict[str, Any] = {
-        "organization_id": settings.default_organization_id,
+        "organization_id": project.organization_id,
         "project_id": project.id,
         "run_id": run_id,
         "type": "technical_audit",

@@ -29,6 +29,14 @@ const rows = ["alpha", "beta"].map((name, index) => ({
   businessStage: "JOINED", managementStatus: "ACTIVE",
   outcomeStatus: "OPEN", fulfillmentStatus: "NOT_EXPECTED",
   contactEmail: index === 1 ? "editorial@beta.example" : null,
+  contactReviewRequired: index === 0,
+  draftState: index === 1
+    ? {
+        id: "018f0000-0000-7000-8000-000000000130",
+        status: "draft",
+        currentVersionSource: "MODEL",
+      }
+    : null,
   hasDownstreamFacts: index === 0,
   version: index + 1,
   createdAt: new Date(`2026-07-24T00:00:0${index}.000Z`),
@@ -40,6 +48,19 @@ const rows = ["alpha", "beta"].map((name, index) => ({
   assessmentComponents: [],
   assessmentEvidence: { sourceEvidenceIds: [`snapshot-${index}`] },
   assessmentGeneratedAt: new Date("2026-07-25T01:00:00.000Z"),
+  selectedBy: "user-80",
+  selectionVisiblePoolGeneration: 3,
+  selectionGenerationContractId:
+    "018f0000-0000-7000-8000-000000000120",
+  selectionInputPinId: "018f0000-0000-7000-8000-000000000121",
+  selectionScoreModelVersion: "recommendation-commercial-fit.v4",
+  selectionProjectContextVersion: 8,
+  selectionSiteProfileVersionId: "site-profile-v8",
+  selectionOutreachProfileVersionId:
+    "018f0000-0000-7000-8000-000000000122",
+  selectionPromotionTargetVersionId: "promotion-target-v4",
+  selectionImmutableFingerprint: "sha256:selection-80",
+  selectionTargetUrl: "https://owner.example/guides/alpha",
 }));
 
 describe("BL-AI-080 Opportunity query API", () => {
@@ -76,6 +97,13 @@ describe("BL-AI-080 Opportunity query API", () => {
     expect(first.json()).toMatchObject({
       items: [{ id: rows[0]?.id, joinSequence: 11, targetSiteKey: "alpha.example",
         contactEmail: null, hasDownstreamFacts: true,
+        draftId: null,
+        engagementPathState: "CONTACT_PENDING",
+        primaryNextAction: {
+          kind: "RESOLVE_CONTACT_OR_PATH",
+          enabled: false,
+          blockerCode: "CONTACT_OR_PATH_REQUIRED",
+        },
         createdAt: "2026-07-24T00:00:00.000Z" }],
       hasMore: true, meta: { organizationId: "org-80", workspaceId: "workspace-80",
         websiteProjectId: "project-80", requestId: "request-80" },
@@ -91,7 +119,10 @@ describe("BL-AI-080 Opportunity query API", () => {
       url: `/api/v1/projects/project-key/backlinks/opportunities?limit=1&cursor=${cursor}` });
     expect(second.json()).toMatchObject({
       items: [{ id: rows[1]?.id, joinSequence: 10,
-        contactEmail: "editorial@beta.example" }],
+        contactEmail: "editorial@beta.example",
+        draftId: "018f0000-0000-7000-8000-000000000130",
+        engagementPathState: "EMAIL_READY",
+        primaryNextAction: { kind: "REVIEW_DRAFT", enabled: true } }],
       hasMore: false, nextCursor: null,
     });
     expect(calls[1]?.values?.slice(8, 10)).toEqual([11, rows[0]?.id]);
@@ -107,7 +138,17 @@ describe("BL-AI-080 Opportunity query API", () => {
           readOnly: true,
           score: 82,
         },
-        placementCandidate: null },
+        placementCandidate: null,
+        selectionSnapshot: {
+          lineageStatus: "COMPLETE",
+          visiblePoolGeneration: 3,
+          generationContractId:
+            "018f0000-0000-7000-8000-000000000120",
+          projectContextVersion: 8,
+          selectedTargetUrl: "https://owner.example/guides/alpha",
+          selectedBy: "user-80",
+          selectedAt: "2026-07-24T00:00:00.000Z",
+        } },
       meta: { websiteProjectId: "project-80" },
     });
     expect(calls[2]?.values).toEqual([
@@ -116,6 +157,8 @@ describe("BL-AI-080 Opportunity query API", () => {
     expect(calls[2]?.text).toContain(
       "s.score_model_version<>\n                 'recommendation-commercial-fit.v3'",
     );
+    expect(calls[2]?.text).toContain("backlink_recommendation_generation_contracts");
+    expect(calls[2]?.text).toContain("'opportunity.created'");
 
     const missing = await app.inject({ method: "GET",
       url: "/api/v1/projects/project-key/backlinks/opportunities"

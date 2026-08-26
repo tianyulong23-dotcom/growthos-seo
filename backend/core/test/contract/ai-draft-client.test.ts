@@ -110,4 +110,44 @@ describe("BL-AI-090 real AI Adapter shell", () => {
         providerRef: "provider-ref", latencyMs: 12 },
     ]);
   });
+
+  it("logs only a safe provider diagnostic code on failure", async () => {
+    const logs: unknown[] = [];
+    const client = createAiDraftClient({
+      config: validConfig,
+      transport: {
+        async generate() {
+          throw new AiDraftError({
+            code: "MISCONFIGURED",
+            message: "RAW_PROVIDER_RESPONSE_MUST_NOT_BE_LOGGED",
+            retryable: false,
+            diagnosticCode: "PROVIDER_HTTP_400",
+          });
+        },
+      },
+      logger: (event) => logs.push(event),
+    });
+
+    await expect(client.generate(input)).rejects.toMatchObject({
+      code: "MISCONFIGURED",
+      diagnosticCode: "PROVIDER_HTTP_400",
+    });
+    expect(logs).toEqual([
+      {
+        event: "backlinks.ai_draft.started",
+        modelId: "model-1",
+        providerRef: "provider-ref",
+      },
+      {
+        event: "backlinks.ai_draft.failed",
+        modelId: "model-1",
+        providerRef: "provider-ref",
+        errorCode: "MISCONFIGURED",
+        diagnosticCode: "PROVIDER_HTTP_400",
+      },
+    ]);
+    expect(JSON.stringify(logs)).not.toContain(
+      "RAW_PROVIDER_RESPONSE_MUST_NOT_BE_LOGGED",
+    );
+  });
 });

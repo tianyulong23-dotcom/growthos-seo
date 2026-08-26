@@ -6,13 +6,11 @@ import {
 import type {
   DraftDocument,
   DraftMutationResult,
-  SendIntentMessagePurpose,
 } from "@/features/outreach/drafts/types"
 
 export type DraftJobStatus =
   BacklinksResponse<"backlinksGetDraftJobV1">["job"]["status"]
-export type DraftJob =
-  BacklinksResponse<"backlinksGetDraftJobV1">["job"]
+export type DraftJob = BacklinksResponse<"backlinksGetDraftJobV1">["job"]
 export type DraftRequest = NonNullable<DraftJob["request"]>
 
 export type ManualContactRole =
@@ -168,14 +166,7 @@ export function confirmContactCandidate(
 export function createSendIntent(
   websiteProjectKey: string,
   draftId: string,
-  input: Readonly<{
-    approvedDraftVersionId: string
-    contactId: string
-    contactVersion: number
-    gmailConnectionId: string
-    messagePurpose: SendIntentMessagePurpose
-    followUpIndex: number
-  }>,
+  input: BacklinksRequest<"backlinksCreateSendIntentV1">["body"],
   idempotencyKey: string
 ) {
   return requestBacklinks("backlinksCreateSendIntentV1", {
@@ -188,14 +179,7 @@ export function createSendIntent(
 export function preflightSendIntent(
   websiteProjectKey: string,
   draftId: string,
-  input: Readonly<{
-    approvedDraftVersionId: string
-    contactId: string
-    contactVersion: number
-    gmailConnectionId: string
-    messagePurpose: SendIntentMessagePurpose
-    followUpIndex: number
-  }>,
+  input: BacklinksRequest<"backlinksPreflightSendIntentV1">["body"],
   signal?: AbortSignal
 ) {
   return requestBacklinks(
@@ -217,6 +201,21 @@ export function getSendIntent(
     "backlinksGetSendIntentV1",
     {
       path: { websiteProjectKey, sendIntentId },
+    },
+    signal ? { signal } : undefined
+  )
+}
+
+export function listDraftSendIntents(
+  websiteProjectKey: string,
+  draftId: string,
+  signal?: AbortSignal
+) {
+  return requestBacklinks(
+    "backlinksListSendIntentsV1",
+    {
+      path: { websiteProjectKey },
+      query: { draftId, limit: 1 },
     },
     signal ? { signal } : undefined
   )

@@ -1,5 +1,6 @@
 import * as React from "react"
 
+import { ApiError } from "@/api/client"
 import {
   backlinksProjectQueries,
   createProjectQueryKey,
@@ -13,6 +14,7 @@ import {
 import type {
   GmailConnectionView,
   GmailDisconnectResponse,
+  GmailReadinessProjection,
   GmailStatusResponse,
 } from "@/features/outreach/gmail/types"
 
@@ -24,6 +26,12 @@ const invalidOAuthAttemptMessage =
   "Gmail 授权已过期或失效，请重新连接并在 10 分钟内完成 Google 同意。"
 const deniedOAuthAttempt = "access_denied"
 const deniedOAuthAttemptMessage = "已取消 Gmail 授权，未保存任何连接。"
+const providerUnavailableOAuthAttempt = "provider_unavailable"
+const providerUnavailableOAuthAttemptMessage =
+  "Google 授权服务暂时不可用，连接未完成。请点击重新连接 Gmail；系统不会误标为已连接。"
+const failedOAuthAttempt = "failed"
+const failedOAuthAttemptMessage =
+  "Gmail 连接未完成。请点击重新连接 Gmail；若问题持续，请提供页面中的请求编号。"
 
 function readOAuthCallbackError(): string | null {
   if (typeof window === "undefined") return null
@@ -31,6 +39,10 @@ function readOAuthCallbackError(): string | null {
   const callbackError = url.searchParams.get(oauthCallbackErrorParam)
   if (callbackError === invalidOAuthAttempt) return invalidOAuthAttemptMessage
   if (callbackError === deniedOAuthAttempt) return deniedOAuthAttemptMessage
+  if (callbackError === providerUnavailableOAuthAttempt) {
+    return providerUnavailableOAuthAttemptMessage
+  }
+  if (callbackError === failedOAuthAttempt) return failedOAuthAttemptMessage
   return null
 }
 
@@ -55,6 +67,8 @@ export function useGmailConnection(
   const [connection, setConnection] =
     React.useState<GmailConnectionView | null>(null)
   const [accounts, setAccounts] = React.useState<GmailConnectionView[]>([])
+  const [readiness, setReadiness] =
+    React.useState<GmailReadinessProjection | null>(null)
   const [errorMessage, setErrorMessage] = React.useState<string | null>(
     callbackError
   )
@@ -67,20 +81,25 @@ export function useGmailConnection(
   const [loadedProjectKey, setLoadedProjectKey] = React.useState<string | null>(
     null
   )
+  const activeProjectKeyRef = React.useRef(websiteProjectKey)
+  activeProjectKeyRef.current = websiteProjectKey
 
   const currentProjectLoaded = loadedProjectKey === websiteProjectKey
   const visibleConnection = currentProjectLoaded ? connection : null
   const visibleAccounts = currentProjectLoaded ? accounts : []
+  const visibleReadiness = currentProjectLoaded ? readiness : null
   const visibleStatus = enabled && !currentProjectLoaded ? "loading" : status
 
   const applyStatusResponse = React.useCallback(
-    (response: GmailStatusResponse) => {
+    (projectKey: string, response: GmailStatusResponse) => {
+      if (activeProjectKeyRef.current !== projectKey) return
       setConnection(response.connection)
       setAccounts(response.accounts)
-      setLoadedProjectKey(websiteProjectKey)
+      setReadiness(response.readiness)
+      setLoadedProjectKey(projectKey)
       setStatus("ready")
     },
-    [websiteProjectKey]
+    []
   )
 
   React.useEffect(() => {
@@ -91,8 +110,9 @@ export function useGmailConnection(
 
   const refresh = React.useCallback(async () => {
     if (!enabled) return
+    const projectKey = websiteProjectKey
     const queryKey = createProjectQueryKey(
-      websiteProjectKey,
+      projectKey,
       "gmail-connection-status"
     )
     backlinksProjectQueries.invalidate(queryKey)
@@ -100,13 +120,15 @@ export function useGmailConnection(
     setErrorMessage(null)
     try {
       const response = await backlinksProjectQueries.fetch(queryKey, (signal) =>
-        getGmailConnectionStatus(websiteProjectKey, signal)
+        getGmailConnectionStatus(projectKey, signal)
       )
-      applyStatusResponse(response)
+      applyStatusResponse(projectKey, response)
     } catch {
+      if (activeProjectKeyRef.current !== projectKey) return
       setConnection(null)
       setAccounts([])
-      setLoadedProjectKey(websiteProjectKey)
+      setReadiness(null)
+      setLoadedProjectKey(projectKey)
       setStatus("error")
       setErrorMessage("无法读取 Gmail 连接状态；界面不会推断为已连接。")
     }
@@ -127,13 +149,14 @@ export function useGmailConnection(
       .then(
         (response) => {
           if (cancelled) return
-          applyStatusResponse(response)
+          applyStatusResponse(websiteProjectKey, response)
           setErrorMessage(callbackError)
         },
         () => {
           if (cancelled) return
           setConnection(null)
           setAccounts([])
+          setReadiness(null)
           setLoadedProjectKey(websiteProjectKey)
           setErrorMessage("无法读取 Gmail 连接状态；界面不会推断为已连接。")
           setStatus("error")
@@ -157,9 +180,24 @@ export function useGmailConnection(
       window.setTimeout(() => {
         setBusyAction((current) => (current === "connect" ? null : current))
       }, 15_000)
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof ApiError &&
+        error.code === "OAUTH_ORIGIN_MISMATCH" &&
+        error.canonicalFrontendOrigin !== null
+      ) {
+        const canonical = new URL(error.canonicalFrontendOrigin)
+        if (canonical.origin !== window.location.origin) {
+          window.location.assign(
+            `${canonical.origin}${window.location.pathname}${window.location.search}${window.location.hash}`
+          )
+          return
+        }
+      }
       setErrorMessage(
-        "未能启动 Gmail 授权。真实 Provider 默认关闭时会安全失败。"
+        error instanceof ApiError && error.code === "OAUTH_ORIGIN_MISMATCH"
+          ? "Gmail 授权地址配置不一致，系统未创建授权票据。请刷新后重试。"
+          : "未能启动 Gmail 授权。请稍后重试；连接状态不会被误标为已连接。"
       )
       setBusyAction(null)
     }
@@ -171,19 +209,21 @@ export function useGmailConnection(
       setBusyAction("select")
       setErrorMessage(null)
       try {
-        const response = await selectGmailConnection(
-          websiteProjectKey,
-          connectionId
-        )
+        const projectKey = websiteProjectKey
+        const response = await selectGmailConnection(projectKey, connectionId)
         backlinksProjectQueries.invalidate(
-          createProjectQueryKey(websiteProjectKey, "gmail-connection-status")
+          createProjectQueryKey(projectKey, "gmail-connection-status")
         )
-        applyStatusResponse(response)
+        applyStatusResponse(projectKey, response)
+        if (activeProjectKeyRef.current !== projectKey) return
         setLastDisconnect(null)
       } catch {
+        if (activeProjectKeyRef.current !== websiteProjectKey) return
         setErrorMessage("未能为当前项目选择该 Gmail 账号，请刷新后重试。")
       } finally {
-        setBusyAction(null)
+        if (activeProjectKeyRef.current === websiteProjectKey) {
+          setBusyAction(null)
+        }
       }
     },
     [applyStatusResponse, visibleConnection?.connectionId, websiteProjectKey]
@@ -191,23 +231,28 @@ export function useGmailConnection(
 
   const disconnect = React.useCallback(async () => {
     if (visibleConnection === null) return
+    const projectKey = websiteProjectKey
     setBusyAction("disconnect")
     setErrorMessage(null)
     try {
       const response = await disconnectGmailConnection(
-        websiteProjectKey,
+        projectKey,
         visibleConnection.connectionId,
         visibleConnection.version
       )
       backlinksProjectQueries.invalidate(
-        createProjectQueryKey(websiteProjectKey, "gmail-connection-status")
+        createProjectQueryKey(projectKey, "gmail-connection-status")
       )
+      if (activeProjectKeyRef.current !== projectKey) return
       setLastDisconnect(response.revocationStatus)
       await refresh()
     } catch {
+      if (activeProjectKeyRef.current !== projectKey) return
       setErrorMessage("断开请求未完成，发送保持暂停；请刷新后重试。")
     } finally {
-      setBusyAction(null)
+      if (activeProjectKeyRef.current === projectKey) {
+        setBusyAction(null)
+      }
     }
   }, [refresh, visibleConnection, websiteProjectKey])
 
@@ -215,6 +260,7 @@ export function useGmailConnection(
     status: visibleStatus,
     connection: visibleConnection,
     accounts: visibleAccounts,
+    readiness: visibleReadiness,
     errorMessage,
     busyAction,
     lastDisconnect,

@@ -26,8 +26,8 @@ export function PageHeader({
   onAction,
   actionDisabled,
 }: PageHeaderProps) {
-  const { projects, getProject } = useProjects()
-  const { projectId = projects[0]?.id ?? "" } = useParams()
+  const { getProject } = useProjects()
+  const { projectId = "" } = useParams()
   const project = getProject(projectId)
 
   return (

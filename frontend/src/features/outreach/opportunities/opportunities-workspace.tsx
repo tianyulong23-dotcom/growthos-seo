@@ -1,11 +1,15 @@
 import * as React from "react"
 import {
   Archive,
+  ArrowLeft,
+  Copy,
   Ellipsis,
+  ExternalLink,
   MailPlus,
   Pause,
   RefreshCw,
   RotateCcw,
+  Save,
   Search,
 } from "lucide-react"
 import { Link, useSearchParams } from "react-router"
@@ -62,13 +66,16 @@ import {
   getOpportunity,
   isOpportunityApiStatus,
   listOpportunities,
+  patchCooperationPathContent,
   patchOpportunityManagement,
+  transitionManualAction,
   transitionOpportunity,
   type OpportunityBusinessStage,
   type OpportunityDetail,
   type OpportunityFilters,
   type OpportunityFulfillmentStatus,
   type OpportunityListItem,
+  type OpportunityManualActionState,
   type OpportunityManagementStatus,
   type OpportunityOutcomeStatus,
 } from "./api"
@@ -142,6 +149,145 @@ const fulfillmentLabels: Record<OpportunityFulfillmentStatus, string> = {
   FULFILLED: "已履约",
 }
 
+const manualActionLabels: Record<OpportunityManualActionState, string> = {
+  READY_FOR_MANUAL_ACTION: "待人工处理",
+  IN_PROGRESS: "处理中",
+  SUBMITTED: "已提交",
+  RESPONSE_RECEIVED: "已收到回复",
+  BLOCKED: "受阻",
+  ABANDONED: "已放弃",
+}
+
+const cooperationPathLabels: Record<
+  NonNullable<OpportunityDetail["cooperationPath"]>["pathType"],
+  string
+> = {
+  contact_form: "联系表单",
+  guest_post_submission: "客座文章投稿",
+  resource_submission: "资源提交",
+  editor_author_page: "编辑或作者页面",
+}
+
+const engagementPathLabels: Record<
+  OpportunityDetail["engagementPathState"],
+  string
+> = {
+  EMAIL_READY: "邮件路径已就绪",
+  MANUAL_PATH_READY: "人工路径已就绪",
+  CONTACT_PENDING: "待补联系人或合作路径",
+}
+
+const primaryNextActionLabels: Record<
+  OpportunityDetail["primaryNextAction"]["kind"],
+  string
+> = {
+  CREATE_EMAIL_DRAFT: "创建邮件草稿",
+  WAIT_FOR_DRAFT: "等待草稿生成",
+  EDIT_DRAFT: "编辑基础草稿",
+  REVIEW_DRAFT: "审阅草稿",
+  REVIEW_SEND_READINESS: "检查发送就绪",
+  VIEW_MAIL_STATUS: "查看邮件状态",
+  CONTINUE_MANUAL_PATH: "继续人工合作路径",
+  RESOLVE_CONTACT_OR_PATH: "补齐联系人或合作路径",
+}
+
+function draftActionHref(
+  websiteProjectKey: string,
+  detail: OpportunityDetail,
+  primaryNextActionKind: OpportunityDetail["primaryNextAction"]["kind"]
+): string | null {
+  if (primaryNextActionKind === "CREATE_EMAIL_DRAFT") {
+    return `/projects/${websiteProjectKey}/backlinks/drafts/new?opportunityId=${detail.id}`
+  }
+  if (
+    detail.draftId &&
+    [
+      "EDIT_DRAFT",
+      "REVIEW_DRAFT",
+      "REVIEW_SEND_READINESS",
+      "VIEW_MAIL_STATUS",
+    ].includes(primaryNextActionKind)
+  ) {
+    return `/projects/${websiteProjectKey}/backlinks/drafts/${detail.draftId}`
+  }
+  return null
+}
+
+function contactResolutionHref(
+  websiteProjectKey: string,
+  detail: OpportunityDetail,
+  engagementPathState: OpportunityDetail["engagementPathState"]
+): string | null {
+  if (
+    detail.engagementChannel !== "EMAIL" ||
+    engagementPathState !== "CONTACT_PENDING"
+  ) {
+    return null
+  }
+  return `/projects/${websiteProjectKey}/backlinks/drafts/new?opportunityId=${detail.id}`
+}
+
+function resolveEngagementPathState(
+  detail: OpportunityDetail
+): OpportunityDetail["engagementPathState"] {
+  if (detail.engagementPathState) return detail.engagementPathState
+  if (detail.cooperationPath) return "MANUAL_PATH_READY"
+  if (
+    detail.engagementChannel === "EMAIL" &&
+    detail.contactEmail &&
+    !detail.contactReviewRequired
+  ) {
+    return "EMAIL_READY"
+  }
+  return "CONTACT_PENDING"
+}
+
+function resolvePrimaryNextActionKind(
+  detail: OpportunityDetail,
+  engagementPathState: OpportunityDetail["engagementPathState"]
+): OpportunityDetail["primaryNextAction"]["kind"] {
+  if (detail.primaryNextAction?.kind) return detail.primaryNextAction.kind
+  if (engagementPathState === "MANUAL_PATH_READY") {
+    return "CONTINUE_MANUAL_PATH"
+  }
+  if (engagementPathState === "CONTACT_PENDING") {
+    return "RESOLVE_CONTACT_OR_PATH"
+  }
+  return detail.draftId ? "EDIT_DRAFT" : "CREATE_EMAIL_DRAFT"
+}
+
+function primaryManualTransition(state: OpportunityManualActionState): {
+  toState: OpportunityManualActionState
+  label: string
+} {
+  const transitions: Record<
+    OpportunityManualActionState,
+    { toState: OpportunityManualActionState; label: string }
+  > = {
+    READY_FOR_MANUAL_ACTION: { toState: "IN_PROGRESS", label: "开始处理" },
+    IN_PROGRESS: { toState: "SUBMITTED", label: "确认已提交" },
+    SUBMITTED: {
+      toState: "RESPONSE_RECEIVED",
+      label: "记录已收到回复",
+    },
+    RESPONSE_RECEIVED: { toState: "IN_PROGRESS", label: "继续跟进" },
+    BLOCKED: { toState: "IN_PROGRESS", label: "恢复处理" },
+    ABANDONED: { toState: "IN_PROGRESS", label: "恢复处理" },
+  }
+  return transitions[state]
+}
+
+function nextActionForManualState(state: OpportunityManualActionState) {
+  return {
+    READY_FOR_MANUAL_ACTION: "开始人工处理并核对页面要求。",
+    IN_PROGRESS: "完成当前人工步骤后，明确确认是否已提交。",
+    SUBMITTED: "等待并记录网站回复。",
+    RESPONSE_RECEIVED: "根据回复继续推进合作。",
+    BLOCKED: "解决阻塞原因后恢复人工处理。",
+    ABANDONED: "如需重新启动，恢复人工处理。",
+  }[state]
+}
+
 function mapQueryStatus(error: unknown): QueryStatus {
   if (isOutreachOffline()) return "offline"
   if (isOpportunityApiStatus(error, 403)) return "forbidden"
@@ -179,9 +325,11 @@ function evidenceValue(
 }
 
 function DomainCell({
+  channel,
   domain,
   email,
 }: {
+  channel: OpportunityListItem["engagementChannel"]
   domain: string
   email: string | null
 }) {
@@ -195,6 +343,11 @@ function DomainCell({
         {email && (
           <span className="block truncate text-xs text-muted-foreground">
             {email}
+          </span>
+        )}
+        {!email && channel === "COOPERATION_PATH" && (
+          <span className="block truncate text-xs text-muted-foreground">
+            人工合作路径
           </span>
         )}
       </span>
@@ -215,9 +368,7 @@ function managementReason(action: ManagementAction, note: string) {
       : action.nextStatus === "PAUSED"
         ? "Opportunity paused from current work."
         : "Opportunity restored to active work."
-  return note.trim()
-    ? `${standardReason} Note: ${note.trim()}`
-    : standardReason
+  return note.trim() ? `${standardReason} Note: ${note.trim()}` : standardReason
 }
 
 function StateCard({
@@ -323,8 +474,26 @@ export function OpportunitiesWorkspace({
   const [managementAction, setManagementAction] =
     React.useState<ManagementAction | null>(null)
   const [managementNote, setManagementNote] = React.useState("")
+  const [manualContent, setManualContent] = React.useState("")
+  const [manualNextAction, setManualNextAction] = React.useState("")
+  const [submissionConfirmationOpen, setSubmissionConfirmationOpen] =
+    React.useState(false)
   const [commandStatus, setCommandStatus] =
     React.useState<CommandStatus>("idle")
+  const engagementPathState = detail ? resolveEngagementPathState(detail) : null
+  const primaryNextActionKind =
+    detail && engagementPathState
+      ? resolvePrimaryNextActionKind(detail, engagementPathState)
+      : null
+  const selectionSnapshot = detail?.selectionSnapshot ?? null
+  const draftHref =
+    detail && primaryNextActionKind
+      ? draftActionHref(websiteProjectKey, detail, primaryNextActionKind)
+      : null
+  const resolveContactHref =
+    detail && engagementPathState
+      ? contactResolutionHref(websiteProjectKey, detail, engagementPathState)
+      : null
 
   const loadList = React.useCallback(
     async (force = false) => {
@@ -371,6 +540,8 @@ export function OpportunitiesWorkspace({
         if (request !== detailRequest.current) return
         setDetail(response.item)
         setTransitionStage(response.item.businessStage)
+        setManualContent(response.item.cooperationPath?.editableContent ?? "")
+        setManualNextAction(response.item.cooperationPath?.nextAction ?? "")
         setDetailStatus("data")
       } catch (error) {
         if (request !== detailRequest.current) return
@@ -541,6 +712,51 @@ export function OpportunitiesWorkspace({
     }
   }
 
+  async function saveManualContent() {
+    const path = detail?.cooperationPath
+    if (!detail || !path || !manualContent.trim() || !manualNextAction.trim()) {
+      return
+    }
+    setCommandStatus("submitting")
+    try {
+      await patchCooperationPathContent(websiteProjectKey, detail.id, {
+        expectedVersion: path.version,
+        editableContent: manualContent.trim(),
+        nextAction: manualNextAction.trim(),
+      })
+      setCommandStatus("idle")
+      await refreshAfterCommand()
+    } catch (error) {
+      setCommandStatus(mapCommandStatus(error))
+    }
+  }
+
+  async function applyManualTransition(
+    toState: OpportunityManualActionState,
+    submissionConfirmed = false
+  ) {
+    const path = detail?.cooperationPath
+    if (!detail || !path) return
+    setCommandStatus("submitting")
+    try {
+      await transitionManualAction(websiteProjectKey, detail.id, {
+        expectedVersion: path.version,
+        toState,
+        nextAction: nextActionForManualState(toState),
+        evidence: {
+          source: "operator_ui",
+          pathUrl: path.pathUrl,
+        },
+        ...(submissionConfirmed ? { submissionConfirmed: true } : {}),
+      })
+      setSubmissionConfirmationOpen(false)
+      setCommandStatus("idle")
+      await refreshAfterCommand()
+    } catch (error) {
+      setCommandStatus(mapCommandStatus(error))
+    }
+  }
+
   return (
     <div>
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -551,8 +767,10 @@ export function OpportunitiesWorkspace({
           ],
           [
             "待补联系人",
-            items.filter((item) =>
-              ["JOINED", "CONTACT_PREPARING"].includes(item.businessStage)
+            items.filter(
+              (item) =>
+                item.engagementChannel === "EMAIL" &&
+                ["JOINED", "CONTACT_PREPARING"].includes(item.businessStage)
             ).length,
           ],
           [
@@ -622,9 +840,7 @@ export function OpportunitiesWorkspace({
               <Select
                 value={managementFilter}
                 onValueChange={(value) =>
-                  setManagementFilter(
-                    (value ?? "CURRENT") as ManagementFilter
-                  )
+                  setManagementFilter((value ?? "CURRENT") as ManagementFilter)
                 }
               >
                 <SelectTrigger
@@ -720,6 +936,7 @@ export function OpportunitiesWorkspace({
                   <TableRow key={item.id}>
                     <TableCell>
                       <DomainCell
+                        channel={item.engagementChannel}
                         domain={item.targetHostAscii}
                         email={item.contactEmail}
                       />
@@ -820,9 +1037,7 @@ export function OpportunitiesWorkspace({
             </Table>
           </div>
           <div className="flex min-h-12 items-center justify-between gap-3 border-t px-4 py-2 text-sm">
-            <span className="text-muted-foreground">
-              {items.length} 个结果
-            </span>
+            <span className="text-muted-foreground">{items.length} 个结果</span>
             <Button
               variant="outline"
               size="sm"
@@ -842,6 +1057,9 @@ export function OpportunitiesWorkspace({
             setSearchParams({})
             setDetail(null)
             setTransitionReason("")
+            setManualContent("")
+            setManualNextAction("")
+            setSubmissionConfirmationOpen(false)
             setCommandStatus("idle")
           }
         }}
@@ -876,17 +1094,239 @@ export function OpportunitiesWorkspace({
                   {detail.contactReviewRequired && (
                     <Badge variant="outline">联系人需复核</Badge>
                   )}
+                  {engagementPathState && (
+                    <Badge variant="outline">
+                      {engagementPathLabels[engagementPathState]}
+                    </Badge>
+                  )}
                 </div>
 
-                <Link
-                  className={buttonVariants({
-                    className: "w-full sm:w-fit",
-                  })}
-                  to={`/projects/${websiteProjectKey}/backlinks/drafts/new?opportunityId=${detail.id}`}
-                >
-                  <MailPlus />
-                  撰写邮件
-                </Link>
+                <section className="space-y-3 border-y py-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-sm font-medium">推荐交接</div>
+                      <div className="text-xs text-muted-foreground">
+                        {primaryNextActionKind
+                          ? primaryNextActionLabels[primaryNextActionKind]
+                          : "下一步信息暂不可用"}
+                      </div>
+                    </div>
+                    <Link
+                      className={buttonVariants({
+                        variant: "outline",
+                        size: "sm",
+                      })}
+                      to={`/projects/${websiteProjectKey}/backlinks/recommendations?recommendationId=${detail.recommendationId}`}
+                    >
+                      <ArrowLeft />
+                      返回推荐
+                    </Link>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                    <span className="text-muted-foreground">推荐代次</span>
+                    <span className="text-right">
+                      {selectionSnapshot?.visiblePoolGeneration ?? "不可用"}
+                    </span>
+                    <span className="text-muted-foreground">上下文版本</span>
+                    <span className="truncate text-right">
+                      {detail.recommendationContextVersionId}
+                    </span>
+                    <span className="text-muted-foreground">推广目标</span>
+                    <span className="truncate text-right">
+                      {selectionSnapshot?.selectedTargetUrl ?? "不可用"}
+                    </span>
+                    <span className="text-muted-foreground">快照状态</span>
+                    <span className="text-right">
+                      {selectionSnapshot?.lineageStatus === "COMPLETE"
+                        ? "完整"
+                        : selectionSnapshot
+                          ? "部分可用"
+                          : "当前接口未提供"}
+                    </span>
+                  </div>
+                </section>
+
+                {engagementPathState === "EMAIL_READY" && draftHref && (
+                  <Link
+                    className={buttonVariants({
+                      className: "w-full sm:w-fit",
+                    })}
+                    to={draftHref}
+                  >
+                    <MailPlus />
+                    {primaryNextActionKind
+                      ? primaryNextActionLabels[primaryNextActionKind]
+                      : "打开邮件草稿"}
+                  </Link>
+                )}
+
+                {primaryNextActionKind === "WAIT_FOR_DRAFT" && (
+                  <div role="status" className="border-l-2 py-1 pl-3 text-sm">
+                    草稿 Job 正在运行；刷新后继续，不会创建第二个生命周期状态。
+                  </div>
+                )}
+
+                {engagementPathState === "CONTACT_PENDING" && (
+                  <section className="space-y-3 border-l-2 border-amber-500 py-1 pl-3">
+                    <div role="status" className="space-y-1 text-sm">
+                      <div className="font-medium">联系人尚未确认</div>
+                      <p className="text-muted-foreground">
+                        先核对或录入真实联系人，再生成邮件草稿。
+                      </p>
+                    </div>
+                    {resolveContactHref && (
+                      <Link
+                        className={buttonVariants({
+                          className: "w-full sm:w-fit",
+                        })}
+                        to={resolveContactHref}
+                      >
+                        <MailPlus />
+                        完善联系人并创建草稿
+                      </Link>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      此操作不会直接发送；草稿仍需审阅、批准和最终发送确认。
+                    </p>
+                  </section>
+                )}
+
+                {engagementPathState === "MANUAL_PATH_READY" &&
+                  detail.cooperationPath && (
+                    <section className="space-y-3 border-b pb-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-sm font-medium">
+                          {
+                            cooperationPathLabels[
+                              detail.cooperationPath.pathType
+                            ]
+                          }
+                        </div>
+                        <Badge variant="outline">
+                          {manualActionLabels[detail.cooperationPath.state]}
+                        </Badge>
+                      </div>
+                      <a
+                        href={detail.cooperationPath.pathUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className={buttonVariants({
+                          variant: "outline",
+                          className: "w-full sm:w-fit",
+                        })}
+                      >
+                        <ExternalLink />
+                        打开合作页面
+                      </a>
+                      <div className="space-y-2">
+                        <div className="text-xs font-medium text-muted-foreground">
+                          可编辑外联文案
+                        </div>
+                        <Textarea
+                          value={manualContent}
+                          onChange={(event) =>
+                            setManualContent(event.target.value)
+                          }
+                          rows={7}
+                          maxLength={5000}
+                          disabled={commandStatus === "submitting"}
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={!manualContent.trim()}
+                            onClick={() =>
+                              void navigator.clipboard.writeText(manualContent)
+                            }
+                          >
+                            <Copy />
+                            复制文案
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={
+                              commandStatus === "submitting" ||
+                              !manualContent.trim() ||
+                              !manualNextAction.trim()
+                            }
+                            onClick={() => void saveManualContent()}
+                          >
+                            <Save />
+                            保存文案
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <div className="text-xs font-medium text-muted-foreground">
+                          下一步动作
+                        </div>
+                        <Input
+                          value={manualNextAction}
+                          onChange={(event) =>
+                            setManualNextAction(event.target.value)
+                          }
+                          maxLength={500}
+                          disabled={commandStatus === "submitting"}
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {(() => {
+                          const action = primaryManualTransition(
+                            detail.cooperationPath.state
+                          )
+                          return (
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={commandStatus === "submitting"}
+                              onClick={() => {
+                                if (action.toState === "SUBMITTED") {
+                                  setSubmissionConfirmationOpen(true)
+                                  return
+                                }
+                                void applyManualTransition(action.toState)
+                              }}
+                            >
+                              {action.label}
+                            </Button>
+                          )
+                        })()}
+                        {detail.cooperationPath.state !== "BLOCKED" &&
+                          detail.cooperationPath.state !== "ABANDONED" && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={commandStatus === "submitting"}
+                              onClick={() =>
+                                void applyManualTransition("BLOCKED")
+                              }
+                            >
+                              标记受阻
+                            </Button>
+                          )}
+                        {detail.cooperationPath.state !== "ABANDONED" && (
+                          <Button
+                            type="button"
+                            variant="destructive"
+                            size="sm"
+                            disabled={commandStatus === "submitting"}
+                            onClick={() =>
+                              void applyManualTransition("ABANDONED")
+                            }
+                          >
+                            放弃
+                          </Button>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        打开或复制不会改变状态；只有明确确认后才会记录为已提交。
+                      </p>
+                    </section>
+                  )}
 
                 <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-y py-4 text-sm">
                   <span className="text-muted-foreground">结果状态</span>
@@ -915,7 +1355,9 @@ export function OpportunitiesWorkspace({
                   </span>
                   <span className="text-muted-foreground">联系人邮箱</span>
                   <span className="truncate text-right">
-                    {detail.contactEmail ?? "待确认"}
+                    {detail.engagementChannel === "EMAIL"
+                      ? (detail.contactEmail ?? "待确认")
+                      : "非邮件合作路径"}
                   </span>
                 </div>
 
@@ -1039,9 +1481,7 @@ export function OpportunitiesWorkspace({
                         variant="outline"
                         size="sm"
                         disabled={commandStatus === "submitting"}
-                        onClick={() =>
-                          openManagementAction(detail, "PAUSED")
-                        }
+                        onClick={() => openManagementAction(detail, "PAUSED")}
                       >
                         <Pause />
                         暂停
@@ -1052,9 +1492,7 @@ export function OpportunitiesWorkspace({
                         variant="destructive"
                         size="sm"
                         disabled={commandStatus === "submitting"}
-                        onClick={() =>
-                          openManagementAction(detail, "ARCHIVED")
-                        }
+                        onClick={() => openManagementAction(detail, "ARCHIVED")}
                       >
                         <Archive />
                         {archiveLabel(detail)}
@@ -1064,9 +1502,7 @@ export function OpportunitiesWorkspace({
                       <Button
                         size="sm"
                         disabled={commandStatus === "submitting"}
-                        onClick={() =>
-                          openManagementAction(detail, "ACTIVE")
-                        }
+                        onClick={() => openManagementAction(detail, "ACTIVE")}
                       >
                         <RotateCcw />
                         恢复
@@ -1079,6 +1515,39 @@ export function OpportunitiesWorkspace({
           </div>
         </SheetContent>
       </Sheet>
+
+      <AlertDialog
+        open={submissionConfirmationOpen}
+        onOpenChange={(open) => {
+          if (!open && commandStatus !== "submitting") {
+            setSubmissionConfirmationOpen(false)
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认已完成外部提交？</AlertDialogTitle>
+            <AlertDialogDescription>
+              只有你已经在目标网站完成表单、投稿或资源提交时才能确认。仅打开页面或复制文案不算提交。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <Button
+              variant="outline"
+              disabled={commandStatus === "submitting"}
+              onClick={() => setSubmissionConfirmationOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={commandStatus === "submitting"}
+              onClick={() => void applyManualTransition("SUBMITTED", true)}
+            >
+              {commandStatus === "submitting" ? "正在确认..." : "确认已提交"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={managementAction !== null}
@@ -1123,8 +1592,7 @@ export function OpportunitiesWorkspace({
                   {
                     forbidden: "当前账号无权更新该机会。",
                     conflict: "机会版本已变化；页面已重新读取服务端状态。",
-                    offline:
-                      "请求结果仍不明确；未在页面中推断或伪造操作成功。",
+                    offline: "请求结果仍不明确；未在页面中推断或伪造操作成功。",
                     error: "未能通过服务端回读确认操作成功。",
                   }[commandStatus]
                 }

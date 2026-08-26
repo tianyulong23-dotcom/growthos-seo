@@ -13,6 +13,7 @@ import {
   RefreshCw,
   ShieldAlert,
 } from "lucide-react"
+import { Link, useSearchParams } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -345,11 +346,7 @@ function PlacementEntryPanel({
         </label>
         <Button
           className="self-end"
-          disabled={
-            busy ||
-            !sourcePageUrl.trim() ||
-            !targetUrl.trim()
-          }
+          disabled={busy || !sourcePageUrl.trim() || !targetUrl.trim()}
           onClick={submitManual}
         >
           <Plus data-icon="inline-start" />
@@ -385,9 +382,7 @@ function PlacementEntryPanel({
           className="border-t px-4 py-3 text-xs"
           role={entryState === "success" ? "status" : "alert"}
         >
-          {entryState === "submitting"
-            ? "正在提交真实验证任务"
-            : entryMessage}
+          {entryState === "submitting" ? "正在提交真实验证任务" : entryMessage}
         </div>
       ) : null}
     </section>
@@ -643,9 +638,7 @@ function EvidenceReadBlock({ evidence }: { evidence: PlacementEvidence }) {
       </div>
       <div>
         <dt className="text-muted-foreground">X-Robots-Tag</dt>
-        <dd className="mt-1">
-          {evidence.source.xRobotsTag ?? "服务端未提供"}
-        </dd>
+        <dd className="mt-1">{evidence.source.xRobotsTag ?? "服务端未提供"}</dd>
       </div>
       <div>
         <dt className="text-muted-foreground">Meta robots</dt>
@@ -680,14 +673,13 @@ function EvidenceReadBlock({ evidence }: { evidence: PlacementEvidence }) {
           className="border-t pt-3 sm:col-span-2"
           key={`${occurrence.resolvedHref}-${index}`}
         >
-          <dt className="text-muted-foreground">
-            Link occurrence {index + 1}
-          </dt>
+          <dt className="text-muted-foreground">Link occurrence {index + 1}</dt>
           <dd className="mt-1 grid gap-1">
             <span className="break-all">{occurrence.resolvedHref}</span>
             <span>anchor: {occurrence.anchorText || "空文本"}</span>
             <span>
-              rel: {occurrence.rel.length > 0 ? occurrence.rel.join(", ") : "无"}
+              rel:{" "}
+              {occurrence.rel.length > 0 ? occurrence.rel.join(", ") : "无"}
             </span>
             <span>
               nofollow {String(occurrence.nofollow)} · sponsored{" "}
@@ -1010,6 +1002,7 @@ function ReverifyControl({
 }
 
 function DetailContent({
+  websiteProjectKey,
   detail,
   events,
   eventsState,
@@ -1022,6 +1015,7 @@ function DetailContent({
   reloadEvents,
   requestReverify,
 }: {
+  websiteProjectKey: string
   detail: LinkDetail
   events: LifecycleEventsPage | null
   eventsState: ResourceState
@@ -1035,6 +1029,28 @@ function DetailContent({
   requestReverify: (placement: LinkPlacement) => void
 }) {
   const isCandidate = detail.recordType === "candidate"
+  const persistedReplyId = detail.replyId ?? ""
+  const placementId =
+    detail.recordType === "placement" ? detail.placementId : null
+  const returnSearch = new URLSearchParams()
+  if (detail.opportunityId) {
+    returnSearch.set("opportunityId", detail.opportunityId)
+  }
+  if (persistedReplyId) returnSearch.set("replyId", persistedReplyId)
+  if (placementId) returnSearch.set("placementId", placementId)
+  const returnTo = `/projects/${websiteProjectKey}/backlinks/links${
+    returnSearch.size > 0 ? `?${returnSearch.toString()}` : ""
+  }`
+  const linkedPath = (view: "opportunities" | "reports") => {
+    const search = new URLSearchParams()
+    if (detail.opportunityId) {
+      search.set("opportunityId", detail.opportunityId)
+    }
+    if (persistedReplyId) search.set("replyId", persistedReplyId)
+    if (placementId) search.set("placementId", placementId)
+    search.set("returnTo", returnTo)
+    return `/projects/${websiteProjectKey}/backlinks/${view}?${search.toString()}`
+  }
   return (
     <div className="min-w-0 overflow-y-auto">
       <SheetHeader className="border-b pr-14">
@@ -1042,6 +1058,13 @@ function DetailContent({
           <StateBadge state={detail.displayState} />
           <Badge variant="outline">
             {detail.countsTowardKpi ? "计入成功 KPI" : "不计入成功 KPI"}
+          </Badge>
+          <Badge variant="secondary">
+            {isCandidate
+              ? "Candidate 证据"
+              : detail.lineageStatus === "OUTREACH_DERIVED"
+                ? "外联归因 Placement"
+                : "已有外链库存"}
           </Badge>
         </div>
         <SheetTitle className="mt-2 break-all">
@@ -1069,6 +1092,36 @@ function DetailContent({
             <div className="mt-1 break-all">
               {detail.opportunityId || "已有外链（未绑定 Opportunity）"}
             </div>
+            {detail.opportunityId ? (
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+                <Link
+                  className="text-primary hover:underline"
+                  to={linkedPath("opportunities")}
+                >
+                  查看 Opportunity
+                </Link>
+                {!isCandidate ? (
+                  <Link
+                    className="text-primary hover:underline"
+                    to={linkedPath("reports")}
+                  >
+                    查看项目报告
+                  </Link>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <div>
+            <div className="text-muted-foreground">Reply</div>
+            <div className="mt-1 break-all">
+              {detail.replyId || "未绑定已确认回复"}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">Placement lineage</div>
+            <div className="mt-1 break-all">
+              {detail.placementId || "等待 Placement 创建"}
+            </div>
           </div>
           {!isCandidate ? (
             <>
@@ -1090,7 +1143,11 @@ function DetailContent({
               </div>
               <div>
                 <div className="text-muted-foreground">下次监控</div>
-                <div className="mt-1">{dateTime(detail.nextCheckAt)}</div>
+                <div className="mt-1">
+                  {detail.nextCheckAt
+                    ? dateTime(detail.nextCheckAt)
+                    : "尚未排期"}
+                </div>
               </div>
               <div>
                 <div className="text-muted-foreground">Browser 回退</div>
@@ -1218,6 +1275,10 @@ export function LinksWorkspace({
   websiteProjectKey: string
   client?: LinksClient
 }) {
+  const [searchParams] = useSearchParams()
+  const deepLinkOpportunityId = searchParams.get("opportunityId")?.trim() ?? ""
+  const deepLinkPlacementId = searchParams.get("placementId")?.trim() ?? ""
+  const deepLinkReplyId = searchParams.get("replyId")?.trim() ?? ""
   const [view, setView] = useState<LinkDisplayState>("candidate")
   const [page, setPage] = useState<LinksPage | null>(null)
   const [state, setState] = useState<LoadState>("loading")
@@ -1236,7 +1297,9 @@ export function LinksWorkspace({
   const [opportunities, setOpportunities] = useState<OpportunityListItem[]>([])
   const [opportunitiesState, setOpportunitiesState] =
     useState<ResourceState>("loading")
-  const [selectedOpportunityId, setSelectedOpportunityId] = useState("")
+  const [selectedOpportunityId, setSelectedOpportunityId] = useState(
+    deepLinkOpportunityId
+  )
   const [sourcePageUrl, setSourcePageUrl] = useState("")
   const [targetUrl, setTargetUrl] = useState("")
   const [entryState, setEntryState] = useState<EntryState>("idle")
@@ -1246,6 +1309,7 @@ export function LinksWorkspace({
   const detailRequest = useRef(0)
   const eventsRequest = useRef(0)
   const evidenceRequest = useRef(0)
+  const deepLinkPlacementRequest = useRef(0)
   const listKey = useMemo(
     () =>
       createProjectQueryKey(
@@ -1278,6 +1342,11 @@ export function LinksWorkspace({
         .then((response) => {
           setOpportunities(response.items)
           setOpportunitiesState("ready")
+          setSelectedOpportunityId(
+            response.items.some((item) => item.id === deepLinkOpportunityId)
+              ? deepLinkOpportunityId
+              : ""
+          )
         })
         .catch((error: unknown) => {
           if (error instanceof DOMException && error.name === "AbortError") {
@@ -1290,7 +1359,7 @@ export function LinksWorkspace({
       window.clearTimeout(loadTimer)
       controller.abort()
     }
-  }, [client, websiteProjectKey])
+  }, [client, deepLinkOpportunityId, websiteProjectKey])
 
   const resetDetailResources = () => {
     eventsRequest.current += 1
@@ -1460,6 +1529,52 @@ export function LinksWorkspace({
     }
   }
 
+  const loadDeepLinkedPlacement = async () => {
+    if (deepLinkPlacementId === "") return
+    const request = ++deepLinkPlacementRequest.current
+    const detailKey = createProjectQueryKey(
+      websiteProjectKey,
+      "link-detail",
+      "placement",
+      deepLinkPlacementId
+    )
+    backlinksProjectQueries.invalidate(detailKey)
+    setSelected(null)
+    setDetail(null)
+    setDetailState("loading")
+    resetDetailResources()
+    try {
+      const response = await backlinksProjectQueries.fetch(
+        detailKey,
+        (signal) =>
+          client.getPlacementLink(
+            websiteProjectKey,
+            deepLinkPlacementId,
+            signal
+          )
+      )
+      if (request !== deepLinkPlacementRequest.current) return
+      const placement: LinkPlacement = response
+      setSelected(placement)
+      setDetail(response)
+      setDetailState("ready")
+      void loadPlacementEvents(response.placementId)
+    } catch (error) {
+      if (request !== deepLinkPlacementRequest.current) return
+      if (error instanceof DOMException && error.name === "AbortError") return
+      setDetail(null)
+      setDetailState(detailErrorState(error))
+    }
+  }
+
+  useEffect(() => {
+    if (deepLinkPlacementId === "") return
+    queueMicrotask(() => void loadDeepLinkedPlacement())
+    return () => {
+      deepLinkPlacementRequest.current += 1
+    }
+  }, [client, deepLinkPlacementId, websiteProjectKey])
+
   const readEvidence = async (evidenceId: string) => {
     const request = ++evidenceRequest.current
     const evidenceKey = createProjectQueryKey(
@@ -1533,6 +1648,12 @@ export function LinksWorkspace({
 
   const submitManualPlacement = async () => {
     const opportunityId = selectedOpportunityId
+    const replyId =
+      opportunityId &&
+      opportunityId === deepLinkOpportunityId &&
+      deepLinkReplyId
+        ? deepLinkReplyId
+        : ""
     const source = sourcePageUrl.trim()
     const target = targetUrl.trim()
     if (!source || !target) {
@@ -1549,6 +1670,7 @@ export function LinksWorkspace({
         {
           sourceType: "manual",
           ...(opportunityId ? { opportunityId } : {}),
+          ...(replyId ? { replyId } : {}),
           sourcePageUrl: source,
           targetUrl: target,
           evidence: {
@@ -1564,11 +1686,15 @@ export function LinksWorkspace({
       )
       if (
         response.status !== "PENDING_VALIDATION" ||
-        (
-          opportunityId
-            ? response.opportunityId !== opportunityId
-            : response.opportunityId !== undefined
-        )
+        (opportunityId
+          ? response.opportunityId !== opportunityId
+          : response.opportunityId !== undefined) ||
+        (replyId
+          ? response.replyId !== replyId ||
+            response.lineageStatus !== "OUTREACH_DERIVED"
+          : response.replyId !== undefined ||
+            response.lineageStatus !== "UNATTRIBUTED") ||
+        !response.placementId
       ) {
         throw new Error("Placement candidate was not queued for validation")
       }
@@ -1593,18 +1719,13 @@ export function LinksWorkspace({
     setEntryState("submitting")
     setEntryMessage("")
     try {
-      const rows = parsePlacementCsv(
-        await file.text(),
-        selectedOpportunityId
-      )
+      const rows = parsePlacementCsv(await file.text(), selectedOpportunityId)
       for (const row of rows) {
         const response = await client.createPlacementCandidate(
           websiteProjectKey,
           {
             sourceType: "import",
-            ...(row.opportunityId
-              ? { opportunityId: row.opportunityId }
-              : {}),
+            ...(row.opportunityId ? { opportunityId: row.opportunityId } : {}),
             sourceExternalId: `csv:${file.name}:${row.rowNumber}`,
             sourcePageUrl: row.sourcePageUrl,
             targetUrl: row.targetUrl,
@@ -1625,11 +1746,9 @@ export function LinksWorkspace({
         )
         if (
           response.status !== "PENDING_VALIDATION" ||
-          (
-            row.opportunityId
-              ? response.opportunityId !== row.opportunityId
-              : response.opportunityId !== undefined
-          )
+          (row.opportunityId
+            ? response.opportunityId !== row.opportunityId
+            : response.opportunityId !== undefined)
         ) {
           throw new Error(`CSV 第 ${row.rowNumber} 行未进入直接验证`)
         }
@@ -1646,7 +1765,9 @@ export function LinksWorkspace({
       setEntryState(entryErrorState(error))
       const reason =
         error instanceof Error ? error.message : "Placement CSV 导入失败"
-      setEntryMessage(imported > 0 ? `已提交 ${imported} 条；${reason}` : reason)
+      setEntryMessage(
+        imported > 0 ? `已提交 ${imported} 条；${reason}` : reason
+      )
     }
   }
 
@@ -1807,7 +1928,10 @@ export function LinksWorkspace({
       </div>
 
       <Sheet
-        open={selected !== null}
+        open={
+          selected !== null ||
+          (deepLinkPlacementId !== "" && detailState !== "idle")
+        }
         onOpenChange={(open) => {
           if (open) return
           setSelected(null)
@@ -1842,11 +1966,18 @@ export function LinksWorkspace({
                 }}
                 requestReverify={(placement) => void requestReverify(placement)}
                 reverifyResult={reverifyResult}
+                websiteProjectKey={websiteProjectKey}
               />
             ) : null
           ) : detailState === "idle" ? null : (
             <DetailNotice
-              retry={selected ? () => void openDetail(selected) : undefined}
+              retry={
+                selected
+                  ? () => void openDetail(selected)
+                  : deepLinkPlacementId
+                    ? () => void loadDeepLinkedPlacement()
+                    : undefined
+              }
               state={detailState}
             />
           )}

@@ -152,6 +152,7 @@ export const googleAuthFailureSchema = z.object({
   retryable: z.boolean(),
   httpStatus: z.number().int().min(400).max(599).optional(),
   providerRequestId: z.string().trim().min(1).max(255).optional(),
+  transportCode: z.string().trim().min(1).max(64).optional(),
 }).strict().superRefine((failure, context) => {
   if (failure.retryable !== googleAuthFailureRetryability[failure.code]) {
     context.addIssue({
@@ -172,6 +173,7 @@ export class GoogleAuthError extends Error {
   readonly retryable: boolean;
   readonly httpStatus: number | undefined;
   readonly providerRequestId: string | undefined;
+  readonly transportCode: string | undefined;
 
   constructor(failure: GoogleAuthFailure, options?: ErrorOptions) {
     const parsed = googleAuthFailureSchema.parse(failure);
@@ -182,6 +184,7 @@ export class GoogleAuthError extends Error {
     this.retryable = parsed.retryable;
     this.httpStatus = parsed.httpStatus;
     this.providerRequestId = parsed.providerRequestId;
+    this.transportCode = parsed.transportCode;
   }
 }
 

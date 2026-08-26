@@ -346,6 +346,13 @@ export const backlinkReplyMatchCandidates = pg.pgTable(
       table.inboundMessageId,
       table.opportunityId,
     ),
+    pg.uniqueIndex(
+      "backlink_reply_match_candidate_scoped_assignment_uq",
+    ).on(
+      ...identity(table),
+      table.inboundMessageId,
+      table.opportunityId,
+    ),
     pg.foreignKey({
       name: "backlink_reply_match_candidate_inbound_fk",
       columns: [...identity(table), table.inboundMessageId],

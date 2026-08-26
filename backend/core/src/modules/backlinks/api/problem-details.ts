@@ -9,7 +9,8 @@ import {
 
 export const backlinkProblemContentType = "application/problem+json";
 
-export type BacklinkHttpStatus = 400 | 401 | 403 | 404 | 409 | 429 | 500;
+export type BacklinkHttpStatus =
+  400 | 401 | 403 | 404 | 409 | 429 | 500 | 503;
 
 type ProblemDefinition = Readonly<{
   status: BacklinkHttpStatus;
@@ -35,9 +36,11 @@ const problemDefinitions = {
   [backlinkErrorCodes.gmailSendDisabled]: defineProblem(409, "Gmail send disabled", "gmail-send-disabled"),
   [backlinkErrorCodes.gmailScopeInsufficient]: defineProblem(409, "Gmail scope insufficient", "gmail-scope-insufficient"),
   [backlinkErrorCodes.gmailWorkerUnavailable]: defineProblem(409, "Gmail worker unavailable", "gmail-worker-unavailable"),
+  [backlinkErrorCodes.gmailOAuthProviderUnavailable]: defineProblem(503, "Gmail authorization temporarily unavailable", "gmail-oauth-provider-unavailable"),
   [backlinkErrorCodes.contactVersionStale]: defineProblem(409, "Contact version stale", "contact-version-stale"),
   [backlinkErrorCodes.draftVersionStale]: defineProblem(409, "Draft version stale", "draft-version-stale"),
   [backlinkErrorCodes.sendPolicyRejected]: defineProblem(409, "Send policy rejected", "send-policy-rejected"),
+  [backlinkErrorCodes.sendReadinessStale]: defineProblem(409, "Send readiness stale", "send-readiness-stale"),
   [backlinkErrorCodes.internal]: defineProblem(500, "Internal server error", "internal-error"),
 } satisfies Record<BacklinkErrorCode, ProblemDefinition>;
 
@@ -53,9 +56,11 @@ const backlinkErrorCodeSchema = z.union([
   z.literal(backlinkErrorCodes.gmailSendDisabled),
   z.literal(backlinkErrorCodes.gmailScopeInsufficient),
   z.literal(backlinkErrorCodes.gmailWorkerUnavailable),
+  z.literal(backlinkErrorCodes.gmailOAuthProviderUnavailable),
   z.literal(backlinkErrorCodes.contactVersionStale),
   z.literal(backlinkErrorCodes.draftVersionStale),
   z.literal(backlinkErrorCodes.sendPolicyRejected),
+  z.literal(backlinkErrorCodes.sendReadinessStale),
   z.literal(backlinkErrorCodes.internal),
 ]);
 
@@ -71,6 +76,7 @@ export const backlinkProblemDetailsSchema = z
       z.literal(409),
       z.literal(429),
       z.literal(500),
+      z.literal(503),
     ]),
     detail: z.string().min(1),
     code: backlinkErrorCodeSchema,
@@ -87,6 +93,14 @@ export const backlinkProblemDetailsSchema = z
           .strict(),
       )
       .optional(),
+    changedConditions: z.array(z.object({
+      code: z.string().min(1),
+      reason: z.enum(["CHANGED", "MISSING", "EXPIRED"]),
+      expectedRevision: z.string().nullable(),
+      currentRevision: z.string().nullable(),
+      retryable: z.boolean(),
+      recoveryAction: z.string().min(1),
+    }).strict()).optional(),
   })
   .strict();
 
@@ -119,9 +133,13 @@ export function toBacklinkProblemDetails(
     retryable: normalized.retryable,
   };
 
-  return backlinkProblemDetailsSchema.parse(
-    normalized.fieldErrors === undefined
-      ? problem
-      : { ...problem, fieldErrors: normalized.fieldErrors },
-  );
+  return backlinkProblemDetailsSchema.parse({
+    ...problem,
+    ...(normalized.fieldErrors === undefined
+      ? {}
+      : { fieldErrors: normalized.fieldErrors }),
+    ...(normalized.changedConditions === undefined
+      ? {}
+      : { changedConditions: normalized.changedConditions }),
+  });
 }

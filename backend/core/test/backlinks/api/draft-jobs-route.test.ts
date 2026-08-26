@@ -14,6 +14,9 @@ import {
   BacklinkError,
   backlinkErrorCodes,
 } from "../../../src/modules/backlinks/domain/errors/backlink-error.js";
+import {
+  AiDraftError,
+} from "../../../src/modules/backlinks/ports/ai-draft.port.js";
 import type {
   CreateDraftGenerationJobInput,
   DraftGenerationJob,
@@ -67,11 +70,14 @@ describe("BL-AI-095 Draft Job API", () => {
       job: DraftGenerationJob;
     }>();
     let budgetAvailable = true;
+    let budgetChecks = 0;
     let modelProviderAvailable = true;
     let preparedSnapshotCount = 0;
+    let prepareError: Error | null = null;
     const repository = {
       async prepareEvidenceSnapshot() {
         preparedSnapshotCount += 1;
+        if (prepareError !== null) throw prepareError;
         return { snapshotId, requestSnapshotId, replayed: false };
       },
       async createJob(input: CreateDraftGenerationJobInput) {
@@ -105,7 +111,10 @@ describe("BL-AI-095 Draft Job API", () => {
           latencyMs: null,
           attemptCount: 0,
           lastErrorCategory: null,
+          diagnosticCode: null,
           persistenceLatencyMs: null,
+          readiness: "QUEUED",
+          fallbackReason: null,
         };
         jobs.set(runId, job);
         idempotency.set(input.idempotencyKey, {
@@ -154,8 +163,13 @@ describe("BL-AI-095 Draft Job API", () => {
       repository,
       budget: {
         async assertAvailable() {
+          budgetChecks += 1;
           if (!budgetAvailable) {
-            throw new Error("BUDGET_EXCEEDED");
+            throw new AiDraftError({
+              code: "BUDGET_EXCEEDED",
+              message: "AI Draft budget is exhausted.",
+              retryable: false,
+            });
           }
         },
       },
@@ -257,28 +271,64 @@ describe("BL-AI-095 Draft Job API", () => {
       "viewer",
     )).statusCode).toBe(403);
 
+    prepareError = new Error("DRAFT_PROMOTION_TARGET_OUTSIDE_PROJECT");
+    const outsideProject = await create(
+      "outside-project-request-95",
+      "outside-project-outreach",
+    );
+    expect(outsideProject.statusCode).toBe(400);
+    expect(outsideProject.json()).toMatchObject({
+      code: "BACKLINK_INVALID_REQUEST",
+      message:
+        "The promotion target must be a valid HTTP(S) page on this project's website.",
+      fieldErrors: [{
+        field: "request.promotionTargetUrl",
+      }],
+    });
+    prepareError = new Error("DRAFT_PROJECT_CONTEXT_INCOMPLETE");
+    const incompleteProject = await create(
+      "incomplete-project-request-95",
+      "incomplete-project-outreach",
+    );
+    expect(incompleteProject.statusCode).toBe(409);
+    expect(incompleteProject.json()).toMatchObject({
+      code: "BACKLINK_CONFLICT",
+      fieldErrors: [{
+        field: "projectMarketingContext",
+      }],
+    });
+    prepareError = null;
+
     const preparedBeforeMisconfigured = preparedSnapshotCount;
+    const budgetChecksBeforeMisconfigured = budgetChecks;
     modelProviderAvailable = false;
     const misconfigured = await create(
       "misconfigured-request-95",
       "misconfigured-outreach",
     );
-    expect(misconfigured.statusCode).toBe(400);
+    expect(misconfigured.statusCode).toBe(202);
     expect(misconfigured.json()).toMatchObject({
-      code: "BACKLINK_INVALID_REQUEST",
-      message: "MISCONFIGURED: AI Draft Provider is not configured.",
-      fieldErrors: [{
-        field: "AI_PROVIDER_ENABLED",
-      }],
+      status: "QUEUED",
+      generationMode: "MODEL",
     });
-    expect(preparedSnapshotCount).toBe(preparedBeforeMisconfigured);
+    expect(preparedSnapshotCount).toBe(preparedBeforeMisconfigured + 1);
+    expect(budgetChecks).toBe(budgetChecksBeforeMisconfigured);
     modelProviderAvailable = true;
 
+    const preparedBeforeBudgetExceeded = preparedSnapshotCount;
+    const budgetChecksBeforeBudgetExceeded = budgetChecks;
     budgetAvailable = false;
-    expect((await create(
+    const budgetExceeded = await create(
       "budget-request-95",
       "budget-outreach",
-    )).statusCode).toBe(429);
+    );
+    expect(budgetExceeded.statusCode).toBe(202);
+    expect(budgetExceeded.json()).toMatchObject({
+      status: "QUEUED",
+      generationMode: "MODEL",
+    });
+    expect(preparedSnapshotCount).toBe(preparedBeforeBudgetExceeded + 1);
+    expect(budgetChecks).toBe(budgetChecksBeforeBudgetExceeded + 1);
     budgetAvailable = true;
 
     const status = await app.inject({
@@ -306,6 +356,9 @@ describe("BL-AI-095 Draft Job API", () => {
         persistenceLatencyMs: null,
         attemptCount: 0,
         lastErrorCategory: null,
+        diagnosticCode: null,
+        readiness: "QUEUED",
+        fallbackReason: null,
       },
     });
     const latest = await app.inject({

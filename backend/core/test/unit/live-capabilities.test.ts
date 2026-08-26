@@ -60,17 +60,15 @@ const localProductDataForSeo = {
     "https://api.dataforseo.com/v3/backlinks/referring_domains/live",
     "https://api.dataforseo.com/v3/backlinks/summary/live",
     "https://api.dataforseo.com/v3/backlinks/backlinks/live",
+    "https://api.dataforseo.com/v3/dataforseo_labs/google/bulk_traffic_estimation/live",
+    "https://api.dataforseo.com/v3/backlinks/bulk_spam_score/live",
+    "https://api.dataforseo.com/v3/backlinks/bulk_ranks/live",
   ]),
   DATAFORSEO_REQUEST_TIMEOUT_MS: "60000",
   DATAFORSEO_ESTIMATED_COST_MICROS: "1000",
   DATAFORSEO_ABSOLUTE_BUDGET_MICROS: "5000",
   DATAFORSEO_MAX_PAID_CALLS: "25",
   DATAFORSEO_CANDIDATE_LIMIT: "25",
-  DATAFORSEO_LOCATION_CODE: "2840",
-  DATAFORSEO_LANGUAGE_CODE: "en",
-  DATAFORSEO_PROJECT_KEYWORDS_JSON: '["video streaming"]',
-  DATAFORSEO_PROJECT_PRODUCTS_JSON: '["streaming platform"]',
-  DATAFORSEO_TARGET_URLS_JSON: '["https://elephtv.com/"]',
 } as const;
 
 describe("local product capability matrix", () => {
@@ -286,7 +284,7 @@ describe("local product capability matrix", () => {
     ],
     [
       "DATAFORSEO_ENDPOINT_ALLOWLIST",
-      '["https://api.dataforseo.com/v3/backlinks/summary/live"]',
+      '["https://example.com/v3/backlinks/summary/live"]',
       "BACKLINKS_DATAFORSEO_ENDPOINT_ALLOWLIST_INVALID",
     ],
     [

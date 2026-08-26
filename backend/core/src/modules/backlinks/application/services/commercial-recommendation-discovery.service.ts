@@ -4,6 +4,7 @@ import type { DataForSeoCallGate } from "../policies/dataforseo-call.policy.js";
 import type { CommercialDataForSeoRuntime } from "../../adapters/dataforseo/commercial-official-runtime.js";
 import { commercialPageParser } from "../../adapters/html/commercial-page-parser.adapter.js";
 import {
+  assessCommercialDiscoveryInputReadiness,
   buildCommercialDiscoveryBlueprint,
   commercialDiscoveryBlueprintSchemaVersion,
   commercialDiscoveryBlueprintVersion,
@@ -13,17 +14,32 @@ import {
   type CommercialDiscoveryBlueprintContext,
 } from "../../domain/recommendations/commercial-discovery-blueprint.js";
 import {
+  commercialDiscoveryCallSchema,
   createCommercialDiscoveryPlan,
   fingerprintCommercialDiscoveryCall,
   mergeCommercialDiscoveryArtifacts,
+  parseCommercialDiscoveryRequestPayload,
+  type CommercialBacklinkPageEvidence,
   type CommercialDiscoveryArtifact,
+  type CommercialDiscoveryCall,
   type CommercialDiscoverySourceType,
 } from "../../domain/recommendations/commercial-discovery-source.js";
-import { evaluateCommercialCandidate } from "../../domain/recommendations/commercial-candidate-evaluation.js";
+import {
+  applyProgressiveCommercialCandidateAdmission,
+  evaluateCommercialCandidate,
+} from "../../domain/recommendations/commercial-candidate-evaluation.js";
+import {
+  selectCommercialCandidateEnrichment,
+  type CommercialCandidateEnrichmentDecision,
+} from "../../domain/recommendations/commercial-candidate-enrichment.js";
 import {
   rankCommercialRecommendationFits,
+  type CommercialFitAdmission,
   type CommercialFitDecision,
-} from "../../domain/recommendations/commercial-score-v3.js";
+} from "../../domain/recommendations/commercial-score-v4.js";
+import {
+  commercialSemanticDiscoveryPaidCallReserve,
+} from "../../domain/recommendations/provider-operation-budget.js";
 import {
   buildCommercialRefillWindowKey,
   type CommercialRefillTier,
@@ -38,10 +54,19 @@ import {
 import type { SafeFetchPort } from "../../ports/safe-fetch.port.js";
 import type { ProviderRequestContext } from "../../ports/dataforseo.port.js";
 import type { AiCommercialDiscoveryBlueprintPort } from "../../ports/ai-commercial-discovery-blueprint.port.js";
+import type {
+  GenerationInputBinding,
+} from "../../ports/shared-seo-evidence.port.js";
 import {
   CommercialDiscoveryRequestService,
   type CommercialDiscoveryQueryClient,
 } from "./commercial-discovery-request.service.js";
+import type {
+  CommercialDiscoveryEvidenceReusePort,
+} from "./shared-seo-commercial-discovery.service.js";
+import {
+  extractTargetLanguageSearchPhrases,
+} from "./target-language-search-phrase.js";
 
 const blockedDiscoveryDomains = Object.freeze([
   "ahrefs.com",
@@ -65,9 +90,60 @@ const blockedDiscoveryDomains = Object.freeze([
 ]);
 const staticAssessmentConcurrency = 4;
 const providerRequestConcurrency = 1;
+const currentV4VisiblePoolPredicate = `(
+  policy.visible_pool_state='building'
+  OR (
+    policy.visible_pool_state='active'
+    AND EXISTS (
+      SELECT 1
+        FROM backlink_recommendation_generation_contracts AS contract
+       WHERE (
+         contract.organization_id,contract.workspace_id,
+         contract.website_project_id,
+         contract.recommendation_context_version_id,
+         contract.visible_pool_generation
+       )=(
+         policy.organization_id,policy.workspace_id,
+         policy.website_project_id,
+         policy.project_context_version_id,
+         policy.visible_pool_generation
+       )
+         AND contract.qualification_contract_version=
+           'recommendation-qualification.v1'
+         AND contract.visibility_contract_version=
+           'recommendation-visibility.v1'
+         AND contract.score_model_version=
+           'recommendation-commercial-fit.v4'
+    )
+  )
+)`;
+
+function providerRequestStatus(
+  error: unknown,
+): "failed" | "unknown_charge" | null {
+  if (
+    typeof error !== "object"
+    || error === null
+    || !("providerRequestStatus" in error)
+  ) {
+    return null;
+  }
+  return error.providerRequestStatus === "failed"
+    || error.providerRequestStatus === "unknown_charge"
+    ? error.providerRequestStatus
+    : null;
+}
+
+function isExpectedProviderFailure(error: unknown): boolean {
+  return providerRequestStatus(error) !== null
+    || (error instanceof Error
+      && error.name === "DataForSeoCallBlockedError");
+}
 
 export type CommercialRecommendationContext = Readonly<{
   snapshotVersion: number;
+  profileVersionId: string;
+  promotionTargetVersionId: string;
   projectSettingsVersionId: string;
   projectSettingsVersion: number;
   canonicalDomain: string;
@@ -93,6 +169,7 @@ export type CommercialRecommendationDiscoveryConfiguration = Readonly<{
 export type CommercialReadyCandidate = Readonly<{
   hostnameAscii: string;
   sourceTypes: readonly CommercialDiscoverySourceType[];
+  business: Parameters<typeof evaluateCommercialCandidate>[0]["business"];
   provider: Readonly<{
     rank: number | null;
     traffic: number | null;
@@ -100,6 +177,7 @@ export type CommercialReadyCandidate = Readonly<{
     referringDomainCount: number | null;
     spamScore: number | null;
     countryCode: string | null;
+    backlinkPageEvidence: readonly CommercialBacklinkPageEvidence[];
     evidenceRefs: readonly string[];
     collectedAt: string;
   }>;
@@ -109,11 +187,19 @@ export type CommercialReadyCandidate = Readonly<{
 
 export type CommercialRecommendationDiscoveryResult = Readonly<{
   candidates: readonly CommercialReadyCandidate[];
+  enrichmentCandidates: readonly CommercialReadyCandidate[];
+  admission: CommercialFitAdmission;
   provider: Readonly<{
     source: "cache" | "stale-cache" | "single-flight" | "provider";
     acquiredAt: string;
     costMicros: number;
     requestFingerprint: string;
+  }>;
+  discovery: Readonly<{
+    semanticStatus: "not_required" | "completed" | "paused" | "unavailable";
+    semanticRequiredCallCount: number;
+    semanticCompletedCallCount: number;
+    reason: string | null;
   }>;
 }>;
 
@@ -179,16 +265,25 @@ const projectMatchStopWords = new Set([
   "with",
 ]);
 
+const nonSemanticResourceLabels = new Set([
+  "other / needs review",
+]);
+
 function projectMatchTokens(values: readonly string[]): ReadonlySet<string> {
   return new Set(
-    values.flatMap((value) =>
-      value
-        .toLowerCase()
-        .split(/[^a-z0-9]+/u)
-        .filter(
-          (token) => token.length >= 3 && !projectMatchStopWords.has(token),
-        ),
-    ),
+    values
+      .filter(
+        (value) =>
+          !nonSemanticResourceLabels.has(value.trim().toLowerCase()),
+      )
+      .flatMap((value) =>
+        value
+          .toLowerCase()
+          .split(/[^a-z0-9]+/u)
+          .filter(
+            (token) => token.length >= 3 && !projectMatchStopWords.has(token),
+          ),
+      ),
   );
 }
 
@@ -291,32 +386,21 @@ async function mapConcurrent<T, R>(
 
 async function collectBlueprintEvidence(
   input: Readonly<{
-    scope: Scope;
     contextVersionId: string;
     context: CommercialRecommendationContext;
-    safeFetch: Pick<SafeFetchPort, "fetch">;
+    inputBinding: GenerationInputBinding;
   }>,
 ): Promise<readonly string[]> {
   const evidence = new Set<string>([
     `postgresql:project-context:${input.contextVersionId}:snapshot:${input.context.snapshotVersion}`,
     `postgresql:project-settings:${input.context.projectSettingsVersionId}:version:${input.context.projectSettingsVersion}`,
+    `postgresql:outreach-profile:${input.inputBinding.outreachProfileRecordId}:profile-version:${input.context.profileVersionId}`,
+    `postgresql:generation-input-pin:${input.inputBinding.inputPinId}`,
   ]);
-  for (const targetUrl of input.context.targetUrls.slice(0, 5)) {
-    try {
-      const fetched = await input.safeFetch.fetch({
-        url: targetUrl,
-        purpose: "seo-assessment",
-        workspaceId: input.scope.workspaceId,
-        websiteProjectId: input.scope.websiteProjectId,
-        maxBytes: 512_000,
-        maxRedirects: 4,
-      });
-      if (fetched.status >= 200 && fetched.status < 400) {
-        evidence.add(`safefetch:${fetched.finalUrl}:${fetched.fetchedAt}`);
-      }
-    } catch {
-      // Project context remains authoritative when target evidence is unavailable.
-    }
+  for (const item of input.inputBinding.sharedEvidence) {
+    evidence.add(
+      `platform-evidence:${item.recordId}:${item.snapshot.sourceModule}:${item.snapshot.sourceVersion}`,
+    );
   }
   return Object.freeze([...evidence].sort());
 }
@@ -613,6 +697,372 @@ function blueprintContext(
   });
 }
 
+export type CommercialDiscoveryBatchClaim = Readonly<{
+  batchId: string;
+  disposition: "resumed" | "same_owner";
+}>;
+
+export async function claimPausedCommercialDiscoveryBatch(
+  input: Readonly<{
+    client: CommercialDiscoveryQueryClient;
+    scope: Scope;
+    contextVersionId: string;
+    visiblePoolGeneration: number;
+    jobId: string;
+    refillKey: string;
+    inputBinding: GenerationInputBinding;
+    actorId: string;
+    claimedAt: Date;
+    acceptedProviderRecoveryPending?: boolean;
+  }>,
+): Promise<CommercialDiscoveryBatchClaim | null> {
+  const lifecycleId = randomUUID();
+  const auditId = randomUUID();
+  const lineageKey = [
+    "commercial-discovery-batch-resumed",
+    input.scope.websiteProjectId,
+    input.contextVersionId,
+    input.visiblePoolGeneration,
+    input.jobId,
+  ].join(":");
+  const auditRequestId = `${lineageKey}:audit`;
+  const integrityHash = aggregateHash([
+    lineageKey,
+    input.inputBinding.inputPinId,
+    input.inputBinding.immutableFingerprint,
+  ]);
+  const result = await input.client.query(
+    `/* COMMERCIAL_DISCOVERY_BATCH_TAKEOVER */
+     WITH locked_batch AS MATERIALIZED (
+       SELECT batch.*
+         FROM backlink_commercial_discovery_batches AS batch
+        WHERE (batch.organization_id,batch.workspace_id,
+               batch.website_project_id)=($1::uuid,$2::uuid,$3::uuid)
+          AND batch.project_context_version_id=$4::uuid
+          AND batch.visible_pool_generation=$5
+          AND batch.idempotency_key=$6
+        FOR UPDATE OF batch
+     ),
+     old_owner AS MATERIALIZED (
+       SELECT job.id,job.status,refill.id AS refill_id
+         FROM locked_batch AS batch
+         JOIN backlink_jobs AS job
+           ON (job.organization_id,job.workspace_id,
+               job.website_project_id,job.id)=(
+                batch.organization_id,batch.workspace_id,
+                batch.website_project_id,batch.refill_job_id
+              )
+         JOIN backlink_recommendation_refills AS refill
+           ON (refill.organization_id,refill.workspace_id,
+               refill.website_project_id,refill.job_id)=(
+                job.organization_id,job.workspace_id,
+                job.website_project_id,job.id
+              )
+          AND refill.recommendation_context_version_id=$4::uuid
+          AND refill.visible_pool_generation=$5
+        FOR UPDATE OF job,refill
+     ),
+     new_owner AS MATERIALIZED (
+       SELECT job.id,job.status,job.version,job.correlation_id,
+              job.result_summary,refill.id AS refill_id
+         FROM backlink_jobs AS job
+         JOIN backlink_recommendation_refills AS refill
+           ON (refill.organization_id,refill.workspace_id,
+               refill.website_project_id,refill.job_id)=(
+                job.organization_id,job.workspace_id,
+                job.website_project_id,job.id
+              )
+          AND refill.recommendation_context_version_id=$4::uuid
+          AND refill.visible_pool_generation=$5
+        WHERE (job.organization_id,job.workspace_id,
+               job.website_project_id,job.id)=(
+                $1::uuid,$2::uuid,$3::uuid,$7::uuid
+              )
+          AND job.job_type='recommendation_refill'
+          AND job.source_object_type='recommendation_context'
+          AND job.source_object_id=$4::uuid
+        FOR UPDATE OF job,refill
+     ),
+     locked_requests AS MATERIALIZED (
+       SELECT request.*
+         FROM provider_batch_requests AS request
+         JOIN locked_batch AS batch
+           ON (request.organization_id,request.workspace_id,
+               request.website_project_id)=(
+                batch.organization_id,batch.workspace_id,
+                batch.website_project_id
+              )
+          AND request.request_id LIKE
+              regexp_replace(
+                batch.idempotency_key,
+                '^commercial-discovery:',
+                ''
+              )||':%'
+        FOR UPDATE OF request
+     ),
+     locked_provider_requests AS MATERIALIZED (
+       SELECT provider_request.*
+         FROM backlink_provider_requests AS provider_request
+         JOIN locked_requests AS request
+           ON (provider_request.organization_id,
+               provider_request.workspace_id,
+               provider_request.website_project_id,
+               provider_request.id)=(
+                request.organization_id,request.workspace_id,
+                request.website_project_id,request.id
+              )
+        FOR UPDATE OF provider_request
+     ),
+     locked_usage AS MATERIALIZED (
+       SELECT usage.*
+         FROM backlink_provider_usage_ledger AS usage
+         JOIN locked_requests AS request
+           ON (usage.organization_id,usage.workspace_id,
+               usage.website_project_id,usage.provider_request_id)=(
+                request.organization_id,request.workspace_id,
+                request.website_project_id,request.id
+              )
+          AND usage.provider='dataforseo'
+          AND usage.reservation_key=request.budget_reservation_id
+        FOR UPDATE OF usage
+     ),
+     locked_leases AS MATERIALIZED (
+       SELECT lease.*
+         FROM provider_fetch_leases AS lease
+         JOIN locked_requests AS request
+           ON lease.artifact_fingerprint=request.normalized_request_hash
+          AND lease.owner_request_id=request.request_id
+        FOR UPDATE OF lease
+     ),
+     safety AS MATERIALIZED (
+       SELECT NOT EXISTS (
+                SELECT 1 FROM locked_requests
+                 WHERE status IN ('running','unknown_charge')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM locked_provider_requests
+                 WHERE status IN ('running','unknown_charge')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM locked_usage WHERE status='reserved'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM locked_leases
+                 WHERE status IN ('acquired','unknown_charge')
+              ) AS safe_to_resume
+     ),
+     authority AS MATERIALIZED (
+       SELECT batch.id AS batch_id,
+              batch.refill_job_id AS old_job_id,
+              old_owner.refill_id AS old_refill_id,
+              new_owner.refill_id AS new_refill_id,
+              new_owner.version AS new_job_version,
+              new_owner.correlation_id,
+              (
+                batch.refill_job_id=$7::uuid
+                AND (
+                  safety.safe_to_resume
+                  OR $20::boolean
+                )
+              ) AS same_owner,
+              (
+                batch.refill_job_id<>$7::uuid
+                AND batch.status='paused'
+                AND old_owner.status IN ('partial_success','cancelled')
+                AND new_owner.status IN ('queued','running','waiting_provider')
+                AND safety.safe_to_resume
+              ) AS claimable
+         FROM locked_batch AS batch
+         JOIN old_owner ON true
+         JOIN new_owner ON true
+         CROSS JOIN safety
+         JOIN backlink_project_context_snapshots AS context
+           ON (context.organization_id,context.workspace_id,
+               context.website_project_id,context.id)=(
+                batch.organization_id,batch.workspace_id,
+                batch.website_project_id,$4::uuid
+              )
+          AND context.snapshot_version=$8
+          AND context.profile_version_id=$9
+          AND context.promotion_target_version_id=$10
+         JOIN backlink_generation_input_pins AS pin
+           ON (pin.organization_id,pin.workspace_id,
+               pin.website_project_id,pin.id)=(
+                batch.organization_id,batch.workspace_id,
+                batch.website_project_id,$11::uuid
+              )
+          AND pin.project_context_version=$8
+          AND pin.site_profile_version_id=$9
+          AND pin.promotion_target_version_id=$10
+          AND pin.immutable_fingerprint=$12
+        WHERE (
+                batch.status='paused'
+                OR (
+                  batch.refill_job_id=$7::uuid
+                  AND batch.status='running'
+                  AND $20::boolean
+                )
+              )
+          AND new_owner.status IN ('queued','running','waiting_provider')
+          AND NOT EXISTS (
+            SELECT 1
+              FROM backlink_project_context_snapshots AS newer
+             WHERE (newer.organization_id,newer.workspace_id,
+                    newer.website_project_id)=(
+                     batch.organization_id,batch.workspace_id,
+                     batch.website_project_id
+                   )
+               AND newer.snapshot_version>context.snapshot_version
+          )
+     ),
+     lineaged_job AS (
+       UPDATE backlink_jobs AS job
+          SET result_summary=jsonb_set(
+                COALESCE(job.result_summary,'{}'::jsonb),
+                '{commercialDiscoveryResume}',
+                jsonb_build_object(
+                  'resumedFromJobId',authority.old_job_id,
+                  'resumedFromBatchId',authority.batch_id,
+                  'resumedFromRefillId',authority.old_refill_id,
+                  'contextVersionId',$4::uuid,
+                  'visiblePoolGeneration',$5,
+                  'generationInputPinId',$11::uuid,
+                  'generationInputFingerprint',$12,
+                  'claimedAt',$14::timestamptz
+                ),
+                true
+              ),
+              updated_at=$14,
+              updated_by=$13,
+              version=job.version+1
+         FROM authority
+        WHERE job.id=$7::uuid
+          AND authority.claimable
+          AND NOT COALESCE(
+            job.result_summary ? 'commercialDiscoveryResume',
+            false
+          )
+       RETURNING job.id,job.version,job.correlation_id
+     ),
+     claimed_batch AS (
+       UPDATE backlink_commercial_discovery_batches AS batch
+          SET refill_job_id=$7::uuid
+         FROM authority,lineaged_job
+        WHERE batch.id=authority.batch_id
+          AND batch.refill_job_id=authority.old_job_id
+          AND authority.claimable
+       RETURNING batch.id
+     ),
+     lifecycle AS (
+       INSERT INTO backlink_lifecycle_events (
+         id,organization_id,workspace_id,website_project_id,job_id,
+         aggregate_type,aggregate_id,sequence,aggregate_version,event_type,
+         actor_type,actor_id,before_state,after_state,reason,correlation_id,
+         idempotency_key,created_at
+       )
+       SELECT $15,$1,$2,$3,$7,
+              'recommendation_refill',authority.new_refill_id,
+              lineaged_job.version,lineaged_job.version,
+              'recommendation_refill.discovery_batch_resumed',
+              'system',$13,
+              jsonb_build_object(
+                'jobId',authority.old_job_id,
+                'batchId',authority.batch_id
+              ),
+              jsonb_build_object(
+                'jobId',$7::uuid,
+                'batchId',authority.batch_id,
+                'resumedFromJobId',authority.old_job_id,
+                'resumedFromBatchId',authority.batch_id
+              ),
+              'resume_paused_commercial_discovery_batch',
+              lineaged_job.correlation_id,$17,$14
+         FROM authority,lineaged_job,claimed_batch
+       ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
+       RETURNING id
+     ),
+     audit AS (
+       INSERT INTO backlink_audit_events (
+         id,organization_id,workspace_id,website_project_id,job_id,
+         lifecycle_event_id,actor_id,actor_kind,action,target_type,target_id,
+         outcome,reason,before_redacted,after_redacted,request_id,
+         correlation_id,integrity_hash,created_at
+       )
+       SELECT $16,$1,$2,$3,$7,lifecycle.id,$13,'system',
+              'recommendation_refill.discovery_batch_resumed',
+              'commercial_discovery_batch',authority.batch_id,
+              'success','resume_paused_commercial_discovery_batch',
+              jsonb_build_object('jobId',authority.old_job_id),
+              jsonb_build_object(
+                'jobId',$7::uuid,
+                'resumedFromJobId',authority.old_job_id,
+                'resumedFromBatchId',authority.batch_id
+              ),
+              $18,lineaged_job.correlation_id,$19,$14
+         FROM authority,lineaged_job,claimed_batch,lifecycle
+       RETURNING id
+     )
+     SELECT claimed_batch.id,
+            'resumed'::text AS disposition
+       FROM claimed_batch
+     UNION ALL
+     SELECT authority.batch_id,
+            'same_owner'::text AS disposition
+       FROM authority
+      WHERE authority.same_owner
+     LIMIT 1`,
+    [
+      input.scope.organizationId,
+      input.scope.workspaceId,
+      input.scope.websiteProjectId,
+      input.contextVersionId,
+      input.visiblePoolGeneration,
+      `commercial-discovery:${input.refillKey}`,
+      input.jobId,
+      input.inputBinding.pins.projectContextVersion,
+      input.inputBinding.pins.siteProfileVersionId,
+      input.inputBinding.pins.promotionTargetVersionId,
+      input.inputBinding.inputPinId,
+      input.inputBinding.immutableFingerprint,
+      input.actorId,
+      input.claimedAt,
+      lifecycleId,
+      auditId,
+      lineageKey,
+      auditRequestId,
+      integrityHash,
+      input.acceptedProviderRecoveryPending === true,
+    ],
+  );
+  const row = result.rows[0];
+  if (row === undefined) {
+    const existing = await input.client.query(
+      `SELECT id
+         FROM backlink_commercial_discovery_batches
+        WHERE (organization_id,workspace_id,website_project_id)=
+              ($1::uuid,$2::uuid,$3::uuid)
+          AND project_context_version_id=$4::uuid
+          AND visible_pool_generation=$5
+          AND idempotency_key=$6`,
+      [
+        input.scope.organizationId,
+        input.scope.workspaceId,
+        input.scope.websiteProjectId,
+        input.contextVersionId,
+        input.visiblePoolGeneration,
+        `commercial-discovery:${input.refillKey}`,
+      ],
+    );
+    if (existing.rows[0] === undefined) return null;
+    throw new Error("COMMERCIAL_DISCOVERY_BATCH_TAKEOVER_BLOCKED");
+  }
+  return Object.freeze({
+    batchId: String(row.id),
+    disposition:
+      row.disposition === "same_owner" ? "same_owner" : "resumed",
+  });
+}
+
 async function openBatch(
   input: Readonly<{
     client: CommercialDiscoveryQueryClient;
@@ -620,6 +1070,7 @@ async function openBatch(
     blueprintId: string;
     contextVersionId: string;
     visiblePoolGeneration: number;
+    jobId: string;
     refillKey: string;
     refillTier: CommercialRefillTier;
     refillRound: number;
@@ -631,32 +1082,23 @@ async function openBatch(
   const result = await input.client.query(
     `INSERT INTO backlink_commercial_discovery_batches (
        id,organization_id,workspace_id,website_project_id,blueprint_id,
-       project_context_version_id,visible_pool_generation,status,
+       project_context_version_id,visible_pool_generation,refill_job_id,status,
        idempotency_key,request_intent,
        source_types,refill_tier,refill_round,started_at,created_by
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,'running',$8,'DISCOVERY',
-       '["EXISTING_HISTORY"]'::jsonb,$9,$10,$11,$12
+       $1,$2,$3,$4,$5,$6,$7,$8,'running',$9,'DISCOVERY',
+       '["EXISTING_HISTORY"]'::jsonb,$10,$11,$12,$13
      )
      ON CONFLICT (
        organization_id,workspace_id,website_project_id,
        project_context_version_id,idempotency_key
      ) DO UPDATE SET
-       status=CASE
-         WHEN backlink_commercial_discovery_batches.status='failed'
-           THEN 'running'
-         ELSE backlink_commercial_discovery_batches.status
-       END,
-       pause_reason=CASE
-         WHEN backlink_commercial_discovery_batches.status='failed'
-           THEN NULL
-         ELSE backlink_commercial_discovery_batches.pause_reason
-       END,
-       finished_at=CASE
-         WHEN backlink_commercial_discovery_batches.status='failed'
-           THEN NULL
-         ELSE backlink_commercial_discovery_batches.finished_at
-       END
+       status='running',
+       pause_reason=NULL,
+       finished_at=NULL
+     WHERE backlink_commercial_discovery_batches.refill_job_id=
+             EXCLUDED.refill_job_id
+       AND backlink_commercial_discovery_batches.status IN ('paused','running')
      RETURNING id`,
     [
       batchId,
@@ -666,6 +1108,7 @@ async function openBatch(
       input.blueprintId,
       input.contextVersionId,
       input.visiblePoolGeneration,
+      input.jobId,
       `commercial-discovery:${input.refillKey}`,
       input.refillTier,
       input.refillRound,
@@ -680,26 +1123,184 @@ async function openBatch(
   return String(storedId);
 }
 
-async function remainingBudgetMicros(
+type AcceptedProviderRecoveryCall = Readonly<{
+  call: CommercialDiscoveryCall;
+  requestId: string;
+  budgetReservationId: string;
+}>;
+
+async function loadAcceptedProviderRecoveryPlan(
   input: Readonly<{
     client: CommercialDiscoveryQueryClient;
     scope: Scope;
-    absoluteBudgetMicros: number;
+    contextVersionId: string;
+    visiblePoolGeneration: number;
+    jobId: string;
+    refillKey: string;
+    now: Date;
   }>,
-): Promise<number> {
+): Promise<readonly AcceptedProviderRecoveryCall[]> {
   const result = await input.client.query(
-    `SELECT GREATEST(limit_micros-spent_micros-reserved_micros,0)
-            AS remaining
-       FROM backlink_provider_budgets
-      WHERE organization_id=$1 AND workspace_id=$2
-        AND provider='dataforseo'
-        AND period_start<=now() AND period_end>now()
-      ORDER BY period_start DESC
-      LIMIT 1`,
-    [input.scope.organizationId, input.scope.workspaceId],
+    `/* DATAFORSEO_ACCEPTED_TASK_RECOVERY_PLAN */
+     SELECT batch.endpoint,
+            blueprint.id::text AS "blueprintId",
+            batch.response_schema_version AS "responseSchemaVersion",
+            batch.normalized_request_hash AS "requestFingerprint",
+            batch.estimated_cost_micros AS "estimatedCostMicros",
+            batch.request_id AS "requestId",
+            batch.budget_reservation_id AS "budgetReservationId",
+            provider_request.request_payload AS "requestPayload"
+       FROM backlink_jobs AS job
+       JOIN backlink_recommendation_refills AS refill
+         ON (refill.organization_id,refill.workspace_id,
+             refill.website_project_id,refill.job_id)=(
+              job.organization_id,job.workspace_id,
+              job.website_project_id,job.id
+            )
+        AND refill.recommendation_context_version_id=$4::uuid
+        AND refill.visible_pool_generation=$5
+        AND refill.refill_window_key=$7
+       JOIN provider_batch_requests AS batch
+         ON (batch.organization_id,batch.workspace_id,
+             batch.website_project_id)=(
+              job.organization_id,job.workspace_id,
+              job.website_project_id
+            )
+        AND batch.request_id LIKE $9
+       JOIN backlink_provider_requests AS provider_request
+         ON (provider_request.organization_id,provider_request.workspace_id,
+             provider_request.website_project_id,provider_request.id)=(
+              batch.organization_id,batch.workspace_id,
+              batch.website_project_id,batch.id
+            )
+       JOIN backlink_commercial_discovery_blueprints AS blueprint
+         ON (blueprint.organization_id,blueprint.workspace_id,
+             blueprint.website_project_id)=(
+              job.organization_id,job.workspace_id,
+              job.website_project_id
+            )
+        AND blueprint.project_context_version_id=$4::uuid
+        AND blueprint.id::text=provider_request.request_payload
+              #>>'{__growthosDiscoveryPlannerLineage,blueprintId}'
+       JOIN backlink_provider_usage_ledger AS usage
+         ON (usage.organization_id,usage.workspace_id,
+             usage.website_project_id,usage.provider_request_id)=(
+              batch.organization_id,batch.workspace_id,
+              batch.website_project_id,batch.id
+            )
+        AND usage.provider='dataforseo'
+        AND usage.reservation_key=batch.budget_reservation_id
+        AND usage.status='reserved'
+       JOIN provider_fetch_leases AS lease
+         ON lease.artifact_fingerprint=batch.normalized_request_hash
+        AND lease.owner_request_id=batch.request_id
+      WHERE (job.organization_id,job.workspace_id,
+             job.website_project_id,job.id)=(
+              $1::uuid,$2::uuid,$3::uuid,$6::uuid
+            )
+        AND job.job_type='recommendation_refill'
+        AND job.source_object_type='recommendation_context'
+        AND job.source_object_id=$4::uuid
+        AND batch.provider='dataforseo'
+        AND batch.endpoint='/v3/serp/google/organic/task_post'
+        AND batch.budget_reservation_id LIKE $10
+        AND batch.created_at>=job.created_at
+        AND provider_request.request_payload
+              #>>'{__growthosDiscoveryPlannerLineage,queryId}'
+              ~ '^[0-9a-f]{64}$'
+        AND NOT EXISTS (
+          SELECT 1
+            FROM backlink_commercial_discovery_batches AS conflicting
+           WHERE (conflicting.organization_id,conflicting.workspace_id,
+                  conflicting.website_project_id)=(
+                   job.organization_id,job.workspace_id,
+                   job.website_project_id
+                 )
+             AND conflicting.project_context_version_id=$4::uuid
+             AND conflicting.visible_pool_generation=$5
+             AND conflicting.idempotency_key=
+                   'commercial-discovery:'||$7
+             AND conflicting.refill_job_id<>job.id
+        )
+        AND (
+          (
+            batch.status='running'
+            AND provider_request.status='running'
+            AND lease.status='acquired'
+            AND lease.lease_expires_at<=$8
+          )
+          OR (
+            batch.status='unknown_charge'
+            AND provider_request.status='unknown_charge'
+            AND lease.status='unknown_charge'
+          )
+        )
+      ORDER BY batch.request_id`,
+    [
+      input.scope.organizationId,
+      input.scope.workspaceId,
+      input.scope.websiteProjectId,
+      input.contextVersionId,
+      input.visiblePoolGeneration,
+      input.jobId,
+      input.refillKey,
+      input.now,
+      `${input.refillKey}:%`,
+      `commercial-refill-operation:${input.jobId}:discovery:`
+        + `${input.refillKey}:%`,
+    ],
   );
-  const remaining = Number(result.rows[0]?.remaining ?? 0);
-  return Math.max(0, Math.min(input.absoluteBudgetMicros, remaining));
+  return Object.freeze(result.rows.map((row) => {
+    const persistedRequest = parseCommercialDiscoveryRequestPayload(
+      row.requestPayload,
+    );
+    const sourceTypes = ["BLUEPRINT_SERP_STANDARD_QUEUE"] as const;
+    const matchingCalls = sourceTypes.flatMap((sourceType) => {
+      try {
+        const call = commercialDiscoveryCallSchema.parse({
+          endpoint: row.endpoint,
+          intent: "DISCOVERY",
+          sourceType,
+          request: persistedRequest.request,
+          ...(persistedRequest.plannerLineage === undefined
+            ? {}
+            : { plannerLineage: persistedRequest.plannerLineage }),
+          responseSchemaVersion: row.responseSchemaVersion,
+          estimatedCostMicros: Number(row.estimatedCostMicros),
+        });
+        return fingerprintCommercialDiscoveryCall(call)
+          === String(row.requestFingerprint)
+          ? [call]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+    if (matchingCalls.length !== 1) {
+      throw new Error("DATAFORSEO_ACCEPTED_TASK_RECOVERY_CALL_MISMATCH");
+    }
+    const call = matchingCalls[0];
+    if (call === undefined) {
+      throw new Error("DATAFORSEO_ACCEPTED_TASK_RECOVERY_CALL_MISMATCH");
+    }
+    if (call.plannerLineage === undefined) {
+      throw new Error("DATAFORSEO_SEMANTIC_LINEAGE_REQUIRED");
+    }
+    if (call.plannerLineage.blueprintId !== String(row.blueprintId ?? "")) {
+      throw new Error("DATAFORSEO_ACCEPTED_TASK_RECOVERY_BLUEPRINT_MISMATCH");
+    }
+    const requestId = String(row.requestId ?? "").trim();
+    const budgetReservationId =
+      String(row.budgetReservationId ?? "").trim();
+    if (requestId === "" || budgetReservationId === "") {
+      throw new Error("DATAFORSEO_ACCEPTED_TASK_RECOVERY_CONTEXT_INVALID");
+    }
+    return Object.freeze({
+      call,
+      requestId,
+      budgetReservationId,
+    });
+  }));
 }
 
 function providerSource(
@@ -713,17 +1314,41 @@ function providerSource(
 
 function candidateState(
   decision: CommercialFitDecision["decision"],
-): "candidate_ready" | "excluded" | "insufficient_data" | "manual_review" {
-  return decision === "eligible"
-    ? "candidate_ready"
-    : decision === "ineligible"
-      ? "excluded"
-      : decision;
+  enrichmentDecision: CommercialCandidateEnrichmentDecision["decision"],
+):
+  | "enrichment_eligible"
+  | "excluded"
+  | "insufficient_data"
+  | "manual_review" {
+  if (enrichmentDecision === "enrichment_eligible") {
+    return "enrichment_eligible";
+  }
+  if (enrichmentDecision === "not_selected") {
+    return "insufficient_data";
+  }
+  if (enrichmentDecision === "excluded" || decision === "ineligible") {
+    return "excluded";
+  }
+  return decision === "eligible" ? "insufficient_data" : decision;
 }
 
 function uniqueQueries(values: readonly string[]): readonly string[] {
-  return Object.freeze(
-    [...new Set(values.map((value) => value.trim()).filter(Boolean))],
+  const seen = new Set<string>();
+  return Object.freeze(values.map((value) => value.trim()).filter((value) => {
+    if (!value) return false;
+    const normalized = value.toLocaleLowerCase().replace(/\s+/gu, " ");
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  }));
+}
+
+function discoveryLanguageInputRequired(languageCode: string): Error {
+  return new Error(
+    "WEBSITE_PROJECT_DISCOVERY_LANGUAGE_INPUT_REQUIRED "
+      + "owner=WEBSITE_PROJECT "
+      + "recovery=add_target_language_keyword_or_content_topic "
+      + `reason=no_target_language_semantic_seed:${languageCode}`,
   );
 }
 
@@ -734,6 +1359,33 @@ function commercialRefillPageIndex(round: number, window: number): number {
   return diagonal * (diagonal + 1) / 2 + roundIndex;
 }
 
+function discoveryMarketName(
+  countryCode: string,
+  languageCode: string,
+): string {
+  try {
+    return new Intl.DisplayNames(
+      [languageCode || "en"],
+      { type: "region" },
+    ).of(countryCode.toUpperCase())?.trim() || countryCode.toUpperCase();
+  } catch {
+    return countryCode.toUpperCase();
+  }
+}
+
+function removeDiscoveryProjectBrand(
+  value: string,
+  canonicalDomain: string,
+): string {
+  const brand = canonicalDomain.trim().toLowerCase().split(".")[0] ?? "";
+  if (brand.length < 3) return value.trim();
+  const escaped = brand.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return value
+    .replace(new RegExp(`\\b${escaped}\\b`, "giu"), " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
 export function buildCommercialTierSearchQueries(
   input: Readonly<{
     tier: CommercialRefillTier;
@@ -741,156 +1393,146 @@ export function buildCommercialTierSearchQueries(
     context: CommercialRecommendationContext;
     refillRound: number;
     refillWindow: number;
+    languageCode: string;
   }>,
 ): readonly string[] {
   if (input.tier === "curated_resource_library") {
     return Object.freeze([]);
   }
-  const market = input.context.countryCode;
-  const products = input.context.products.slice(0, 8);
-  const keywords = input.context.keywords.slice(0, 8);
-  const topics = input.blueprint.topicClusters.slice(0, 16);
-  const audiences = input.context.targetAudiences.slice(0, 8);
-  const goals = input.context.partnershipGoals.slice(0, 8);
-  const blueprintQueries = input.blueprint.searchQueryClusters.slice(0, 24);
-  const archetypes = input.blueprint.targetSiteArchetypes.slice(0, 16);
-  const cooperationAngles = input.blueprint.cooperationAngles.slice(0, 12);
-  const valuePropositions =
-    input.blueprint.productValuePropositions.slice(0, 12);
+  if (input.blueprint.inputReadiness !== "READY") {
+    throw discoveryLanguageInputRequired(input.languageCode);
+  }
+  const market = discoveryMarketName(
+    input.context.countryCode,
+    input.languageCode,
+  );
+  const normalize = (value: string) =>
+    value.trim().toLocaleLowerCase().replace(/\s+/gu, " ");
+  const forbiddenGoals = new Set(
+    extractTargetLanguageSearchPhrases(
+      input.context.partnershipGoals,
+      input.languageCode,
+    ).map(normalize),
+  );
+  const canonicalDomain = normalize(input.context.canonicalDomain);
+  const projectBrand = canonicalDomain.split(".")[0] ?? "";
+  const phrases = (values: readonly string[], limit: number) =>
+    extractTargetLanguageSearchPhrases(values, input.languageCode)
+      .map((value) =>
+        removeDiscoveryProjectBrand(value, input.context.canonicalDomain)
+      )
+      .filter((value) => {
+        const normalized = normalize(value);
+        return normalized.length > 0
+          && ![...forbiddenGoals].some((goal) =>
+            normalized.includes(goal)
+          )
+          && !normalized.includes(canonicalDomain)
+          && (projectBrand.length < 3
+            || !normalized.includes(projectBrand));
+      })
+      .slice(0, limit);
+  const products = phrases(input.context.products, 4);
+  const keywords = phrases(input.context.keywords, 4);
+  const topics = phrases(input.blueprint.topicClusters, 6);
+  const audiences = phrases(input.context.targetAudiences, 4);
+  const blueprintQueries = phrases(
+    input.blueprint.searchQueryClusters,
+    12,
+  );
   const targetMarketScoped = input.tier !== "same_language_expansion";
   const subjects = uniqueQueries(
     input.tier === "exact_product_target_market"
-      ? [...products, ...blueprintQueries]
+      ? [...keywords, ...products, ...topics]
       : input.tier === "same_topic_target_market"
-        ? [...topics, ...keywords, ...blueprintQueries]
+        ? [...topics, ...keywords, ...products]
         : input.tier === "adjacent_industry_same_audience"
-          ? [...topics, ...products, ...keywords]
+          ? [...audiences, ...topics, ...products, ...keywords]
           : input.tier === "resource_media_review_partner_ecosystem"
-            ? [...products, ...topics, ...goals]
-            : [...blueprintQueries, ...topics, ...keywords, ...products],
-  );
-  const intents =
-    input.tier === "exact_product_target_market"
+            ? [...products, ...topics, ...keywords]
+            : [...topics, ...keywords, ...products],
+  ).slice(0, 4);
+  if (subjects.length === 0 && blueprintQueries.length === 0) {
+    throw discoveryLanguageInputRequired(input.languageCode);
+  }
+  const scopeQuery = (value: string) => {
+    if (!targetMarketScoped) return value;
+    const normalized = normalize(value);
+    return normalized.includes(normalize(market))
+        || normalized.includes(normalize(input.context.countryCode))
+      ? value
+      : `${value} ${market}`;
+  };
+  const query = (...parts: readonly string[]) =>
+    parts.map((part) => part.trim()).filter(Boolean).join(" ");
+  const patterns = input.tier === "adjacent_industry_same_audience"
+    ? [
+        "consumer technology blogs",
+        "telecom publications",
+        "digital lifestyle websites",
+        "adjacent industry publications",
+        "\"write for us\"",
+        "\"media kit\"",
+      ]
+    : input.tier === "resource_media_review_partner_ecosystem"
       ? [
-          "review",
-          "publication",
-          "buying guide",
-          "editorial",
-          "comparison",
-          "recommendations",
-          "magazine",
-          "blog",
-          "expert roundup",
-          "contributors",
+          "\"submit a resource\"",
+          "useful links",
+          "resource directory",
+          "\"media kit\"",
+          "review publications",
+          "partner publications",
         ]
-      : input.tier === "same_topic_target_market"
-        ? [
-            "blog",
-            "magazine",
-            "resources",
-            "editorial",
-            "guide",
-            "news",
-            "association",
-            "community",
-            "experts",
-            "contributors",
-          ]
-        : input.tier === "adjacent_industry_same_audience"
-          ? [
-              "industry resources",
-              "industry publication",
-              "trade association",
-              "professional community",
-              "buyer guide",
-              "editorial magazine",
-              "partner directory",
-              "expert roundup",
-              "contributors",
-              "resource page",
-            ]
-          : [
-              "resource",
-              "media",
-              "review",
-              "partners",
-              "guide",
-              "association",
-              "community",
-              "directory",
-              "expert roundup",
-              "contributors",
-            ];
-  const qualifiers = uniqueQueries([
-    ...(targetMarketScoped ? [market] : []),
-    ...audiences,
-    ...goals,
-    ...cooperationAngles,
-  ]);
-  const boundedSubjects = subjects.length > 0
-    ? subjects
-    : uniqueQueries([
-        ...blueprintQueries,
-        ...valuePropositions,
-        input.blueprint.canonicalDomain,
-      ]);
-  const boundedQualifiers =
-    qualifiers.length > 0 ? qualifiers : targetMarketScoped ? [market] : [""];
-  const query = (...parts: readonly string[]) => uniqueQueries(parts).join(" ");
-  const allQueries = uniqueQueries(
-    boundedSubjects.flatMap((subject) => [
-      ...boundedQualifiers.flatMap((qualifier) =>
-        intents.map((intent) =>
-          query(
-            subject,
-            targetMarketScoped ? market : "",
-            qualifier === market ? "" : qualifier,
-            intent,
-          )
-        )
-      ),
-      ...archetypes.map((archetype) =>
-        query(subject, targetMarketScoped ? market : "", archetype)
-      ),
-      ...cooperationAngles.map((angle) =>
-        query(subject, targetMarketScoped ? market : "", angle)
-      ),
-      ...audiences.flatMap((audience) =>
-        archetypes.map((archetype) =>
-          query(
-            audience,
-            subject,
-            targetMarketScoped ? market : "",
-            archetype,
-          )
-        )
-      ),
-      ...valuePropositions.flatMap((value) =>
-        intents.slice(0, 5).map((intent) =>
-          query(value, targetMarketScoped ? market : "", intent)
-        )
-      ),
-    ]),
+      : [
+          "blogs",
+          "publications",
+          "review websites",
+          "\"write for us\"",
+          "\"contribute\"",
+          "\"advertise with us\"",
+          "\"media kit\"",
+          "\"submit a resource\"",
+          "useful links",
+          "resource directory",
+        ];
+  const generatedQueries = subjects.flatMap((subject) =>
+    patterns.map((pattern) =>
+      query(
+        targetMarketScoped ? market : "",
+        subject,
+        pattern,
+      )
+    )
   );
+  const plannedQueries = input.blueprint.generator === "AI"
+    ? blueprintQueries
+    : uniqueQueries([
+        ...blueprintQueries.map(scopeQuery),
+        ...generatedQueries,
+      ]);
+  const allQueries = extractTargetLanguageSearchPhrases(
+    plannedQueries,
+    input.languageCode,
+  ).filter((value) => {
+    const normalized = normalize(value);
+    return ![...forbiddenGoals].some((goal) => normalized.includes(goal))
+      && !normalized.includes(canonicalDomain)
+      && (projectBrand.length < 3
+        || !normalized.includes(projectBrand));
+  });
   const pageIndex = commercialRefillPageIndex(
     input.refillRound,
     input.refillWindow,
   );
-  return Object.freeze(allQueries.slice(pageIndex * 20, pageIndex * 20 + 20));
+  return Object.freeze(allQueries.slice(pageIndex * 6, pageIndex * 6 + 6));
 }
 
-async function loadCuratedResourceLibraryArtifact(
+async function loadProjectAuthority(
   input: Readonly<{
     client: CommercialDiscoveryQueryClient;
     scope: Scope;
-    blueprint: CommercialDiscoveryBlueprint;
-    requestedCount: number;
-    candidateLimit: number;
-    refillRound: number;
-    refillWindow: number;
-    collectedAt: string;
   }>,
-): Promise<CommercialDiscoveryArtifact> {
+): Promise<ReturnType<typeof calculateProjectAuthority>> {
   const authorityResult = await input.client.query(
     `SELECT referring_domains "referringDomains"
        FROM backlink_profile_snapshots
@@ -910,11 +1552,26 @@ async function loadCuratedResourceLibraryArtifact(
     referringDomainsValue === null || referringDomainsValue === undefined
       ? null
       : Number(referringDomainsValue);
-  const projectAuthority = calculateProjectAuthority(
+  return calculateProjectAuthority(
     referringDomains !== null && Number.isFinite(referringDomains)
       ? referringDomains
       : null,
   );
+}
+
+async function loadCuratedResourceLibraryArtifact(
+  input: Readonly<{
+    client: CommercialDiscoveryQueryClient;
+    scope: Scope;
+    blueprint: CommercialDiscoveryBlueprint;
+    requestedCount: number;
+    candidateLimit: number;
+    refillRound: number;
+    refillWindow: number;
+    collectedAt: string;
+  }>,
+): Promise<CommercialDiscoveryArtifact> {
+  const projectAuthority = await loadProjectAuthority(input);
   const limit = Math.min(
     input.candidateLimit,
     Math.max(10, input.requestedCount * 4),
@@ -940,12 +1597,10 @@ async function loadCuratedResourceLibraryArtifact(
         AND active=true
         AND quality_bucket IN ('recommend','review')
         AND quality_reviewed=true
-      ORDER BY authority_score DESC,canonical_domain
-      LIMIT $3`,
+      ORDER BY canonical_domain`,
     [
       input.scope.organizationId,
       input.scope.workspaceId,
-      455,
     ],
   );
   const stringArray = (value: unknown): readonly string[] =>
@@ -1022,6 +1677,7 @@ async function loadCuratedResourceLibraryArtifact(
         return Object.freeze({
           canonicalDomain: String(row.canonicalDomain),
           discoveryUrls: Object.freeze([]),
+          backlinkPageEvidence: Object.freeze([]),
           rank: numberOrNull(row.rank),
           traffic: numberOrNull(row.traffic),
           backlinkCount: numberOrNull(row.backlinkCount),
@@ -1067,11 +1723,14 @@ export async function executeCommercialRecommendationDiscovery(
     scope: Scope;
     contextVersionId: string;
     context: CommercialRecommendationContext;
+    inputBinding: GenerationInputBinding;
     configuration: CommercialRecommendationDiscoveryConfiguration;
     blueprintGenerator?: AiCommercialDiscoveryBlueprintPort | undefined;
+    sharedEvidence?: CommercialDiscoveryEvidenceReusePort | undefined;
     requestClientFactory?:
       | (() => Promise<CommercialDiscoveryRequestClientLease>)
       | undefined;
+    providerBudgetOperationPrefix?: string | undefined;
     requestedCount: number;
     jobId: string;
     visiblePoolGeneration: number;
@@ -1083,13 +1742,34 @@ export async function executeCommercialRecommendationDiscovery(
   }>,
 ): Promise<CommercialRecommendationDiscoveryResult> {
   const startedAt = input.now();
+  const providerBudgetOperationPrefix = (
+    input.providerBudgetOperationPrefix
+    ?? `commercial-refill-operation:${input.jobId}`
+  ).trim().replace(/:+$/u, "");
+  if (providerBudgetOperationPrefix.length === 0) {
+    throw new TypeError(
+      "Commercial discovery provider budget operation prefix is required.",
+    );
+  }
+  const authorizedSources = new Set(
+    input.inputBinding.outreachProfile.authorizedDiscoverySources,
+  );
+  const requiredSource = input.refillTier === "curated_resource_library"
+    ? "CURATED_RESOURCE_LIBRARY"
+    : "WEBSITE_PROJECT";
+  if (!authorizedSources.has(requiredSource)) {
+    throw new Error(
+      `WEBSITE_PROJECT_DISCOVERY_INPUT_REQUIRED owner=WEBSITE_PROJECT recovery=reproject_current_website_project reason=source_not_authorized:${requiredSource}`,
+    );
+  }
   const activePool = await input.client.query(
     `SELECT visible_pool_generation AS "visiblePoolGeneration"
-       FROM backlink_commercial_inventory_policies
-      WHERE organization_id=$1 AND workspace_id=$2
-        AND website_project_id=$3 AND project_context_version_id=$4
-        AND visible_pool_generation=$5
-        AND visible_pool_state='building'
+       FROM backlink_commercial_inventory_policies AS policy
+      WHERE policy.organization_id=$1 AND policy.workspace_id=$2
+        AND policy.website_project_id=$3
+        AND policy.project_context_version_id=$4
+        AND policy.visible_pool_generation=$5
+        AND ${currentV4VisiblePoolPredicate}
       FOR SHARE`,
     [
       input.scope.organizationId,
@@ -1121,13 +1801,17 @@ export async function executeCommercialRecommendationDiscovery(
   const artifacts: CommercialDiscoveryArtifact[] = [];
   const sources: ("cache" | "stale-cache" | "single-flight" | "provider")[] =
     [];
+  let paidCostMicros = 0;
   let blueprint: CommercialDiscoveryBlueprint;
   let blueprintId: string;
-  let plan = Object.freeze([]) as ReturnType<
-    typeof createCommercialDiscoveryPlan
-  >;
+  let acceptedRecoveryPlan =
+    Object.freeze([]) as readonly AcceptedProviderRecoveryCall[];
   let pauseReason: string | null = null;
   let failureStatus: "paused" | "unavailable" | null = null;
+  let semanticRequiredCallCount = 0;
+  let semanticCompletedCallCount = 0;
+  let requiredSemanticQueryIds = new Set<string>();
+  let batchId = "";
   const lockKey = [
     input.scope.organizationId,
     input.scope.workspaceId,
@@ -1157,10 +1841,9 @@ export async function executeCommercialRecommendationDiscovery(
       blueprintId = cached.id;
     } else {
       const evidenceRefs = await collectBlueprintEvidence({
-        scope: input.scope,
         contextVersionId: input.contextVersionId,
         context: input.context,
-        safeFetch: input.safeFetch,
+        inputBinding: input.inputBinding,
       });
       generatedContext = blueprintContext({
         contextVersionId: input.contextVersionId,
@@ -1169,7 +1852,12 @@ export async function executeCommercialRecommendationDiscovery(
         evidenceRefs,
         historicalFeedbackDomains: [...history.previouslyExcludedDomains],
       });
-      if (input.blueprintGenerator !== undefined) {
+      const inputReadiness =
+        assessCommercialDiscoveryInputReadiness(generatedContext);
+      if (
+        input.blueprintGenerator !== undefined
+        && inputReadiness === "READY"
+      ) {
         try {
           const generated = await input.blueprintGenerator.generate({
             ...input.scope,
@@ -1184,6 +1872,8 @@ export async function executeCommercialRecommendationDiscovery(
           aiGeneration = undefined;
           fallbackReason = "AI_PROVIDER_UNAVAILABLE";
         }
+      } else if (inputReadiness !== "READY") {
+        fallbackReason = "PROJECT_EVIDENCE_REFRESH_REQUIRED";
       }
       blueprint = buildCommercialDiscoveryBlueprint({
         context: generatedContext,
@@ -1194,144 +1884,34 @@ export async function executeCommercialRecommendationDiscovery(
       });
       blueprintId = "";
     }
-    if (curatedResourceLibrary) {
-      artifacts.push(
-        await loadCuratedResourceLibraryArtifact({
-          client: input.client,
-          scope: input.scope,
-          blueprint,
-          requestedCount: input.requestedCount,
-          candidateLimit: input.configuration.candidateLimit,
-          refillRound: input.refillRound,
-          refillWindow: input.refillWindow ?? 1,
-          collectedAt: startedAt.toISOString(),
-        }),
-      );
-      sources.push("cache");
-    } else {
-      const budget = await remainingBudgetMicros({
+    if (!curatedResourceLibrary) {
+      acceptedRecoveryPlan = await loadAcceptedProviderRecoveryPlan({
         client: input.client,
         scope: input.scope,
-        absoluteBudgetMicros: input.configuration.absoluteBudgetMicros,
+        contextVersionId: input.contextVersionId,
+        visiblePoolGeneration: input.visiblePoolGeneration,
+        jobId: input.jobId,
+        refillKey,
+        now: startedAt,
       });
-      plan = createCommercialDiscoveryPlan({
-        searchQueries: buildCommercialTierSearchQueries({
-          tier: input.refillTier,
-          blueprint,
-          context: input.context,
-          refillRound: input.refillRound,
-          refillWindow: input.refillWindow ?? 1,
-        }),
-        verifiedCompetitorDomains: blueprint.explicitCompetitorDomains,
-        userDomain: input.context.canonicalDomain,
-        locationCode: input.configuration.locationCode,
-        languageCode: input.configuration.languageCode,
-        endpointAllowlist: input.configuration.endpointAllowlist,
-        estimatedCostMicros: input.configuration.estimatedCostMicros,
-        remainingBudgetMicros: budget,
-      });
-      pauseReason = plan.length === 0 ? "budget_or_endpoint_allowlist" : null;
-      failureStatus = plan.length === 0 ? "paused" : null;
-      const concurrency =
-        input.requestClientFactory === undefined
-          ? 1
-          : providerRequestConcurrency;
-      const indexedPlan = plan.map((call, index) => ({ call, index }));
-      for (
-        let offset = 0;
-        offset < indexedPlan.length;
-        offset += concurrency
-      ) {
-        const group = indexedPlan.slice(offset, offset + concurrency);
-        const settled = await Promise.allSettled(
-          group.map(async ({ call, index }) => {
-            const lease =
-              input.requestClientFactory === undefined
-                ? Object.freeze({
-                    client: input.client,
-                    gate: input.gate,
-                    release: () => undefined,
-                  })
-                : await input.requestClientFactory();
-            try {
-              const requestService = new CommercialDiscoveryRequestService({
-                client: lease.client,
-                provider: input.provider,
-                gate: lease.gate ?? input.gate,
-                now: input.now,
-              });
-              const fingerprint = fingerprintCommercialDiscoveryCall(call);
-              const context: ProviderRequestContext = {
-                ...input.scope,
-                requestId: `${refillKey}:${index + 1}`,
-                idempotencyKey:
-                  `commercial-discovery:${refillKey}:${fingerprint}`,
-                budgetReservationId: `${refillKey}:${fingerprint}`,
-              };
-              return await requestService.execute({
-                context,
-                projectContextVersionId: input.contextVersionId,
-                call,
-                locationCode: input.configuration.locationCode,
-                languageCode: input.configuration.languageCode,
-                refreshMode: "CACHE_PREFERRED",
-                actorId: input.actorId,
-              });
-            } finally {
-              await lease.release();
-            }
-          }),
-        );
-        let firstFailure: unknown;
-        let unknownChargeFailure: unknown;
-        for (const outcome of settled) {
-          if (outcome.status === "fulfilled") {
-            artifacts.push(outcome.value.artifact);
-            sources.push(outcome.value.source);
-            continue;
-          }
-          const message =
-            outcome.reason instanceof Error
-              ? outcome.reason.message
-              : "DATAFORSEO_DISCOVERY_UNAVAILABLE";
-          if (
-            message.includes("CHARGE_RECONCILIATION") ||
-            message.includes("unknown_charge")
-          ) {
-            unknownChargeFailure ??= outcome.reason;
-          } else {
-            firstFailure ??= outcome.reason;
-          }
-        }
-        if (unknownChargeFailure !== undefined) {
-          if (generatedContext !== null) {
-            blueprintId = await persistBlueprint({
-              client: input.client,
-              scope: input.scope,
-              contextVersionId: input.contextVersionId,
-              blueprint,
-              actorId: input.actorId,
-              generatedAt: startedAt,
-            });
-          }
-          throw unknownChargeFailure;
-        }
-        if (firstFailure !== undefined) {
-          const message =
-            firstFailure instanceof Error
-              ? firstFailure.message
-              : "DATAFORSEO_DISCOVERY_UNAVAILABLE";
-          pauseReason = message.slice(0, 255);
-          failureStatus =
-            firstFailure instanceof Error &&
-            firstFailure.name === "DataForSeoCallBlockedError"
-              ? "paused"
-              : "unavailable";
-          break;
-        }
-      }
     }
-    if (generatedContext !== null) {
+    const claimedBatch = await claimPausedCommercialDiscoveryBatch({
+      client: input.client,
+      scope: input.scope,
+      contextVersionId: input.contextVersionId,
+      visiblePoolGeneration: input.visiblePoolGeneration,
+      jobId: input.jobId,
+      refillKey,
+      inputBinding: input.inputBinding,
+      actorId: input.actorId,
+      claimedAt: startedAt,
+      acceptedProviderRecoveryPending: acceptedRecoveryPlan.length > 0,
+    });
+    if (claimedBatch !== null) {
+      batchId = claimedBatch.batchId;
+    }
+    const persistGeneratedBlueprintWithObservedEvidence = async () => {
+      if (generatedContext === null || blueprintId !== "") return;
       const competitorEvidence = artifacts.filter(
         ({ sourceType }) => sourceType === "VERIFIED_COMPETITOR_BACKLINK_GAP",
       );
@@ -1358,47 +1938,289 @@ export async function executeCommercialRecommendationDiscovery(
         actorId: input.actorId,
         generatedAt: startedAt,
       });
+    };
+    const ensureBatchOpen = async () => {
+      if (batchId.length > 0) return;
+      await persistGeneratedBlueprintWithObservedEvidence();
+      const activePolicy = await input.client.query(
+        `UPDATE backlink_commercial_inventory_policies AS policy
+            SET updated_at=now(),updated_by=$6
+          WHERE policy.organization_id=$1 AND policy.workspace_id=$2
+            AND policy.website_project_id=$3
+            AND policy.project_context_version_id=$4
+            AND policy.visible_pool_generation=$5
+            AND ${currentV4VisiblePoolPredicate}
+          RETURNING visible_pool_generation`,
+        [
+          input.scope.organizationId,
+          input.scope.workspaceId,
+          input.scope.websiteProjectId,
+          input.contextVersionId,
+          input.visiblePoolGeneration,
+          input.actorId,
+        ],
+      );
+      if (activePolicy.rows[0] === undefined) {
+        throw new Error("COMMERCIAL_VISIBLE_POOL_GENERATION_STALE");
+      }
+      batchId = await openBatch({
+        client: input.client,
+        scope: input.scope,
+        blueprintId,
+        contextVersionId: input.contextVersionId,
+        visiblePoolGeneration: input.visiblePoolGeneration,
+        jobId: input.jobId,
+        refillKey,
+        refillTier: input.refillTier,
+        refillRound: input.refillRound,
+        actorId: input.actorId,
+        startedAt,
+      });
+    };
+    if (curatedResourceLibrary) {
+      artifacts.push(
+        await loadCuratedResourceLibraryArtifact({
+          client: input.client,
+          scope: input.scope,
+          blueprint,
+          requestedCount: input.requestedCount,
+          candidateLimit: input.configuration.candidateLimit,
+          refillRound: input.refillRound,
+          refillWindow: input.refillWindow ?? 1,
+          collectedAt: startedAt.toISOString(),
+        }),
+      );
+      sources.push("cache");
+    } else {
+      const concurrency =
+        input.requestClientFactory === undefined
+          ? 1
+          : providerRequestConcurrency;
+      let nextPlanIndex = 0;
+      const executePlan = async (
+        calls: readonly CommercialDiscoveryCall[],
+        recoveryPlan: readonly AcceptedProviderRecoveryCall[],
+      ): Promise<boolean> => {
+        const indexedPlan: Array<Readonly<{
+          call: CommercialDiscoveryCall;
+          index: number;
+          recovery: AcceptedProviderRecoveryCall | null;
+        }>> = [];
+        for (const [localIndex, call] of calls.entries()) {
+          const index = nextPlanIndex;
+          nextPlanIndex += 1;
+          const recovery = recoveryPlan[localIndex] ?? null;
+          if (recovery !== null) {
+            indexedPlan.push({ call, index, recovery });
+            continue;
+          }
+          const reusable =
+            input.sharedEvidence === undefined
+              ? null
+              : await input.sharedEvidence.readReusable(call);
+          if (reusable === null) {
+            indexedPlan.push({ call, index, recovery: null });
+          } else {
+            artifacts.push(reusable);
+            sources.push("cache");
+          }
+        }
+        for (
+          let offset = 0;
+          offset < indexedPlan.length;
+          offset += concurrency
+        ) {
+          const group = indexedPlan.slice(offset, offset + concurrency);
+          const settled = await Promise.allSettled(
+            group.map(async ({ call, index, recovery }) => {
+              const lease =
+                input.requestClientFactory === undefined
+                  ? Object.freeze({
+                      client: input.client,
+                      gate: input.gate,
+                      release: () => undefined,
+                    })
+                  : await input.requestClientFactory();
+              try {
+                if (
+                  call.sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE"
+                  && call.plannerLineage === undefined
+                ) {
+                  throw new Error("DATAFORSEO_SEMANTIC_LINEAGE_REQUIRED");
+                }
+                const requestService = new CommercialDiscoveryRequestService({
+                  client: lease.client,
+                  provider: input.provider,
+                  gate: lease.gate ?? input.gate,
+                  now: input.now,
+                });
+                const fingerprint = fingerprintCommercialDiscoveryCall(call);
+                const context: ProviderRequestContext = {
+                  ...input.scope,
+                  requestId:
+                    recovery?.requestId ?? `${refillKey}:${index + 1}`,
+                  idempotencyKey:
+                    `commercial-discovery:${refillKey}:${fingerprint}`,
+                  budgetReservationId:
+                    recovery?.budgetReservationId
+                    ?? [
+                      providerBudgetOperationPrefix,
+                      "discovery",
+                      refillKey,
+                      fingerprint,
+                    ].join(":"),
+                };
+                return await requestService.execute({
+                  context,
+                  projectContextVersionId: input.contextVersionId,
+                  call,
+                  locationCode: input.configuration.locationCode,
+                  languageCode: input.configuration.languageCode,
+                  refreshMode: "CACHE_PREFERRED",
+                  actorId: input.actorId,
+                  recoveryOnly: recovery !== null,
+                });
+              } finally {
+                await lease.release();
+              }
+            }),
+          );
+          let firstFailure: unknown;
+          let internalFailure: unknown;
+          let unknownChargeFailure: unknown;
+          for (const outcome of settled) {
+            if (outcome.status === "fulfilled") {
+              artifacts.push(outcome.value.artifact);
+              sources.push(outcome.value.source);
+              if (outcome.value.source === "provider") {
+                paidCostMicros += outcome.value.artifact.costMicros;
+              }
+              continue;
+            }
+            const message =
+              outcome.reason instanceof Error
+                ? outcome.reason.message
+                : "DATAFORSEO_DISCOVERY_UNAVAILABLE";
+            if (
+              providerRequestStatus(outcome.reason) === "unknown_charge"
+              || message.includes("CHARGE_RECONCILIATION")
+              || message.includes("unknown_charge")
+            ) {
+              unknownChargeFailure ??= outcome.reason;
+            } else if (isExpectedProviderFailure(outcome.reason)) {
+              firstFailure ??= outcome.reason;
+            } else {
+              internalFailure ??= outcome.reason;
+            }
+          }
+          if (internalFailure !== undefined) {
+            throw internalFailure;
+          }
+          if (unknownChargeFailure !== undefined) {
+            await persistGeneratedBlueprintWithObservedEvidence();
+            throw unknownChargeFailure;
+          }
+          if (firstFailure !== undefined) {
+            const message =
+              firstFailure instanceof Error
+                ? firstFailure.message
+                : "DATAFORSEO_DISCOVERY_UNAVAILABLE";
+            pauseReason = message.slice(0, 255);
+            failureStatus =
+              firstFailure instanceof Error
+                && firstFailure.name === "DataForSeoCallBlockedError"
+                ? "paused"
+                : "unavailable";
+            return false;
+          }
+        }
+        return true;
+      };
+      await persistGeneratedBlueprintWithObservedEvidence();
+      const searchQueries = buildCommercialTierSearchQueries({
+        tier: input.refillTier,
+        blueprint,
+        context: input.context,
+        refillRound: input.refillRound,
+        refillWindow: input.refillWindow ?? 1,
+        languageCode: input.configuration.languageCode,
+      });
+      const candidatePlan = createCommercialDiscoveryPlan({
+        blueprintId,
+        searchQueries,
+        verifiedCompetitorDomains: blueprint.explicitCompetitorDomains,
+        userDomain: input.context.canonicalDomain,
+        locationCode: input.configuration.locationCode,
+        languageCode: input.configuration.languageCode,
+        endpointAllowlist: input.configuration.endpointAllowlist,
+        estimatedCostMicros: input.configuration.estimatedCostMicros,
+        remainingBudgetMicros: Number.MAX_SAFE_INTEGER,
+      });
+      const semanticPlan = candidatePlan
+        .filter(
+          ({ sourceType }) =>
+            sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE",
+        )
+        .slice(0, commercialSemanticDiscoveryPaidCallReserve);
+      requiredSemanticQueryIds = new Set(
+        semanticPlan.flatMap(({ plannerLineage }) =>
+          plannerLineage === undefined ? [] : [plannerLineage.queryId]
+        ),
+      );
+      semanticRequiredCallCount = requiredSemanticQueryIds.size;
+
+      if (input.sharedEvidence !== undefined) {
+        for (const call of candidatePlan) {
+          const reusable = await input.sharedEvidence.readReusable(call);
+          if (
+            reusable !== null
+            && !artifacts.some(
+              ({ requestFingerprint }) =>
+                requestFingerprint === reusable.requestFingerprint,
+            )
+          ) {
+            artifacts.push(reusable);
+            sources.push("cache");
+          }
+        }
+      }
+
+      await ensureBatchOpen();
+      if (acceptedRecoveryPlan.length > 0) {
+        const recoveryCalls = Object.freeze(
+          acceptedRecoveryPlan.map(({ call }) => call),
+        );
+        await executePlan(recoveryCalls, acceptedRecoveryPlan);
+      }
+      if (failureStatus === null) {
+        const collectedFingerprints = new Set(
+          artifacts.map(({ requestFingerprint }) => requestFingerprint),
+        );
+        const pendingSemanticPlan = semanticPlan.filter(
+          (call) =>
+            !collectedFingerprints.has(
+              fingerprintCommercialDiscoveryCall(call),
+            ),
+        );
+        await executePlan(pendingSemanticPlan, []);
+      }
+      if (semanticRequiredCallCount === 0) {
+        pauseReason = "semantic_discovery_not_planned_endpoint_allowlist";
+      }
     }
+    await persistGeneratedBlueprintWithObservedEvidence();
+    await ensureBatchOpen();
   } finally {
     await input.client.query(
       "SELECT pg_advisory_unlock(hashtextextended($1,0))",
       [lockKey],
     );
   }
-
-  const activePolicy = await input.client.query(
-    `UPDATE backlink_commercial_inventory_policies
-        SET updated_at=now(),updated_by=$6
-      WHERE organization_id=$1 AND workspace_id=$2
-        AND website_project_id=$3 AND project_context_version_id=$4
-        AND visible_pool_generation=$5
-        AND visible_pool_state='building'
-      RETURNING visible_pool_generation`,
-    [
-      input.scope.organizationId,
-      input.scope.workspaceId,
-      input.scope.websiteProjectId,
-      input.contextVersionId,
-      input.visiblePoolGeneration,
-      input.actorId,
-    ],
-  );
-  if (activePolicy.rows[0] === undefined) {
-    throw new Error("COMMERCIAL_VISIBLE_POOL_GENERATION_STALE");
+  if (batchId.length === 0) {
+    throw new Error("COMMERCIAL_DISCOVERY_BATCH_NOT_OPEN");
   }
-  const batchId = await openBatch({
-    client: input.client,
-    scope: input.scope,
-    blueprintId,
-    contextVersionId: input.contextVersionId,
-    visiblePoolGeneration: input.visiblePoolGeneration,
-    refillKey,
-    refillTier: input.refillTier,
-    refillRound: input.refillRound,
-    actorId: input.actorId,
-    startedAt,
-  });
 
+  const projectAuthority = await loadProjectAuthority(input);
   const merged = mergeCommercialDiscoveryArtifacts({
     artifacts,
     userDomain: input.context.canonicalDomain,
@@ -1415,7 +2237,7 @@ export async function executeCommercialRecommendationDiscovery(
       .map(({ collectedAt }) => collectedAt)
       .sort()
       .at(-1) ?? startedAt.toISOString();
-  const evaluated = await mapConcurrent(
+  const baselineEvaluated = await mapConcurrent(
     merged,
     staticAssessmentConcurrency,
     async (candidate) => {
@@ -1436,36 +2258,39 @@ export async function executeCommercialRecommendationDiscovery(
         pageParser: commercialPageParser,
         now: () => input.now().toISOString(),
       });
+      const business = Object.freeze({
+        selfOrRelatedDomain:
+          candidate.canonicalDomain === input.context.canonicalDomain,
+        existingBacklinkOrOpportunity: false,
+        permanentlyRejectedOrSuppressed:
+          history.previouslyExcludedDomains.has(candidate.canonicalDomain),
+        unsafeOrDisallowedIndustry: false,
+        targetCountryCode: input.context.countryCode,
+        candidateCountryCode: candidate.countryCode,
+        targetLanguages: [
+          input.context.locale,
+          input.configuration.languageCode,
+        ],
+        allowSameLanguageExpansion:
+          input.refillTier === "same_language_expansion" ||
+          input.refillTier === "curated_resource_library",
+        targetMarketScopedDiscovery: [
+          "exact_product_target_market",
+          "same_topic_target_market",
+          "adjacent_industry_same_audience",
+          "resource_media_review_partner_ecosystem",
+        ].includes(input.refillTier),
+        projectAuthorityScore: projectAuthority.score,
+      });
       const commercialScore = evaluateCommercialCandidate({
-        business: {
-          selfOrRelatedDomain:
-            candidate.canonicalDomain === input.context.canonicalDomain,
-          existingBacklinkOrOpportunity: false,
-          permanentlyRejectedOrSuppressed:
-            history.previouslyExcludedDomains.has(candidate.canonicalDomain),
-          unsafeOrDisallowedIndustry: false,
-          targetCountryCode: input.context.countryCode,
-          candidateCountryCode: candidate.countryCode,
-          targetLanguages: [
-            input.context.locale,
-            input.configuration.languageCode,
-          ],
-          allowSameLanguageExpansion:
-            input.refillTier === "same_language_expansion" ||
-            input.refillTier === "curated_resource_library",
-          targetMarketScopedDiscovery: [
-            "exact_product_target_market",
-            "same_topic_target_market",
-            "adjacent_industry_same_audience",
-            "resource_media_review_partner_ecosystem",
-          ].includes(input.refillTier),
-        },
+        business,
         provider: {
           rank: candidate.rank,
           traffic: candidate.traffic,
           backlinkCount: candidate.backlinkCount,
           referringDomainCount: candidate.referringDomainCount,
           spamScore: candidate.spamScore,
+          backlinkPageEvidence: candidate.backlinkPageEvidence,
           evidenceRefs: candidate.evidenceRefs,
           collectedAt,
         },
@@ -1474,6 +2299,7 @@ export async function executeCommercialRecommendationDiscovery(
       return Object.freeze({
         hostnameAscii: candidate.canonicalDomain,
         sourceTypes: candidate.sourceTypes,
+        business,
         provider: Object.freeze({
           rank: candidate.rank,
           traffic: candidate.traffic,
@@ -1481,6 +2307,7 @@ export async function executeCommercialRecommendationDiscovery(
           referringDomainCount: candidate.referringDomainCount,
           spamScore: candidate.spamScore,
           countryCode: candidate.countryCode,
+          backlinkPageEvidence: candidate.backlinkPageEvidence,
           evidenceRefs: candidate.evidenceRefs,
           collectedAt,
         }),
@@ -1489,8 +2316,37 @@ export async function executeCommercialRecommendationDiscovery(
       });
     },
   );
+  const progressiveAdmission =
+    applyProgressiveCommercialCandidateAdmission(
+      baselineEvaluated.map(({ commercialScore }) => commercialScore),
+    );
+  const evaluated = Object.freeze(
+    baselineEvaluated.map((candidate, index) => {
+      const commercialScore = progressiveAdmission.scores[index];
+      if (commercialScore === undefined) {
+        throw new Error("COMMERCIAL_PROGRESSIVE_ADMISSION_SCORE_MISSING");
+      }
+      return Object.freeze({
+        ...candidate,
+        commercialScore,
+      });
+    }),
+  );
+  const enrichment = selectCommercialCandidateEnrichment(evaluated);
+  const enrichmentDecisions = new Map(
+    enrichment.decisions.map((decision) => [
+      decision.hostnameAscii,
+      decision,
+    ]),
+  );
 
   for (const candidate of evaluated) {
+    const enrichmentDecision = enrichmentDecisions.get(
+      candidate.hostnameAscii,
+    );
+    if (enrichmentDecision === undefined) {
+      throw new Error("COMMERCIAL_ENRICHMENT_DECISION_MISSING");
+    }
     await input.client.query(
       `INSERT INTO backlink_commercial_candidates (
          id,organization_id,workspace_id,website_project_id,blueprint_id,
@@ -1541,10 +2397,14 @@ export async function executeCommercialRecommendationDiscovery(
           decision: candidate.commercialScore.decision,
           hitGates: candidate.commercialScore.hitGates,
           missingEvidence: candidate.commercialScore.missingEvidence,
+          enrichment: enrichmentDecision,
         }),
         JSON.stringify(candidate.commercialScore),
         candidate.commercialScore.scoreModelVersion,
-        candidateState(candidate.commercialScore.decision),
+        candidateState(
+          candidate.commercialScore.decision,
+          enrichmentDecision.decision,
+        ),
         collectedAt,
         input.actorId,
       ],
@@ -1552,19 +2412,31 @@ export async function executeCommercialRecommendationDiscovery(
   }
 
   const finishedAt = input.now();
-  const batchStatus =
-    failureStatus ??
-    (artifacts.length > 0 || plan.length === 0 ? "completed" : "unavailable");
+  if (!curatedResourceLibrary) {
+    semanticCompletedCallCount = new Set(
+      artifacts.flatMap(({ sourceType, plannerLineage }) =>
+        sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE"
+          && plannerLineage !== undefined
+          && plannerLineage.blueprintId === blueprintId
+          && requiredSemanticQueryIds.has(plannerLineage.queryId)
+          ? [plannerLineage.queryId]
+          : []
+      ),
+    ).size;
+    if (semanticCompletedCallCount < semanticRequiredCallCount) {
+      failureStatus ??= "paused";
+      pauseReason ??= semanticCompletedCallCount === 0
+        ? "semantic_discovery_not_executed"
+        : "semantic_discovery_incomplete";
+    }
+  }
+  const batchStatus = failureStatus ?? "completed";
   const sourceTypes = [
     "EXISTING_HISTORY",
     ...new Set(artifacts.map(({ sourceType }) => sourceType)),
   ];
   const fingerprints = artifacts.map(
     ({ requestFingerprint }) => requestFingerprint,
-  );
-  const paidCostMicros = artifacts.reduce(
-    (sum, artifact) => sum + artifact.costMicros,
-    0,
   );
   const ranked = rankCommercialRecommendationFits(evaluated)
     .filter(({ commercialScore }) => commercialScore.decision === "eligible")
@@ -1586,7 +2458,8 @@ export async function executeCommercialRecommendationDiscovery(
                 )
               ELSE $11
             END,
-            raw_candidate_count=$12,eligible_candidate_count=$13,
+            raw_candidate_count=$12,
+            eligible_candidate_count=$13,
             elimination_reason_counts=$14::jsonb
       WHERE organization_id=$1 AND workspace_id=$2
         AND website_project_id=$3 AND id=$4
@@ -1610,16 +2483,17 @@ export async function executeCommercialRecommendationDiscovery(
     ],
   );
   await input.client.query(
-    `UPDATE backlink_commercial_inventory_policies
+    `UPDATE backlink_commercial_inventory_policies AS policy
         SET latest_refill_at=$5,next_refill_at=$6,
             latest_provider_collected_at=$7,pause_reason=$8,
             last_raw_candidate_count=$9,
             elimination_reason_counts=$10::jsonb,
             updated_at=$5,updated_by=$11,version=version+1
-      WHERE organization_id=$1 AND workspace_id=$2
-        AND website_project_id=$3 AND project_context_version_id=$4
-        AND visible_pool_generation=$12
-        AND visible_pool_state='building'`,
+      WHERE policy.organization_id=$1 AND policy.workspace_id=$2
+        AND policy.website_project_id=$3
+        AND policy.project_context_version_id=$4
+        AND policy.visible_pool_generation=$12
+        AND ${currentV4VisiblePoolPredicate}`,
     [
       input.scope.organizationId,
       input.scope.workspaceId,
@@ -1637,6 +2511,8 @@ export async function executeCommercialRecommendationDiscovery(
   );
   return Object.freeze({
     candidates: Object.freeze(ranked),
+    enrichmentCandidates: enrichment.candidates,
+    admission: progressiveAdmission.admission,
     provider: Object.freeze({
       source: providerSource(sources),
       acquiredAt: collectedAt,
@@ -1646,6 +2522,18 @@ export async function executeCommercialRecommendationDiscovery(
           ? [`commercial-discovery:${batchId}`]
           : fingerprints,
       ),
+    }),
+    discovery: Object.freeze({
+      semanticStatus: curatedResourceLibrary
+        ? "not_required"
+        : semanticRequiredCallCount === 0
+          ? "not_required"
+        : batchStatus === "completed"
+          ? "completed"
+          : batchStatus,
+      semanticRequiredCallCount,
+      semanticCompletedCallCount,
+      reason: pauseReason,
     }),
   });
 }

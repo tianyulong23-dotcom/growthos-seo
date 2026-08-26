@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 from app.api.routes.audits import get_audit_service
 from app.core.config import Settings
 from app.main import app
+from app.modules.audit.models import CreateAuditRunRequest
 from app.modules.audit.service import (
     AuditProjectRecord,
     AuditIssueGroupRecord,
@@ -622,6 +623,7 @@ def test_create_audit_run_starts_crawler_workflow() -> None:
     assert status_code == 202
     assert body["status"] == "queued"
     assert controller.task is not None
+    assert controller.task["organization_id"] == "test-org"
     assert controller.task["target_url"] == "https://example.com"
     assert controller.task["directory"] == "/blog"
     assert controller.task["rendering"] == "off"
@@ -630,6 +632,30 @@ def test_create_audit_run_starts_crawler_workflow() -> None:
     assert controller.task["duplication_threshold"] == 0.9
     assert controller.task["enable_pagespeed"] is True
     assert controller.workflow_id == f"crawler:technical_audit:{body['run_id']}"
+
+
+def test_scoped_audit_service_uses_resolved_project_organization() -> None:
+    service, controller, repository = build_service()
+    repository.projects[("resolved-org", "example")] = AuditProjectRecord(
+        id="example",
+        organization_id="resolved-org",
+        domain="example.com",
+        country="ZA",
+        language="en",
+        audit_run_id=None,
+    )
+
+    response = asyncio.run(
+        service.for_organization("resolved-org").create_run(
+            "example",
+            CreateAuditRunRequest(),
+        )
+    )
+
+    assert response.status == "queued"
+    assert controller.task is not None
+    assert controller.task["organization_id"] == "resolved-org"
+    assert controller.task["project_id"] == "example"
 
 
 def test_create_rejects_second_active_audit_run() -> None:

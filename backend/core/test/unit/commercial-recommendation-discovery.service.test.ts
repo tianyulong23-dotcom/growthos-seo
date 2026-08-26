@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildCommercialTierSearchQueries,
+  claimPausedCommercialDiscoveryBatch,
   executeCommercialRecommendationDiscovery,
   scoreCuratedResourceForProject,
 } from "../../src/modules/backlinks/application/services/commercial-recommendation-discovery.service.js";
@@ -13,9 +14,52 @@ import {
   type CommercialDiscoveryQueryClient,
 } from "../../src/modules/backlinks/application/services/commercial-discovery-request.service.js";
 import {
+  createCommercialDiscoveryPlan,
   fingerprintCommercialDiscoveryCall,
+  serializeCommercialDiscoveryRequestPayload,
   type CommercialDiscoveryCall,
 } from "../../src/modules/backlinks/domain/recommendations/commercial-discovery-source.js";
+import type { GenerationInputBinding } from "../../src/modules/backlinks/ports/shared-seo-evidence.port.js";
+
+const profileVersionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const promotionTargetVersionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const inputBinding: GenerationInputBinding = Object.freeze({
+  inputPinId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  outreachProfileRecordId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  immutableFingerprint: "discovery-fixture-binding",
+  pins: Object.freeze({
+    organizationId: "11111111-1111-4111-8111-111111111111",
+    websiteProjectId: "33333333-3333-4333-8333-333333333333",
+    projectContextVersion: 2,
+    siteProfileVersionId: profileVersionId,
+    outreachProfileVersionId: profileVersionId,
+    promotionTargetVersionId,
+    keywordEvidenceSnapshotIds: Object.freeze([]),
+    sharedEvidenceSnapshotIds: Object.freeze([]),
+    market: "US",
+    qualificationContractVersion: "backlinks.recommendation-qualification.v4",
+  }),
+  outreachProfile: Object.freeze({
+    organizationId: "11111111-1111-4111-8111-111111111111",
+    websiteProjectId: "33333333-3333-4333-8333-333333333333",
+    profileVersionId,
+    promotionTargetVersionId,
+    keywordsAndTopics: Object.freeze([]),
+    productsAndServices: Object.freeze([]),
+    targetUrls: Object.freeze([]),
+    targetAudiences: Object.freeze([]),
+    partnershipGoals: Object.freeze([]),
+    market: "US",
+    location: "US",
+    language: "en-US",
+    authorizedDiscoverySources: Object.freeze([
+      "WEBSITE_PROJECT",
+      "CURATED_RESOURCE_LIBRARY",
+    ]),
+    immutableFingerprint: "discovery-fixture-profile",
+  }),
+  sharedEvidence: Object.freeze([]),
+});
 
 class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
   readonly calls: Array<Readonly<{
@@ -32,7 +76,35 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
     staleUntil: Date;
   }>>();
 
-  constructor(private readonly reconciledFingerprint: string | null = null) {}
+  constructor(
+    private readonly reconciledFingerprint: string | null = null,
+    private readonly interrupted: Readonly<{
+      fingerprint: string;
+      batchRequestId: string;
+      providerTaskId: string | null;
+      leaseOwnerRequestId: string;
+      budgetReserved: boolean;
+      startedAt: Date;
+    }> | null = null,
+    private readonly acceptedRecovery: Readonly<{
+      endpoint: CommercialDiscoveryCall["endpoint"];
+      blueprintId: string;
+      responseSchemaVersion: string;
+      requestFingerprint: string;
+      estimatedCostMicros: number;
+      requestId: string;
+      budgetReservationId: string;
+      requestPayload: Readonly<Record<string, unknown>>;
+    }> | null = null,
+    private readonly remainingBudget = 10_000,
+  ) {}
+
+  seedBlueprint(
+    id: string,
+    value: Readonly<Record<string, unknown>>,
+  ): void {
+    this.blueprint = { id, value };
+  }
 
   async query(
     text: string,
@@ -60,7 +132,14 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
       return { rows: [{ visiblePoolGeneration: values[4] ?? 1 }] };
     }
     if (sql.includes("SELECT GREATEST(")) {
-      return { rows: [{ remaining: 10_000 }] };
+      return { rows: [{ remaining: this.remainingBudget }] };
+    }
+    if (sql.includes("DATAFORSEO_ACCEPTED_TASK_RECOVERY_PLAN")) {
+      return {
+        rows: this.acceptedRecovery === null
+          ? []
+          : [this.acceptedRecovery],
+      };
     }
     if (
       sql.includes("SELECT id,blueprint")
@@ -102,6 +181,24 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
       && values[3] === this.reconciledFingerprint
     ) {
       return { rows: [{ id: "reconciled-request" }] };
+    }
+    if (
+      sql.includes("DATAFORSEO_WORKER_INTERRUPTED_AFTER_TASK_ACCEPTED")
+      && this.interrupted !== null
+      && values[3] === this.interrupted.fingerprint
+    ) {
+      return {
+        rows: [{
+          batchRequestId: this.interrupted.batchRequestId,
+          providerTaskId: this.interrupted.providerTaskId,
+          leaseOwnerRequestId: this.interrupted.leaseOwnerRequestId,
+          budgetReserved: this.interrupted.budgetReserved,
+          startedAt: this.interrupted.startedAt,
+        }],
+      };
+    }
+    if (sql.includes("DATAFORSEO_RECONCILED_NOT_DISPATCHED")) {
+      return { rows: [{ id: "reconciled-not-dispatched" }] };
     }
     if (
       sql.includes("WITH attempted AS")
@@ -163,6 +260,728 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
 }
 
 describe("commercial recommendation discovery service", () => {
+  it("settles a deterministic zero-plan window without reporting provider downtime", async () => {
+    const client = new MemoryDiscoveryClient();
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const authorize = vi.fn(async () => {});
+
+    const result = await executeCommercialRecommendationDiscovery({
+      client,
+      provider: { execute: providerExecute },
+      gate: { preflight: async () => {}, authorize },
+      safeFetch: {
+        fetch: async () => ({
+          requestedUrl: "https://aiper.com/",
+          finalUrl: "https://aiper.com/",
+          status: 200,
+          contentType: "text/html",
+          body: new Uint8Array(),
+          redirectChain: [],
+          resolvedIps: ["203.0.113.10"],
+          fetchedAt: "2026-08-25T15:30:00.000Z",
+        }),
+      },
+      scope: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+      },
+      contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
+      context: {
+        snapshotVersion: 2,
+        profileVersionId,
+        promotionTargetVersionId,
+        projectSettingsVersionId:
+          "55555555-5555-4555-8555-555555555555",
+        projectSettingsVersion: 1,
+        canonicalDomain: "aiper.com",
+        locale: "en-US",
+        countryCode: "US",
+        products: ["robotic pool cleaner"],
+        keywords: ["pool cleaning"],
+        targetUrls: ["https://aiper.com/"],
+        targetAudiences: ["pool owners"],
+        partnershipGoals: ["editorial review"],
+        explicitCompetitorDomains: [],
+      },
+      configuration: {
+        endpointAllowlist: [],
+        estimatedCostMicros: 1_000,
+        absoluteBudgetMicros: 10_000,
+        candidateLimit: 25,
+        locationCode: "2840",
+        languageCode: "en",
+      },
+      requestedCount: 10,
+      visiblePoolGeneration: 1,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      refillWindow: 1,
+      jobId: "job-zero-plan",
+      actorId: "zero-plan-test",
+      now: () => new Date("2026-08-25T15:30:00.000Z"),
+    });
+
+    expect(result.discovery).toEqual({
+      semanticStatus: "not_required",
+      semanticRequiredCallCount: 0,
+      semanticCompletedCallCount: 0,
+      reason: "semantic_discovery_not_planned_endpoint_allowlist",
+    });
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    const batchUpdate = client.calls.find(({ text }) =>
+      text.includes("UPDATE backlink_commercial_discovery_batches")
+      && text.includes("SET status=$5")
+    );
+    expect(batchUpdate?.values[4]).toBe("completed");
+    expect(batchUpdate?.values[9]).toBe(
+      "semantic_discovery_not_planned_endpoint_allowlist",
+    );
+  });
+
+  it("only transfers a paused batch from a terminal job without provider risk", async () => {
+    const calls: Array<Readonly<{
+      text: string;
+      values: readonly unknown[];
+    }>> = [];
+    const client: CommercialDiscoveryQueryClient = {
+      async query(text, values = []) {
+        calls.push({ text, values });
+        if (text.includes("COMMERCIAL_DISCOVERY_BATCH_TAKEOVER")) {
+          return {
+            rows: [{
+              id: "77777777-7777-4777-8777-777777777777",
+              disposition: "resumed",
+            }],
+          };
+        }
+        return { rows: [] };
+      },
+    };
+
+    const result = await claimPausedCommercialDiscoveryBatch({
+      client,
+      scope: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+      },
+      contextVersionId: "55555555-5555-4555-8555-555555555555",
+      visiblePoolGeneration: 1,
+      jobId: "66666666-6666-4666-8666-666666666666",
+      refillKey: "commercial-refill:project:context:g1:t1:r1:w1",
+      inputBinding,
+      actorId: "stage2d-test",
+      claimedAt: new Date("2026-08-20T01:00:00.000Z"),
+    });
+
+    expect(result).toEqual({
+      batchId: "77777777-7777-4777-8777-777777777777",
+      disposition: "resumed",
+    });
+    const takeover = calls.find(({ text }) =>
+      text.includes("COMMERCIAL_DISCOVERY_BATCH_TAKEOVER")
+    );
+    expect(takeover?.text).toContain("FOR UPDATE OF batch");
+    expect(takeover?.text).toContain(
+      "old_owner.status IN ('partial_success','cancelled')",
+    );
+    expect(takeover?.text).toContain("batch.status='paused'");
+    expect(takeover?.text).toContain(
+      "batch.status='running'",
+    );
+    expect(takeover?.text).toContain("$20::boolean");
+    expect(takeover?.text).toContain(
+      "SELECT 1 FROM locked_requests",
+    );
+    expect(takeover?.text).toContain(
+      "WHERE status IN ('running','unknown_charge')",
+    );
+    expect(takeover?.text).toContain(
+      "SELECT 1 FROM locked_provider_requests",
+    );
+    expect(takeover?.text).toContain("status='reserved'");
+    expect(takeover?.text).toContain(
+      "SELECT 1 FROM locked_leases",
+    );
+    expect(takeover?.text).toContain(
+      "SET refill_job_id=$7::uuid",
+    );
+    expect(takeover?.text).not.toContain(
+      "UPDATE backlink_provider_requests",
+    );
+    expect(takeover?.text).not.toContain(
+      "UPDATE backlink_provider_usage_ledger",
+    );
+    expect(takeover?.text).not.toContain(
+      "UPDATE backlink_commercial_candidates",
+    );
+  });
+
+  it("recovers an accepted task after its budget period expires", async () => {
+    const blueprintId = "88888888-8888-4888-8888-888888888888";
+    const runtimeContext = {
+      snapshotVersion: 2 as const,
+      profileVersionId,
+      promotionTargetVersionId,
+      projectSettingsVersionId:
+        "55555555-5555-4555-8555-555555555555",
+      projectSettingsVersion: 1,
+      canonicalDomain: "elephtv.com",
+      locale: "en",
+      countryCode: "ZA",
+      products: ["streaming", "film"],
+      keywords: ["streaming service in SA"],
+      targetUrls: ["https://elephtv.com/"],
+      targetAudiences: ["South African viewers"],
+      partnershipGoals: ["authoritative film review websites"],
+      explicitCompetitorDomains: ["smiletv.net"],
+    };
+    const blueprint = buildCommercialDiscoveryBlueprint({
+      context: {
+        projectContextVersionId:
+          "44444444-4444-4444-8444-444444444444",
+        projectSettingsVersionId:
+          runtimeContext.projectSettingsVersionId,
+        projectSettingsVersion: runtimeContext.projectSettingsVersion,
+        canonicalDomain: runtimeContext.canonicalDomain,
+        countries: [runtimeContext.countryCode],
+        languages: [runtimeContext.locale],
+        products: runtimeContext.products,
+        keywords: runtimeContext.keywords,
+        promotionTargetUrls: runtimeContext.targetUrls,
+        declaredTargetAudiences: runtimeContext.targetAudiences,
+        partnershipGoals: runtimeContext.partnershipGoals,
+        explicitCompetitorDomains:
+          runtimeContext.explicitCompetitorDomains,
+        historicalFeedbackDomains: [],
+        evidenceRefs: ["project-context:elephtv"],
+      },
+    });
+    const [call] = createCommercialDiscoveryPlan({
+      blueprintId,
+      searchQueries: buildCommercialTierSearchQueries({
+        tier: "exact_product_target_market",
+        blueprint,
+        context: runtimeContext,
+        refillRound: 1,
+        refillWindow: 1,
+        languageCode: "en",
+      }).slice(0, 1),
+      verifiedCompetitorDomains: [],
+      userDomain: runtimeContext.canonicalDomain,
+      locationCode: "2710",
+      languageCode: "en",
+      endpointAllowlist: [
+        "/v3/serp/google/organic/task_post",
+      ],
+      estimatedCostMicros: 25_000,
+      remainingBudgetMicros: 25_000,
+    });
+    if (call === undefined) throw new Error("Missing semantic recovery call");
+    const fingerprint = fingerprintCommercialDiscoveryCall(call);
+    const refillKey =
+      "commercial-refill:33333333-3333-4333-8333-333333333333:"
+      + "44444444-4444-4444-8444-444444444444:g1:t1:r1:w1";
+    const requestId = `${refillKey}:1`;
+    const jobId = "77777777-7777-4777-8777-777777777777";
+    const budgetReservationId =
+      `commercial-refill-operation:${jobId}:discovery:`
+      + `${refillKey}:${fingerprint}`;
+    const client = new MemoryDiscoveryClient(
+      null,
+      {
+        fingerprint,
+        batchRequestId: "66666666-6666-4666-8666-666666666666",
+        providerTaskId: "provider-task-accepted",
+        leaseOwnerRequestId: requestId,
+        budgetReserved: true,
+        startedAt: new Date("2026-08-17T09:55:00.000Z"),
+      },
+      {
+        endpoint: call.endpoint,
+        blueprintId,
+        responseSchemaVersion: call.responseSchemaVersion,
+        requestFingerprint: fingerprint,
+        estimatedCostMicros: call.estimatedCostMicros,
+        requestId,
+        budgetReservationId,
+        requestPayload: serializeCommercialDiscoveryRequestPayload(call),
+      },
+      0,
+    );
+    client.seedBlueprint(
+      blueprintId,
+      JSON.parse(JSON.stringify(blueprint)) as Record<string, unknown>,
+    );
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const recoverAcceptedTask = vi.fn(async () => ({
+      tasks: [{
+        id: "provider-task-accepted",
+        status_code: 20000,
+        cost: 0.07,
+        result: [],
+      }],
+    }));
+    const authorize = vi.fn(async () => {});
+
+    const result = await executeCommercialRecommendationDiscovery({
+      client,
+      provider: {
+        execute: providerExecute,
+        recoverAcceptedTask,
+      },
+      gate: { preflight: async () => {}, authorize },
+      safeFetch: {
+        fetch: async () => ({
+          requestedUrl: "https://elephtv.com/",
+          finalUrl: "https://elephtv.com/",
+          status: 200,
+          contentType: "text/html",
+          body: new Uint8Array(),
+          redirectChain: [],
+          resolvedIps: ["203.0.113.10"],
+          fetchedAt: "2026-08-17T10:00:00.000Z",
+        }),
+      },
+      scope: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+      },
+      contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
+      context: runtimeContext,
+      configuration: {
+        endpointAllowlist: [
+          "/v3/serp/google/organic/task_post",
+          "/v3/serp/google/organic/task_get/advanced",
+        ],
+        estimatedCostMicros: 25_000,
+        absoluteBudgetMicros: 1_000_000,
+        candidateLimit: 25,
+        locationCode: "2710",
+        languageCode: "en",
+      },
+      requestedCount: 10,
+      visiblePoolGeneration: 1,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      refillWindow: 1,
+      jobId,
+      actorId: "phase-4-test",
+      now: () => new Date("2026-08-17T10:00:00.000Z"),
+    });
+
+    expect(result.provider).toMatchObject({
+      source: "provider",
+      costMicros: 70_000,
+    });
+    expect(recoverAcceptedTask).toHaveBeenCalledWith(
+      call,
+      "provider-task-accepted",
+    );
+    expect(call.plannerLineage).toBeDefined();
+    expect(recoverAcceptedTask.mock.calls[0]?.[0].plannerLineage).toEqual(
+      call.plannerLineage,
+    );
+    expect(providerExecute.mock.calls.map(([executedCall]) =>
+      fingerprintCommercialDiscoveryCall(executedCall)
+    )).not.toContain(fingerprint);
+    expect(providerExecute).toHaveBeenCalledTimes(3);
+    expect(authorize).toHaveBeenCalledTimes(3);
+    const recoveryLookup = client.calls.find(({ text }) =>
+      text.includes("DATAFORSEO_ACCEPTED_TASK_RECOVERY_PLAN")
+    );
+    expect(recoveryLookup?.text).toContain(
+      "JOIN backlink_recommendation_refills AS refill",
+    );
+    expect(recoveryLookup?.text).toContain(
+      "refill.refill_window_key=$7",
+    );
+    expect(recoveryLookup?.values[6]).toBe(refillKey);
+    expect(recoveryLookup?.values[6]).not.toBe(
+      `commercial-discovery:${refillKey}`,
+    );
+    expect(recoveryLookup?.text).toContain(
+      "batch.budget_reservation_id LIKE $10",
+    );
+    expect(recoveryLookup?.text).toContain(
+      "__growthosDiscoveryPlannerLineage,blueprintId",
+    );
+    expect(recoveryLookup?.text).not.toContain(
+      "FROM backlink_commercial_discovery_batches AS discovery",
+    );
+    expect(recoveryLookup?.values[9]).toBe(
+      `commercial-refill-operation:${jobId}:discovery:${refillKey}:%`,
+    );
+    const batchOpenIndex = client.calls.findIndex(({ text }) =>
+      text.includes("INSERT INTO backlink_commercial_discovery_batches")
+    );
+    const acceptedRecoveryIndex = client.calls.findIndex(({ text }) =>
+      text.includes("DATAFORSEO_WORKER_INTERRUPTED_AFTER_TASK_ACCEPTED")
+    );
+    expect(batchOpenIndex).toBeGreaterThan(-1);
+    expect(acceptedRecoveryIndex).toBeGreaterThan(batchOpenIndex);
+    expect(client.calls.filter(({ text }) =>
+      text.includes("INSERT INTO provider_batch_requests")
+    )).toHaveLength(3);
+  });
+
+  it("recovers an accepted task after an expired Worker lease", async () => {
+    const call: CommercialDiscoveryCall = {
+      endpoint: "/v3/backlinks/referring_domains/live",
+      intent: "DISCOVERY",
+      sourceType: "USER_REFERRING_DOMAINS",
+      request: {
+        target: "example.com",
+        limit: 25,
+      },
+      responseSchemaVersion:
+        "dataforseo.backlinks-referring-domains-commercial.v1",
+      estimatedCostMicros: 25_000,
+    };
+    const fingerprint = fingerprintCommercialDiscoveryCall(call);
+    const leaseOwnerRequestId =
+      "commercial-refill:33333333-3333-4333-8333-333333333333:"
+      + "44444444-4444-4444-8444-444444444444:g1:t1:r1:w1:1";
+    const client = new MemoryDiscoveryClient(null, {
+      fingerprint,
+      batchRequestId: "66666666-6666-4666-8666-666666666666",
+      providerTaskId: "provider-task-accepted",
+      leaseOwnerRequestId,
+      budgetReserved: true,
+      startedAt: new Date("2026-08-17T08:00:00.000Z"),
+    });
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const recoverAcceptedTask = vi.fn(async () => ({ tasks: [] }));
+    const authorize = vi.fn(async () => {});
+    const request = new CommercialDiscoveryRequestService({
+      client,
+      provider: {
+        execute: providerExecute,
+        recoverAcceptedTask,
+      },
+      gate: { preflight: async () => {}, authorize },
+      now: () => new Date("2026-08-17T08:05:20.000Z"),
+    });
+
+    await expect(request.execute({
+      context: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+        requestId: leaseOwnerRequestId,
+        idempotencyKey: "commercial-discovery:recovery",
+        budgetReservationId: "commercial-refill:recovery",
+      },
+      projectContextVersionId: "44444444-4444-4444-8444-444444444444",
+      call,
+      locationCode: "2710",
+      languageCode: "en",
+      refreshMode: "CACHE_PREFERRED",
+      actorId: "phase-4-test",
+    })).resolves.toMatchObject({
+      source: "provider",
+      artifact: {
+        providerTaskIds: [],
+        candidates: [],
+      },
+    });
+
+    expect(recoverAcceptedTask).toHaveBeenCalledWith(
+      call,
+      "provider-task-accepted",
+    );
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    const transitionSql = client.calls.find(({ text }) =>
+      text.includes("DATAFORSEO_WORKER_INTERRUPTED_AFTER_TASK_ACCEPTED")
+    )?.text ?? "";
+    expect(transitionSql).toContain("lease.lease_expires_at<=$8");
+    expect(transitionSql).toContain(
+      "usage.reservation_key=batch.budget_reservation_id",
+    );
+    expect(transitionSql).toContain(
+      "$1::uuid,$2::uuid,$3::uuid",
+    );
+    expect(transitionSql).toContain("status='unknown_charge'");
+    expect(client.calls.some(({ text }) =>
+      text.includes("INSERT INTO provider_batch_requests")
+    )).toBe(false);
+  });
+
+  it("fails closed when an interrupted request has no accepted task id", async () => {
+    const call: CommercialDiscoveryCall = {
+      endpoint: "/v3/backlinks/referring_domains/live",
+      intent: "DISCOVERY",
+      sourceType: "USER_REFERRING_DOMAINS",
+      request: {
+        target: "example.com",
+        limit: 25,
+      },
+      responseSchemaVersion:
+        "dataforseo.backlinks-referring-domains-commercial.v1",
+      estimatedCostMicros: 25_000,
+    };
+    const fingerprint = fingerprintCommercialDiscoveryCall(call);
+    const leaseOwnerRequestId =
+      "commercial-refill:33333333-3333-4333-8333-333333333333:"
+      + "44444444-4444-4444-8444-444444444444:g1:t1:r1:w1:1";
+    const client = new MemoryDiscoveryClient(null, {
+      fingerprint,
+      batchRequestId: "66666666-6666-4666-8666-666666666666",
+      providerTaskId: null,
+      leaseOwnerRequestId,
+      budgetReserved: true,
+      startedAt: new Date("2026-08-17T08:00:00.000Z"),
+    });
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const recoverAcceptedTask = vi.fn(async () => ({ tasks: [] }));
+    const authorize = vi.fn(async () => {});
+    const request = new CommercialDiscoveryRequestService({
+      client,
+      provider: {
+        execute: providerExecute,
+        recoverAcceptedTask,
+      },
+      gate: { preflight: async () => {}, authorize },
+      now: () => new Date("2026-08-17T08:05:20.000Z"),
+    });
+
+    await expect(request.execute({
+      context: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+        requestId: leaseOwnerRequestId,
+        idempotencyKey: "commercial-discovery:recovery",
+        budgetReservationId: "commercial-refill:recovery",
+      },
+      projectContextVersionId: "44444444-4444-4444-8444-444444444444",
+      call,
+      locationCode: "2710",
+      languageCode: "en",
+      refreshMode: "CACHE_PREFERRED",
+      actorId: "phase-4-test",
+    })).rejects.toThrow(
+      "BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED",
+    );
+
+    expect(recoverAcceptedTask).not.toHaveBeenCalled();
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(client.calls.some(({ text }) =>
+      text.includes("WITH attempted AS")
+      && text.includes("provider_fetch_leases")
+    )).toBe(false);
+  });
+
+  it("recovers a task found by official dispatch reconciliation without reposting", async () => {
+    const call: CommercialDiscoveryCall = {
+      endpoint: "/v3/serp/google/organic/task_post",
+      intent: "DISCOVERY",
+      sourceType: "BLUEPRINT_SERP_STANDARD_QUEUE",
+      request: {
+        keyword: "regional streaming industry publications",
+        location_code: 2710,
+        language_code: "en",
+        depth: 10,
+        device: "desktop",
+        os: "windows",
+      },
+      responseSchemaVersion: "dataforseo.serp-google-organic-task-post.v2",
+      estimatedCostMicros: 25_000,
+    };
+    const fingerprint = fingerprintCommercialDiscoveryCall(call);
+    const leaseOwnerRequestId = "commercial-refill:recovery:accepted:1";
+    const client = new MemoryDiscoveryClient(null, {
+      fingerprint,
+      batchRequestId: "66666666-6666-4666-8666-666666666666",
+      providerTaskId: null,
+      leaseOwnerRequestId,
+      budgetReserved: true,
+      startedAt: new Date("2026-08-17T08:00:00.000Z"),
+    });
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const recoverAcceptedTask = vi.fn(async () => ({ tasks: [] }));
+    const reconcileDispatchedTask = vi.fn(async () => ({
+      status: "accepted" as const,
+      providerTaskId: "provider-task-reconciled",
+    }));
+    const authorize = vi.fn(async () => {});
+    const request = new CommercialDiscoveryRequestService({
+      client,
+      provider: {
+        execute: providerExecute,
+        recoverAcceptedTask,
+        reconcileDispatchedTask,
+      },
+      gate: { preflight: async () => {}, authorize },
+      now: () => new Date("2026-08-17T08:05:20.000Z"),
+    });
+
+    await expect(request.execute({
+      context: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+        requestId: leaseOwnerRequestId,
+        idempotencyKey: "commercial-discovery:recovery",
+        budgetReservationId: "commercial-refill:recovery",
+      },
+      projectContextVersionId: "44444444-4444-4444-8444-444444444444",
+      call,
+      locationCode: "2710",
+      languageCode: "en",
+      refreshMode: "CACHE_PREFERRED",
+      actorId: "phase-4-test",
+    })).resolves.toMatchObject({
+      source: "provider",
+      artifact: { candidates: [] },
+    });
+
+    expect(reconcileDispatchedTask).toHaveBeenCalledOnce();
+    expect(recoverAcceptedTask).toHaveBeenCalledWith(
+      call,
+      "provider-task-reconciled",
+    );
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+  it("releases an officially absent dispatch before safely reposting", async () => {
+    const call: CommercialDiscoveryCall = {
+      endpoint: "/v3/serp/google/organic/task_post",
+      intent: "DISCOVERY",
+      sourceType: "BLUEPRINT_SERP_STANDARD_QUEUE",
+      request: {
+        keyword: "regional streaming industry publications",
+        location_code: 2710,
+        language_code: "en",
+        depth: 10,
+        device: "desktop",
+        os: "windows",
+      },
+      responseSchemaVersion: "dataforseo.serp-google-organic-task-post.v2",
+      estimatedCostMicros: 25_000,
+    };
+    const fingerprint = fingerprintCommercialDiscoveryCall(call);
+    const leaseOwnerRequestId = "commercial-refill:recovery:not-found:1";
+    const client = new MemoryDiscoveryClient(null, {
+      fingerprint,
+      batchRequestId: "66666666-6666-4666-8666-666666666666",
+      providerTaskId: null,
+      leaseOwnerRequestId,
+      budgetReserved: true,
+      startedAt: new Date("2026-08-17T08:00:00.000Z"),
+    });
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const recoverAcceptedTask = vi.fn(async () => ({ tasks: [] }));
+    const reconcileDispatchedTask = vi.fn(async () => ({
+      status: "not_found" as const,
+    }));
+    const authorize = vi.fn(async () => {});
+    const request = new CommercialDiscoveryRequestService({
+      client,
+      provider: {
+        execute: providerExecute,
+        recoverAcceptedTask,
+        reconcileDispatchedTask,
+      },
+      gate: { preflight: async () => {}, authorize },
+      now: () => new Date("2026-08-17T08:05:20.000Z"),
+    });
+
+    await expect(request.execute({
+      context: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+        requestId: leaseOwnerRequestId,
+        idempotencyKey: "commercial-discovery:recovery",
+        budgetReservationId: "commercial-refill:recovery",
+      },
+      projectContextVersionId: "44444444-4444-4444-8444-444444444444",
+      call,
+      locationCode: "2710",
+      languageCode: "en",
+      refreshMode: "CACHE_PREFERRED",
+      actorId: "phase-4-test",
+    })).resolves.toMatchObject({
+      source: "provider",
+      artifact: { candidates: [] },
+    });
+
+    expect(reconcileDispatchedTask).toHaveBeenCalledOnce();
+    expect(client.calls.some(({ text }) =>
+      text.includes("DATAFORSEO_RECONCILED_NOT_DISPATCHED")
+    )).toBe(true);
+    expect(providerExecute).toHaveBeenCalledOnce();
+    expect(recoverAcceptedTask).not.toHaveBeenCalled();
+    expect(authorize).toHaveBeenCalledOnce();
+  });
+
+  it("does not create a new provider request when recovery state changes", async () => {
+    const call: CommercialDiscoveryCall = {
+      endpoint: "/v3/serp/google/organic/task_post",
+      intent: "DISCOVERY",
+      sourceType: "BLUEPRINT_SERP_STANDARD_QUEUE",
+      request: {
+        keyword: "streaming review",
+        location_code: 2710,
+        language_code: "en",
+        depth: 10,
+        device: "desktop",
+        os: "windows",
+      },
+      responseSchemaVersion: "dataforseo.serp-google-organic-task-post.v2",
+      estimatedCostMicros: 25_000,
+    };
+    const client = new MemoryDiscoveryClient();
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const recoverAcceptedTask = vi.fn(async () => ({ tasks: [] }));
+    const authorize = vi.fn(async () => {});
+    const request = new CommercialDiscoveryRequestService({
+      client,
+      provider: {
+        execute: providerExecute,
+        recoverAcceptedTask,
+      },
+      gate: { preflight: async () => {}, authorize },
+      now: () => new Date("2026-08-17T10:00:00.000Z"),
+    });
+
+    await expect(request.execute({
+      context: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+        requestId: "commercial-refill:recovery:1",
+        idempotencyKey: "commercial-discovery:recovery",
+        budgetReservationId: "commercial-refill:recovery",
+      },
+      projectContextVersionId: "44444444-4444-4444-8444-444444444444",
+      call,
+      locationCode: "2710",
+      languageCode: "en",
+      refreshMode: "CACHE_PREFERRED",
+      actorId: "phase-4-test",
+      recoveryOnly: true,
+    })).rejects.toThrow(
+      "DATAFORSEO_ACCEPTED_TASK_RECOVERY_STATE_CHANGED",
+    );
+
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(recoverAcceptedTask).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(client.calls.some(({ text }) =>
+      text.includes("INSERT INTO provider_batch_requests")
+    )).toBe(false);
+  });
+
   it("does not redispatch a reconciled charged request without a result", async () => {
     const call: CommercialDiscoveryCall = {
       endpoint: "/v3/backlinks/referring_domains/live",
@@ -184,7 +1003,7 @@ describe("commercial recommendation discovery service", () => {
     const request = new CommercialDiscoveryRequestService({
       client,
       provider: { execute: providerExecute },
-      gate: { authorize },
+      gate: { preflight: async () => {}, authorize },
       now: () => new Date("2026-08-13T10:58:00.000Z"),
     });
 
@@ -220,6 +1039,66 @@ describe("commercial recommendation discovery service", () => {
     )).toBe(false);
   });
 
+  it("blocks before lease, batch, budget reservation, or provider execution", async () => {
+    const call: CommercialDiscoveryCall = {
+      endpoint: "/v3/serp/google/organic/task_post",
+      intent: "DISCOVERY",
+      sourceType: "BLUEPRINT_SERP_STANDARD_QUEUE",
+      request: {
+        keyword: "streaming review publication",
+        location_code: 2710,
+        language_code: "en",
+        depth: 10,
+        device: "desktop",
+        os: "windows",
+      },
+      responseSchemaVersion: "dataforseo.serp-google-organic-task-post.v2",
+      estimatedCostMicros: 25_000,
+    };
+    const client = new MemoryDiscoveryClient();
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const authorize = vi.fn(async () => {});
+    const preflight = vi.fn(async () => {
+      throw new Error("DATAFORSEO_OPERATION_NOT_AUTHORIZED");
+    });
+    const request = new CommercialDiscoveryRequestService({
+      client,
+      provider: { execute: providerExecute },
+      gate: { preflight, authorize },
+      now: () => new Date("2026-08-19T10:00:00.000Z"),
+    });
+
+    await expect(request.execute({
+      context: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+        requestId: "commercial-refill:preflight-denied",
+        idempotencyKey: "commercial-refill:preflight-denied",
+        budgetReservationId: "commercial-refill:preflight-denied",
+      },
+      projectContextVersionId: "44444444-4444-4444-8444-444444444444",
+      call,
+      locationCode: "2710",
+      languageCode: "en",
+      refreshMode: "FORCE_LIVE",
+      actorId: "stage2d-test",
+    })).rejects.toThrow("DATAFORSEO_OPERATION_NOT_AUTHORIZED");
+
+    expect(preflight).toHaveBeenCalledOnce();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(client.calls.some(({ text }) =>
+      text.includes("WITH attempted AS")
+      && text.includes("provider_fetch_leases")
+    )).toBe(false);
+    expect(client.calls.some(({ text }) =>
+      text.includes("INSERT INTO provider_batch_requests")
+      || text.includes("INSERT INTO backlink_provider_requests")
+      || text === "BEGIN"
+    )).toBe(false);
+  });
+
   it("reuses one Blueprint and one provider artifact for the same Context", async () => {
     const client = new MemoryDiscoveryClient();
     const generate = vi.fn(async () => ({
@@ -227,7 +1106,12 @@ describe("commercial recommendation discovery service", () => {
         targetAudience: ["pool owners"],
         productValuePropositions: ["robotic pool cleaning"],
         topicClusters: ["pool maintenance"],
-        searchQueryClusters: ["robotic pool cleaner reviews"],
+        searchQueryClusters: [
+          "United States robotic pool cleaner blogs",
+          "United States robotic pool cleaner publications",
+          "\"robotic pool cleaner\" \"write for us\" United States",
+          "United States robotic pool cleaner resource directory",
+        ],
         targetSiteArchetypes: ["pool care publication"],
         cooperationAngles: ["editorial review"],
         negativeKeywords: [],
@@ -271,7 +1155,7 @@ describe("commercial recommendation discovery service", () => {
       executeCommercialRecommendationDiscovery({
         client,
         provider: { execute: providerExecute },
-        gate: { authorize },
+        gate: { preflight: async () => {}, authorize },
         safeFetch: { fetch },
         scope: {
           organizationId: "11111111-1111-4111-8111-111111111111",
@@ -279,8 +1163,11 @@ describe("commercial recommendation discovery service", () => {
           websiteProjectId: "33333333-3333-4333-8333-333333333333",
         },
         contextVersionId: "44444444-4444-4444-8444-444444444444",
+        inputBinding,
         context: {
           snapshotVersion: 2,
+          profileVersionId,
+          promotionTargetVersionId,
           projectSettingsVersionId:
             "55555555-5555-4555-8555-555555555555",
           projectSettingsVersion: 1,
@@ -296,7 +1183,7 @@ describe("commercial recommendation discovery service", () => {
         },
         configuration: {
           endpointAllowlist: [
-            "/v3/dataforseo_labs/google/competitors_domain/live",
+            "/v3/serp/google/organic/task_post",
           ],
           estimatedCostMicros: 1_000,
           absoluteBudgetMicros: 10_000,
@@ -310,6 +1197,8 @@ describe("commercial recommendation discovery service", () => {
         refillTier: "exact_product_target_market",
         refillRound: 1,
         jobId,
+        providerBudgetOperationPrefix:
+          `commercial-refill-operation:${jobId}`,
         actorId: "local-product-029-test",
         now: () => new Date(
           Date.parse("2026-08-10T02:00:00.000Z") + tick++ * 1_000,
@@ -322,23 +1211,31 @@ describe("commercial recommendation discovery service", () => {
     expect(first.provider.source).toBe("provider");
     expect(second.provider.source).toBe("cache");
     expect(generate).toHaveBeenCalledTimes(1);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(providerExecute).toHaveBeenCalledTimes(1);
-    expect(authorize).toHaveBeenCalledTimes(1);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(providerExecute).toHaveBeenCalledTimes(4);
+    expect(authorize).toHaveBeenCalledTimes(4);
     expect(client.calls.some(({ text, values }) =>
       text.includes("SET provider_task_id=$2")
       && values[1] === "provider-task-persisted"
     )).toBe(true);
-    const authorizedContext = authorize.mock.calls[0]?.[0].context;
+    const authorizedGateInput = authorize.mock.calls[0]?.[0];
+    const authorizedContext = authorizedGateInput.context;
     const insertedBatch = client.calls.find(({ text }) =>
       text.includes("INSERT INTO provider_batch_requests")
     );
     expect(authorizedContext.budgetReservationId).toMatch(
-      /^commercial-refill:.*:[0-9a-f-]{36}$/u,
+      /^commercial-refill-operation:job-1:discovery:commercial-refill:.*:[0-9a-f-]{36}$/u,
     );
     expect(insertedBatch?.values[13]).toBe(
       authorizedContext.budgetReservationId,
     );
+    expect(authorizedGateInput.requiredRemainingPaidCalls).toBe(0);
+    expect(authorizedGateInput.requiredRemainingCostMicros).toBe(0);
+    const discoveryBatch = client.calls.find(({ text }) =>
+      text.includes("INSERT INTO backlink_commercial_discovery_batches")
+    );
+    expect(discoveryBatch?.text).toContain("refill_job_id");
+    expect(discoveryBatch?.values[7]).toBe("job-1");
     const completedBatchUpdate = client.calls.find(({ text }) =>
       text.includes("provider_request_fingerprints=$7::jsonb")
     );
@@ -351,6 +1248,101 @@ describe("commercial recommendation discovery service", () => {
     expect(completedBatchUpdate?.text).toContain(
       "backlink_commercial_discovery_batches.finished_at",
     );
+    expect(completedBatchUpdate?.text).toContain(
+      "raw_candidate_count=$12",
+    );
+    expect(completedBatchUpdate?.values[11]).toBe(0);
+    const inventoryPolicyUpdate = client.calls.find(({ text }) =>
+      text.includes("last_raw_candidate_count=$9")
+    );
+    expect(inventoryPolicyUpdate?.values[8]).toBe(0);
+  });
+
+  it("skips a planned provider call when exact shared evidence is reusable", async () => {
+    const client = new MemoryDiscoveryClient();
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const authorize = vi.fn(async () => {});
+    const readReusable = vi.fn(async (call: CommercialDiscoveryCall) => ({
+      sourceType: call.sourceType,
+      endpoint: call.endpoint,
+      requestFingerprint: fingerprintCommercialDiscoveryCall(call),
+      responseSchemaVersion: call.responseSchemaVersion,
+      collectedAt: "2026-08-15T02:00:00.000Z",
+      costMicros: 1_000,
+      providerTaskIds: ["shared-task-1"],
+      candidates: [],
+      ...(call.plannerLineage === undefined
+        ? {}
+        : { plannerLineage: call.plannerLineage }),
+    }));
+
+    const result = await executeCommercialRecommendationDiscovery({
+      client,
+      provider: { execute: providerExecute },
+      gate: { preflight: async () => {}, authorize },
+      safeFetch: {
+        fetch: async () => ({
+          requestedUrl: "https://aiper.com/",
+          finalUrl: "https://aiper.com/",
+          status: 200,
+          contentType: "text/html",
+          body: new Uint8Array(),
+          redirectChain: [],
+          resolvedIps: ["203.0.113.10"],
+          fetchedAt: "2026-08-15T02:00:00.000Z",
+        }),
+      },
+      scope: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+      },
+      contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
+      context: {
+        snapshotVersion: 2,
+        profileVersionId,
+        promotionTargetVersionId,
+        projectSettingsVersionId:
+          "55555555-5555-4555-8555-555555555555",
+        projectSettingsVersion: 1,
+        canonicalDomain: "aiper.com",
+        locale: "en-US",
+        countryCode: "US",
+        products: ["robotic pool cleaner"],
+        keywords: ["pool cleaning"],
+        targetUrls: ["https://aiper.com/"],
+        targetAudiences: ["pool owners"],
+        partnershipGoals: ["editorial review"],
+        explicitCompetitorDomains: [],
+      },
+      configuration: {
+          endpointAllowlist: [
+            "/v3/serp/google/organic/task_post",
+          ],
+        estimatedCostMicros: 1_000,
+        absoluteBudgetMicros: 10_000,
+        candidateLimit: 25,
+        locationCode: "2840",
+        languageCode: "en",
+      },
+      sharedEvidence: { readReusable },
+      requestedCount: 10,
+      visiblePoolGeneration: 1,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      jobId: "job-shared-evidence",
+      actorId: "phase-4-test",
+      now: () => new Date("2026-08-15T02:00:00.000Z"),
+    });
+
+    expect(result.provider).toMatchObject({
+      source: "cache",
+      costMicros: 0,
+    });
+    expect(readReusable.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
   });
 
   it("runs the curated resource tier without paid provider or AI transport", async () => {
@@ -362,7 +1354,7 @@ describe("commercial recommendation discovery service", () => {
     const result = await executeCommercialRecommendationDiscovery({
       client,
       provider: { execute: providerExecute },
-      gate: { authorize },
+      gate: { preflight: async () => {}, authorize },
       safeFetch: { fetch },
       scope: {
         organizationId: "11111111-1111-4111-8111-111111111111",
@@ -370,8 +1362,11 @@ describe("commercial recommendation discovery service", () => {
         websiteProjectId: "33333333-3333-4333-8333-333333333333",
       },
       contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
       context: {
         snapshotVersion: 2,
+        profileVersionId,
+        promotionTargetVersionId,
         projectSettingsVersionId:
           "55555555-5555-4555-8555-555555555555",
         projectSettingsVersion: 1,
@@ -412,12 +1407,18 @@ describe("commercial recommendation discovery service", () => {
     expect(result.candidates).toEqual([]);
     expect(providerExecute).not.toHaveBeenCalled();
     expect(authorize).not.toHaveBeenCalled();
-    expect(fetch).toHaveBeenCalledOnce();
-    expect(
-      client.calls.find(({ text }) =>
-        text.includes("FROM backlink_resource_library_items")
-      )?.values[2],
-    ).toBe(455);
+    expect(fetch).not.toHaveBeenCalled();
+    const resourceQuery = client.calls.find(({ text }) =>
+      text.includes("FROM backlink_resource_library_items")
+    );
+    expect(resourceQuery?.text).not.toContain(
+      "ORDER BY authority_score DESC",
+    );
+    expect(resourceQuery?.text).not.toContain("LIMIT $3");
+    expect(resourceQuery?.values).toEqual([
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+    ]);
   });
 
   it("uses disjoint persisted query windows before widening the round", () => {
@@ -460,23 +1461,386 @@ describe("commercial recommendation discovery service", () => {
         context,
         refillRound,
         refillWindow,
+        languageCode: "en",
       });
     const first = queries(1, 1);
     const second = queries(1, 2);
     const broader = queries(2, 1);
     const thirdWindow = queries(1, 3);
 
-    expect(first).toHaveLength(20);
-    expect(second).toHaveLength(20);
-    expect(broader).toHaveLength(20);
-    expect(thirdWindow).toHaveLength(20);
+    expect(first).toHaveLength(6);
+    expect(second).toHaveLength(6);
+    expect(broader).toHaveLength(6);
+    expect(thirdWindow).toHaveLength(6);
     expect(first.filter((query) => second.includes(query))).toEqual([]);
     expect(first.filter((query) => broader.includes(query))).toEqual([]);
     expect(second.filter((query) => broader.includes(query))).toEqual([]);
     expect(thirdWindow.filter((query) => broader.includes(query))).toEqual([]);
     expect([...first, ...second, ...broader, ...thirdWindow].every((query) =>
-      query.includes("US")
+      query.includes("United States")
     )).toBe(true);
+  });
+
+  it("filters language before subject limits without exposing raw goals", () => {
+    const context = {
+      snapshotVersion: 2 as const,
+      profileVersionId,
+      promotionTargetVersionId,
+      projectSettingsVersionId: "settings-elephtv",
+      projectSettingsVersion: 1,
+      canonicalDomain: "elephtv.com",
+      locale: "en-ZA",
+      countryCode: "ZA",
+      products: ["直播", "影视"],
+      keywords: [
+        "South African live streaming guide",
+        "independent film reviews",
+      ],
+      targetUrls: ["https://elephtv.com/watch/live"],
+      targetAudiences: ["南非流媒体观众"],
+      partnershipGoals: [
+        "获取权威影视评测 / authoritative film review backlinks",
+      ],
+      explicitCompetitorDomains: [],
+    };
+    const blueprint = buildCommercialDiscoveryBlueprint({
+      context: {
+        projectContextVersionId: "context-elephtv",
+        projectSettingsVersionId: "settings-elephtv",
+        projectSettingsVersion: 1,
+        canonicalDomain: "elephtv.com",
+        countries: ["ZA"],
+        languages: ["en"],
+        products: context.products,
+        keywords: context.keywords,
+        promotionTargetUrls: context.targetUrls,
+        declaredTargetAudiences: context.targetAudiences,
+        partnershipGoals: context.partnershipGoals,
+        explicitCompetitorDomains: [],
+        historicalFeedbackDomains: [],
+        evidenceRefs: ["project-context:elephtv"],
+      },
+    });
+
+    const queries = buildCommercialTierSearchQueries({
+      tier: "exact_product_target_market",
+      blueprint,
+      context,
+      refillRound: 1,
+      refillWindow: 1,
+      languageCode: "en",
+    });
+
+    expect(queries).toHaveLength(6);
+    expect(queries.some((query) =>
+      query.includes("South African live streaming guide")
+    )).toBe(true);
+    expect(queries.every((query) => !/\p{Script=Han}/u.test(query))).toBe(true);
+    expect(queries.every((query) =>
+      !query.toLowerCase().includes("authoritative film review backlinks")
+    )).toBe(true);
+    expect(queries.every((query) => !query.includes("elephtv.com"))).toBe(true);
+  });
+
+  it("blocks a raw partnership goal embedded in a Blueprint query cluster", () => {
+    const rawGoal = "authoritative film review backlinks";
+    const context = {
+      snapshotVersion: 2 as const,
+      profileVersionId,
+      promotionTargetVersionId,
+      projectSettingsVersionId: "settings-goal-boundary",
+      projectSettingsVersion: 1,
+      canonicalDomain: "elephtv.com",
+      locale: "en-ZA",
+      countryCode: "ZA",
+      products: ["影视"],
+      keywords: [rawGoal],
+      targetUrls: ["https://elephtv.com/watch/live"],
+      targetAudiences: ["南非流媒体观众"],
+      partnershipGoals: [`获取权威影视评测 / ${rawGoal}`],
+      explicitCompetitorDomains: [],
+    };
+    const generated = buildCommercialDiscoveryBlueprint({
+      context: {
+        projectContextVersionId: "context-goal-boundary",
+        projectSettingsVersionId: "settings-goal-boundary",
+        projectSettingsVersion: 1,
+        canonicalDomain: "elephtv.com",
+        countries: ["ZA"],
+        languages: ["en"],
+        products: context.products,
+        keywords: context.keywords,
+        promotionTargetUrls: context.targetUrls,
+        declaredTargetAudiences: context.targetAudiences,
+        partnershipGoals: context.partnershipGoals,
+        explicitCompetitorDomains: [],
+        historicalFeedbackDomains: [],
+        evidenceRefs: ["project-context:goal-boundary"],
+      },
+    });
+    const blueprint = Object.freeze({
+      ...generated,
+      topicClusters: Object.freeze(["streaming media"]),
+      searchQueryClusters: Object.freeze([
+        `${rawGoal} publication`,
+        "streaming media publication",
+      ]),
+    });
+
+    const queries = buildCommercialTierSearchQueries({
+      tier: "exact_product_target_market",
+      blueprint,
+      context,
+      refillRound: 1,
+      refillWindow: 1,
+      languageCode: "en",
+    });
+
+    expect(queries.length).toBeGreaterThan(0);
+    expect(queries.some((query) => query.includes("streaming media"))).toBe(true);
+    expect(queries.every((query) =>
+      !query.toLowerCase().includes(rawGoal)
+    )).toBe(true);
+  });
+
+  it("uses an AI blueprint as the exclusive semantic query plan", () => {
+    const aiQueries = [
+      "South Africa streaming television blogs",
+      "South Africa independent film publications",
+      "streaming television contributor sites South Africa",
+      "South Africa entertainment resource submissions",
+    ];
+    const context = {
+      snapshotVersion: 2 as const,
+      profileVersionId,
+      promotionTargetVersionId,
+      projectSettingsVersionId: "settings-ai-query-plan",
+      projectSettingsVersion: 1,
+      canonicalDomain: "elephtv.com",
+      locale: "en-ZA",
+      countryCode: "ZA",
+      products: ["直播", "影视"],
+      keywords: ["South African streaming guide"],
+      targetUrls: ["https://elephtv.com/watch/live"],
+      targetAudiences: ["South African streaming viewers"],
+      partnershipGoals: ["editorial review backlinks"],
+      explicitCompetitorDomains: [],
+    };
+    const blueprint = buildCommercialDiscoveryBlueprint({
+      context: {
+        projectContextVersionId: "context-ai-query-plan",
+        projectSettingsVersionId: "settings-ai-query-plan",
+        projectSettingsVersion: 1,
+        canonicalDomain: context.canonicalDomain,
+        countries: ["ZA"],
+        languages: ["en"],
+        products: context.products,
+        keywords: context.keywords,
+        promotionTargetUrls: context.targetUrls,
+        declaredTargetAudiences: context.targetAudiences,
+        partnershipGoals: context.partnershipGoals,
+        explicitCompetitorDomains: [],
+        historicalFeedbackDomains: [],
+        evidenceRefs: ["project-context:ai-query-plan"],
+      },
+      aiOutput: {
+        targetAudience: context.targetAudiences,
+        productValuePropositions: ["live television streaming"],
+        topicClusters: ["streaming television", "independent film"],
+        searchQueryClusters: aiQueries,
+        targetSiteArchetypes: ["regional entertainment publication"],
+        cooperationAngles: ["editorial contribution"],
+        negativeKeywords: [],
+        excludedSiteTypes: ["general platform"],
+        discoveredCompetitorSeeds: [],
+      },
+      aiModel: {
+        providerRef: "openai",
+        modelId: "gpt-5.6-terra",
+        modelVersion: "2026-08-21",
+      },
+      aiGeneration: {
+        inputTokens: 100,
+        outputTokens: 50,
+        estimatedCostUsd: 0.0002,
+        latencyMs: 25,
+      },
+    });
+
+    const firstWindow = buildCommercialTierSearchQueries({
+      tier: "exact_product_target_market",
+      blueprint,
+      context,
+      refillRound: 1,
+      refillWindow: 1,
+      languageCode: "en",
+    });
+    const secondWindow = buildCommercialTierSearchQueries({
+      tier: "exact_product_target_market",
+      blueprint,
+      context,
+      refillRound: 1,
+      refillWindow: 2,
+      languageCode: "en",
+    });
+
+    expect(blueprint.generator).toBe("AI");
+    expect(firstWindow).toEqual(aiQueries);
+    expect(secondWindow).toEqual([]);
+    expect(firstWindow.every((query) =>
+      !query.includes("local or regional publication")
+      && !query.includes("adjacent industry publication")
+    )).toBe(true);
+  });
+
+  it("lets Terra normalize stored project facts into target-language queries", async () => {
+    const client = new MemoryDiscoveryClient();
+    const providerExecute = vi.fn(async (call: CommercialDiscoveryCall) => {
+      if (call.sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE") {
+        expect(client.calls.some(({ text }) =>
+          text.includes("INSERT INTO backlink_commercial_discovery_blueprints")
+        )).toBe(true);
+        expect(call.plannerLineage).toMatchObject({
+          blueprintId: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f-]{27}$/u,
+          ),
+          queryId: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        });
+        expect(call.request).not.toHaveProperty(
+          "__growthosDiscoveryPlannerLineage",
+        );
+      }
+      return { tasks: [] };
+    });
+    const authorize = vi.fn(async () => {});
+    const aiQueries = [
+      "South Africa streaming service blogs",
+      "South Africa online television publications",
+      "streaming contributor sites South Africa",
+      "South Africa entertainment media kit",
+    ];
+    const generate = vi.fn(async () => ({
+      output: {
+        targetAudience: ["South African streaming viewers"],
+        productValuePropositions: ["live television streaming"],
+        topicClusters: ["streaming service", "online television"],
+        searchQueryClusters: aiQueries,
+        targetSiteArchetypes: ["regional entertainment publication"],
+        cooperationAngles: ["editorial contribution"],
+        negativeKeywords: [],
+        excludedSiteTypes: ["general platform"],
+        discoveredCompetitorSeeds: [],
+      },
+      model: {
+        providerRef: "openai",
+        modelId: "gpt-5.6-terra",
+        modelVersion: "2026-08-21",
+      },
+      generation: {
+        inputTokens: 100,
+        outputTokens: 50,
+        estimatedCostUsd: 0.0002,
+        latencyMs: 25,
+      },
+    }));
+
+    await executeCommercialRecommendationDiscovery({
+      client,
+      provider: { execute: providerExecute },
+      gate: { preflight: async () => {}, authorize },
+      blueprintGenerator: { generate },
+      safeFetch: {
+        fetch: async () => {
+          throw new Error("SAFE_FETCH_MUST_NOT_RUN");
+        },
+      },
+      scope: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+      },
+      contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
+      context: {
+        snapshotVersion: 2,
+        profileVersionId,
+        promotionTargetVersionId,
+        projectSettingsVersionId:
+          "55555555-5555-4555-8555-555555555555",
+        projectSettingsVersion: 1,
+        canonicalDomain: "elephtv.com",
+        locale: "en-ZA",
+        countryCode: "ZA",
+        products: ["直播", "影视"],
+        keywords: [],
+        targetUrls: ["https://elephtv.com/watch/live"],
+        targetAudiences: ["南非流媒体观众"],
+        partnershipGoals: [
+          "获取权威影视评测 / authoritative film review backlinks",
+        ],
+        explicitCompetitorDomains: [],
+      },
+      configuration: {
+        endpointAllowlist: [
+          "/v3/dataforseo_labs/google/competitors_domain/live",
+          "/v3/serp/google/organic/task_post",
+        ],
+        estimatedCostMicros: 1_000,
+        absoluteBudgetMicros: 10_000,
+        candidateLimit: 25,
+        locationCode: "2710",
+        languageCode: "en",
+      },
+      requestedCount: 10,
+      visiblePoolGeneration: 1,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      jobId: "job-language-input-required",
+      actorId: "stage2b-test",
+      now: () => new Date("2026-08-19T08:00:00.000Z"),
+    });
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(providerExecute).toHaveBeenCalled();
+    expect(authorize).toHaveBeenCalled();
+    const semanticCalls = providerExecute.mock.calls
+      .map(([call]) => call as CommercialDiscoveryCall)
+      .filter(({ sourceType }) =>
+        sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE"
+      );
+    expect(semanticCalls.length).toBeGreaterThan(0);
+    expect(semanticCalls.every(({ request }) =>
+      aiQueries.includes(String(request.keyword))
+    )).toBe(true);
+    expect(semanticCalls.every(({ request }) =>
+      !String(request.keyword).includes("local or regional publication")
+      && !String(request.keyword).includes("adjacent industry publication")
+    )).toBe(true);
+    const persistedSemanticRequests = client.calls
+      .filter(({ text }) =>
+        text.includes("INSERT INTO backlink_provider_requests")
+      )
+      .map(({ values }) =>
+        JSON.parse(String(values[7])) as Record<string, unknown>
+      )
+      .filter((payload) =>
+        "__growthosDiscoveryPlannerLineage" in payload
+      );
+    expect(persistedSemanticRequests.length).toBeGreaterThan(0);
+    expect(persistedSemanticRequests.every((payload) =>
+      aiQueries.includes(String(payload.keyword))
+    )).toBe(true);
+    const persistedSemanticArtifacts = client.calls
+      .filter(({ text }) =>
+        text.includes(
+          "INSERT INTO backlink_commercial_discovery_artifacts",
+        )
+      )
+      .map(({ values }) =>
+        JSON.parse(String(values[9])) as Record<string, unknown>
+      )
+      .filter((artifact) => artifact.plannerLineage !== undefined);
+    expect(persistedSemanticArtifacts.length).toBeGreaterThan(0);
   });
 
   it("serializes independent provider request clients", async () => {
@@ -497,6 +1861,9 @@ describe("commercial recommendation discovery service", () => {
       client,
       provider: { execute: providerExecute },
       gate: {
+        preflight: async () => {
+          throw new Error("SHARED_GATE_MUST_NOT_BE_USED");
+        },
         authorize: async () => {
           throw new Error("SHARED_GATE_MUST_NOT_BE_USED");
         },
@@ -519,8 +1886,11 @@ describe("commercial recommendation discovery service", () => {
         websiteProjectId: "33333333-3333-4333-8333-333333333333",
       },
       contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
       context: {
         snapshotVersion: 2,
+        profileVersionId,
+        promotionTargetVersionId,
         projectSettingsVersionId:
           "55555555-5555-4555-8555-555555555555",
         projectSettingsVersion: 1,
@@ -545,6 +1915,7 @@ describe("commercial recommendation discovery service", () => {
       requestClientFactory: async () => ({
         client: new MemoryDiscoveryClient(),
         gate: {
+          preflight: async () => {},
           authorize: async () => {
             requestGateCalls += 1;
           },
@@ -563,10 +1934,101 @@ describe("commercial recommendation discovery service", () => {
       now: () => new Date("2026-08-12T15:00:00.000Z"),
     });
 
-    expect(providerExecute).toHaveBeenCalledTimes(10);
+    expect(providerExecute).toHaveBeenCalledTimes(4);
     expect(maximumInFlight).toBe(1);
-    expect(requestGateCalls).toBe(10);
-    expect(released).toBe(10);
+    expect(requestGateCalls).toBe(4);
+    expect(released).toBe(4);
+  });
+
+  it("rethrows internal request failures instead of recording provider unavailability", async () => {
+    const client = new MemoryDiscoveryClient();
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const internalFailure = new Error("operator does not exist: uuid = text");
+    let released = 0;
+
+    await expect(executeCommercialRecommendationDiscovery({
+      client,
+      provider: { execute: providerExecute },
+      gate: {
+        preflight: async () => {},
+        authorize: async () => {},
+      },
+      safeFetch: {
+        fetch: async () => ({
+          requestedUrl: "https://silksleepwear.com/",
+          finalUrl: "https://silksleepwear.com/",
+          status: 200,
+          contentType: "text/html",
+          body: new Uint8Array(),
+          redirectChain: [],
+          resolvedIps: ["203.0.113.10"],
+          fetchedAt: "2026-08-17T09:00:00.000Z",
+        }),
+      },
+      scope: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+      },
+      contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
+      context: {
+        snapshotVersion: 2,
+        profileVersionId,
+        promotionTargetVersionId,
+        projectSettingsVersionId:
+          "55555555-5555-4555-8555-555555555555",
+        projectSettingsVersion: 1,
+        canonicalDomain: "silksleepwear.com",
+        locale: "en-US",
+        countryCode: "US",
+        products: ["silk pajamas"],
+        keywords: ["silk sleepwear"],
+        targetUrls: ["https://silksleepwear.com/"],
+        targetAudiences: ["women"],
+        partnershipGoals: ["editorial review"],
+        explicitCompetitorDomains: [],
+      },
+      configuration: {
+        endpointAllowlist: ["/v3/serp/google/organic/task_post"],
+        estimatedCostMicros: 1_000,
+        absoluteBudgetMicros: 10_000,
+        candidateLimit: 25,
+        locationCode: "2840",
+        languageCode: "en",
+      },
+      requestClientFactory: async () => ({
+        client: {
+          query: async (text: string) => {
+            if (text.includes("DATAFORSEO_WORKER_INTERRUPTED_AFTER_TASK_ACCEPTED")) {
+              throw internalFailure;
+            }
+            return { rows: [] };
+          },
+        },
+        gate: {
+          preflight: async () => {},
+          authorize: async () => {},
+        },
+        release: () => {
+          released += 1;
+        },
+      }),
+      requestedCount: 10,
+      visiblePoolGeneration: 1,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      refillWindow: 1,
+      jobId: "job-internal-failure",
+      actorId: "phase-4-test",
+      now: () => new Date("2026-08-17T09:00:00.000Z"),
+    })).rejects.toBe(internalFailure);
+
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(released).toBeGreaterThan(0);
+    expect(client.calls.some(({ text }) =>
+      text.includes("provider_request_fingerprints=$7::jsonb")
+    )).toBe(false);
   });
 
   it("scores existing resources against each project without treating authority as fit", () => {
@@ -671,6 +2133,27 @@ describe("commercial recommendation discovery service", () => {
     })).toMatchObject({
       eligible: false,
       reasonCodes: expect.arrayContaining(["RESOURCE_RISK_NOT_LOW"]),
+    });
+    expect(scoreCuratedResourceForProject({
+      resource: {
+        ...resource,
+        categories: ["Profile"],
+        tags: ["Profile Backlink", "Other / Needs Review"],
+      },
+      blueprint: blueprint({
+        canonicalDomain: "screenwise.co.za",
+        country: "ZA",
+        products: ["streaming entertainment"],
+        keywords: ["film review website"],
+        audience: ["South African viewers"],
+      }),
+      minimumAuthorityScore: 40,
+    })).toMatchObject({
+      eligible: false,
+      matchedTerms: [],
+      reasonCodes: expect.arrayContaining([
+        "RESOURCE_PROJECT_TOPIC_MISMATCH",
+      ]),
     });
   });
 });

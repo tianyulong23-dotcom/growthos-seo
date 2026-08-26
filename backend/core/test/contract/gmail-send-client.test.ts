@@ -101,7 +101,7 @@ describe("BL-AI-117 Gmail Send Real Adapter shell", () => {
 
   it.each([
     [400, undefined, gmailSendFailureCodes.invalidRequest, false, undefined],
-    [401, undefined, gmailSendFailureCodes.preRequestFailed, true, undefined],
+    [401, undefined, gmailSendFailureCodes.reauthRequired, false, undefined],
     [403, "scope", gmailSendFailureCodes.forbidden, false, undefined],
     [403, "quota", gmailSendFailureCodes.rateLimited, true, 120],
     [429, undefined, gmailSendFailureCodes.rateLimited, true, 120],
@@ -140,7 +140,7 @@ describe("BL-AI-117 Gmail Send Real Adapter shell", () => {
     });
   });
 
-  it("retries only failures proven to occur before request dispatch", async () => {
+  it("classifies a pre-dispatch provider network failure truthfully", async () => {
     const send = vi.fn(async () => {
       throw new GmailSendProviderError({
         kind: "transport",
@@ -154,7 +154,26 @@ describe("BL-AI-117 Gmail Send Real Adapter shell", () => {
 
     await expect(adapter.send(command)).resolves.toEqual({
       kind: "definitely_not_sent",
-      code: gmailSendFailureCodes.preRequestFailed,
+      code: gmailSendFailureCodes.providerNetwork,
+      retryable: true,
+    });
+  });
+
+  it("preserves a temporary token refresh failure before provider dispatch", async () => {
+    const send = vi.fn(async () => {
+      throw new GmailSendProviderError({
+        kind: "auth",
+        authCode: "GOOGLE_AUTH_TEMPORARY_FAILURE",
+      });
+    });
+    const adapter = new GmailSendClientAdapter({
+      config: { enabled: true },
+      client: { send },
+    });
+
+    await expect(adapter.send(command)).resolves.toEqual({
+      kind: "definitely_not_sent",
+      code: gmailSendFailureCodes.tokenRefreshFailed,
       retryable: true,
     });
   });

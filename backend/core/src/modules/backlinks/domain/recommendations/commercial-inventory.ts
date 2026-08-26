@@ -23,7 +23,7 @@ function assertWatermarks(low: number, high: number, name: string): void {
 export function decideCommercialInventoryRefill(input: Readonly<{
   policy: CommercialInventoryPolicy;
   candidateReadyCount: number;
-  publishedContactReadyCount: number;
+  publishedVisibleCount: number;
   historicalVerifiedEmailCount: number;
   historicalCandidateCount: number;
   refillCycleActive?: boolean | undefined;
@@ -58,13 +58,12 @@ export function decideCommercialInventoryRefill(input: Readonly<{
   );
   const publishedDeficit = Math.max(
     0,
-    policy.publishedHighWatermark - input.publishedContactReadyCount,
+    policy.publishedHighWatermark - input.publishedVisibleCount,
   );
-  const publishedOverfetch = Math.ceil(publishedDeficit / effectiveEmailHitRate);
   const inventoryLow =
-    input.publishedContactReadyCount < policy.publishedLowWatermark;
+    input.publishedVisibleCount < policy.publishedLowWatermark;
   const refillCycleActive = input.refillCycleActive === true
-    && input.publishedContactReadyCount < policy.publishedHighWatermark;
+    && input.publishedVisibleCount < policy.publishedHighWatermark;
   const refillNeeded = inventoryLow || refillCycleActive;
   const pauseReason = input.inflight
     ? "inflight" as const
@@ -75,7 +74,7 @@ export function decideCommercialInventoryRefill(input: Readonly<{
   return Object.freeze({
     shouldRefill: refillNeeded && pauseReason === null,
     requestedCandidateCount: refillNeeded
-      ? publishedOverfetch
+      ? publishedDeficit
       : 0,
     effectiveEmailHitRate,
     pauseReason,

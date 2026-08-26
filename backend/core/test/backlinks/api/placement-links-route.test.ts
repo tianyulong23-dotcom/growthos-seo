@@ -53,6 +53,8 @@ const candidateRow = {
   id: candidateId,
   candidateId,
   placementId: null,
+  opportunityId: "018f0000-0000-7000-8000-000000000201",
+  replyId: null,
   sourcePageUrl: "https://publisher.example/candidate",
   targetUrl: "https://target.example/landing",
   candidateStatus: "REVIEW_REQUIRED",
@@ -69,6 +71,8 @@ const changedRow = {
   id: changedPlacementId,
   candidateId,
   placementId: changedPlacementId,
+  opportunityId: "018f0000-0000-7000-8000-000000000201",
+  replyId: "018f0000-0000-7000-8000-000000000202",
   sourcePageUrl: "https://publisher.example/changed",
   targetUrl: "https://target.example/landing",
   candidateStatus: null,
@@ -76,6 +80,9 @@ const changedRow = {
   validationStatus: "VALID",
   healthStatus: "changed",
   monitoringStatus: "enabled",
+  latestObservedAt: null,
+  lastSuccessfulObservationAt: null,
+  latestFailureCode: null,
   nextCheckAt: "2026-07-29T12:00:00.000Z",
   consecutiveAnomalies: 1,
   browserFallbackEnabled: true,
@@ -99,6 +106,26 @@ describe("BL-AI-158 Links API", () => {
     const query = createPlacementLinksQuery({
       query: async (text, values) => {
         calls.push({ text, values });
+        if (text.includes("placement_counts AS")) {
+          return {
+            rows: [{
+              placementTotal: 2,
+              pendingVerification: 0,
+              active: 0,
+              suspectedChanged: 0,
+              changed: 1,
+              suspectedLost: 0,
+              lost: 1,
+              recovered: 0,
+              candidateTotal: 1,
+              lastSuccessfulObservationAt: null,
+              latestAttemptAt: null,
+              latestAttemptStatus: null,
+              latestFailureCode: null,
+              nextCheckAt: null,
+            }],
+          };
+        }
         if (text.includes("FROM backlink_placement_candidates c")
           && text.includes("c.id AS \"candidateId\"")) {
           return {
@@ -204,6 +231,21 @@ describe("BL-AI-158 Links API", () => {
         },
       ],
       hasMore: true,
+      summary: {
+        placements: {
+          total: 2,
+          changed: 1,
+          lost: 1,
+        },
+        candidates: {
+          total: 1,
+          countsTowardKpi: false,
+        },
+        evidence: {
+          source: "DIRECT_MONITOR",
+          freshness: "unknown",
+        },
+      },
       meta: {
         organizationId: "org-1",
         workspaceId: "workspace-1",
@@ -235,7 +277,7 @@ describe("BL-AI-158 Links API", () => {
       hasMore: false,
       nextCursor: null,
     });
-    expect(calls[1]?.values?.[4]).toBe(changedRow.createdAt);
+    expect(calls[2]?.values?.[4]).toBe(changedRow.createdAt);
 
     const lost = await app.inject({
       method: "GET",
@@ -245,7 +287,7 @@ describe("BL-AI-158 Links API", () => {
     expect(lost.json()).toMatchObject({
       items: [{ displayState: "lost", placementId: lostPlacementId }],
     });
-    expect(calls[2]?.values?.[3]).toBe("lost");
+    expect(calls[4]?.values?.[3]).toBe("lost");
 
     const candidate = await app.inject({
       method: "GET",
@@ -283,14 +325,14 @@ describe("BL-AI-158 Links API", () => {
       url: "/api/v1/projects/foreign/backlinks/links",
     });
     expect(denied.statusCode).toBe(403);
-    expect(calls).toHaveLength(5);
+    expect(calls).toHaveLength(8);
 
     const invalid = await app.inject({
       method: "GET",
       url: "/api/v1/projects/project-key/backlinks/links?cursor=invalid",
     });
     expect(invalid.statusCode).toBe(400);
-    expect(calls).toHaveLength(5);
+    expect(calls).toHaveLength(8);
   });
 
   it("serves lifecycle, immutable evidence, and authorized reverify contracts", async () => {
@@ -311,6 +353,31 @@ describe("BL-AI-158 Links API", () => {
             items: [],
             nextCursor: null,
             hasMore: false,
+            summary: {
+              placements: {
+                total: 0,
+                pendingVerification: 0,
+                active: 0,
+                suspectedChanged: 0,
+                changed: 0,
+                suspectedLost: 0,
+                lost: 0,
+                recovered: 0,
+              },
+              candidates: {
+                total: 0,
+                countsTowardKpi: false,
+              },
+              evidence: {
+                source: "DIRECT_MONITOR",
+                dataCutoff: null,
+                freshness: "unknown",
+                lastSuccessfulObservationAt: null,
+                latestAttemptAt: null,
+                latestAttemptStatus: "idle",
+                latestFailure: { status: "none", code: null },
+              },
+            },
           }),
           getCandidateLink: async () => null,
           getPlacementLink: async () => null,
@@ -333,6 +400,7 @@ describe("BL-AI-158 Links API", () => {
             evidenceId,
             placementId: changedPlacementId,
             kind: "placement_observation",
+            evidenceSource: "DIRECT_MONITOR",
             immutable: true,
             hashVerified: true,
             hash: "a".repeat(64),

@@ -1,8 +1,19 @@
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
+
 import { describe, expect, it, vi } from "vitest";
+
+const httpsRequest = vi.hoisted(() => vi.fn());
+vi.mock("node:https", async (importOriginal) => ({
+  ...await importOriginal<typeof import("node:https")>(),
+  request: httpsRequest,
+}));
+
 import {
-  SafeFetchAdapter, type SafeHttpResponse, type SafeHttpTransport,
+  nodeHttpTransport, SafeFetchAdapter, type SafeHttpResponse, type SafeHttpTransport,
 } from "../../src/modules/backlinks/adapters/http/safe-fetch.adapter.js";
 import type { HostnameResolver } from "../../src/modules/backlinks/adapters/http/network-policy.js";
+import { enforceUrlPolicy } from "../../src/modules/backlinks/adapters/http/url-policy.js";
 import { safeFetchFailureCodes } from "../../src/modules/backlinks/ports/safe-fetch.port.js";
 const request = {
   url: "https://example.com/start", purpose: "contact-enrichment",
@@ -29,6 +40,34 @@ const adapter = (transport: SafeHttpTransport, timeoutMs = 50) =>
     timeoutMs, transport, resolver, clock: () => "2026-07-23T06:00:00.000Z",
   });
 describe("BL-AI-068 SafeFetch adapter", () => {
+  it("keeps pinned-IP requests off Node's environment proxy agent", async () => {
+    httpsRequest.mockImplementationOnce((options, receive) => {
+      const response = Readable.from([]);
+      Object.assign(response, {
+        statusCode: 200,
+        headers: { "content-type": "text/html" },
+        destroy: vi.fn(),
+      });
+      queueMicrotask(() => receive(response));
+      return Object.assign(new EventEmitter(), { end: vi.fn() });
+    });
+
+    await nodeHttpTransport({
+      url: enforceUrlPolicy("https://example.com/start"),
+      address: { address: "8.8.8.8", family: 4 },
+      signal: new AbortController().signal,
+    });
+
+    expect(httpsRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: false,
+        hostname: "8.8.8.8",
+        servername: "example.com",
+      }),
+      expect.any(Function),
+    );
+  });
+
   it("pins an approved IP and revalidates a redirect", async () => {
     const transport = vi.fn<SafeHttpTransport>()
       .mockResolvedValueOnce(reply({ status: 302, location: "/final" }))
@@ -44,6 +83,25 @@ describe("BL-AI-068 SafeFetch adapter", () => {
       address: { address: "8.8.8.8" },
       url: { normalizedUrl: "https://example.com/final" },
     });
+  });
+  it("tries each approved address after a transport failure", async () => {
+    const multiAddressResolver: HostnameResolver = async () => [
+      { address: "8.8.8.8", family: 4 },
+      { address: "1.1.1.1", family: 4 },
+    ];
+    const transport = vi.fn<SafeHttpTransport>()
+      .mockRejectedValueOnce(new Error("first address unavailable"))
+      .mockResolvedValueOnce(reply());
+    const result = await new SafeFetchAdapter({
+      timeoutMs: 50,
+      transport,
+      resolver: multiAddressResolver,
+      clock: () => "2026-07-23T06:00:00.000Z",
+    }).fetch(request);
+
+    expect(result.resolvedIps).toEqual(["8.8.8.8", "1.1.1.1"]);
+    expect(transport.mock.calls.map(([call]) => call.address.address))
+      .toEqual(["8.8.8.8", "1.1.1.1"]);
   });
   it("blocks a private redirect before a second request", async () => {
     const transport = vi.fn<SafeHttpTransport>().mockResolvedValue(

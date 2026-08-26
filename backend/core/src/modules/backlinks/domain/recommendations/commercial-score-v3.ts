@@ -1,7 +1,12 @@
 export const commercialRecommendationFitModelVersion =
   "recommendation-commercial-fit.v3";
 export const commercialRecommendationFitRuleVersion =
-  "recommendation-commercial-fit-rules.v3.1";
+  "recommendation-commercial-fit-rules.v3.2";
+export const commercialFitBaselineAdmissionThreshold = 50;
+export const commercialFitMinimumAdmissionThreshold = 50;
+export const commercialFitAdmissionThresholdStep = 5;
+export const commercialFitProgressiveAdmissionPolicyVersion =
+  "commercial-fit-progressive-admission.v1";
 
 export const commercialFitComponentIds = [
   "semantic_relevance",
@@ -34,7 +39,6 @@ export const commercialFitHardGateIds = [
   "unrelated_industry",
   "unsafe_or_disallowed",
   "pbn_or_link_farm",
-  "forbidden_market_mismatch",
 ] as const;
 
 export type CommercialFitHardGateId = (typeof commercialFitHardGateIds)[number];
@@ -62,6 +66,13 @@ export type CommercialFitGateInput = Readonly<{
   evidenceRefs: readonly string[];
 }>;
 
+export type CommercialFitAdmission = Readonly<{
+  policyVersion: typeof commercialFitProgressiveAdmissionPolicyVersion;
+  baselineThreshold: typeof commercialFitBaselineAdmissionThreshold;
+  appliedThreshold: number;
+  fallbackApplied: boolean;
+}>;
+
 export type CommercialFitDecision = Readonly<{
   decision: "eligible" | "ineligible" | "insufficient_data" | "manual_review";
   scoreModelVersion: typeof commercialRecommendationFitModelVersion;
@@ -80,16 +91,53 @@ export type CommercialFitDecision = Readonly<{
   }>[];
   hitGates: readonly CommercialFitHardGateId[];
   missingEvidence: readonly string[];
+  admission: CommercialFitAdmission;
 }>;
 
-const criticalComponents = new Set<CommercialFitComponentId>([
-  "semantic_relevance",
-  "market_language_tier",
-  "safefetch_technical_access",
+const criticalSafetyGateIds = new Set<CommercialFitHardGateId>([
+  "unsafe_or_disallowed",
+  "pbn_or_link_farm",
 ]);
 
 function roundFour(value: number): number {
   return Math.round((value + Number.EPSILON) * 10_000) / 10_000;
+}
+
+function admissionForThreshold(threshold: number): CommercialFitAdmission {
+  if (
+    !Number.isInteger(threshold) ||
+    threshold < commercialFitMinimumAdmissionThreshold ||
+    threshold > commercialFitBaselineAdmissionThreshold ||
+    threshold % commercialFitAdmissionThresholdStep !== 0
+  ) {
+    throw new TypeError(
+      "Commercial fit admission threshold must be 50",
+    );
+  }
+  return Object.freeze({
+    policyVersion: commercialFitProgressiveAdmissionPolicyVersion,
+    baselineThreshold: commercialFitBaselineAdmissionThreshold,
+    appliedThreshold: threshold,
+    fallbackApplied: threshold < commercialFitBaselineAdmissionThreshold,
+  });
+}
+
+export function resolveProgressiveCommercialFitAdmissionThreshold(
+  scores: readonly CommercialFitDecision[],
+): number {
+  void scores;
+  return commercialFitBaselineAdmissionThreshold;
+}
+
+export function applyCommercialFitAdmissionThreshold(
+  score: CommercialFitDecision,
+  threshold: number,
+): CommercialFitDecision {
+  const admission = admissionForThreshold(threshold);
+  return Object.freeze({
+    ...score,
+    admission,
+  });
 }
 
 export function scoreCommercialRecommendationFit(
@@ -123,6 +171,9 @@ export function scoreCommercialRecommendationFit(
       gate?.state === "manual_review"
     );
   });
+  const uncertainSafetyGates = uncertainGates.filter((id) =>
+    criticalSafetyGateIds.has(id)
+  );
   const ordered = commercialFitComponentIds.map((id) => {
     const component = components.get(id);
     if (component === undefined) throw new TypeError(`Missing component ${id}`);
@@ -149,12 +200,10 @@ export function scoreCommercialRecommendationFit(
   const missingEvidence = ordered
     .filter((component) => component.points === null)
     .map((component) => `score.${component.id}`);
-  const criticalMissing = ordered.some(
-    (component) =>
-      criticalComponents.has(component.id) && component.points === null,
-  );
-  const requiresManualReview = [...gates.values(), ...ordered].some(
-    (item) => item.state === "manual_review",
+  const requiresManualReview = commercialFitHardGateIds.some(
+    (id) =>
+      criticalSafetyGateIds.has(id) &&
+      gates.get(id)?.state === "manual_review",
   );
   const total = roundFour(
     ordered.reduce((sum, component) => sum + (component.points ?? 0), 0),
@@ -162,11 +211,11 @@ export function scoreCommercialRecommendationFit(
   const decision =
     hitGates.length > 0
       ? "ineligible"
-      : uncertainGates.length > 0 || criticalMissing
-        ? requiresManualReview
-          ? "manual_review"
-          : "insufficient_data"
-        : total >= 55
+      : requiresManualReview
+        ? "manual_review"
+      : uncertainSafetyGates.length > 0
+        ? "insufficient_data"
+        : total >= commercialFitBaselineAdmissionThreshold
           ? "eligible"
           : "ineligible";
 
@@ -184,6 +233,9 @@ export function scoreCommercialRecommendationFit(
       ...uncertainGates.map((id) => `gate.${id}`),
       ...missingEvidence,
     ]),
+    admission: admissionForThreshold(
+      commercialFitBaselineAdmissionThreshold,
+    ),
   });
 }
 

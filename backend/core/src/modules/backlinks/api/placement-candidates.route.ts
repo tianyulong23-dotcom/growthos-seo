@@ -43,6 +43,9 @@ const metaSchema = z.object({
 const responseSchema = z.object({
   candidateId: z.uuid(),
   opportunityId: z.uuid().optional(),
+  replyId: z.uuid().optional(),
+  placementId: z.uuid(),
+  lineageStatus: z.enum(["OUTREACH_DERIVED", "UNATTRIBUTED"]),
   status: z.enum(["PENDING_MATCH", "PENDING_VALIDATION"]),
   matchStatus: z.enum(["UNMATCHED", "AUTO_MATCHED"]),
   initialValidationStatus: z.literal("PENDING"),

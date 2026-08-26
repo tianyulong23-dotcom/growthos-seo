@@ -91,6 +91,7 @@ export function createOutboxRepository(client: OutboxQueryClient) {
       workerId: string;
       limit: number;
       eventType?: string;
+      eventId?: string;
       staleClaimBefore?: Date;
     }>): Promise<
       readonly ClaimedOutboxEvent[]
@@ -105,6 +106,7 @@ export function createOutboxRepository(client: OutboxQueryClient) {
                      AND status = 'processing' AND claimed_at <= $4)
                   )
               AND ($3::text IS NULL OR event_type = $3)
+              AND ($5::uuid IS NULL OR id = $5::uuid)
             ORDER BY available_at, created_at, id
             FOR UPDATE SKIP LOCKED
             LIMIT $1
@@ -131,6 +133,7 @@ export function createOutboxRepository(client: OutboxQueryClient) {
           input.workerId,
           input.eventType ?? null,
           input.staleClaimBefore ?? null,
+          input.eventId ?? null,
         ],
       );
       return result.rows as readonly ClaimedOutboxEvent[];
@@ -162,9 +165,13 @@ export function createOutboxRelayRepository(client: OutboxQueryClient) {
       workerId: string;
       limit: number;
       eventType?: string;
+      eventId?: string;
       staleClaimBefore?: Date;
     }>): Promise<readonly ClaimedOutboxEvent[]> {
       if (!Number.isInteger(input.limit) || input.limit < 1) return [];
+      if (input.eventId !== undefined) {
+        throw new Error("BACKLINK_OUTBOX_EXACT_CLAIM_UNSUPPORTED");
+      }
       const result = await client.query(
         `SELECT event_id AS "eventId",
                 organization_id AS "organizationId",

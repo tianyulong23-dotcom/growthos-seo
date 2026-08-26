@@ -20,7 +20,9 @@ import type {
 import type {
   BacklinkRecommendationRefillInput,
 } from "./definitions/backlink-recommendation-refill.orchestration.js";
-import { commercialSupplyPublishedTarget } from "../domain/recommendations/commercial-refill-cycle.js";
+import {
+  parseProviderOperationBudgetAuthorization,
+} from "../domain/recommendations/provider-operation-budget.js";
 import {
   sendIntentCreatedEventType,
 } from "../application/services/send-intent.repository.js";
@@ -29,6 +31,7 @@ import type {
   createOutboxRepository,
 } from "../db/repositories/outbox.repository.js";
 import {
+  assertBacklinksRecoveryTaskQueue,
   assertBacklinksTaskQueue,
   assertBacklinksWorkflowId,
   backlinksRuntimeContract,
@@ -410,12 +413,46 @@ function parseRecommendationRefillRequest(
     || Number(payload.visiblePoolGeneration) < 1
     || !Number.isInteger(payload.lowWatermark)
     || !Number.isInteger(payload.highWatermark)
-    || Number(payload.lowWatermark) !== commercialSupplyPublishedTarget - 1
-    || Number(payload.highWatermark) !== commercialSupplyPublishedTarget
+    || Number(payload.lowWatermark) < 0
+    || Number(payload.highWatermark) <= Number(payload.lowWatermark)
+    || (
+      payload.supplyMode !== undefined
+      && payload.supplyMode !== "existing_evidence"
+    )
   ) {
     throw new Error("BACKLINK_RECOMMENDATION_REFILL_OUTBOX_EVENT_INVALID");
   }
-  return payload as BacklinkRecommendationRefillInput;
+  const providerBudgetAuthorization =
+    payload.providerBudgetAuthorization === undefined
+      ? undefined
+      : parseProviderOperationBudgetAuthorization(
+        payload.providerBudgetAuthorization,
+      );
+  const expectedProviderOperationId =
+    `commercial-refill-operation:${payload.jobId as string}`;
+  if (
+    (
+      providerBudgetAuthorization === undefined
+      && payload.providerOperationId !== undefined
+    )
+    || (
+      providerBudgetAuthorization !== undefined
+      && payload.providerOperationId !== expectedProviderOperationId
+    )
+    || (
+      payload.supplyMode === "existing_evidence"
+      && (
+        providerBudgetAuthorization !== undefined
+        || payload.providerOperationId !== undefined
+      )
+    )
+  ) {
+    throw new Error("BACKLINK_RECOMMENDATION_REFILL_OUTBOX_EVENT_INVALID");
+  }
+  return {
+    ...payload,
+    providerBudgetAuthorization,
+  } as BacklinkRecommendationRefillInput;
 }
 
 function parseContactEnrichmentRequest(
@@ -483,10 +520,21 @@ export function createTemporalContactEnrichmentConsumer(
 export function createTemporalRecommendationRefillConsumer(
   client: TemporalWorkflowClient,
   taskQueue: string,
+  options: Readonly<{ expectedJobId: string }> | null = null,
 ): RecommendationRefillConsumer {
-  assertBacklinksTaskQueue(taskQueue);
+  if (options === null) {
+    assertBacklinksTaskQueue(taskQueue);
+  } else {
+    assertBacklinksRecoveryTaskQueue(taskQueue, options.expectedJobId);
+  }
   return {
     async consume(input) {
+      if (
+        options !== null
+        && input.jobId !== options.expectedJobId
+      ) {
+        throw new Error("BACKLINK_RECOMMENDATION_REFILL_RECOVERY_JOB_INVALID");
+      }
       const workflowId = buildBacklinksWorkflowId({
         organizationId: input.organizationId,
         workspaceId: input.workspaceId,
@@ -664,7 +712,10 @@ function createPlacementOutboxRelay<T>(options: Readonly<{
   const retryAt = options.retryAt ?? (() => new Date(Date.now() + 5_000));
   return {
     async runOnce(input: Readonly<{
-      workerId: string; limit: number; staleClaimBefore: Date;
+      workerId: string;
+      limit: number;
+      staleClaimBefore: Date;
+      eventId?: string;
     }>) {
       const events = await options.repository.claim({
         ...input,
@@ -776,7 +827,10 @@ export function createBacklinkOutboxRelay(options: Readonly<{
   const retryAt = options.retryAt ?? (() => new Date(Date.now() + 5_000));
   return {
     async runOnce(input: Readonly<{
-      workerId: string; limit: number; staleClaimBefore: Date;
+      workerId: string;
+      limit: number;
+      staleClaimBefore: Date;
+      eventId?: string;
     }>) {
       const events = await options.repository.claim({
         ...input, eventType: BACKLINK_PROJECT_ANALYSIS_REQUESTED,

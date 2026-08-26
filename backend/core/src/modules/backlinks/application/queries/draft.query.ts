@@ -9,7 +9,11 @@ import type { ResolvedProjectContext } from "../../ports/project-context.port.js
 import type {
   DraftGenerationJob,
   DraftGenerationRepository,
+  DraftInputSnapshot,
 } from "../repositories/draft-generation.repository.js";
+import type {
+  DraftFreshness,
+} from "../read-models/draft-freshness.js";
 import { draftDocumentSchema } from "../schemas/draft-document.schema.js";
 import type { DraftRequest } from "../schemas/draft-request.schema.js";
 
@@ -41,6 +45,17 @@ type DraftJobView = Readonly<{
   persistenceLatencyMs: number | null;
   attemptCount: number;
   lastErrorCategory: string | null;
+  diagnosticCode: string | null;
+  readiness:
+    | "QUEUED"
+    | "GENERATING"
+    | "RETRYING"
+    | "AI_DRAFT_READY"
+    | "BASIC_DRAFT_READY"
+    | "POLICY_BLOCKED"
+    | "BUDGET_BLOCKED"
+    | "FAILED";
+  fallbackReason: string | null;
 }>;
 
 export type DraftQuery = Readonly<{
@@ -64,6 +79,8 @@ export type DraftQuery = Readonly<{
     status: "generating" | "draft" | "approved" | "rejected" | "sent";
     draftVersion: number;
     approvedVersionId: string | null;
+    inputSnapshot: DraftInputSnapshot | null;
+    freshness: DraftFreshness;
     currentVersion: Readonly<{
       id: string;
       versionNo: number;
@@ -71,6 +88,11 @@ export type DraftQuery = Readonly<{
       bodyText: string;
       bodyDocument: ReturnType<typeof draftDocumentSchema.parse>;
       source: "MODEL" | "TEMPLATE_FALLBACK" | "MANUAL" | "RESTORED";
+      readiness:
+        | "AI_DRAFT_READY"
+        | "BASIC_DRAFT_READY"
+        | "EDITED_DRAFT_READY";
+      fallbackReason: string | null;
       createdAt: string;
     }> | null;
   }>>;
@@ -100,6 +122,9 @@ const toJobView = (job: DraftGenerationJob): DraftJobView => ({
   persistenceLatencyMs: job.persistenceLatencyMs,
   attemptCount: job.attemptCount,
   lastErrorCategory: job.lastErrorCategory,
+  diagnosticCode: job.diagnosticCode,
+  readiness: job.readiness,
+  fallbackReason: job.fallbackReason,
 });
 
 export function createDraftQuery(
@@ -158,6 +183,14 @@ export function createDraftQuery(
         status: draft.status,
         draftVersion: draft.draftVersion,
         approvedVersionId: draft.approvedVersionId,
+        inputSnapshot: draft.inputSnapshot ?? null,
+        freshness: draft.freshness ?? {
+          state: "UNKNOWN",
+          staleReasons: [],
+          unknownReason: "SNAPSHOT_CONTEXT_INCOMPLETE",
+          regenerateRequired: false,
+          manualEditsPreserved: true,
+        },
         currentVersion: draft.currentVersion === null
           ? null
           : {

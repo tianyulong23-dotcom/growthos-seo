@@ -27,6 +27,12 @@ function recommendationStartLeaseStorageKey(
   return `${recommendationOperationStorageKey(scope)}:start-lease`
 }
 
+function recommendationRefillAttemptStorageKey(
+  scope: RecommendationOperationScope
+) {
+  return `${recommendationOperationStorageKey(scope)}:attempt`
+}
+
 export function readRecommendationOperation(
   storage: StorageAccess,
   scope: RecommendationOperationScope
@@ -46,6 +52,37 @@ export function storeRecommendationOperation(
   operationId: string
 ) {
   storage.setItem(recommendationOperationStorageKey(scope), operationId)
+}
+
+export function clearRecommendationOperation(
+  storage: StorageAccess,
+  scope: RecommendationOperationScope
+) {
+  storage.removeItem(recommendationOperationStorageKey(scope))
+}
+
+export function getOrCreateRecommendationRefillAttempt(
+  storage: StorageAccess,
+  scope: RecommendationOperationScope,
+  createAttemptId: () => string
+) {
+  const key = recommendationRefillAttemptStorageKey(scope)
+  const storedAttemptId = storage.getItem(key)
+  if (storedAttemptId !== null && uuidPattern.test(storedAttemptId)) {
+    return storedAttemptId
+  }
+  if (storedAttemptId !== null) storage.removeItem(key)
+
+  const attemptId = createAttemptId()
+  storage.setItem(key, attemptId)
+  return attemptId
+}
+
+export function clearRecommendationRefillAttempt(
+  storage: StorageAccess,
+  scope: RecommendationOperationScope
+) {
+  storage.removeItem(recommendationRefillAttemptStorageKey(scope))
 }
 
 function parseStartLease(value: string | null): StartLease | null {

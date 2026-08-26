@@ -64,13 +64,21 @@ class AuthoritativePlatformContextResolver:
         self,
         *,
         request: Request,
+        required_permission: str = "backlinks:read",
     ) -> ResolvedPlatformCollectionContext:
         actor = self._authenticate(request)
         eligible = tuple(
             membership
             for membership in actor.memberships
-            if "backlinks:read" in membership.permissions
+            if required_permission in membership.permissions
         )
+        if not eligible:
+            raise PlatformContextResolutionError(
+                status=403,
+                code="PLATFORM_PERMISSION_DENIED",
+                title="Platform permission denied",
+                detail=f"The authenticated actor lacks {required_permission}.",
+            )
         tenant_scopes = {
             (membership.organization_id, membership.workspace_id)
             for membership in eligible
@@ -130,6 +138,7 @@ class AuthoritativePlatformContextResolver:
             membership
             for membership in actor.memberships
             if membership.organization_id == project.organization_id
+            and membership.workspace_id == project.workspace_id
         )
         if not tenant_memberships:
             raise PlatformContextResolutionError(
@@ -208,6 +217,8 @@ class LocalDevelopmentPlatformContextResolver:
         "content:review",
         "content:submit_review",
         "content:write",
+        "projects:read",
+        "projects:write",
     )
 
     def __init__(
@@ -215,15 +226,27 @@ class LocalDevelopmentPlatformContextResolver:
         *,
         projects: WebsiteProjectAuthority,
         organization_id: str,
+        workspace_id: str,
+        user_id: str,
     ) -> None:
         self._projects = projects
         self._organization_id = organization_id
+        self._workspace_id = workspace_id
+        self._user_id = user_id
 
     async def resolve_collection(
         self,
         *,
         request: Request,
+        required_permission: str = "backlinks:read",
     ) -> ResolvedPlatformCollectionContext:
+        if required_permission not in self._permissions:
+            raise PlatformContextResolutionError(
+                status=403,
+                code="PLATFORM_PERMISSION_DENIED",
+                title="Platform permission denied",
+                detail=f"The local actor lacks {required_permission}.",
+            )
         correlation_id = (
             request.headers.get("x-request-id", "").strip()
             or request.headers.get("x-correlation-id", "").strip()
@@ -231,13 +254,13 @@ class LocalDevelopmentPlatformContextResolver:
         )
         return ResolvedPlatformCollectionContext(
             actor=PlatformActor(
-                user_id="local-user",
+                user_id=self._user_id,
                 session_id="local-development",
                 roles=("owner",),
             ),
             tenant=PlatformTenant(
                 organization_id=self._organization_id,
-                workspace_id="local",
+                workspace_id=self._workspace_id,
             ),
             permissions=self._permissions,
             correlation_id=correlation_id,
@@ -258,8 +281,30 @@ class LocalDevelopmentPlatformContextResolver:
                 title="Platform project not found",
                 detail="The requested Website Project does not exist.",
             )
+        if (
+            project.organization_id != self._organization_id
+            or project.workspace_id != self._workspace_id
+        ):
+            raise PlatformContextResolutionError(
+                status=409,
+                code="PLATFORM_LOCAL_PROJECT_TENANT_MISMATCH",
+                title="Local project tenant mismatch",
+                detail=(
+                    "The requested Website Project is not assigned to the configured "
+                    "local organization and workspace."
+                ),
+            )
 
-        del required_permission
+        required_permission = required_permission or (
+            "backlinks:read" if request.method in {"GET", "HEAD"} else "backlinks:write"
+        )
+        if required_permission not in self._permissions:
+            raise PlatformContextResolutionError(
+                status=403,
+                code="PLATFORM_PERMISSION_DENIED",
+                title="Platform permission denied",
+                detail=f"The local actor lacks {required_permission}.",
+            )
 
         correlation_id = (
             request.headers.get("x-request-id", "").strip()
@@ -268,13 +313,13 @@ class LocalDevelopmentPlatformContextResolver:
         )
         return ResolvedPlatformRequestContext(
             actor=PlatformActor(
-                user_id="local-user",
+                user_id=self._user_id,
                 session_id="local-development",
                 roles=("owner",),
             ),
             tenant=PlatformTenant(
-                organization_id=project.organization_id,
-                workspace_id="local",
+                organization_id=self._organization_id,
+                workspace_id=self._workspace_id,
             ),
             project=PlatformProject(
                 website_project_id=project.website_project_id,

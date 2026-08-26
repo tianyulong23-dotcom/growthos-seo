@@ -1,19 +1,43 @@
 export const commercialRefillTiers = [
+  "curated_resource_library",
+  "exact_product_target_market",
+  "same_topic_target_market",
+  "adjacent_industry_same_audience",
+  "resource_media_review_partner_ecosystem",
+  "same_language_expansion",
+] as const;
+
+export type CommercialRefillTier = (typeof commercialRefillTiers)[number];
+export const commercialPaidRefillTiers = [
+  "exact_product_target_market",
+  "same_topic_target_market",
+  "adjacent_industry_same_audience",
+  "resource_media_review_partner_ecosystem",
+  "same_language_expansion",
+] as const satisfies readonly Exclude<
+  CommercialRefillTier,
+  "curated_resource_library"
+>[];
+
+const commercialRefillWindowKeyTiers = [
   "exact_product_target_market",
   "same_topic_target_market",
   "adjacent_industry_same_audience",
   "resource_media_review_partner_ecosystem",
   "same_language_expansion",
   "curated_resource_library",
-] as const;
+] as const satisfies readonly CommercialRefillTier[];
 
-export const commercialSupplyPublishedTarget = 10;
+export const defaultCommercialSupplyPublishedTarget = 10;
 
-export type CommercialRefillTier = (typeof commercialRefillTiers)[number];
-export const commercialPaidRefillTiers = commercialRefillTiers.slice(
-  0,
-  5,
-) as readonly Exclude<CommercialRefillTier, "curated_resource_library">[];
+export function resolveCommercialSupplyPublishedTarget(
+  value: unknown,
+): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 100
+    ? parsed
+    : defaultCommercialSupplyPublishedTarget;
+}
 
 export type CommercialSupplyOutcome =
   | "TARGET_REACHED"
@@ -56,7 +80,7 @@ export type CommercialSupplyPlan =
         CommercialSupplyOutcome,
         "TARGET_REACHED" | "SUPPLY_FLOOR_REACHED"
       > | null;
-      reason: "contact_processing" | "budget" | "provider" | "project_context";
+      reason: "budget" | "provider" | "project_context";
     }>
   | Readonly<{
       kind: "complete";
@@ -111,7 +135,7 @@ export function buildCommercialRefillWindowKey(
   assertPositiveInteger(input.round, "round");
   const window = input.window ?? 1;
   assertPositiveInteger(window, "window");
-  const tierIndex = commercialRefillTiers.indexOf(input.tier);
+  const tierIndex = commercialRefillWindowKeyTiers.indexOf(input.tier);
   if (tierIndex < 0) {
     throw new TypeError("Commercial refill tier is invalid");
   }
@@ -140,7 +164,7 @@ export function parseCommercialRefillWindowKey(value: string): Readonly<{
     );
   if (match === null) return null;
   const visiblePoolGeneration = Number(match[3] ?? 1);
-  const tier = commercialRefillTiers[Number(match[4]) - 1];
+  const tier = commercialRefillWindowKeyTiers[Number(match[4]) - 1];
   const round = Number(match[5]);
   const window = Number(match[6] ?? 1);
   if (
@@ -356,8 +380,7 @@ export function calculateCommercialSupplySampleSize(
     0,
     input.targetPublishedCount - input.publishedCount,
   );
-  const conversionRate =
-    rawToFitRate * fitToContactRate * contactToPublishedRate;
+  const conversionRate = rawToFitRate;
   return Object.freeze({
     requestedCandidateCount:
       deficit === 0
@@ -448,7 +471,6 @@ export function planCommercialSupplyOperation(
     fitCandidateCount: number;
     readyFitCandidateCount: number;
     contactReadyCount: number;
-    contactWorkPending: boolean;
     providerState: CommercialSupplyProviderState;
     paidCursor: Readonly<{
       tier: CommercialPaidRefillTier;
@@ -480,14 +502,6 @@ export function planCommercialSupplyOperation(
       reason: "project_context",
     });
   }
-  if (input.contactWorkPending) {
-    return Object.freeze({
-      kind: "wait",
-      outcome: null,
-      reason: "contact_processing",
-    });
-  }
-
   const paid = nextPaidCursor(input.paidCursor, input.attempts);
   const resource = nextResourceCursor(input.resourceCursor, input.attempts);
   const execute = (
@@ -522,6 +536,13 @@ export function planCommercialSupplyOperation(
       outcome: "SUPPLY_FLOOR_REACHED",
     });
   }
+  const paidAttemptPending = input.attempts.some(
+    (attempt) =>
+      attempt.tier === paid.cursor.tier &&
+      attempt.round === paid.cursor.round &&
+      attempt.window === paid.window &&
+      attempt.eligibleCandidateCount === undefined,
+  );
   if (input.providerState !== "available") {
     if (!resource.exhausted) {
       return execute("resource", {
@@ -538,7 +559,7 @@ export function planCommercialSupplyOperation(
       reason: input.providerState === "budget_paused" ? "budget" : "provider",
     });
   }
-  if (!paid.exhausted) {
+  if (paidAttemptPending && !paid.exhausted) {
     return execute("paid", {
       ...paid.cursor,
       window: paid.window,
@@ -550,12 +571,32 @@ export function planCommercialSupplyOperation(
       window: resource.window,
     });
   }
+  if (!paid.exhausted) {
+    return execute("paid", {
+      ...paid.cursor,
+      window: paid.window,
+    });
+  }
+  if (resource.cursor.round > paid.cursor.round) {
+    return execute("paid", {
+      tier: "exact_product_target_market",
+      round: resource.cursor.round,
+      window: 1,
+    });
+  }
+  if (paid.cursor.round > resource.cursor.round) {
+    return execute("resource", {
+      tier: "curated_resource_library",
+      round: paid.cursor.round,
+      window: 1,
+    });
+  }
   const nextRound = Math.max(
     paid.cursor.round,
     resource.cursor.round,
   ) + 1;
-  return execute("paid", {
-    tier: "exact_product_target_market",
+  return execute("resource", {
+    tier: "curated_resource_library",
     round: nextRound,
     window: 1,
   });

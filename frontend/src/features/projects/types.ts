@@ -1,5 +1,11 @@
 export type Project = {
   id: string
+  workspaceId?: string
+  lifecycleStatus?: "ACTIVE" | "ARCHIVED"
+  lifecycleVersion?: number
+  archivedAt?: string | null
+  archiveReason?: string | null
+  contextVersion?: number
   name: string
   domain: string
   country: string
@@ -46,6 +52,8 @@ export type SiteProfile = {
   languages: string[]
   contentTopics: string[]
   conversionActions: string[]
+  partnershipGoals?: string[]
+  inputRequired?: string[] | null
   keyPages: {
     url: string
     title: string
@@ -83,5 +91,63 @@ export type BusinessProfileRun = {
   startedAt: string | null
   finishedAt: string | null
   elapsedSeconds: number
+  createdAt: string
+}
+
+export type ProjectOutreachReadinessStatus =
+  | "READY"
+  | "INPUT_REQUIRED"
+  | "REFRESHING"
+  | "STALE"
+
+export type ProjectOutreachRecoveryAction =
+  | "RESTORE_PROJECT"
+  | "WAIT_FOR_SITE_PROFILE"
+  | "COMPLETE_SITE_PROFILE"
+  | "CONFIRM_BUSINESS_PROFILE"
+  | "SET_PROJECT_LANGUAGE_MARKET"
+  | "PUBLISH_PROMOTION_TARGET"
+  | "ADD_PROMOTION_TOPIC_OR_PUBLISHED_TARGET"
+  | "REPUBLISH_PROMOTION_TARGET"
+  | "REVIEW_PROJECT_INPUTS"
+  | "OPEN_RECOMMENDATIONS"
+
+export type ProjectOutreachReadinessState = {
+  websiteProjectId: string
+  status: ProjectOutreachReadinessStatus
+  siteProfileVersionId: string | null
+  outreachProfileVersionId: string | null
+  promotionTargetVersionId: string | null
+  fingerprint: string
+  inputRequired: string[]
+  primaryRecoveryAction: ProjectOutreachRecoveryAction
+}
+
+export type PublishPromotionTargetInput = {
+  approvedKeywordIds: string[]
+  publishedTargetIds: string[]
+  expectedProjectContextVersion: number
+  expectedSiteProfileVersionId: string | null
+}
+
+export type ConfirmPromotionTargetInput = {
+  confirmedTopics: string[]
+  confirmedTargetUrls: string[]
+  expectedProjectContextVersion: number
+  expectedSiteProfileVersionId: string | null
+}
+
+export type PromotionTargetVersion = {
+  id: string
+  projectId: string
+  version: number
+  keywords: string[]
+  targetUrls: string[]
+  targetAudiences: string[]
+  partnershipGoals: string[]
+  inputRequired: string[]
+  sourceKeywordIds: string[]
+  sourcePublishedTargetIds: string[]
+  sourceSiteProfileVersionId: string | null
   createdAt: string
 }

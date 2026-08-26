@@ -31,6 +31,7 @@ export const placementCandidateEvidenceSchema = z.object({
 export const createPlacementCandidateBodySchema = z.object({
   sourceType: z.enum(placementCandidateSourceTypes),
   opportunityId: z.uuid().optional(),
+  replyId: z.uuid().optional(),
   sourceExternalId: nonBlank.max(500).optional(),
   sourcePageUrl: nonBlank.max(2_048).optional(),
   targetUrl: nonBlank.max(2_048),
@@ -54,6 +55,20 @@ export const createPlacementCandidateBodySchema = z.object({
       path: ["sourceType"],
       message:
         "Only manual and imported links can bind directly to an Opportunity.",
+    });
+  }
+  if (value.replyId !== undefined && value.opportunityId === undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["opportunityId"],
+      message: "An Opportunity is required for Reply lineage.",
+    });
+  }
+  if (value.replyId !== undefined && value.sourceType !== "manual") {
+    context.addIssue({
+      code: "custom",
+      path: ["sourceType"],
+      message: "Only manually confirmed outreach can carry Reply lineage.",
     });
   }
 });

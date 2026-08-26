@@ -17,6 +17,28 @@ import (
 
 var plaintextAISettingsPrefix = []byte("plaintext:v1:")
 
+const insertSiteProfileVersionSQL = `
+	INSERT INTO site_profile_versions (
+		source_run_id, project_id, profile_json, confidence
+	)
+	VALUES ($1, $2, $3::jsonb, $4)
+	ON CONFLICT (source_run_id) DO NOTHING
+`
+
+const upsertSiteProfileSQL = `
+	INSERT INTO site_profiles (
+		project_id, source_run_id, profile_json, confidence, updated_at
+	)
+	SELECT $1, $2, $3::jsonb, $4, now()
+	WHERE $5
+	ON CONFLICT (project_id) DO UPDATE SET
+		source_run_id = EXCLUDED.source_run_id,
+		profile_json = EXCLUDED.profile_json
+			|| COALESCE(site_profiles.user_overrides, '{}'::jsonb),
+		confidence = EXCLUDED.confidence,
+		updated_at = now()
+`
+
 type PostgresCrawlRepository struct {
 	pool                    *pgxpool.Pool
 	aiSettingsEncryptionKey string
@@ -609,52 +631,32 @@ func (r *PostgresCrawlRepository) SaveResult(
 		}
 	}
 	if task.Type == TaskSiteUnderstanding {
-		profile := BuildSiteProfile(task, result.Pages)
-		if result.SiteProfile != nil {
-			profile = *result.SiteProfile
-		}
-		profileJSON, err := json.Marshal(profile)
-		if err != nil {
-			return fmt.Errorf("encode site profile: %w", err)
-		}
-		if _, err := tx.Exec(
-			ctx,
-			`
-			INSERT INTO site_profile_versions (
-				source_run_id, project_id, profile_json, confidence
-			)
-			VALUES ($1, $2, $3::jsonb, $4)
-			ON CONFLICT (source_run_id) DO NOTHING
-			`,
-			task.RunID,
-			task.ProjectID,
-			profileJSON,
-			profile.Confidence,
-		); err != nil {
-			return fmt.Errorf("insert site profile version: %w", err)
-		}
-		if _, err := tx.Exec(
-			ctx,
-			`
-			INSERT INTO site_profiles (
-				project_id, source_run_id, profile_json, confidence, updated_at
-			)
-			SELECT $1, $2, $3::jsonb, $4, now()
-			WHERE $5
-			ON CONFLICT (project_id) DO UPDATE SET
-				source_run_id = EXCLUDED.source_run_id,
-				profile_json = EXCLUDED.profile_json
-					|| COALESCE(site_profiles.user_overrides, '{}'::jsonb),
-				confidence = EXCLUDED.confidence,
-				updated_at = now()
-			`,
-			task.ProjectID,
-			task.RunID,
-			profileJSON,
-			profile.Confidence,
-			understandingRunID == task.RunID,
-		); err != nil {
-			return fmt.Errorf("upsert site profile: %w", err)
+		if profile, persistProfile := siteProfileForPersistence(task, result); persistProfile {
+			profileJSON, err := json.Marshal(profile)
+			if err != nil {
+				return fmt.Errorf("encode site profile: %w", err)
+			}
+			if _, err := tx.Exec(
+				ctx,
+				insertSiteProfileVersionSQL,
+				task.RunID,
+				task.ProjectID,
+				profileJSON,
+				profile.Confidence,
+			); err != nil {
+				return fmt.Errorf("insert site profile version: %w", err)
+			}
+			if _, err := tx.Exec(
+				ctx,
+				upsertSiteProfileSQL,
+				task.ProjectID,
+				task.RunID,
+				profileJSON,
+				profile.Confidence,
+				understandingRunID == task.RunID,
+			); err != nil {
+				return fmt.Errorf("upsert site profile: %w", err)
+			}
 		}
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM crawl_checkpoints WHERE run_id = $1", task.RunID); err != nil {

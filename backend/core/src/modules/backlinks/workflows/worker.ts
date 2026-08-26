@@ -39,6 +39,8 @@ export type BacklinksWorkerFactoryOptions = Readonly<{
 export type BacklinksWorkerRegistrations = Readonly<{
   workflowsPath: string;
   activities: object;
+  taskQueue?: string;
+  healthSnapshot?(): Promise<Record<string, unknown>>;
   backgroundServices?: readonly Readonly<{
     start(): Promise<void>;
     stop(): Promise<void>;
@@ -92,12 +94,15 @@ export async function startBacklinksWorker(
 
   const {
     backgroundServices = [],
+    healthSnapshot: _healthSnapshot,
+    taskQueue = config.TEMPORAL_BACKLINKS_TASK_QUEUE,
     ...workerRegistrations
   } = registrations;
+  void _healthSnapshot;
   const worker = await factory({
     address: config.TEMPORAL_ADDRESS,
     namespace: config.TEMPORAL_NAMESPACE,
-    taskQueue: config.TEMPORAL_BACKLINKS_TASK_QUEUE,
+    taskQueue,
     buildId: config.TEMPORAL_BUILD_ID,
     useVersioning: false,
     ...workerRegistrations,

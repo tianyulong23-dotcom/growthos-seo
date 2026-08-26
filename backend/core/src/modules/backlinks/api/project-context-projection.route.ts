@@ -27,6 +27,86 @@ const paramsSchema = z
 const projectTextListSchema = z.array(
   z.string().trim().min(1).max(2_048),
 ).max(100);
+const outreachProfileSchema = z
+  .object({
+    recordId: z.string().uuid(),
+    immutableFingerprint: nonBlankString,
+    profile: z
+      .object({
+        organizationId: nonBlankString,
+        websiteProjectId: nonBlankString,
+        profileVersionId: z.string().uuid(),
+        promotionTargetVersionId: z.string().uuid(),
+        keywordsAndTopics: projectTextListSchema,
+        productsAndServices: projectTextListSchema,
+        targetUrls: z.array(z.string().trim().url().max(2_048)).max(100),
+        targetAudiences: projectTextListSchema,
+        partnershipGoals: projectTextListSchema,
+        market: nonBlankString,
+        location: nonBlankString,
+        language: nonBlankString,
+        authorizedDiscoverySources: projectTextListSchema,
+        immutableFingerprint: nonBlankString,
+      })
+      .strict(),
+  })
+  .strict();
+const sharedSeoEvidenceSchema = z
+  .object({
+    recordId: z.string().uuid(),
+    snapshot: z
+      .object({
+        organizationId: nonBlankString,
+        websiteProjectId: nonBlankString,
+        evidenceType: nonBlankString,
+        sourceModule: z.enum([
+          "site-profile",
+          "keywords",
+          "competitor-serp",
+          "content",
+          "gsc",
+        ]),
+        sourceRecordId: nonBlankString,
+        sourceVersion: nonBlankString,
+        provider: nonBlankString,
+        endpoint: nonBlankString,
+        normalizedParameters: z.record(z.string(), z.unknown()),
+        requestFingerprint: nonBlankString,
+        market: nonBlankString,
+        location: nonBlankString,
+        language: nonBlankString,
+        fetchedAt: z.string().datetime({ offset: true }),
+        expiresAt: z.string().datetime({ offset: true }),
+        providerRequestId: nonBlankString,
+        providerTaskId: nonBlankString.nullable(),
+        costMicros: z.number().int().nonnegative().nullable(),
+        artifactRef: nonBlankString,
+        status: z.enum(["ready", "expired", "failed"]),
+      })
+      .strict(),
+  })
+  .strict();
+const generationInputPinsSchema = z
+  .object({
+    recordId: z.string().uuid(),
+    outreachProfileRecordId: z.string().uuid(),
+    immutableFingerprint: nonBlankString,
+    pins: z
+      .object({
+        organizationId: nonBlankString,
+        websiteProjectId: nonBlankString,
+        projectContextVersion: z.number().int().positive(),
+        siteProfileVersionId: z.string().uuid(),
+        outreachProfileVersionId: z.string().uuid(),
+        promotionTargetVersionId: z.string().uuid(),
+        keywordEvidenceSnapshotIds: z.array(z.string().uuid()).max(100),
+        sharedEvidenceSnapshotIds: z.array(z.string().uuid()).max(100),
+        market: nonBlankString,
+        qualificationContractVersion: nonBlankString,
+      })
+      .strict(),
+  })
+  .strict();
 const bodySchema = z
   .object({
     snapshotId: z.string().uuid(),
@@ -46,24 +126,40 @@ const bodySchema = z
     inputComplete: z.boolean(),
     jobId: z.string().uuid(),
     outboxEventId: z.string().uuid(),
+    outreachProfile: outreachProfileSchema,
+    sharedSeoEvidence: z.array(sharedSeoEvidenceSchema).max(100),
+    generationInputPins: generationInputPinsSchema,
   })
   .strict()
   .superRefine((body, context) => {
     if (!body.inputComplete) return;
-    for (const field of [
-      "products",
-      "keywords",
-      "targetUrls",
-      "targetAudiences",
-      "partnershipGoals",
-    ] as const) {
-      if (body[field].length === 0) {
-        context.addIssue({
-          code: "custom",
-          path: [field],
-          message: "A complete Website Project context cannot contain an empty list.",
-        });
-      }
+    if (body.products.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["products"],
+        message: "A complete Website Project context requires a site theme.",
+      });
+    }
+    if (
+      body.outreachProfile.profile.keywordsAndTopics.length === 0
+      && body.outreachProfile.profile.targetUrls.length === 0
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["keywords"],
+        message: "A promotion topic or published target is required.",
+      });
+    }
+    if (
+      !body.sharedSeoEvidence.some(
+        (item) => item.snapshot.sourceModule === "site-profile",
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sharedSeoEvidence"],
+        message: "A traceable Website Project site profile is required.",
+      });
     }
   });
 const responseSchema = z

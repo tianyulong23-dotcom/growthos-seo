@@ -12,7 +12,7 @@ type ContactEnrichmentActivities = Readonly<{
 }>;
 
 const activities = proxyActivities<ContactEnrichmentActivities>({
-  startToCloseTimeout: "5 minutes",
+  startToCloseTimeout: "8 minutes",
   retry: { maximumAttempts: 1 },
 });
 

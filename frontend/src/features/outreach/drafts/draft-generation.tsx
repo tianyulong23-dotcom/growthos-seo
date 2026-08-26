@@ -113,11 +113,7 @@ function formatTimestamp(value: string | null) {
   }).format(new Date(value))
 }
 
-export function DraftGeneration({
-  project,
-}: {
-  project: OutreachProject
-}) {
+export function DraftGeneration({ project }: { project: OutreachProject }) {
   const websiteProjectKey = project.id
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -136,8 +132,9 @@ export function DraftGeneration({
     "idle" | "polling" | "stale"
   >("idle")
   const [pollCount, setPollCount] = React.useState(0)
-  const [lastSuccessfulQueryAt, setLastSuccessfulQueryAt] =
-    React.useState<string | null>(null)
+  const [lastSuccessfulQueryAt, setLastSuccessfulQueryAt] = React.useState<
+    string | null
+  >(null)
   const [frontendDiscoveryLatencyMs, setFrontendDiscoveryLatencyMs] =
     React.useState<number | null>(null)
   const [clockNow, setClockNow] = React.useState(Date.now)
@@ -196,10 +193,7 @@ export function DraftGeneration({
   )
 
   const updateDraftRequest = React.useCallback(
-    <Key extends keyof DraftRequest,>(
-      key: Key,
-      value: DraftRequest[Key]
-    ) => {
+    <Key extends keyof DraftRequest>(key: Key, value: DraftRequest[Key]) => {
       requestKey.current = null
       setDraftRequest((current) => ({ ...current, [key]: value }))
     },
@@ -305,7 +299,10 @@ export function DraftGeneration({
       }
       if (nextJob.status === "FAILED" || nextJob.status === "REFUSED") {
         const category = nextJob.lastErrorCategory ?? "UNCLASSIFIED"
-        setError(`服务端错误分类：${category}`)
+        const diagnostic = nextJob.diagnosticCode
+          ? `，诊断码：${nextJob.diagnosticCode}`
+          : ""
+        setError(`服务端错误分类：${category}${diagnostic}`)
         setFailureState("error")
       } else {
         setError(null)
@@ -384,10 +381,7 @@ export function DraftGeneration({
   ])
 
   React.useEffect(() => {
-    if (
-      job === null ||
-      terminalStatuses.includes(job.status)
-    ) {
+    if (job === null || terminalStatuses.includes(job.status)) {
       return
     }
     const timer = window.setInterval(() => setClockNow(Date.now()), 1_000)
@@ -482,11 +476,7 @@ export function DraftGeneration({
   }
 
   const startGeneration = async (forceNewRequest = false) => {
-    if (
-      !opportunityId ||
-      selectedContact === null ||
-      createInFlight.current
-    ) {
+    if (!opportunityId || selectedContact === null || createInFlight.current) {
       return
     }
 
@@ -523,8 +513,7 @@ export function DraftGeneration({
             anchorTextSuggestion:
               draftRequest.anchorTextSuggestion?.trim() || null,
             language: draftRequest.language.trim(),
-            additionalRequirements:
-              draftRequest.additionalRequirements.trim(),
+            additionalRequirements: draftRequest.additionalRequirements.trim(),
             forbiddenPhrases: forbiddenPhrasesText
               .split(/\r?\n|,/)
               .map((phrase) => phrase.trim())
@@ -615,9 +604,12 @@ export function DraftGeneration({
 
   React.useEffect(() => {
     if (job?.status === "SUCCEEDED") {
-      navigate(`/projects/${websiteProjectKey}/backlinks/drafts/${job.draftId}`, {
-        replace: true,
-      })
+      navigate(
+        `/projects/${websiteProjectKey}/backlinks/drafts/${job.draftId}`,
+        {
+          replace: true,
+        }
+      )
     }
   }, [job, navigate, websiteProjectKey])
 
@@ -627,9 +619,8 @@ export function DraftGeneration({
       ? null
       : Math.max(
           0,
-          (job.finishedAt === null
-            ? clockNow
-            : Date.parse(job.finishedAt)) - Date.parse(job.queuedAt)
+          (job.finishedAt === null ? clockNow : Date.parse(job.finishedAt)) -
+            Date.parse(job.queuedAt)
         )
   const phase =
     pollingState === "stale"
@@ -643,7 +634,9 @@ export function DraftGeneration({
             : status === "RETRY_SCHEDULED"
               ? "Provider 重试已排程"
               : status === "SUCCEEDED"
-                ? "服务端草稿已保存"
+                ? job?.readiness === "BASIC_DRAFT_READY"
+                  ? "非 AI 基础草稿已保存"
+                  : "AI 草稿已保存"
                 : status === "FAILED"
                   ? "服务端生成失败"
                   : status === "REFUSED"
@@ -677,15 +670,22 @@ export function DraftGeneration({
 
   return (
     <div className="min-w-0">
-      <div className="border-b px-4 py-4 sm:px-6 lg:px-8">
+      <div className="sticky top-0 z-20 border-b bg-background px-4 py-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl">
-          <Link
-            to={`/projects/${websiteProjectKey}/backlinks/opportunities`}
-            className="mb-2 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          <Button
+            variant="outline"
+            size="sm"
+            className="mb-3 w-fit bg-background"
+            nativeButton={false}
+            render={
+              <Link
+                to={`/projects/${websiteProjectKey}/backlinks/opportunities`}
+              />
+            }
           >
-            <ArrowLeft className="size-3.5" />
-            外链机会
-          </Link>
+            <ArrowLeft />
+            返回外链机会
+          </Button>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h1 className="text-xl font-semibold">生成邮件草稿</h1>
             <Badge variant="outline">{status}</Badge>
@@ -931,7 +931,7 @@ export function DraftGeneration({
                   value={draftRequest.promotionTargetUrl}
                   onValueChange={(value) => {
                     if (value !== null) {
-                      updateDraftRequest("promotionTargetUrl", value);
+                      updateDraftRequest("promotionTargetUrl", value)
                     }
                   }}
                   disabled={busy}
@@ -960,7 +960,9 @@ export function DraftGeneration({
 
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="grid gap-1.5">
-                <span className="text-xs font-medium">建议锚文本（未确认）</span>
+                <span className="text-xs font-medium">
+                  建议锚文本（未确认）
+                </span>
                 <Input
                   value={draftRequest.anchorTextSuggestion ?? ""}
                   onChange={(event) =>
@@ -993,10 +995,7 @@ export function DraftGeneration({
                 <Select
                   value={draftRequest.tone}
                   onValueChange={(value) =>
-                    updateDraftRequest(
-                      "tone",
-                      value as DraftRequest["tone"]
-                    )
+                    updateDraftRequest("tone", value as DraftRequest["tone"])
                   }
                   disabled={busy}
                 >
@@ -1055,9 +1054,7 @@ export function DraftGeneration({
               />
             </label>
             <label className="grid gap-1.5">
-              <span className="text-xs font-medium">
-                禁用措辞（每行一条）
-              </span>
+              <span className="text-xs font-medium">禁用措辞（每行一条）</span>
               <Textarea
                 value={forbiddenPhrasesText}
                 onChange={(event) => {
@@ -1133,9 +1130,7 @@ export function DraftGeneration({
               compact
             />
           )}
-          <span className="text-muted-foreground">
-            {phase}
-          </span>
+          <span className="text-muted-foreground">{phase}</span>
           <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-2 border-t pt-3 text-xs">
             <dt className="text-muted-foreground">已耗时</dt>
             <dd className="text-right tabular-nums">
@@ -1167,6 +1162,8 @@ export function DraftGeneration({
             <dd className="text-right tabular-nums">
               {job?.attemptCount ?? 0}
             </dd>
+            <dt className="text-muted-foreground">草稿就绪状态</dt>
+            <dd className="text-right">{job?.readiness ?? "未开始"}</dd>
           </dl>
           {evidenceSnapshotId && (
             <span className="text-xs text-muted-foreground">
@@ -1180,9 +1177,10 @@ export function DraftGeneration({
           )}
           {job?.generator === "TEMPLATE_FALLBACK" && (
             <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-              <Badge variant="outline">确定性模板降级</Badge>
+              <Badge variant="outline">非 AI 基础草稿</Badge>
               <span className="text-xs text-muted-foreground">
-                Provider 不可用，本次结果不是 AI 生成成功。
+                失败分类：{job.fallbackReason ?? "DRAFT_GENERATION_FAILED"}。
+                草稿可直接编辑，保存后形成独立人工版本。
               </span>
             </div>
           )}

@@ -1,4 +1,22 @@
 import { apiRequest } from "@/api/client"
+import {
+  requestBacklinks,
+  type BacklinksRequest,
+  type BacklinksResponse,
+  type PerformanceBacklinkCandidate,
+  type PerformanceBacklinkPlacement,
+  type PerformanceBacklinksResponse,
+} from "@/api/generated/backlinks"
+
+export type {
+  PerformanceBacklinkCandidate,
+  PerformanceBacklinkEvidenceSummary,
+  PerformanceBacklinkFailure,
+  PerformanceBacklinkMeta,
+  PerformanceBacklinkPlacement,
+  PerformanceBacklinkSummary,
+  PerformanceBacklinksResponse,
+} from "@/api/generated/backlinks"
 
 export type PerformanceRange = 7 | 28 | 90
 export type PerformanceSort =
@@ -124,6 +142,30 @@ export type PerformanceArticleOptions = {
   order?: PerformanceSortOrder
 }
 
+type PerformanceBacklinksRequest =
+  BacklinksRequest<"get_project_backlink_performance_v1">
+export type PerformanceBacklinkView = Exclude<
+  NonNullable<PerformanceBacklinksRequest["query"]>["view"],
+  undefined
+>
+export type PerformanceBacklinkItem =
+  | PerformanceBacklinkCandidate
+  | PerformanceBacklinkPlacement
+export type PerformanceBacklinkOptions = {
+  view?: PerformanceBacklinkView
+  limit?: number
+  cursor?: string | null
+  signal?: AbortSignal
+}
+export type PerformanceBacklinkPlacementDetail =
+  BacklinksResponse<"backlinksGetPlacementLinkV1">["link"]
+export type PerformanceBacklinkEvents =
+  BacklinksResponse<"backlinksListPlacementLifecycleEventsV1">
+export type PerformanceBacklinkEvidence =
+  BacklinksResponse<"backlinksGetPlacementEvidenceV1">["evidence"]
+export type PerformanceBacklinkReverifyResult =
+  BacklinksResponse<"backlinksReverifyPlacementV1">
+
 function basePath(projectId: string) {
   return `/api/v1/projects/${encodeURIComponent(projectId)}/performance`
 }
@@ -179,4 +221,80 @@ export function resolvePerformanceSignal(projectId: string, signalId: string) {
     `${basePath(projectId)}/signals/${encodeURIComponent(signalId)}/resolve`,
     { method: "POST" }
   )
+}
+
+export function getPerformanceBacklinks(
+  projectId: string,
+  options: PerformanceBacklinkOptions = {}
+): Promise<PerformanceBacklinksResponse> {
+  return requestBacklinks(
+    "get_project_backlink_performance_v1",
+    {
+      path: { project_id: projectId },
+      query: {
+        view: options.view,
+        limit: options.limit,
+        cursor: options.cursor,
+      },
+    },
+    { signal: options.signal }
+  )
+}
+
+export async function getPerformanceBacklinkPlacement(
+  projectId: string,
+  placementId: string,
+  signal?: AbortSignal
+): Promise<PerformanceBacklinkPlacementDetail> {
+  const response = await requestBacklinks(
+    "backlinksGetPlacementLinkV1",
+    {
+      path: { websiteProjectKey: projectId, placementId },
+    },
+    { signal }
+  )
+  return response.link
+}
+
+export function getPerformanceBacklinkEvents(
+  projectId: string,
+  placementId: string,
+  signal?: AbortSignal
+): Promise<PerformanceBacklinkEvents> {
+  return requestBacklinks(
+    "backlinksListPlacementLifecycleEventsV1",
+    {
+      path: { websiteProjectKey: projectId, placementId },
+      query: { limit: 50 },
+    },
+    { signal }
+  )
+}
+
+export async function getPerformanceBacklinkEvidence(
+  projectId: string,
+  evidenceId: string,
+  signal?: AbortSignal
+): Promise<PerformanceBacklinkEvidence> {
+  const response = await requestBacklinks(
+    "backlinksGetPlacementEvidenceV1",
+    {
+      path: { websiteProjectKey: projectId, evidenceId },
+    },
+    { signal }
+  )
+  return response.evidence
+}
+
+export function reverifyPerformanceBacklink(
+  projectId: string,
+  placementId: string,
+  expectedVersion: number,
+  idempotencyKey: string
+): Promise<PerformanceBacklinkReverifyResult> {
+  return requestBacklinks("backlinksReverifyPlacementV1", {
+    path: { websiteProjectKey: projectId, placementId },
+    headers: { "idempotency-key": idempotencyKey },
+    body: { expectedVersion },
+  })
 }

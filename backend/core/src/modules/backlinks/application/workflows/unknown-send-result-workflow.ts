@@ -7,19 +7,44 @@ import type {
 import type {
   GmailSentMessageQueryResult,
 } from "../../ports/gmail-sent-message-query.port.js";
+import type {
+  GmailSendWorkflowInput,
+} from "./send-workflow.js";
 
-export type UnknownSendResultWorkflowInput = Readonly<{
-  sendIntentId: string;
+export type UnknownSendResultWorkflowInput = GmailSendWorkflowInput & Readonly<{
   manualDecision?: SendReconciliationDecision;
 }>;
 
 export type UnknownSendResultWorkflowActivities = Readonly<{
-  load(input: Readonly<{ sendIntentId: string }>): Promise<LoadUnknownSendResult>;
-  query(input: Readonly<{
+  load(input: GmailSendWorkflowInput): Promise<LoadUnknownSendResult>;
+  query(input: GmailSendWorkflowInput & Readonly<{
     sendIntentId: string;
     rfcMessageId: string;
   }>): Promise<GmailSentMessageQueryResult>;
-  reconcile(input: Readonly<{
+  recoverDispatch(input: Readonly<{
+    context: GmailSendWorkflowInput;
+    attempt: UnknownSendResultAttempt;
+    queryResult: GmailSentMessageQueryResult;
+  }>): Promise<
+    | Readonly<{
+      outcome: "completed";
+      providerMessageId: string;
+      providerThreadId: string | null;
+      rfcMessageId: string;
+    }>
+    | Readonly<{
+      outcome: "retry_scheduled";
+      retryAfterSeconds: number;
+    }>
+    | Readonly<{ outcome: "failed_final"; errorCode: string }>
+    | Readonly<{
+      outcome: "recheck_required";
+      attemptId: string;
+      rfcMessageId: string;
+      errorCode: string;
+    }>
+  >;
+  reconcile(input: GmailSendWorkflowInput & Readonly<{
     attempt: UnknownSendResultAttempt;
     decision: SendReconciliationDecision;
   }>): Promise<SendReconciliationResult>;
@@ -37,7 +62,8 @@ export type UnknownSendResultWorkflowResult =
     outcome: "not_reconcilable";
     status: string;
     rfcMessageId: string;
-  }>;
+  }>
+  | Awaited<ReturnType<UnknownSendResultWorkflowActivities["recoverDispatch"]>>;
 
 export const unknownSendResultWorkflowId = (sendIntentId: string): string =>
   `send-reconciliation/${sendIntentId}`;
@@ -60,7 +86,15 @@ export async function runUnknownSendResultWorkflow(
   input: UnknownSendResultWorkflowInput,
   activities: UnknownSendResultWorkflowActivities,
 ): Promise<UnknownSendResultWorkflowResult> {
-  const loaded = await activities.load({ sendIntentId: input.sendIntentId });
+  const executionInput: GmailSendWorkflowInput = {
+    organizationId: input.organizationId,
+    workspaceId: input.workspaceId,
+    websiteProjectId: input.websiteProjectId,
+    gmailConnectionId: input.gmailConnectionId,
+    actorId: input.actorId,
+    sendIntentId: input.sendIntentId,
+  };
+  const loaded = await activities.load(executionInput);
   if (loaded.state === "reconciled") {
     if (loaded.outcome === "completed") {
       return {
@@ -84,11 +118,25 @@ export async function runUnknownSendResultWorkflow(
     };
   }
 
-  const decision = input.manualDecision
-    ?? decisionFromQuery(await activities.query({
-      sendIntentId: input.sendIntentId,
+  const queryResult = input.manualDecision === undefined
+    ? await activities.query({
+      ...executionInput,
       rfcMessageId: loaded.attempt.rfcMessageId,
-    }));
+    })
+    : null;
+  if (loaded.attempt.status === "DISPATCHING") {
+    if (queryResult === null) {
+      throw new Error("A dispatching send cannot use a manual decision.");
+    }
+    return activities.recoverDispatch({
+      context: executionInput,
+      attempt: loaded.attempt,
+      queryResult,
+    });
+  }
+
+  const decision = input.manualDecision
+    ?? decisionFromQuery(queryResult as GmailSentMessageQueryResult);
   if (decision === null) {
     return {
       outcome: "manual_confirmation_required",
@@ -97,5 +145,9 @@ export async function runUnknownSendResultWorkflow(
       errorCode: loaded.attempt.errorCode,
     };
   }
-  return activities.reconcile({ attempt: loaded.attempt, decision });
+  return activities.reconcile({
+    ...executionInput,
+    attempt: loaded.attempt,
+    decision,
+  });
 }

@@ -35,8 +35,10 @@ describe("commercial discovery blueprint", () => {
     expect(blueprint.modelVersion).toBeNull();
     expect(blueprint.fallbackReason).toBe("AI_OUTPUT_INVALID");
     expect(blueprint.searchQueryClusters).toContain(
-      "US video localization platform industry publication",
+      "United States video localization blogs",
     );
+    expect(blueprint.searchQueryClusters.length).toBeLessThanOrEqual(12);
+    expect(blueprint.inputReadiness).toBe("READY");
     expect(blueprint.discoveredCompetitorSeeds).toEqual([]);
     expect(blueprint.targetAudience).toContain("media operations teams");
     expect(blueprint.cooperationAngles).toContain(
@@ -52,7 +54,12 @@ describe("commercial discovery blueprint", () => {
       targetAudience: ["media operations teams"],
       productValuePropositions: ["multilingual release workflow"],
       topicClusters: ["video localization"],
-      searchQueryClusters: ["video localization publications"],
+      searchQueryClusters: [
+        "United States video localization blogs",
+        "United States video localization publications",
+        "\"video localization\" \"write for us\" United States",
+        "United States video localization resource directory",
+      ],
       targetSiteArchetypes: ["media operations publication"],
       cooperationAngles: ["expert contribution"],
       negativeKeywords: ["casino"],
@@ -159,7 +166,7 @@ describe("commercial discovery blueprint", () => {
     );
   });
 
-  it("keeps deterministic fallback non-empty for a sparse new project", () => {
+  it("requests upstream evidence instead of inventing domain-based queries", () => {
     const blueprint = buildCommercialDiscoveryBlueprint({
       context: {
         ...context,
@@ -172,13 +179,37 @@ describe("commercial discovery blueprint", () => {
       },
     });
 
-    expect(blueprint.targetAudience.length).toBeGreaterThan(0);
-    expect(blueprint.topicClusters).toContain("sparse-project.com");
-    expect(blueprint.topicClusters.length).toBeGreaterThan(1);
-    expect(blueprint.searchQueryClusters).toContain(
-      "US sparse-project.com industry publication",
+    expect(blueprint.inputReadiness).toBe(
+      "PROJECT_EVIDENCE_REFRESH_REQUIRED",
     );
-    expect(blueprint.blueprintVersion).toBe(3);
-    expect(blueprint.targetSiteArchetypes.length).toBeGreaterThanOrEqual(10);
+    expect(blueprint.targetAudience).toEqual([]);
+    expect(blueprint.topicClusters).toEqual([]);
+    expect(blueprint.searchQueryClusters).toEqual([]);
+    expect(blueprint.blueprintVersion).toBe(5);
+    expect(JSON.stringify(blueprint.searchQueryClusters)).not.toContain(
+      "sparse-project.com",
+    );
+  });
+
+  it("keeps the project brand out of DataForSEO discovery queries", () => {
+    const blueprint = buildCommercialDiscoveryBlueprint({
+      context: {
+        ...context,
+        canonicalDomain: "elephtv.com",
+        countries: ["ZA"],
+        products: ["ElephTV streaming app"],
+        keywords: ["streaming service", "online TV"],
+        promotionTargetUrls: ["https://elephtv.com/watch"],
+        declaredTargetAudiences: ["South African streaming viewers"],
+        partnershipGoals: ["streaming service guide"],
+      },
+    });
+
+    expect(blueprint.inputReadiness).toBe("READY");
+    expect(blueprint.searchQueryClusters.length).toBeGreaterThanOrEqual(4);
+    expect(blueprint.searchQueryClusters.join(" ")).not.toMatch(/eleph\s*tv/i);
+    expect(blueprint.searchQueryClusters).toContain(
+      "South Africa streaming service blogs",
+    );
   });
 });

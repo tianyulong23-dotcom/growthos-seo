@@ -61,7 +61,9 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        connection.exec_driver_sql("SET search_path TO public, platform")
+        connection.exec_driver_sql(
+            "SET search_path TO public, platform, crawling, audit"
+        )
         connection.commit()
         do_run_migrations(connection)
 

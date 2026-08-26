@@ -2,6 +2,11 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
 import { Client as TemporalClient, Connection } from "@temporalio/client";
+import {
+  bundleWorkflowCode,
+  NativeConnection,
+  Worker,
+} from "@temporalio/worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -21,6 +26,7 @@ import {
 } from "../../../src/modules/backlinks/workflows/namespaces.js";
 import {
   startBacklinksWorker,
+  type BacklinksWorkerFactory,
   type RunningBacklinksWorker,
 } from "../../../src/modules/backlinks/workflows/worker.js";
 import {
@@ -133,6 +139,31 @@ describe("BL-AI-041 Phase 02 gate", () => {
     const workflowsPath = resolve(
       "src/modules/backlinks/workflows/definitions/index.ts",
     );
+    const workflowBundle = await bundleWorkflowCode({ workflowsPath });
+    const bundledWorkerFactory: BacklinksWorkerFactory = async (options) => {
+      const nativeConnection = await NativeConnection.connect({
+        address: options.address,
+      });
+      try {
+        const worker = await Worker.create({
+          connection: nativeConnection,
+          namespace: options.namespace,
+          taskQueue: options.taskQueue,
+          buildId: options.buildId,
+          useVersioning: options.useVersioning,
+          workflowBundle,
+          activities: options.activities,
+        });
+        return {
+          run: () => worker.run(),
+          shutdown: () => worker.shutdown(),
+          close: () => nativeConnection.close(),
+        };
+      } catch (error) {
+        await nativeConnection.close();
+        throw error;
+      }
+    };
     const stableActivities = createBacklinkProjectAnalysisActivities(snapshots);
     let rejectFirstAttempt: (() => void) | undefined;
     const firstAttemptRejected = new Promise<void>((resolveAttempt) => {
@@ -155,6 +186,7 @@ describe("BL-AI-041 Phase 02 gate", () => {
           backlinksLoadProjectAnalysisContextV1:
             failingActivities.loadBacklinkProjectAnalysisContext,
         }, workflowsPath },
+        bundledWorkerFactory,
       );
       const handle = await client.workflow.start(
         backlinksRuntimeContract.workflows.projectAnalysis.workflowType,
@@ -186,6 +218,7 @@ describe("BL-AI-041 Phase 02 gate", () => {
           backlinksLoadProjectAnalysisContextV1:
             stableActivities.loadBacklinkProjectAnalysisContext,
         }, workflowsPath },
+        bundledWorkerFactory,
       );
       await expect(handle.result()).resolves.toMatchObject({
         ...scope,

@@ -1,17 +1,26 @@
 import type { CommercialStaticAssessment } from "./commercial-static-assessment.js";
+import type { CommercialBacklinkPageEvidence } from "./commercial-discovery-source.js";
 import {
+  applyCommercialFitAdmissionThreshold,
+  commercialFitBaselineAdmissionThreshold,
+  commercialFitProgressiveAdmissionPolicyVersion,
+  commercialFitSpamHardRejectMinimum,
+  commercialFitSpamReviewMinimum,
+  resolveProgressiveCommercialFitAdmissionThreshold,
   scoreCommercialRecommendationFit,
+  type CommercialFitAdmission,
   type CommercialFitDecision,
   type CommercialFitEvidenceState,
   type CommercialFitGateInput,
   type CommercialFitScoreInput,
-} from "./commercial-score-v3.js";
+} from "./commercial-score-v4.js";
 
 export type CommercialCandidateBusinessFacts = Readonly<{
   selfOrRelatedDomain: boolean;
   existingBacklinkOrOpportunity: boolean;
   permanentlyRejectedOrSuppressed: boolean;
   unsafeOrDisallowedIndustry: boolean;
+  projectAuthorityScore?: number | null;
   targetCountryCode: string;
   candidateCountryCode: string | null;
   targetLanguages: readonly string[];
@@ -25,6 +34,7 @@ export type CommercialCandidateProviderFacts = Readonly<{
   backlinkCount: number | null;
   referringDomainCount: number | null;
   spamScore: number | null;
+  backlinkPageEvidence?: readonly CommercialBacklinkPageEvidence[];
   evidenceRefs: readonly string[];
   collectedAt: string;
 }>;
@@ -42,16 +52,30 @@ export type CommercialFitDetails = Readonly<{
     candidateCountry: string | null;
     targetLanguage: string;
     candidateLanguage: string | null;
-    tier: "target_market" | "same_language_expansion" | "forbidden_mismatch";
+    tier:
+      | "target_market"
+      | "same_language_expansion"
+      | "market_language_mismatch";
     reasonCode: string;
   }>;
   cooperationAngles: readonly string[];
+  authority: Readonly<{
+    projectAuthority: number;
+    candidateAuthority: number | null;
+    confidence: "observed" | "neutral_default";
+    tier:
+      | "candidate_below_range"
+      | "normal_relative_range"
+      | "elevated_authority_gap"
+      | "extreme_authority_gap";
+  }>;
   dataForSeo: Readonly<{
     rank: number | null;
     traffic: number | null;
     backlinks: number | null;
     referringDomains: number | null;
     spamScore: number | null;
+    backlinkPageEvidence: readonly CommercialBacklinkPageEvidence[];
     evidenceRefs: readonly string[];
     collectedAt: string;
   }>;
@@ -68,6 +92,11 @@ export type CommercialCandidateFitDecision = CommercialFitDecision &
   Readonly<{
     details: CommercialFitDetails;
   }>;
+
+export type ProgressiveCommercialCandidateAdmission = Readonly<{
+  scores: readonly CommercialCandidateFitDecision[];
+  admission: CommercialFitAdmission;
+}>;
 
 function clamp(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -103,19 +132,143 @@ function scoreInput(
 function providerAuthority(
   provider: CommercialCandidateProviderFacts,
 ): number | null {
+  if (provider.rank !== null) return Math.max(0, Math.min(100, provider.rank));
   const values = [
-    provider.rank === null ? null : clamp(provider.rank / 100),
     provider.backlinkCount === null
       ? null
-      : clamp(Math.log10(provider.backlinkCount + 1) / 6),
+      : clamp(Math.log10(provider.backlinkCount + 1) / 6) * 100,
     provider.referringDomainCount === null
       ? null
-      : clamp(Math.log10(provider.referringDomainCount + 1) / 5),
-    provider.spamScore === null ? null : clamp(1 - provider.spamScore / 100),
+      : clamp(Math.log10(provider.referringDomainCount + 1) / 5) * 100,
+    provider.spamScore === null
+      ? null
+      : clamp(1 - provider.spamScore / 100) * 100,
   ].filter((value): value is number => value !== null);
   return values.length === 0
     ? null
     : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+const megaPlatformSiteTypes = new Set([
+  "global_platform",
+  "infrastructure_platform",
+  "marketplace",
+  "social_network",
+  "search_engine",
+  "code_hosting",
+  "cloud_platform",
+  "encyclopedia",
+]);
+
+const minimumProjectRelevantPlacementRelevance = 0.35;
+
+function normalizedPageUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol)) return null;
+    url.hash = "";
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\/+$/u, "") || "/";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function healthyActiveBacklinkEvidence(
+  provider: CommercialCandidateProviderFacts,
+): readonly CommercialBacklinkPageEvidence[] {
+  return Object.freeze((provider.backlinkPageEvidence ?? []).filter(
+    (evidence) =>
+      evidence.linkStatus === "active" &&
+      (evidence.sourceHttpStatus === null ||
+        evidence.sourceHttpStatus < 400) &&
+      (evidence.targetHttpStatus === null ||
+        evidence.targetHttpStatus < 400),
+  ));
+}
+
+function projectRelevantPageUrls(
+  assessment: CommercialStaticAssessment,
+): ReadonlySet<string> {
+  return new Set(assessment.relatedContentPages.flatMap((value) => {
+    const normalized = normalizedPageUrl(value);
+    return normalized === null ? [] : [normalized];
+  }));
+}
+
+function currentProjectRelevantPlacementEvidence(
+  assessment: CommercialStaticAssessment,
+  provider: CommercialCandidateProviderFacts,
+): Readonly<{
+  cooperationPage: string | null;
+  backlinkPage: CommercialBacklinkPageEvidence | null;
+}> {
+  if (
+    (assessment.productRelevance ?? 0) <
+      minimumProjectRelevantPlacementRelevance
+  ) {
+    return Object.freeze({ cooperationPage: null, backlinkPage: null });
+  }
+  const relevantPages = projectRelevantPageUrls(assessment);
+  const cooperationPage = assessment.cooperationPages.find((value) => {
+    const normalized = normalizedPageUrl(value);
+    return normalized !== null && relevantPages.has(normalized);
+  }) ?? null;
+  const backlinkPage = healthyActiveBacklinkEvidence(provider).find(
+    (evidence) => {
+      const normalized = normalizedPageUrl(evidence.sourceUrl);
+      return normalized !== null && relevantPages.has(normalized);
+    },
+  ) ?? null;
+  return Object.freeze({ cooperationPage, backlinkPage });
+}
+
+export function applyCommercialCandidateAdmissionThreshold(
+  score: CommercialCandidateFitDecision,
+  threshold: number,
+): CommercialCandidateFitDecision {
+  const adjusted = applyCommercialFitAdmissionThreshold(score, threshold);
+  const reasonCodes = [...score.details.reasonCodes];
+  if (adjusted.admission.fallbackApplied && adjusted.decision === "eligible") {
+    reasonCodes.push(
+      "PROGRESSIVE_SCORE_THRESHOLD",
+      `ADMISSION_THRESHOLD_${adjusted.admission.appliedThreshold}`,
+    );
+  }
+  return Object.freeze({
+    ...adjusted,
+    details: Object.freeze({
+      ...score.details,
+      matchTier:
+        adjusted.decision !== "eligible"
+          ? "not_eligible"
+          : score.details.matchTier === "high_fit"
+            ? "high_fit"
+            : "qualified_fit",
+      reasonCodes: Object.freeze([...new Set(reasonCodes)]),
+    }),
+  });
+}
+
+export function applyProgressiveCommercialCandidateAdmission(
+  scores: readonly CommercialCandidateFitDecision[],
+): ProgressiveCommercialCandidateAdmission {
+  const appliedThreshold =
+    resolveProgressiveCommercialFitAdmissionThreshold(scores);
+  return Object.freeze({
+    scores: Object.freeze(
+      scores.map((score) =>
+        applyCommercialCandidateAdmissionThreshold(score, appliedThreshold),
+      ),
+    ),
+    admission: Object.freeze({
+      policyVersion: commercialFitProgressiveAdmissionPolicyVersion,
+      baselineThreshold: commercialFitBaselineAdmissionThreshold,
+      appliedThreshold,
+      fallbackApplied: false as const,
+    }),
+  });
 }
 
 export function evaluateCommercialCandidate(
@@ -151,7 +304,7 @@ export function evaluateCommercialCandidate(
         ? "target_market"
         : sameLanguage && input.business.allowSameLanguageExpansion
           ? "same_language_expansion"
-          : "forbidden_mismatch";
+          : "market_language_mismatch";
   const marketScore =
     sameLanguage && sameCountry
       ? 1
@@ -166,7 +319,41 @@ export function evaluateCommercialCandidate(
       ? "TARGET_MARKET_MATCH"
       : marketTier === "same_language_expansion"
         ? "SAME_LANGUAGE_EXPANSION"
-        : "FORBIDDEN_MARKET_MISMATCH";
+        : "MARKET_LANGUAGE_MISMATCH_DEPRIORITIZED";
+  const projectAuthority =
+    input.business.projectAuthorityScore === null ||
+      input.business.projectAuthorityScore === undefined
+      ? 50
+      : Math.max(0, Math.min(100, input.business.projectAuthorityScore));
+  const authorityConfidence =
+    input.business.projectAuthorityScore === null ||
+      input.business.projectAuthorityScore === undefined
+      ? "neutral_default"
+      : "observed";
+  const candidateAuthority = providerAuthority(input.provider);
+  const authorityGap =
+    candidateAuthority === null ? null : candidateAuthority - projectAuthority;
+  const authorityTier =
+    authorityGap === null || (authorityGap >= -15 && authorityGap <= 40)
+      ? "normal_relative_range"
+      : authorityGap < -15
+        ? "candidate_below_range"
+        : authorityGap <= 55
+          ? "elevated_authority_gap"
+          : "extreme_authority_gap";
+  const placementEvidence = currentProjectRelevantPlacementEvidence(
+    assessment,
+    input.provider,
+  );
+  const hasProjectRelevantPlacementEvidence =
+    placementEvidence.cooperationPage !== null ||
+    placementEvidence.backlinkPage !== null;
+  const hasGenericPlacementSignal =
+    assessment.cooperationPages.length > 0 ||
+    healthyActiveBacklinkEvidence(input.provider).length > 0;
+  const megaPlatform =
+    assessment.siteType !== null &&
+    megaPlatformSiteTypes.has(assessment.siteType);
   const commonGate = (
     id: CommercialFitGateInput["id"],
     matched: boolean,
@@ -231,43 +418,101 @@ export function evaluateCommercialCandidate(
         input.provider.spamScore === null
           ? null
           : assessment.highConfidenceLinkFarm === true ||
-            (input.provider.spamScore ?? 0) >= 70,
+            (input.provider.spamScore ?? 0) >=
+              commercialFitSpamHardRejectMinimum,
       evidenceRefs: Object.freeze([
         ...assessment.evidenceRefs,
         ...input.provider.evidenceRefs,
       ]),
     }),
     Object.freeze({
-      id: "forbidden_market_mismatch",
-      state: candidateLanguage === null ? staticState : "derived",
+      id: "confirmed_inaccessible",
+      state:
+        assessment.technicalAccessibility === null ? staticState : "observed",
       matched:
-        candidateLanguage === null ? null : marketTier === "forbidden_mismatch",
+        assessment.technicalAccessibility === null
+          ? null
+          : assessment.technicalAccessibility === 0,
       evidenceRefs: assessment.evidenceRefs,
+    }),
+    Object.freeze({
+      id: "mega_platform_without_placement_evidence",
+      state: assessment.siteType === null ? staticState : "derived",
+      matched:
+        assessment.siteType === null
+          ? null
+          : megaPlatform &&
+            authorityTier === "extreme_authority_gap" &&
+            !hasProjectRelevantPlacementEvidence,
+      evidenceRefs: Object.freeze([
+        ...assessment.evidenceRefs,
+        ...input.provider.evidenceRefs,
+      ]),
     }),
   ]);
 
-  const audienceMatch = assessment.matchedAudiences.length > 0 ? 1 : 0;
-  const cooperationSignal =
-    assessment.cooperationPages.length > 0
+  const placementAttainability = placementEvidence.cooperationPage !== null
+    ? 1
+    : placementEvidence.backlinkPage !== null
+      ? 0.85
+      : hasGenericPlacementSignal
+        ? 0.3 + clamp(assessment.productRelevance ?? 0) * 0.15
+        : assessment.monetizationMethods.length > 0 ||
+            assessment.matchedPartnershipGoals.length > 0
+          ? 0.15 + clamp(assessment.productRelevance ?? 0) * 0.15
+        : assessment.editorialQuality === null
+          ? null
+          : clamp(assessment.editorialQuality * 0.45);
+  const relativeAuthority = candidateAuthority === null
+    ? 0.5
+    : authorityTier === "normal_relative_range"
       ? 1
-      : assessment.monetizationMethods.length > 0
-        ? 0.7
-        : 0;
-  const partnershipMatch =
-    assessment.matchedPartnershipGoals.length > 0 ? 1 : 0;
-  const audiencePartnership = clamp(
-    audienceMatch * 0.45 + partnershipMatch * 0.25 + cooperationSignal * 0.3,
-  );
-  const editorialCommercial =
-    assessment.editorialQuality === null ||
-    assessment.outboundLinkDensity === null
+      : authorityTier === "candidate_below_range"
+        ? 0.6
+       : authorityTier === "elevated_authority_gap"
+          ? hasProjectRelevantPlacementEvidence
+            ? 0.75
+            : 0.35
+          : hasProjectRelevantPlacementEvidence
+            ? 0.6
+            : 0;
+  const trafficSignal =
+    input.provider.traffic === null
       ? null
-      : clamp(
-          assessment.editorialQuality * 0.65 +
-            cooperationSignal * 0.25 +
-            (1 - assessment.outboundLinkDensity) * 0.1,
-        );
-  const authority = providerAuthority(input.provider);
+      : clamp(Math.log10(input.provider.traffic + 1) / 6);
+  const spamSignal =
+    input.provider.spamScore === null
+      ? null
+      : input.provider.spamScore >= commercialFitSpamReviewMinimum
+        ? clamp(
+            (
+              commercialFitSpamHardRejectMinimum -
+              input.provider.spamScore
+            ) / 80,
+          )
+        : clamp(1 - input.provider.spamScore / 100);
+  const basicQualitySignals = [
+    trafficSignal,
+    spamSignal,
+    assessment.technicalAccessibility,
+  ].filter((value): value is number => value !== null);
+  const trafficBasicQuality =
+    basicQualitySignals.length === 0
+      ? null
+      : basicQualitySignals.reduce((sum, value) => sum + value, 0) /
+        basicQualitySignals.length;
+  const evidenceSignals = [
+    assessment.productRelevance,
+    placementAttainability,
+    candidateAuthority,
+    candidateLanguage,
+    input.provider.traffic,
+    input.provider.spamScore,
+    assessment.technicalAccessibility,
+  ];
+  const evidenceCompleteness =
+    evidenceSignals.filter((value) => value !== null).length /
+    evidenceSignals.length;
   const components: readonly CommercialFitScoreInput[] = Object.freeze([
     scoreInput({
       id: "semantic_relevance",
@@ -279,18 +524,28 @@ export function evaluateCommercialCandidate(
       normalizationRuleVersion: "commercial-semantic-relevance.v2",
     }),
     scoreInput({
-      id: "audience_partnership",
-      state: assessment.decision === "ready" ? "derived" : staticState,
+      id: "placement_attainability",
+      state: placementAttainability === null ? staticState : "derived",
       rawValue:
-        [
-          ...assessment.matchedAudiences,
-          ...assessment.matchedPartnershipGoals,
-        ].join(", ") || null,
-      normalizedValue:
-        assessment.decision === "ready" ? audiencePartnership : null,
+        placementEvidence.cooperationPage ??
+        placementEvidence.backlinkPage?.sourceUrl ??
+        assessment.cooperationPages[0] ??
+        healthyActiveBacklinkEvidence(input.provider)[0]?.sourceUrl ??
+        assessment.monetizationMethods[0] ??
+        null,
+      normalizedValue: placementAttainability,
       evidenceRefs: assessment.evidenceRefs,
       collectedAt: assessment.collectedAt,
-      normalizationRuleVersion: "commercial-audience-partnership.v1",
+      normalizationRuleVersion: "commercial-placement-attainability.v6",
+    }),
+    scoreInput({
+      id: "relative_authority",
+      state: candidateAuthority === null ? "derived" : "observed",
+      rawValue: candidateAuthority,
+      normalizedValue: relativeAuthority,
+      evidenceRefs: input.provider.evidenceRefs,
+      collectedAt: input.provider.collectedAt,
+      normalizationRuleVersion: "commercial-relative-authority.v4",
     }),
     scoreInput({
       id: "market_language_tier",
@@ -301,47 +556,31 @@ export function evaluateCommercialCandidate(
       normalizedValue: candidateLanguage === null ? null : marketScore,
       evidenceRefs: assessment.evidenceRefs,
       collectedAt: assessment.collectedAt,
-      normalizationRuleVersion: "commercial-market-language-tier.v1",
+      normalizationRuleVersion: "commercial-market-language-tier.v2",
     }),
     scoreInput({
-      id: "site_editorial_commercial",
-      state: editorialCommercial === null ? staticState : "derived",
-      rawValue: assessment.siteType,
-      normalizedValue: editorialCommercial,
-      evidenceRefs: assessment.evidenceRefs,
-      collectedAt: assessment.collectedAt,
-      normalizationRuleVersion: "commercial-site-editorial-commercial.v1",
-    }),
-    scoreInput({
-      id: "dataforseo_authority_risk",
-      state: authority === null ? "unavailable" : "derived",
-      rawValue: input.provider.spamScore,
-      normalizedValue: authority,
-      evidenceRefs: input.provider.evidenceRefs,
-      collectedAt: input.provider.collectedAt,
-      normalizationRuleVersion: "commercial-dataforseo-authority-risk.v2",
-    }),
-    scoreInput({
-      id: "dataforseo_traffic_visibility",
-      state: input.provider.traffic === null ? "unavailable" : "derived",
+      id: "traffic_basic_quality",
+      state: trafficBasicQuality === null ? "unavailable" : "derived",
       rawValue: input.provider.traffic,
-      normalizedValue:
-        input.provider.traffic === null
-          ? null
-          : clamp(Math.log10(input.provider.traffic + 1) / 6),
-      evidenceRefs: input.provider.evidenceRefs,
+      normalizedValue: trafficBasicQuality,
+      evidenceRefs: Object.freeze([
+        ...input.provider.evidenceRefs,
+        ...assessment.evidenceRefs,
+      ]),
       collectedAt: input.provider.collectedAt,
-      normalizationRuleVersion: "commercial-dataforseo-traffic.v1",
+      normalizationRuleVersion: "commercial-traffic-basic-quality.v4",
     }),
     scoreInput({
-      id: "safefetch_technical_access",
-      state:
-        assessment.technicalAccessibility === null ? staticState : "observed",
-      rawValue: assessment.failedUrls.length,
-      normalizedValue: assessment.technicalAccessibility,
-      evidenceRefs: assessment.evidenceRefs,
+      id: "evidence_completeness",
+      state: "derived",
+      rawValue: evidenceSignals.filter((value) => value !== null).length,
+      normalizedValue: evidenceCompleteness,
+      evidenceRefs: Object.freeze([
+        ...assessment.evidenceRefs,
+        ...input.provider.evidenceRefs,
+      ]),
       collectedAt: assessment.collectedAt,
-      normalizationRuleVersion: "commercial-safefetch-technical.v1",
+      normalizationRuleVersion: "commercial-evidence-completeness.v4",
     }),
   ]);
   const score = scoreCommercialRecommendationFit({ gates, components });
@@ -351,7 +590,12 @@ export function evaluateCommercialCandidate(
     ...(assessment.matchedKeywords.length > 0 ? ["KEYWORD_MATCH"] : []),
     ...(assessment.matchedTargetPages.length > 0 ? ["TARGET_PAGE_MATCH"] : []),
     marketReasonCode,
-    ...(cooperationSignal > 0 ? ["COOPERATION_PATH_AVAILABLE"] : []),
+    ...(hasProjectRelevantPlacementEvidence
+      ? ["COOPERATION_PATH_AVAILABLE"]
+      : hasGenericPlacementSignal
+        ? ["COOPERATION_PATH_REQUIRES_TOPIC_EVIDENCE"]
+        : []),
+    `RELATIVE_AUTHORITY_${authorityTier.toUpperCase()}`,
     ...score.hitGates.map((gate) => `HARD_GATE_${gate.toUpperCase()}`),
   ];
   return Object.freeze({
@@ -360,7 +604,7 @@ export function evaluateCommercialCandidate(
       matchTier:
         score.decision !== "eligible"
           ? "not_eligible"
-          : (score.total ?? 0) >= 75
+          : assessment.decision === "ready" && (score.total ?? 0) >= 75
             ? "high_fit"
             : "qualified_fit",
       reasonCodes: Object.freeze(reasonCodes),
@@ -385,12 +629,21 @@ export function evaluateCommercialCandidate(
           ? ["published_cooperation_page"]
           : []),
       ]),
+      authority: Object.freeze({
+        projectAuthority,
+        candidateAuthority,
+        confidence: authorityConfidence,
+        tier: authorityTier,
+      }),
       dataForSeo: Object.freeze({
         rank: input.provider.rank,
         traffic: input.provider.traffic,
         backlinks: input.provider.backlinkCount,
         referringDomains: input.provider.referringDomainCount,
         spamScore: input.provider.spamScore,
+        backlinkPageEvidence: Object.freeze([
+          ...(input.provider.backlinkPageEvidence ?? []),
+        ]),
         evidenceRefs: Object.freeze([...input.provider.evidenceRefs]),
         collectedAt: input.provider.collectedAt,
       }),

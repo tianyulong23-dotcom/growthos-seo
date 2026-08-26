@@ -10,6 +10,9 @@ import type {
   createDraftEditingCommands,
 } from "../application/commands/draft.command.js";
 import type { createGmailConnectionCommands } from "../application/commands/gmail-connection.command.js";
+import type {
+  createCooperationPathOpportunityCommands,
+} from "../application/commands/cooperation-path-opportunities.command.js";
 import type { createOpportunityCommands } from "../application/commands/opportunities.command.js";
 import type { createPlacementCandidateCommand } from "../application/commands/placement-candidate.command.js";
 import type { createPlacementReverifyCommand } from "../application/commands/placement-reverify.command.js";
@@ -23,6 +26,9 @@ import type { createSendIntentCommands } from "../application/commands/send-inte
 import type {
   createBacklinkProfileService,
 } from "../application/services/backlink-profile.service.js";
+import type {
+  NegotiationFactsService,
+} from "../application/services/negotiation-facts.service.js";
 import type { AssessmentQuery } from "../application/queries/assessment.query.js";
 import type { DraftQuery } from "../application/queries/draft.query.js";
 import type { createGmailConnectionQuery } from "../application/queries/gmail-connection.query.js";
@@ -34,6 +40,7 @@ import type { ResourceLibraryQuery } from "../application/queries/resource-libra
 import type { ReportOverviewQuery } from "../application/queries/report-overview.query.js";
 import type { ReplyMailQuery } from "../application/queries/reply-mail.query.js";
 import type { SendIntentQuery } from "../application/queries/send-intent.query.js";
+import type { SendIntentListQuery } from "../application/queries/send-intent.query.js";
 import type { SummaryQuery } from "../application/queries/summary.query.js";
 import type { ReportExportWorkflow } from "../application/workflows/report-export.workflow.js";
 import type {
@@ -44,6 +51,7 @@ import {
   type GmailPushWebhookHandler,
 } from "../application/workflows/mail-push-webhook.js";
 import type { BacklinksConfig } from "../config/index.js";
+import type { BacklinksApiRuntimeHealth } from "../runtime/runtime-health.js";
 import { registerBacklinksAssessmentRoute } from "./assessment.route.js";
 import { registerBacklinkProfileRoutes } from "./backlink-profile.route.js";
 import { registerBacklinksContactsRoutes } from "./contacts.route.js";
@@ -51,6 +59,9 @@ import {
   registerBacklinksContactEnrichmentRoutes,
 } from "./contact-enrichment.route.js";
 import { registerBacklinksContextRoute } from "./context.route.js";
+import {
+  registerCooperationPathOpportunityCommandsRoutes,
+} from "./cooperation-path-opportunity-commands.route.js";
 import {
   registerBacklinksDraftEditingRoutes,
   registerBacklinksDraftRoutes,
@@ -61,6 +72,9 @@ import { registerBacklinksHealthRoute } from "./health.route.js";
 import { registerBacklinksRequestLoggingHook } from "./hooks/request-logging.hook.js";
 import { registerBacklinksLinksRoutes } from "./links.route.js";
 import { registerBacklinksMetricDashboardRoute } from "./metrics/metric-dashboard.route.js";
+import {
+  registerBacklinksNegotiationFactsRoutes,
+} from "./negotiation-facts.route.js";
 import { registerBacklinksOpenApi } from "./openapi.js";
 import { registerBacklinksOpportunitiesRoutes } from "./opportunities.route.js";
 import { registerBacklinksOpportunityCommandsRoutes } from "./opportunity-commands.route.js";
@@ -78,6 +92,7 @@ import { registerBacklinksReplyMatchRoutes } from "./reply-match.route.js";
 import { registerBacklinksReportExportRoutes } from "./reports/report-export.route.js";
 import { registerBacklinksReportOverviewRoute } from "./reports/report-overview.route.js";
 import { registerBacklinksSendIntentRoute } from "./send-intent.route.js";
+import { registerBacklinksSendIntentListRoute } from "./send-intent.route.js";
 import {
   registerBacklinksSettingsGovernanceRoutes,
   type BacklinksSettingsGovernanceService,
@@ -92,6 +107,7 @@ type BacklinksApiQueries =
   & RecommendationsQuery
   & ResourceLibraryQuery
   & ReplyMailQuery
+  & SendIntentListQuery
   & SendIntentQuery
   & SummaryQuery;
 type ContactCommands = ReturnType<typeof createContactCommands>;
@@ -101,6 +117,8 @@ type DraftCommands = ReturnType<typeof createDraftCommands>;
 type DraftEditingCommands = ReturnType<typeof createDraftEditingCommands>;
 type GmailConnectionCommands = ReturnType<typeof createGmailConnectionCommands>;
 type GmailConnectionQuery = ReturnType<typeof createGmailConnectionQuery>;
+type CooperationPathOpportunityCommands =
+  ReturnType<typeof createCooperationPathOpportunityCommands>;
 type OpportunityCommands = ReturnType<typeof createOpportunityCommands>;
 type PlacementCandidateCommand = ReturnType<typeof createPlacementCandidateCommand>;
 type PlacementReverifyCommand = ReturnType<typeof createPlacementReverifyCommand>;
@@ -119,6 +137,7 @@ export type BacklinksPrivateApiDependencies = Readonly<{
   gmailConnectionCommands: GmailConnectionCommands;
   gmailConnectionQuery: GmailConnectionQuery;
   gmailPollingSyncCommands: GmailPollingSyncCommands;
+  cooperationPathOpportunityCommands?: CooperationPathOpportunityCommands;
   opportunityCommands: OpportunityCommands;
   placementCandidateCommand: PlacementCandidateCommand;
   placementReverifyCommand: PlacementReverifyCommand;
@@ -128,6 +147,7 @@ export type BacklinksPrivateApiDependencies = Readonly<{
   reportOverviewQuery: ReportOverviewQuery;
   reportExportWorkflow: ReportExportWorkflow;
   replyMatchCommands: ReplyMatchCommands;
+  negotiationFactsService?: NegotiationFactsService;
   sendIntentCommands: SendIntentCommands;
   settingsGovernanceService: BacklinksSettingsGovernanceService;
   backlinkProfileService: BacklinkProfileService;
@@ -145,6 +165,7 @@ export type CreateBacklinksPrivateApiOptions = Readonly<{
     sourceFingerprint: string;
     artifactFingerprint: string;
   }>;
+  runtimeHealth?: BacklinksApiRuntimeHealth;
   logger?: boolean;
 }>;
 
@@ -190,7 +211,11 @@ export async function createBacklinksPrivateApi(
   registerBacklinksPlatformContextConsumer(app, {
     signingKey: options.platformContextSigningKey,
   });
-  registerBacklinksHealthRoute(app, options.config);
+  registerBacklinksHealthRoute(
+    app,
+    options.config,
+    options.runtimeHealth,
+  );
   app.get(
     "/ready",
     {
@@ -243,6 +268,12 @@ export async function createBacklinksPrivateApi(
     module: options.dependencies.module,
     commands: options.dependencies.opportunityCommands,
   });
+  if (options.dependencies.cooperationPathOpportunityCommands !== undefined) {
+    registerCooperationPathOpportunityCommandsRoutes(app, {
+      module: options.dependencies.module,
+      commands: options.dependencies.cooperationPathOpportunityCommands,
+    });
+  }
   registerBacklinksPlacementCandidateRoutes(app, {
     module: options.dependencies.module,
     command: options.dependencies.placementCandidateCommand,
@@ -294,6 +325,9 @@ export async function createBacklinksPrivateApi(
     module: options.dependencies.module,
     commands: options.dependencies.sendIntentCommands,
   });
+  registerBacklinksSendIntentListRoute(app, {
+    module: options.dependencies.module,
+  });
   registerBacklinksGmailConnectionRoutes(app, {
     module: options.dependencies.module,
     commands: options.dependencies.gmailConnectionCommands,
@@ -304,6 +338,12 @@ export async function createBacklinksPrivateApi(
     module: options.dependencies.module,
     commands: options.dependencies.replyMatchCommands,
   });
+  if (options.dependencies.negotiationFactsService !== undefined) {
+    registerBacklinksNegotiationFactsRoutes(app, {
+      module: options.dependencies.module,
+      service: options.dependencies.negotiationFactsService,
+    });
+  }
   registerBacklinksReplyMailRoutes(app, {
     module: options.dependencies.module,
   });

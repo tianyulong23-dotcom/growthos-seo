@@ -83,7 +83,7 @@ class MemoryCoordinator implements DataForSeoRequestCoordinator {
   private readonly flights = new Map<string, Flight>();
 }
 type GatePlan = Partial<Record<
-  "killSwitch" | "quota" | "budget",
+  "availability" | "killSwitch" | "quota" | "budget",
   DataForSeoGateDecision | "error"
 >>;
 function createGate(plan: GatePlan = {}) {
@@ -95,6 +95,18 @@ function createGate(plan: GatePlan = {}) {
       return outcome;
     };
   return new DataForSeoCallPolicy({
+    checkAvailability: async () => {
+      if (plan.availability === "error") {
+        throw new Error("availability unavailable");
+      }
+      return plan.availability === "deny"
+        ? {
+            decision: "deny" as const,
+            reasonCode: "explicit_block",
+            recoveryAction: "remove_explicit_block",
+          }
+        : { decision: "allow" as const };
+    },
     checkKillSwitch: decide(plan.killSwitch),
     checkQuota: decide(plan.quota),
     reserveBudget: decide(plan.budget),
@@ -118,16 +130,20 @@ function createService(
 describe("DataForSeoRequestService", () => {
   it("scopes the Provider Kill Switch to Backlinks and DataForSEO", async () => {
     const checkKillSwitch = vi.fn(async () => "allow" as const);
+    const checkQuota = vi.fn(async () => "allow" as const);
+    const reserveBudget = vi.fn(async () => "allow" as const);
     const policy = new DataForSeoCallPolicy({
       checkKillSwitch,
-      checkQuota: async () => "allow",
-      reserveBudget: async () => "allow",
+      checkQuota,
+      reserveBudget,
     });
 
     await policy.authorize({
       context: input.context,
       requestFingerprint: "fingerprint-1",
       estimatedCostMicros: 20_000,
+      requiredRemainingPaidCalls: 3,
+      requiredRemainingCostMicros: 60_000,
     });
 
     expect(checkKillSwitch).toHaveBeenCalledWith({
@@ -135,6 +151,22 @@ describe("DataForSeoRequestService", () => {
       moduleId: "backlinks",
       providerId: "dataforseo",
       killSwitchKey: "backlinks.dataforseo.v1",
+    });
+    expect(checkQuota).toHaveBeenCalledWith({
+      context: input.context,
+      provider: "dataforseo",
+      estimatedCostMicros: 20_000,
+      requiredRemainingPaidCalls: 3,
+      requiredRemainingCostMicros: 60_000,
+    });
+    expect(reserveBudget).toHaveBeenCalledWith({
+      context: input.context,
+      provider: "dataforseo",
+      estimatedCostMicros: 20_000,
+      requiredRemainingPaidCalls: 3,
+      requiredRemainingCostMicros: 60_000,
+      requestFingerprint: "fingerprint-1",
+      reservationKey: "reservation-1",
     });
   });
 
@@ -204,6 +236,7 @@ describe("DataForSeoRequestService", () => {
   });
 
   it.each([
+    ["external availability", { availability: "deny" }, "PROVIDER_UNAVAILABLE"],
     ["Kill Switch", { killSwitch: "deny" }, "KILL_SWITCH_ACTIVE"],
     ["quota", { quota: "deny" }, "QUOTA_EXCEEDED"],
     ["budget", { budget: "deny" }, "BUDGET_EXCEEDED"],
@@ -214,5 +247,38 @@ describe("DataForSeoRequestService", () => {
 
     await expect(service.execute(input)).rejects.toMatchObject({ code });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("blocks external unavailability before tenant gates and budget", async () => {
+    const checkKillSwitch = vi.fn(async () => "allow" as const);
+    const checkQuota = vi.fn(async () => "allow" as const);
+    const reserveBudget = vi.fn(async () => "allow" as const);
+    const policy = new DataForSeoCallPolicy({
+      checkAvailability: async () => ({
+        decision: "deny",
+        reasonCode: "explicit_block",
+        recoveryAction: "remove_explicit_block",
+      }),
+      checkKillSwitch,
+      checkQuota,
+      reserveBudget,
+    });
+
+    await expect(policy.authorize({
+      context: input.context,
+      requestFingerprint: "fingerprint-blocked",
+      estimatedCostMicros: 20_000,
+    })).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+      stage: "availability",
+      reasonCode: "explicit_block",
+      recoveryAction: "remove_explicit_block",
+      message:
+        "Data provider is unavailable: explicit_block;"
+        + " recovery=remove_explicit_block",
+    });
+    expect(checkKillSwitch).not.toHaveBeenCalled();
+    expect(checkQuota).not.toHaveBeenCalled();
+    expect(reserveBudget).not.toHaveBeenCalled();
   });
 });

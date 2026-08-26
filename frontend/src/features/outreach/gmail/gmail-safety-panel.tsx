@@ -22,6 +22,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet"
 import { GmailAccountSelector } from "@/features/outreach/gmail/gmail-account-selector"
+import { GmailReadinessBlockers } from "@/features/outreach/gmail/gmail-readiness"
 import type { GmailConnectionController } from "@/features/outreach/gmail/use-gmail-connection"
 
 const oauthAttemptTimeoutMs = 10 * 60_000
@@ -69,13 +70,10 @@ const statusPresentation = (
       variant: "outline",
     }
   }
-  if (
-    controller.connection.connectionStatus === "CONNECTED" &&
-    controller.connection.sendAvailability === "AVAILABLE"
-  ) {
+  if (controller.readiness?.connection.ready === true) {
     return {
       label: "已连接",
-      detail: "身份来自服务端连接记录",
+      detail: "OAuth 连接有效；发送和同步门槛独立评估",
       variant: "secondary",
     }
   }
@@ -111,16 +109,6 @@ const statusPresentation = (
       variant: "outline",
     }
   }
-  if (
-    controller.connection.connectionStatus === "CONNECTED" &&
-    controller.connection.sendAvailability === "PAUSED"
-  ) {
-    return {
-      label: "发送受限",
-      detail: "Gmail 身份仍已连接，但发送已被服务端暂停",
-      variant: "destructive",
-    }
-  }
   if (controller.connection.connectionStatus === "DISCONNECTED") {
     return {
       label: "已断开",
@@ -145,10 +133,14 @@ const conservativeVerification = (
   if (controller.status !== "ready" || controller.connection === null) {
     return { level: "未评估", limit: "不可发送", interval: "不可发送" }
   }
-  if (
-    controller.connection.connectionStatus !== "CONNECTED" ||
-    controller.connection.sendAvailability !== "AVAILABLE"
-  ) {
+  if (controller.readiness?.send.state === "WAITING_FOR_SEND_CONTEXT") {
+    return {
+      level: "未评估",
+      limit: "需草稿预检",
+      interval: "需草稿预检",
+    }
+  }
+  if (controller.readiness?.send.ready !== true) {
     return { level: "RESTRICTED", limit: "1 / 24h", interval: "至少 900 秒" }
   }
   return {
@@ -333,6 +325,10 @@ export function GmailSafetyPanel({
             {controller.errorMessage}
           </div>
         )}
+        <GmailReadinessBlockers
+          controller={controller}
+          className="border-t py-3"
+        />
       </section>
 
       <Sheet open={policyOpen} onOpenChange={setPolicyOpen}>

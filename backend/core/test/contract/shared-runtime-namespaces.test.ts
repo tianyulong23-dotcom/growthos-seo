@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  assertBacklinksRecoveryTaskQueue,
   backlinksRuntimeContract,
+  buildBacklinksRecoveryTaskQueue,
   buildBacklinksWorkflowId,
   isBacklinksWorkflowId,
 } from "../../src/modules/backlinks/workflows/namespaces.js";
@@ -52,6 +54,24 @@ describe("BL-AI-ARCH-006 shared runtime namespaces", () => {
     expect(isBacklinksWorkflowId(workflowId)).toBe(true);
     expect(isBacklinksWorkflowId("content:workspace:project:analysis:v1:job")).toBe(false);
     expect(isBacklinksWorkflowId("backlink-recommendation-refill/job")).toBe(false);
+  });
+
+  it("binds a recovery task queue to one refill job", () => {
+    const jobId = "40000000-0000-4000-8000-000000000018";
+    const taskQueue = buildBacklinksRecoveryTaskQueue(jobId);
+
+    expect(taskQueue).toBe(
+      "growthos.backlinks.v1.recovery." + jobId,
+    );
+    expect(() =>
+      assertBacklinksRecoveryTaskQueue(taskQueue, jobId)
+    ).not.toThrow();
+    expect(() =>
+      assertBacklinksRecoveryTaskQueue(
+        taskQueue,
+        "40000000-0000-4000-8000-000000000019",
+      )
+    ).toThrow("BACKLINKS_RECOVERY_TASK_QUEUE_INVALID");
   });
 
   it("starts only the registered Workflow type on the registered queue", async () => {

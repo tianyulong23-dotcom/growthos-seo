@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   ProjectContextSnapshotStatus,
@@ -13,8 +13,8 @@ import {
   createOutboxRepository,
 } from "../../db/repositories/outbox.repository.js";
 import {
-  createRecommendationCommands,
-} from "./recommendations.command.js";
+  createProjectInputPersistenceTransactionRepository,
+} from "../../db/repositories/project-input-persistence.repository.js";
 import {
   withBacklinkTenantTransaction,
   type BacklinkTransactionClient,
@@ -30,6 +30,11 @@ import {
 import {
   buildBacklinksWorkflowId,
 } from "../../workflows/namespaces.js";
+import type {
+  GenerationInputPins,
+  ProjectOutreachProfile,
+  SharedSeoEvidenceSnapshot,
+} from "../../ports/shared-seo-evidence.port.js";
 
 export type ProjectContextProjectionInput = Readonly<{
   organizationId: string;
@@ -56,6 +61,21 @@ export type ProjectContextProjectionInput = Readonly<{
   inputComplete: boolean;
   jobId: string;
   outboxEventId: string;
+  outreachProfile: Readonly<{
+    recordId: string;
+    immutableFingerprint: string;
+    profile: ProjectOutreachProfile;
+  }>;
+  sharedSeoEvidence: readonly Readonly<{
+    recordId: string;
+    snapshot: SharedSeoEvidenceSnapshot;
+  }>[];
+  generationInputPins: Readonly<{
+    recordId: string;
+    outreachProfileRecordId: string;
+    immutableFingerprint: string;
+    pins: GenerationInputPins;
+  }>;
 }>;
 
 export type ProjectContextProjectionResult = Readonly<{
@@ -325,45 +345,319 @@ function conflict(message: string): BacklinkError {
   });
 }
 
-async function requestInitialGeneration(
+function sameStringList(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length
+    && left.every((value, index) => value === right[index])
+  );
+}
+
+function assertProjectionInputBinding(
+  input: ProjectContextProjectionInput,
+): void {
+  const profileEnvelope = input.outreachProfile;
+  const profile = profileEnvelope.profile;
+  const pinEnvelope = input.generationInputPins;
+  const pins = pinEnvelope.pins;
+  const sharedEvidenceIds = input.sharedSeoEvidence.map(
+    (item) => item.recordId,
+  );
+  const keywordEvidenceIds = input.sharedSeoEvidence
+    .filter((item) => item.snapshot.sourceModule === "keywords")
+    .map((item) => item.recordId);
+  const evidenceIdsAreUnique =
+    new Set(sharedEvidenceIds).size === sharedEvidenceIds.length;
+  if (
+    profileEnvelope.immutableFingerprint !== profile.immutableFingerprint
+    || profile.organizationId !== input.organizationId
+    || profile.websiteProjectId !== input.websiteProjectId
+    || profile.profileVersionId !== input.profileVersionId
+    || profile.promotionTargetVersionId !== input.promotionTargetVersionId
+    || profile.market !== input.targetMarket
+    || profile.location !== input.countryCode
+    || profile.language !== input.locale
+    || !sameStringList(profile.productsAndServices, input.products)
+    || !sameStringList(profile.keywordsAndTopics, input.keywords)
+    || !sameStringList(profile.targetUrls, input.targetUrls)
+    || !sameStringList(profile.targetAudiences, input.targetAudiences)
+    || !sameStringList(profile.partnershipGoals, input.partnershipGoals)
+  ) {
+    throw conflict(
+      "The projected outreach profile is bound to different project facts.",
+    );
+  }
+  if (
+    pinEnvelope.outreachProfileRecordId !== profileEnvelope.recordId
+    || pins.organizationId !== input.organizationId
+    || pins.websiteProjectId !== input.websiteProjectId
+    || pins.projectContextVersion !== input.snapshotVersion
+    || pins.siteProfileVersionId !== input.profileVersionId
+    || pins.outreachProfileVersionId !== input.profileVersionId
+    || pins.promotionTargetVersionId !== input.promotionTargetVersionId
+    || pins.market !== input.targetMarket
+    || pins.qualificationContractVersion
+      !== "recommendation-qualification.v1"
+    || !evidenceIdsAreUnique
+    || !sameStringList(pins.sharedEvidenceSnapshotIds, sharedEvidenceIds)
+    || !sameStringList(
+      pins.keywordEvidenceSnapshotIds,
+      keywordEvidenceIds,
+    )
+  ) {
+    throw conflict(
+      "The generation input pin is bound to different project facts.",
+    );
+  }
+  for (const evidence of input.sharedSeoEvidence) {
+    const snapshot = evidence.snapshot;
+    if (
+      snapshot.organizationId !== input.organizationId
+      || snapshot.websiteProjectId !== input.websiteProjectId
+      || snapshot.market !== input.targetMarket
+      || snapshot.location !== input.countryCode
+      || snapshot.language !== input.locale
+    ) {
+      throw conflict(
+        "Shared SEO evidence is bound to a different project or market.",
+      );
+    }
+  }
+  if (!input.inputComplete) {
+    return;
+  }
+  const requiredProfileEvidence = input.sharedSeoEvidence.find(
+    (item) => item.snapshot.sourceModule === "site-profile",
+  );
+  const requiredPromotionEvidence =
+    input.keywords.length > 0
+      ? undefined
+      : input.sharedSeoEvidence.find(
+        (item) => item.snapshot.sourceModule === "content",
+      );
+  const isReady = (
+    evidence: ProjectContextProjectionInput["sharedSeoEvidence"][number],
+  ) => evidence.snapshot.status === "ready";
+  if (
+    input.products.length === 0
+    || requiredProfileEvidence === undefined
+    || (input.keywords.length === 0 && input.targetUrls.length === 0)
+    || (
+      input.keywords.length === 0
+      && (
+        requiredPromotionEvidence === undefined
+        || !isReady(requiredPromotionEvidence)
+      )
+    )
+  ) {
+    throw conflict(
+      "The Website Project does not contain the minimum sufficient discovery evidence.",
+    );
+  }
+  if (!isReady(requiredProfileEvidence)) {
+    throw conflict(
+      "The Website Project site profile evidence is unavailable.",
+    );
+  }
+}
+
+async function persistProjectionInput(
   client: BacklinkTransactionClient,
   input: ProjectContextProjectionInput,
-): Promise<boolean> {
-  if (!input.inputComplete || input.projectStatus !== "ACTIVE") {
-    return false;
+): Promise<void> {
+  if (!input.inputComplete) {
+    return;
   }
-  const result = await createRecommendationCommands(client).requestRefill({
-    context: {
-      actor: {
-        userId: input.actorId,
-        sessionId: input.actorSessionId,
-        roles: input.actorRoles,
-      },
-      tenant: {
-        organizationId: input.organizationId,
-        workspaceId: input.workspaceId,
-      },
-      project: {
-        websiteProjectId: input.websiteProjectId,
-        canonicalDomain: input.canonicalDomain,
-        locale: input.locale,
-        countryCode: input.countryCode,
-        profileVersionId: input.profileVersionId,
-        promotionTargetVersionId: input.promotionTargetVersionId,
-      },
-    },
-    requestId:
-      `project-bootstrap:${input.websiteProjectId}:${input.snapshotVersion}`,
-    expectedVersion: 0,
-    recommendationContextVersionId: input.snapshotId,
-    visiblePoolGeneration: 1,
-    lowWatermark: 9,
-    highWatermark: 10,
-    refillWindowKey:
-      `project-bootstrap:${input.websiteProjectId}:${input.snapshotVersion}:g1`,
-    triggerReason: "inventory_low",
+  const repository =
+    createProjectInputPersistenceTransactionRepository(client);
+  const outreachProfileRecordId = await repository.saveOutreachProfile({
+    recordId: input.outreachProfile.recordId,
+    workspaceId: input.workspaceId,
+    createdBy: input.actorId,
+    profile: input.outreachProfile.profile,
   });
-  return !result.replayed;
+  const persistedEvidenceIds = new Map<string, string>();
+  for (const evidence of input.sharedSeoEvidence) {
+    const persistedId = await repository.saveSharedSeoEvidenceReference({
+      recordId: evidence.recordId,
+      workspaceId: input.workspaceId,
+      createdBy: input.actorId,
+      snapshot: evidence.snapshot,
+    });
+    persistedEvidenceIds.set(evidence.recordId, persistedId);
+  }
+  const mapEvidenceId = (recordId: string): string => {
+    const persistedId = persistedEvidenceIds.get(recordId);
+    if (persistedId === undefined) {
+      throw conflict(
+        `Pinned shared SEO evidence ${recordId} was not persisted.`,
+      );
+    }
+    return persistedId;
+  };
+  await repository.saveGenerationInputPins({
+    recordId: input.generationInputPins.recordId,
+    workspaceId: input.workspaceId,
+    outreachProfileRecordId,
+    createdBy: input.actorId,
+    immutableFingerprint: input.generationInputPins.immutableFingerprint,
+    pins: {
+      ...input.generationInputPins.pins,
+      keywordEvidenceSnapshotIds:
+        input.generationInputPins.pins.keywordEvidenceSnapshotIds.map(
+          mapEvidenceId,
+        ),
+      sharedEvidenceSnapshotIds:
+        input.generationInputPins.pins.sharedEvidenceSnapshotIds.map(
+          mapEvidenceId,
+        ),
+    },
+  });
+}
+
+async function ensureRecommendationDemandPolicy(
+  client: BacklinkTransactionClient,
+  input: ProjectContextProjectionInput,
+): Promise<void> {
+  if (!input.inputComplete || input.projectStatus !== "ACTIVE") {
+    return;
+  }
+  const lifecycleEventId = randomUUID();
+  const auditEventId = randomUUID();
+  const idempotencyKey = [
+    "recommendation-demand",
+    input.websiteProjectId,
+    input.profileVersionId,
+    input.promotionTargetVersionId,
+    input.generationInputPins.immutableFingerprint,
+  ].join(":");
+  const integrityHash = createHash("sha256")
+    .update(JSON.stringify({
+      action: "recommendation.demand.ready",
+      idempotencyKey,
+      projectContextVersionId: input.snapshotId,
+    }))
+    .digest("hex");
+  await client.query(
+    `WITH current_policy AS MATERIALIZED (
+       SELECT policy.*
+       FROM backlink_commercial_inventory_policies AS policy
+       WHERE (
+         policy.organization_id,policy.workspace_id,
+         policy.website_project_id,policy.project_context_version_id
+       )=($1,$2,$3,$4)
+       FOR UPDATE
+     ),
+     inserted_policy AS (
+       INSERT INTO backlink_commercial_inventory_policies (
+         organization_id,workspace_id,website_project_id,
+         project_context_version_id,visible_pool_state,refill_state,
+         termination_reason,pause_reason,next_refill_at,updated_by
+       )
+       SELECT
+         $1,$2,$3,$4,'idle','idle',NULL,NULL,NULL,$5
+       WHERE NOT EXISTS (SELECT 1 FROM current_policy)
+       ON CONFLICT (
+         organization_id,workspace_id,website_project_id,
+         project_context_version_id
+       ) DO NOTHING
+       RETURNING project_context_version_id,
+                 version "policyVersion",
+                 'created'::text "policyAction"
+     ),
+     restored_policy AS (
+       UPDATE backlink_commercial_inventory_policies AS policy
+       SET visible_pool_state='idle',
+           refill_state='idle',
+           termination_reason=NULL,
+           pause_reason=NULL,
+           next_refill_at=NULL,
+           updated_at=now(),
+           updated_by=$5,
+           version=policy.version+1
+       FROM current_policy
+       WHERE (
+         policy.organization_id,policy.workspace_id,
+         policy.website_project_id,policy.project_context_version_id
+       )=($1,$2,$3,$4)
+         AND current_policy.refill_state='paused'
+         AND current_policy.pause_reason='awaiting_authorization'
+       RETURNING policy.project_context_version_id,
+                 policy.version "policyVersion",
+                 'authorization_gate_removed'::text "policyAction"
+     ),
+     policy AS (
+       SELECT * FROM inserted_policy
+       UNION ALL
+       SELECT * FROM restored_policy
+     ),
+     lifecycle AS (
+       INSERT INTO backlink_lifecycle_events (
+         id,organization_id,workspace_id,website_project_id,job_id,
+         aggregate_type,aggregate_id,sequence,aggregate_version,event_type,
+         actor_type,actor_id,before_state,after_state,reason,correlation_id,
+         causation_id,idempotency_key,event_schema_version
+       )
+       SELECT
+         $6,$1,$2,$3,NULL,'commercial_inventory_policy',$4,
+         policy."policyVersion",policy."policyVersion",
+         'recommendation.demand.ready','system',$5,NULL,
+         jsonb_build_object(
+           'status','ready',
+           'projectContextVersionId',$4::text,
+           'snapshotVersion',$7::integer,
+           'profileVersionId',$8::text,
+           'promotionTargetVersionId',$9::text,
+           'evidenceFingerprint',$10::text,
+           'policyAction',policy."policyAction"
+         ),
+         'Website Project evidence is ready for configured discovery sources.',
+         $11,NULL,$12||':'||policy."policyAction",1
+       FROM policy
+       ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
+       RETURNING id
+     )
+     INSERT INTO backlink_audit_events (
+       id,organization_id,workspace_id,website_project_id,job_id,
+       lifecycle_event_id,actor_id,actor_kind,action,target_type,target_id,
+       outcome,reason,before_redacted,after_redacted,request_id,
+       correlation_id,previous_integrity_hash,integrity_hash,
+       event_schema_version
+     )
+     SELECT
+       $13,$1,$2,$3,NULL,lifecycle.id,$5,'system',
+       'recommendation.demand.ready',
+       'commercial_inventory_policy',$4,'success',
+       'Website Project evidence is ready for configured discovery sources.',
+       NULL,
+       jsonb_build_object(
+         'status','ready',
+         'projectContextVersionId',$4::text,
+         'snapshotVersion',$7::integer,
+         'policyAction',policy."policyAction"
+       ),
+       $12,$11,NULL,$14,1
+     FROM lifecycle
+     JOIN policy ON true`,
+    [
+      input.organizationId,
+      input.workspaceId,
+      input.websiteProjectId,
+      input.snapshotId,
+      input.actorId,
+      lifecycleEventId,
+      input.snapshotVersion,
+      input.profileVersionId,
+      input.promotionTargetVersionId,
+      input.generationInputPins.immutableFingerprint,
+      input.correlationId,
+      idempotencyKey,
+      auditEventId,
+      integrityHash,
+    ],
+  );
 }
 
 export function createProjectContextProjectionCommand(
@@ -378,6 +672,7 @@ export function createProjectContextProjectionCommand(
         websiteProjectId: input.websiteProjectId,
       };
       return withBacklinkTenantTransaction(pool, scope, async (client) => {
+        assertProjectionInputBinding(input);
         const snapshots = createProjectContextSnapshotRepository(client);
         const latest = await snapshots.findLatest(scope);
         if (latest !== null && latest.snapshotVersion > input.snapshotVersion) {
@@ -394,6 +689,8 @@ export function createProjectContextProjectionCommand(
             input,
             capabilities,
           );
+          await persistProjectionInput(client, input);
+          await ensureRecommendationDemandPolicy(client, input);
           return {
             state: "replayed",
             snapshotVersion: input.snapshotVersion,
@@ -421,11 +718,13 @@ export function createProjectContextProjectionCommand(
           partnershipGoals: input.partnershipGoals,
           actorId: input.actorId,
         });
+        await persistProjectionInput(client, input);
         await initializeProjectRuntimeGovernance(
           client,
           input,
           capabilities,
         );
+        await ensureRecommendationDemandPolicy(client, input);
         await staleContactEnrichmentJobs(client, input);
 
         if (!input.inputComplete || input.projectStatus !== "ACTIVE") {
@@ -472,7 +771,6 @@ export function createProjectContextProjectionCommand(
           },
           payloadSchemaVersion: 1,
         });
-        await requestInitialGeneration(client, input);
         return {
           state: "projected",
           snapshotVersion: input.snapshotVersion,

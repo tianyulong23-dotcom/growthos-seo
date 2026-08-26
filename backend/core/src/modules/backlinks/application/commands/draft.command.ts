@@ -16,7 +16,11 @@ import { draftDocumentSchema } from "../schemas/draft-document.schema.js";
 import {
   draftDocumentToPlainText,
 } from "../../domain/drafts/draft-document.js";
+import {
+  containsInternalDraftMetadataMarker,
+} from "../../domain/drafts/evidence-policy.js";
 import type { DraftRequest } from "../schemas/draft-request.schema.js";
+import { AiDraftError } from "../../ports/ai-draft.port.js";
 
 export type DraftBudgetGate = Readonly<{
   assertAvailable(input: Readonly<{
@@ -58,6 +62,33 @@ const authorize = (context: ResolvedProjectContext): void => {
 
 const mapRepositoryError = (error: unknown): never => {
   const message = error instanceof Error ? error.message : "";
+  if (message === "DRAFT_PROJECT_CONTEXT_INCOMPLETE") {
+    throw new BacklinkError({
+      code: backlinkErrorCodes.conflict,
+      message:
+        "Project marketing context is incomplete. Add a product, promotion topic, and promotion target before generating a Draft.",
+      fieldErrors: [{
+        field: "projectMarketingContext",
+        message:
+          "The active project needs products, keywords or topics, and a promotion target.",
+      }],
+    });
+  }
+  if (
+    message === "DRAFT_PROMOTION_TARGET_INVALID"
+    || message === "DRAFT_PROMOTION_TARGET_OUTSIDE_PROJECT"
+  ) {
+    throw new BacklinkError({
+      code: backlinkErrorCodes.invalidRequest,
+      message:
+        "The promotion target must be a valid HTTP(S) page on this project's website.",
+      fieldErrors: [{
+        field: "request.promotionTargetUrl",
+        message:
+          "Use a published page on the current project's domain or one of its subdomains.",
+      }],
+    });
+  }
   if (message === "Idempotency key payload mismatch.") {
     throw new BacklinkError({
       code: backlinkErrorCodes.conflict,
@@ -93,17 +124,10 @@ export function createDraftCommands(dependencies: Readonly<{
   return Object.freeze({
     async create(input: CreateDraftCommand) {
       authorize(input.context);
-      if (dependencies.generationMode === "MODEL") {
-        if (!dependencies.modelProviderAvailable()) {
-          throw new BacklinkError({
-            code: backlinkErrorCodes.invalidRequest,
-            message: "MISCONFIGURED: AI Draft Provider is not configured.",
-            fieldErrors: [{
-              field: "AI_PROVIDER_ENABLED",
-              message: "Enable and configure the AI Draft Provider.",
-            }],
-          });
-        }
+      if (
+        dependencies.generationMode === "MODEL"
+        && dependencies.modelProviderAvailable()
+      ) {
         try {
           await dependencies.budget.assertAvailable({
             organizationId: input.context.tenant.organizationId,
@@ -111,12 +135,14 @@ export function createDraftCommands(dependencies: Readonly<{
             websiteProjectId: input.context.project.websiteProjectId,
             operation: "draft_generation",
           });
-        } catch {
-          throw new BacklinkError({
-            code: backlinkErrorCodes.rateLimited,
-            message: "Draft generation budget is unavailable.",
-            retryable: true,
-          });
+        } catch (error) {
+          if (!(error instanceof AiDraftError)) {
+            throw new BacklinkError({
+              code: backlinkErrorCodes.rateLimited,
+              message: "Draft generation budget is unavailable.",
+              retryable: true,
+            });
+          }
         }
       }
 
@@ -215,6 +241,18 @@ const requireCompleted = (
       message: "ExpectedVersion does not match the current Draft.",
     });
   }
+  if (result.state === "invalid_content") {
+    throw new BacklinkError({
+      code: backlinkErrorCodes.invalidRequest,
+      message:
+        "Remove internal evidence metadata before approving this Draft.",
+      fieldErrors: [{
+        field: "bodyDocument",
+        message:
+          "Recipient-visible Draft content contains internal evidence metadata.",
+      }],
+    });
+  }
   return {
     draftId: result.draftId,
     versionId: result.versionId,
@@ -238,6 +276,31 @@ export function createDraftEditingCommands(dependencies: Readonly<{
     }>) {
       authorize(input.context);
       const bodyDocument = draftDocumentSchema.parse(input.bodyDocument);
+      const bodyText = draftDocumentToPlainText(bodyDocument);
+      const fieldErrors = [
+        ...(containsInternalDraftMetadataMarker(input.subjectText)
+          ? [{
+              field: "subjectText",
+              message:
+                "Remove internal evidence metadata from the email subject.",
+            }]
+          : []),
+        ...(containsInternalDraftMetadataMarker(bodyText)
+          ? [{
+              field: "bodyDocument",
+              message:
+                "Remove internal evidence metadata from the email body.",
+            }]
+          : []),
+      ];
+      if (fieldErrors.length > 0) {
+        throw new BacklinkError({
+          code: backlinkErrorCodes.invalidRequest,
+          message:
+            "Recipient-visible draft content cannot contain internal evidence metadata.",
+          fieldErrors,
+        });
+      }
       return requireCompleted(
         await dependencies.repository.saveManualVersion({
           organizationId: input.context.tenant.organizationId,
@@ -246,7 +309,7 @@ export function createDraftEditingCommands(dependencies: Readonly<{
           draftId: input.draftId,
           expectedVersion: input.expectedVersion,
           subjectText: input.subjectText,
-          bodyText: draftDocumentToPlainText(bodyDocument),
+          bodyText,
           bodyDocument,
           versionId: dependencies.newId(),
           actorId: input.context.actor.userId,

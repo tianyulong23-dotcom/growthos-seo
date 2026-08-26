@@ -2,6 +2,9 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import {
+  clearRecommendationOperation,
+  clearRecommendationRefillAttempt,
+  getOrCreateRecommendationRefillAttempt,
   readRecommendationOperation,
   releaseRecommendationStartLease,
   storeRecommendationOperation,
@@ -30,6 +33,7 @@ const scope = {
   visiblePoolGeneration: 1,
 }
 const operationId = "018f0000-0000-7000-8000-000000000097"
+const attemptId = "018f0000-0000-7000-8000-000000000098"
 
 test("LOCAL-PRODUCT-037 persists one operation per project context", () => {
   const storage = new MemoryStorage()
@@ -65,6 +69,36 @@ test("discarding a malformed stored operation allows a fresh generation", () => 
       "growthos:recommendation-refill:project-alpha:context-v3:g1"
     ),
     null
+  )
+})
+
+test("terminal recovery clears the operation without rotating a pending logical attempt", () => {
+  const storage = new MemoryStorage()
+  storeRecommendationOperation(storage, scope, operationId)
+
+  clearRecommendationOperation(storage, scope)
+  assert.equal(readRecommendationOperation(storage, scope), null)
+  assert.equal(
+    getOrCreateRecommendationRefillAttempt(storage, scope, () => attemptId),
+    attemptId
+  )
+  assert.equal(
+    getOrCreateRecommendationRefillAttempt(
+      storage,
+      scope,
+      () => "018f0000-0000-7000-8000-000000000099"
+    ),
+    attemptId
+  )
+
+  clearRecommendationRefillAttempt(storage, scope)
+  assert.equal(
+    getOrCreateRecommendationRefillAttempt(
+      storage,
+      scope,
+      () => "018f0000-0000-7000-8000-000000000099"
+    ),
+    "018f0000-0000-7000-8000-000000000099"
   )
 })
 

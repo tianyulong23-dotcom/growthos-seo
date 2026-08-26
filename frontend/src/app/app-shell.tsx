@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ListTodo,
+  LoaderCircle,
   LogOut,
   Moon,
   Search,
@@ -12,7 +13,7 @@ import {
   SlidersHorizontal,
   Sun,
 } from "lucide-react"
-import { Link, Outlet, useLocation, useParams } from "react-router"
+import { Link, Navigate, Outlet, useLocation, useParams } from "react-router"
 
 import { AgentDock, MobileAgentSheet } from "@/components/agent/agent-dock"
 import { useTheme } from "@/components/theme-provider"
@@ -49,6 +50,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { modules } from "@/data/mock-data"
 import { BusinessProfileOnboardingController } from "@/features/projects/business-profile-onboarding"
 import { useProjects } from "@/features/projects/project-context"
+import { ProjectSwitcher } from "@/features/projects/project-switcher"
 
 function getModulePath(projectId: string, moduleId: string) {
   const currentModule = modules.find((item) => item.id === moduleId)
@@ -60,9 +62,9 @@ function getModulePath(projectId: string, moduleId: string) {
 
 function AppSidebar() {
   const location = useLocation()
-  const { projects, getProject } = useProjects()
+  const { getProject } = useProjects()
   const { isMobile, setOpenMobile, state, toggleSidebar } = useSidebar()
-  const { projectId = projects[0]?.id ?? "" } = useParams()
+  const { projectId = "" } = useParams()
   const project = getProject(projectId)
   const currentProjectId = project.id || projectId
   const activeModule = location.pathname.split("/")[3] ?? "audit"
@@ -326,7 +328,7 @@ function HeaderActions() {
   )
 }
 
-export function AppShell() {
+function ProjectAppShell() {
   return (
     <TooltipProvider>
       <BusinessProfileOnboardingController />
@@ -344,6 +346,7 @@ export function AppShell() {
               title="展开或收起导航"
             />
             <MobileAgentSheet />
+            <ProjectSwitcher />
             <div className="relative hidden max-w-md flex-1 md:block">
               <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -363,4 +366,23 @@ export function AppShell() {
       </SidebarProvider>
     </TooltipProvider>
   )
+}
+
+export function AppShell() {
+  const { projectId = "" } = useParams()
+  const { getProject, loadState } = useProjects()
+  const project = getProject(projectId)
+
+  if (loadState === "loading") {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
+        <LoaderCircle className="mr-2 size-4 animate-spin" />
+        正在加载项目
+      </div>
+    )
+  }
+  if (!projectId || !project.id) {
+    return <Navigate to="/projects" replace />
+  }
+  return <ProjectAppShell />
 }

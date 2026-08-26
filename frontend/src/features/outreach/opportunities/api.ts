@@ -15,6 +15,9 @@ export type OpportunityManagementStatus = OpportunityDetail["managementStatus"]
 export type OpportunityOutcomeStatus = OpportunityDetail["outcomeStatus"]
 export type OpportunityFulfillmentStatus =
   OpportunityDetail["fulfillmentStatus"]
+export type OpportunityManualActionState = NonNullable<
+  OpportunityDetail["cooperationPath"]
+>["state"]
 
 export type OpportunityFilters = {
   businessStage?: OpportunityBusinessStage
@@ -82,6 +85,40 @@ export function patchOpportunityManagement(
   return requestBacklinks("backlinksPatchOpportunityManagementV1", {
     path: { websiteProjectKey, opportunityId },
     headers: { "idempotency-key": idempotencyKey },
+    body: input,
+  })
+}
+
+export function patchCooperationPathContent(
+  websiteProjectKey: string,
+  opportunityId: string,
+  input: {
+    expectedVersion: number
+    editableContent: string
+    nextAction: string
+  }
+) {
+  return requestBacklinks("backlinksPatchCooperationPathContentV1", {
+    path: { websiteProjectKey, opportunityId },
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: input,
+  })
+}
+
+export function transitionManualAction(
+  websiteProjectKey: string,
+  opportunityId: string,
+  input: {
+    expectedVersion: number
+    toState: OpportunityManualActionState
+    nextAction: string
+    evidence?: Record<string, unknown>
+    submissionConfirmed?: boolean
+  }
+) {
+  return requestBacklinks("backlinksTransitionManualActionV1", {
+    path: { websiteProjectKey, opportunityId },
+    headers: { "idempotency-key": crypto.randomUUID() },
     body: input,
   })
 }

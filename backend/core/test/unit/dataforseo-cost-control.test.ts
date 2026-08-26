@@ -87,7 +87,10 @@ const createBulkService = (
 ) => ({
   service: new ProviderBulkRequestService({
     provider: { fetchBatch },
-    gate: { authorize: async () => undefined },
+    gate: {
+      preflight: async () => undefined,
+      authorize: async () => undefined,
+    },
     store,
     now: () => now,
   }, maxBatchSize === undefined ? {} : { maxBatchSize }),
@@ -186,7 +189,10 @@ describe("DFS-COST-002/006 progressive SWR and inventory", () => {
     const service = new DataForSeoRequestService({
       coordinator,
       provider: { fetchBacklinkSnapshot },
-      gate: { authorize: async () => undefined },
+      gate: {
+        preflight: async () => undefined,
+        authorize: async () => undefined,
+      },
       scheduleBackgroundRefresh,
       now: () => now,
     });

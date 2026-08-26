@@ -20,6 +20,12 @@ type Builder = {
 type Table = Readonly<Record<string, unknown>>;
 
 const require = createRequire(import.meta.url);
+const orm = require("drizzle-orm") as {
+  readonly sql: (
+    strings: TemplateStringsArray,
+    ...values: readonly unknown[]
+  ) => unknown;
+};
 const pg = require("drizzle-orm/pg-core") as {
   readonly pgTable: (
     name: string,
@@ -27,7 +33,9 @@ const pg = require("drizzle-orm/pg-core") as {
     extra: (table: Table) => readonly unknown[],
   ) => Table;
   readonly uniqueIndex: (name: string) => {
-    on(...columns: readonly unknown[]): unknown;
+    on(...columns: readonly unknown[]): {
+      where(condition: unknown): unknown;
+    };
   };
   readonly foreignKey: (config: {
     readonly name: string;
@@ -92,11 +100,13 @@ export const backlinkSendIntents = pg.pgTable(
       table.websiteProjectId,
       table.clientIdempotencyKey,
     ),
-    pg.uniqueIndex("backlink_send_intent_logical_message_uq").on(
-      table.workspaceId,
-      table.websiteProjectId,
-      table.logicalMessageKey,
-    ),
+    pg.uniqueIndex("backlink_send_intent_active_logical_message_uq")
+      .on(
+        table.workspaceId,
+        table.websiteProjectId,
+        table.logicalMessageKey,
+      )
+      .where(orm.sql`${table.status} <> 'FAILED_FINAL'`),
     pg.foreignKey({
       name: "backlink_send_intent_opportunity_fk",
       columns: [...identity(table), table.opportunityId],

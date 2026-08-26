@@ -1,0 +1,11 @@
+export function projectRouteForSwitch(
+  pathname: string,
+  currentProjectId: string,
+  nextProjectId: string
+) {
+  const projectPrefix = `/projects/${currentProjectId}`
+  const suffix = pathname.startsWith(projectPrefix)
+    ? pathname.slice(projectPrefix.length)
+    : ""
+  return `/projects/${nextProjectId}${suffix || "/audit/overview"}`
+}

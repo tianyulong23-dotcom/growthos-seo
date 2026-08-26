@@ -131,6 +131,7 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       "0011_backlink_contact_purpose_correction.sql",
       "0012_backlink_gmail_connections.sql",
       "0015_backlink_gmail_sync_capabilities.sql",
+      "0033_backlink_runtime_governance.sql",
       "0041_backlink_gmail_project_bindings.sql",
       "0047_backlink_gmail_organization_reuse.sql",
       "0056_backlink_gmail_affected_project_count.sql",
@@ -685,8 +686,100 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       new Set(
         organizationConnections.map(({ externalSecretId }) =>
           externalSecretId),
-      ).size,
+    ).size,
     ).toBe(2);
+  });
+
+  it("repairs missing enabled Gmail governance without reopening an explicit pause", async () => {
+    let nextId = 1_600;
+    const legacyProjectId = id(160);
+    const legacyConnectionId = id(161);
+    const disabledRepository = new PostgresqlGmailConnectionRepository({
+      pool,
+      newId: () => id(nextId++),
+    });
+    await disabledRepository.saveAuthorizedConnectionWithBindings({
+      connectionId: legacyConnectionId,
+      organizationId,
+      workspaceId,
+      websiteProjectId: legacyProjectId,
+      connectedByUserId: "user-pb-c1",
+      googleSubject: "legacy-google-subject-pb-c1",
+      primaryEmail: "legacy-owner@example.test",
+      displayName: "Legacy Owner",
+      hostedDomain: "example.test",
+      grantedScopes: gmailOAuthScopes,
+      tokenSecretReference: {
+        provider: "integration-secret-store",
+        secretKind: secretKinds.gmailTokenSet,
+        externalSecretId: legacyConnectionId,
+        externalSecretVersion: "1",
+      },
+      tokenExpiresAt: "2026-08-24T12:00:00.000Z",
+    });
+    const governanceRows = () => client.query(
+      `SELECT capability, version, blocked
+         FROM backlinks.backlink_kill_switch_versions
+        WHERE organization_id = $1
+          AND workspace_id = $2
+          AND website_project_id = $3
+          AND layer = 'project'
+          AND capability IN ('GMAIL_SEND', 'GMAIL_SYNC')
+        ORDER BY capability, version`,
+      [organizationId, workspaceId, legacyProjectId],
+    );
+    await expect(governanceRows()).resolves.toMatchObject({ rows: [] });
+
+    const enabledRepository = new PostgresqlGmailConnectionRepository({
+      pool,
+      newId: () => id(nextId++),
+      projectGovernance: {
+        gmailSendEnabled: true,
+        gmailSyncEnabled: true,
+      },
+    });
+    const context = {
+      actor: createActorContext({
+        userId: "user-pb-c1",
+        sessionId: "session-gmail-governance-repair",
+        roles: ["member"],
+      }),
+      tenant: createTenantContext({ organizationId, workspaceId }),
+      project: createProjectContext({
+        websiteProjectId: legacyProjectId,
+        canonicalDomain: "legacy.example.test",
+        locale: "en-US",
+        countryCode: "US",
+        profileVersionId: id(162),
+        promotionTargetVersionId: id(163),
+      }),
+    };
+    await expect(
+      enabledRepository.findProjectMailboxState(context),
+    ).resolves.toMatchObject({
+      selectedConnection: { connectionId: legacyConnectionId },
+    });
+    expect((await governanceRows()).rows).toEqual([
+      { capability: "GMAIL_SEND", version: 1, blocked: false },
+      { capability: "GMAIL_SYNC", version: 1, blocked: false },
+    ]);
+
+    await client.query(
+      `INSERT INTO backlinks.backlink_kill_switch_versions (
+         id, organization_id, workspace_id, website_project_id,
+         layer, capability, provider, version, blocked, reason, created_by
+       ) VALUES (
+         $1, $2, $3, $4, 'project', 'GMAIL_SYNC', NULL, 2, true,
+         'Administrator paused Gmail sync', 'admin-pb-c1'
+       )`,
+      [id(nextId++), organizationId, workspaceId, legacyProjectId],
+    );
+    await enabledRepository.findProjectMailboxState(context);
+    expect((await governanceRows()).rows).toEqual([
+      { capability: "GMAIL_SEND", version: 1, blocked: false },
+      { capability: "GMAIL_SYNC", version: 1, blocked: false },
+      { capability: "GMAIL_SYNC", version: 2, blocked: true },
+    ]);
   });
 
   it("isolates reauthorization failure to projects bound to that Gmail account", async () => {
@@ -762,13 +855,31 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
     });
     expect(refreshState).not.toBeNull();
 
-    await expect(repository.markReauthRequired({
+    const refreshFailure = await repository.markRefreshFailure({
       organizationId,
       workspaceId,
       websiteProjectId: projectAId,
       connectionId: connectionAId,
       actorId: "user-pb-c1",
       expectedVersion: refreshState?.version ?? 0,
+      reason: "GOOGLE_AUTH_TEMPORARY_FAILURE",
+    });
+    expect(refreshFailure).toMatchObject({
+      view: {
+        connectionId: connectionAId,
+        connectionStatus: "CONNECTED",
+        sendAvailability: "AVAILABLE",
+        recentErrorCategory: "GOOGLE_AUTH_TEMPORARY_FAILURE",
+      },
+    });
+
+    await expect(repository.markReauthRequired({
+      organizationId,
+      workspaceId,
+      websiteProjectId: projectAId,
+      connectionId: connectionAId,
+      actorId: "user-pb-c1",
+      expectedVersion: refreshFailure?.version ?? 0,
       reason: "GOOGLE_AUTH_EXPIRED",
     })).resolves.toMatchObject({
       view: {

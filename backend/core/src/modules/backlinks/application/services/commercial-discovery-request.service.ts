@@ -10,6 +10,7 @@ import {
   commercialDiscoveryArtifactSchema,
   fingerprintCommercialDiscoveryCall,
   normalizeCommercialDiscoveryResponse,
+  serializeCommercialDiscoveryRequestPayload,
   type CommercialDiscoveryArtifact,
   type CommercialDiscoveryCall,
 } from "../../domain/recommendations/commercial-discovery-source.js";
@@ -88,10 +89,283 @@ export class CommercialDiscoveryRequestService {
     provider: CommercialDataForSeoRuntime;
     gate: DataForSeoCallGate;
     now(): Date;
+    requiredRemainingPaidCalls?: number;
+    requiredRemainingCostMicros?: number;
     followerWaitMs?: number;
     followerPollMs?: number;
     sleep?: (milliseconds: number) => Promise<void>;
   }>) {}
+
+  private async transitionInterruptedRequest(input: Readonly<{
+    context: ProviderRequestContext;
+    projectContextVersionId: string;
+    call: CommercialDiscoveryCall;
+    requestFingerprint: string;
+    interruptedAt: Date;
+  }>): Promise<Readonly<{
+    batchRequestId: string;
+    providerTaskId: string | null;
+    leaseOwnerRequestId: string;
+    budgetReserved: boolean;
+    startedAt: Date;
+  }> | null> {
+    const interrupted = await this.dependencies.client.query(
+      `WITH guard AS (
+         SELECT pg_advisory_xact_lock(
+           hashtextextended(
+             $1::text||':'||$2::text||':'||$3::text||':'||$4,
+             0
+           )
+         )
+       ),
+       candidate AS MATERIALIZED (
+         SELECT batch.id,
+                batch.request_id AS "leaseOwnerRequestId",
+                batch.provider_task_id AS "providerTaskId",
+                batch.started_at AS "startedAt",
+                EXISTS (
+                  SELECT 1
+                    FROM backlink_provider_usage_ledger AS usage
+                   WHERE (
+                     usage.organization_id,usage.workspace_id,
+                     usage.website_project_id
+                   )=(
+                     batch.organization_id,batch.workspace_id,
+                     batch.website_project_id
+                   )
+                     AND usage.provider='dataforseo'
+                     AND usage.provider_request_id=batch.id
+                     AND usage.reservation_key=batch.budget_reservation_id
+                     AND usage.status='reserved'
+                ) AS "budgetReserved"
+           FROM guard
+           CROSS JOIN provider_batch_requests AS batch
+           JOIN backlink_provider_requests AS provider_request
+             ON (
+               provider_request.organization_id,
+               provider_request.workspace_id,
+               provider_request.website_project_id,
+               provider_request.id
+             )=(
+               batch.organization_id,batch.workspace_id,
+               batch.website_project_id,batch.id
+             )
+           JOIN provider_fetch_leases AS lease
+             ON lease.artifact_fingerprint=batch.normalized_request_hash
+            AND lease.owner_request_id=batch.request_id
+          WHERE (batch.organization_id,batch.workspace_id,
+                 batch.website_project_id)=(
+                   $1::uuid,$2::uuid,$3::uuid
+                 )
+            AND batch.normalized_request_hash=$4
+            AND batch.endpoint=$5
+            AND batch.response_schema_version=$6
+            AND batch.request_id=$7
+            AND batch.status='running'
+            AND provider_request.status='running'
+            AND lease.status='acquired'
+            AND lease.lease_expires_at<=$8
+          ORDER BY batch.started_at DESC
+          LIMIT 1
+          FOR UPDATE OF batch,provider_request,lease
+       ),
+       marked_batch AS (
+         UPDATE provider_batch_requests AS batch
+            SET status='unknown_charge',
+                failure_code=CASE
+                  WHEN candidate."providerTaskId" IS NULL
+                    THEN 'DATAFORSEO_WORKER_INTERRUPTED_DISPATCH_UNKNOWN'
+                  ELSE 'DATAFORSEO_WORKER_INTERRUPTED_AFTER_TASK_ACCEPTED'
+                END,
+                failed_count=1,
+                finished_at=$8
+           FROM candidate
+          WHERE batch.id=candidate.id AND batch.status='running'
+          RETURNING
+            batch.id AS "batchRequestId",
+            candidate."leaseOwnerRequestId",
+            candidate."providerTaskId",
+            candidate."budgetReserved",
+            candidate."startedAt"
+       ),
+       marked_request AS (
+         UPDATE backlink_provider_requests AS provider_request
+            SET status='unknown_charge',finished_at=$8
+           FROM marked_batch
+          WHERE provider_request.id=marked_batch."batchRequestId"
+            AND provider_request.status='running'
+          RETURNING provider_request.id
+       ),
+       marked_lease AS (
+         UPDATE provider_fetch_leases AS lease
+            SET status='unknown_charge',
+                failure_code=CASE
+                  WHEN marked_batch."providerTaskId" IS NULL
+                    THEN 'DATAFORSEO_WORKER_INTERRUPTED_DISPATCH_UNKNOWN'
+                  ELSE 'DATAFORSEO_WORKER_INTERRUPTED_AFTER_TASK_ACCEPTED'
+                END,
+                heartbeat_at=$8,lease_expires_at=$8,updated_at=$8
+           FROM marked_batch,marked_request
+          WHERE lease.artifact_fingerprint=$4
+            AND lease.owner_request_id=marked_batch."leaseOwnerRequestId"
+            AND lease.status='acquired'
+            AND lease.lease_expires_at<=$8
+          RETURNING lease.artifact_fingerprint
+       )
+       SELECT marked_batch.*
+         FROM marked_batch,marked_request,marked_lease`,
+      [
+        input.context.organizationId,
+        input.context.workspaceId,
+        input.context.websiteProjectId,
+        input.requestFingerprint,
+        input.call.endpoint,
+        input.call.responseSchemaVersion,
+        input.context.requestId,
+        input.interruptedAt,
+      ],
+    );
+    const row = interrupted.rows[0];
+    if (row === undefined) return null;
+    return Object.freeze({
+      batchRequestId: String(row.batchRequestId),
+      providerTaskId:
+        typeof row.providerTaskId === "string"
+          ? row.providerTaskId
+          : null,
+      leaseOwnerRequestId: String(row.leaseOwnerRequestId),
+      budgetReserved: row.budgetReserved === true,
+      startedAt: new Date(String(row.startedAt)),
+    });
+  }
+
+  private async reconcileNotDispatched(input: Readonly<{
+    context: ProviderRequestContext;
+    batchRequestId: string;
+    requestFingerprint: string;
+    leaseOwnerRequestId: string;
+    reconciledAt: Date;
+  }>): Promise<void> {
+    const result = await this.dependencies.client.query(
+      `/* DATAFORSEO_RECONCILED_NOT_DISPATCHED */
+       WITH guard AS (
+         SELECT pg_advisory_xact_lock(
+           hashtextextended(
+             $1::text||':'||$2::text||':'||$3::text||':'||$5,
+             0
+           )
+         )
+       ),
+       candidate AS MATERIALIZED (
+         SELECT batch.id,
+                batch.organization_id AS "organizationId",
+                batch.workspace_id AS "workspaceId",
+                usage.id AS "usageId",
+                usage.budget_id AS "budgetId",
+                usage.estimated_cost_micros AS "estimatedCostMicros"
+           FROM guard
+           CROSS JOIN provider_batch_requests AS batch
+           JOIN backlink_provider_requests AS provider_request
+             ON (
+               provider_request.organization_id,
+               provider_request.workspace_id,
+               provider_request.website_project_id,
+               provider_request.id
+             )=(
+               batch.organization_id,batch.workspace_id,
+               batch.website_project_id,batch.id
+             )
+           JOIN backlink_provider_usage_ledger AS usage
+             ON (
+               usage.organization_id,usage.workspace_id,
+               usage.website_project_id,usage.provider_request_id
+             )=(
+               batch.organization_id,batch.workspace_id,
+               batch.website_project_id,batch.id
+             )
+            AND usage.provider='dataforseo'
+            AND usage.reservation_key=batch.budget_reservation_id
+           JOIN provider_fetch_leases AS lease
+             ON lease.artifact_fingerprint=batch.normalized_request_hash
+            AND lease.owner_request_id=batch.request_id
+          WHERE (batch.organization_id,batch.workspace_id,
+                 batch.website_project_id)=($1::uuid,$2::uuid,$3::uuid)
+            AND batch.id=$4::uuid
+            AND batch.normalized_request_hash=$5
+            AND batch.request_id=$6
+            AND batch.status='unknown_charge'
+            AND batch.provider_task_id IS NULL
+            AND provider_request.status='unknown_charge'
+            AND usage.status='reserved'
+            AND lease.status='unknown_charge'
+          FOR UPDATE OF batch,provider_request,usage,lease
+       ),
+       released_usage AS (
+         UPDATE backlink_provider_usage_ledger AS usage
+            SET status='released',released_at=$7
+           FROM candidate
+          WHERE usage.id=candidate."usageId"
+            AND usage.status='reserved'
+          RETURNING usage.budget_id,usage.estimated_cost_micros
+       ),
+       released_budget AS (
+         UPDATE backlink_provider_budgets AS budget
+            SET reserved_micros=
+                  budget.reserved_micros-released_usage.estimated_cost_micros,
+                version=budget.version+1
+           FROM released_usage,candidate
+          WHERE budget.id=released_usage.budget_id
+            AND budget.organization_id=candidate."organizationId"
+            AND budget.workspace_id=candidate."workspaceId"
+            AND budget.reserved_micros
+                  >=released_usage.estimated_cost_micros
+          RETURNING budget.id
+       ),
+       failed_request AS (
+         UPDATE backlink_provider_requests AS provider_request
+            SET status='failed',finished_at=$7
+           FROM candidate
+          WHERE provider_request.id=candidate.id
+            AND provider_request.status='unknown_charge'
+          RETURNING provider_request.id
+       ),
+       failed_batch AS (
+         UPDATE provider_batch_requests AS batch
+            SET status='failed',
+                failure_code='DATAFORSEO_RECONCILED_NOT_DISPATCHED',
+                finished_at=$7
+           FROM candidate
+          WHERE batch.id=candidate.id
+            AND batch.status='unknown_charge'
+          RETURNING batch.id
+       ),
+       failed_lease AS (
+         UPDATE provider_fetch_leases AS lease
+            SET status='failed',
+                failure_code='DATAFORSEO_RECONCILED_NOT_DISPATCHED',
+                heartbeat_at=$7,lease_expires_at=$7,updated_at=$7
+           FROM candidate
+          WHERE lease.artifact_fingerprint=$5
+            AND lease.owner_request_id=$6
+            AND lease.status='unknown_charge'
+          RETURNING lease.artifact_fingerprint
+       )
+       SELECT failed_batch.id
+         FROM released_budget,failed_request,failed_batch,failed_lease`,
+      [
+        input.context.organizationId,
+        input.context.workspaceId,
+        input.context.websiteProjectId,
+        input.batchRequestId,
+        input.requestFingerprint,
+        input.leaseOwnerRequestId,
+        input.reconciledAt,
+      ],
+    );
+    if (result.rows[0] === undefined) {
+      throw new Error("DATAFORSEO_RECONCILIATION_STATE_CHANGED");
+    }
+  }
 
   private async persistSuccessfulRequest(input: Readonly<{
     request: Readonly<{
@@ -175,7 +449,7 @@ export class CommercialDiscoveryRequestService {
                 failed_count=0,
                 actual_cost_micros=$3,
                 raw_payload_hash=$4,
-                provider_task_id=$5,
+                provider_task_id=COALESCE($5,provider_task_id),
                 result_summary=$6::jsonb,
                 failure_code=NULL,
                 finished_at=$7
@@ -241,6 +515,7 @@ export class CommercialDiscoveryRequestService {
     languageCode: string;
     refreshMode: "CACHE_PREFERRED" | "FORCE_LIVE";
     actorId: string;
+    recoveryOnly?: boolean;
   }>): Promise<CommercialDiscoveryRequestResult> {
     const requestFingerprint = fingerprintCommercialDiscoveryCall(input.call);
     const now = this.dependencies.now();
@@ -276,48 +551,143 @@ export class CommercialDiscoveryRequestService {
       }
     }
 
-    const recoverable = await this.dependencies.client.query(
-      `SELECT id AS "batchRequestId",
-              provider_task_id AS "providerTaskId",
-              request_id AS "leaseOwnerRequestId"
-         FROM provider_batch_requests
-        WHERE organization_id=$1 AND workspace_id=$2
-          AND website_project_id=$3
-          AND normalized_request_hash=$4
-          AND endpoint=$5
-          AND response_schema_version=$6
-          AND status='unknown_charge'
-          AND provider_task_id IS NOT NULL
-        ORDER BY started_at DESC
-        LIMIT 1`,
-      [
-        input.context.organizationId,
-        input.context.workspaceId,
-        input.context.websiteProjectId,
-        requestFingerprint,
-        input.call.endpoint,
-        input.call.responseSchemaVersion,
-      ],
-    );
+    const interrupted = await this.transitionInterruptedRequest({
+      context: input.context,
+      projectContextVersionId: input.projectContextVersionId,
+      call: input.call,
+      requestFingerprint,
+      interruptedAt: now,
+    });
+    if (interrupted !== null && !interrupted.budgetReserved) {
+      throw new Error("BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED");
+    }
+
+    const recoverable = interrupted === null
+      ? await this.dependencies.client.query(
+        `SELECT batch.id AS "batchRequestId",
+                batch.provider_task_id AS "providerTaskId",
+                batch.request_id AS "leaseOwnerRequestId",
+                batch.started_at AS "startedAt",
+                TRUE AS "budgetReserved"
+           FROM provider_batch_requests AS batch
+           JOIN backlink_provider_requests AS provider_request
+             ON (
+               provider_request.organization_id,
+               provider_request.workspace_id,
+               provider_request.website_project_id,
+               provider_request.id
+             )=(
+               batch.organization_id,batch.workspace_id,
+               batch.website_project_id,batch.id
+             )
+           JOIN backlink_provider_usage_ledger AS usage
+             ON (
+               usage.organization_id,usage.workspace_id,
+               usage.website_project_id,usage.provider_request_id
+             )=(
+               batch.organization_id,batch.workspace_id,
+               batch.website_project_id,batch.id
+             )
+            AND usage.provider='dataforseo'
+            AND usage.reservation_key=batch.budget_reservation_id
+            AND usage.status='reserved'
+           JOIN provider_fetch_leases AS lease
+             ON lease.artifact_fingerprint=batch.normalized_request_hash
+            AND lease.owner_request_id=batch.request_id
+            AND lease.status='unknown_charge'
+          WHERE (batch.organization_id,batch.workspace_id,
+                 batch.website_project_id)=($1,$2,$3)
+            AND batch.normalized_request_hash=$4
+            AND batch.endpoint=$5
+            AND batch.response_schema_version=$6
+            AND batch.request_id=$7
+            AND batch.status='unknown_charge'
+            AND provider_request.status='unknown_charge'
+          ORDER BY batch.started_at DESC
+          LIMIT 1`,
+        [
+          input.context.organizationId,
+          input.context.workspaceId,
+          input.context.websiteProjectId,
+          requestFingerprint,
+          input.call.endpoint,
+          input.call.responseSchemaVersion,
+          input.context.requestId,
+        ],
+      )
+      : { rows: [interrupted] };
     const recoverableRow = recoverable.rows[0];
+    let reconciledNotDispatched = false;
     if (recoverableRow !== undefined) {
-      const recoverAcceptedTask =
-        this.dependencies.provider.recoverAcceptedTask;
-      if (recoverAcceptedTask === undefined) {
+      if (recoverableRow.budgetReserved !== true) {
         throw new Error("BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED");
       }
-      const response = await recoverAcceptedTask(
-        input.call,
-        String(recoverableRow.providerTaskId),
-      );
-      return this.persistSuccessfulRequest({
-        request: input,
-        requestFingerprint,
-        batchRequestId: String(recoverableRow.batchRequestId),
-        leaseOwnerRequestId: String(recoverableRow.leaseOwnerRequestId),
-        expectedStatus: "unknown_charge",
-        response,
-      });
+      let providerTaskId = typeof recoverableRow.providerTaskId === "string"
+        ? recoverableRow.providerTaskId
+        : null;
+      if (providerTaskId === null) {
+        const reconcileDispatchedTask =
+          this.dependencies.provider.reconcileDispatchedTask;
+        if (reconcileDispatchedTask === undefined) {
+          throw new Error("BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED");
+        }
+        const reconciliation = await reconcileDispatchedTask(input.call, {
+          dispatchedAt: new Date(String(recoverableRow.startedAt)),
+          reconciledAt: now,
+        });
+        if (reconciliation.status === "accepted") {
+          const stored = await this.dependencies.client.query(
+            `UPDATE provider_batch_requests
+                SET provider_task_id=$2
+              WHERE id=$1 AND status='unknown_charge'
+                AND provider_task_id IS NULL
+              RETURNING id`,
+            [
+              String(recoverableRow.batchRequestId),
+              reconciliation.providerTaskId,
+            ],
+          );
+          if (stored.rows[0] === undefined) {
+            throw new Error("DATAFORSEO_RECONCILIATION_STATE_CHANGED");
+          }
+          providerTaskId = reconciliation.providerTaskId;
+        } else if (reconciliation.status === "not_found") {
+          await this.reconcileNotDispatched({
+            context: input.context,
+            batchRequestId: String(recoverableRow.batchRequestId),
+            requestFingerprint,
+            leaseOwnerRequestId: String(
+              recoverableRow.leaseOwnerRequestId,
+            ),
+            reconciledAt: now,
+          });
+          reconciledNotDispatched = true;
+        } else {
+          throw new Error("BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED");
+        }
+      }
+      if (providerTaskId !== null) {
+        const recoverAcceptedTask =
+          this.dependencies.provider.recoverAcceptedTask;
+        if (recoverAcceptedTask === undefined) {
+          throw new Error("BACKLINK_PROVIDER_CHARGE_RECONCILIATION_REQUIRED");
+        }
+        const response = await recoverAcceptedTask(
+          input.call,
+          providerTaskId,
+        );
+        return this.persistSuccessfulRequest({
+          request: input,
+          requestFingerprint,
+          batchRequestId: String(recoverableRow.batchRequestId),
+          leaseOwnerRequestId: String(recoverableRow.leaseOwnerRequestId),
+          expectedStatus: "unknown_charge",
+          response,
+        });
+      }
+    }
+    if (input.recoveryOnly === true && !reconciledNotDispatched) {
+      throw new Error("DATAFORSEO_ACCEPTED_TASK_RECOVERY_STATE_CHANGED");
     }
 
     if (input.refreshMode === "CACHE_PREFERRED") {
@@ -329,7 +699,7 @@ export class CommercialDiscoveryRequestService {
             AND normalized_request_hash=$4
             AND endpoint=$5
             AND response_schema_version=$6
-            AND request_id LIKE $7
+            AND request_id=$7
             AND status='failed'
             AND failure_code=
               'DATAFORSEO_RECONCILED_ASSUMED_CHARGE_NO_RESULT'
@@ -342,7 +712,7 @@ export class CommercialDiscoveryRequestService {
                  AND unresolved.normalized_request_hash=$4
                  AND unresolved.endpoint=$5
                  AND unresolved.response_schema_version=$6
-                 AND unresolved.request_id LIKE $7
+                 AND unresolved.request_id=$7
                  AND unresolved.status='unknown_charge'
             )
           ORDER BY started_at DESC
@@ -354,8 +724,7 @@ export class CommercialDiscoveryRequestService {
           requestFingerprint,
           input.call.endpoint,
           input.call.responseSchemaVersion,
-          `commercial-refill:${input.context.websiteProjectId}:`
-            + `${input.projectContextVersionId}:%`,
+          input.context.requestId,
         ],
       );
       if (reconciledWithoutResult.rows[0] !== undefined) {
@@ -363,6 +732,15 @@ export class CommercialDiscoveryRequestService {
       }
     }
 
+    await this.dependencies.gate.preflight({
+      context: input.context,
+      requestFingerprint,
+      estimatedCostMicros: input.call.estimatedCostMicros,
+      requiredRemainingPaidCalls:
+        this.dependencies.requiredRemainingPaidCalls ?? 0,
+      requiredRemainingCostMicros:
+        this.dependencies.requiredRemainingCostMicros ?? 0,
+    });
     const leases = createProviderFetchLeaseRepository(
       this.dependencies.client,
     );
@@ -466,7 +844,7 @@ export class CommercialDiscoveryRequestService {
         endpoint: input.call.endpoint,
         requestFingerprint,
         requestSchemaVersion: 1,
-        requestPayload: input.call.request,
+        requestPayload: serializeCommercialDiscoveryRequestPayload(input.call),
         startedAt: now,
       });
       await this.dependencies.client.query("COMMIT");
@@ -487,6 +865,10 @@ export class CommercialDiscoveryRequestService {
         context: providerRequestContext,
         requestFingerprint,
         estimatedCostMicros: input.call.estimatedCostMicros,
+        requiredRemainingPaidCalls:
+          this.dependencies.requiredRemainingPaidCalls ?? 0,
+        requiredRemainingCostMicros:
+          this.dependencies.requiredRemainingCostMicros ?? 0,
       });
       const response = await this.dependencies.provider.execute(input.call, {
         onProviderTaskAccepted: async (providerTaskId) => {

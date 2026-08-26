@@ -12,6 +12,8 @@ type Scope = Readonly<{
 export type PlacementValidationCandidate = Readonly<{
   candidateId: string;
   opportunityId: string | null;
+  replyId: string | null;
+  plannedPlacementId: string;
   sourceType: string;
   sourcePageUrl: string;
   normalizedSourceUrl: string;
@@ -148,6 +150,8 @@ function mapCandidate(
       candidate: {
         candidateId,
         opportunityId: asNullableString(row.opportunityId),
+        replyId: asNullableString(row.replyId),
+        plannedPlacementId: String(row.plannedPlacementId),
         sourceType: String(row.sourceType),
         sourcePageUrl: String(row.sourcePageUrl),
         normalizedSourceUrl: String(row.normalizedSourceUrl),
@@ -177,6 +181,8 @@ export function createPlacementInitialValidationRepository(
     async (input) => {
       const result = await client.query(`
         SELECT c.id AS "candidateId",c.opportunity_id AS "opportunityId",
+          c.reply_id AS "replyId",
+          c.planned_placement_id AS "plannedPlacementId",
           c.source_type AS "sourceType",
           c.source_page_url AS "sourcePageUrl",
           c.normalized_source_url AS "normalizedSourceUrl",
@@ -278,7 +284,8 @@ export function createPlacementInitialValidationRepository(
         ), inserted_placement AS (
           INSERT INTO backlink_placements (
             id,organization_id,workspace_id,website_project_id,candidate_id,
-            opportunity_id,initial_validation_id,initial_validation_status,
+            opportunity_id,reply_id,
+            initial_validation_id,initial_validation_status,
             source_page_url,normalized_source_url,normalized_source_url_hash,
             target_url,normalized_target_url,normalized_target_url_hash,
             url_normalization_version,initial_evidence_snapshot_hash,
@@ -286,7 +293,8 @@ export function createPlacementInitialValidationRepository(
             created_at,updated_at,created_by,updated_by
           )
           SELECT $17,t.organization_id,t.workspace_id,t.website_project_id,
-            t.id,t.opportunity_id,v.id,v.status,t.source_page_url,
+            t.id,t.opportunity_id,t.reply_id,
+            v.id,v.status,t.source_page_url,
             t.normalized_source_url,t.normalized_source_url_hash,t.target_url,
             t.normalized_target_url,t.normalized_target_url_hash,
             t.url_normalization_version,v.evidence_snapshot_hash,
@@ -295,6 +303,7 @@ export function createPlacementInitialValidationRepository(
           FROM target t
           JOIN inserted_validation v ON true
           WHERE $7='VALID'
+            AND $17::uuid=t.planned_placement_id
           ON CONFLICT (
             website_project_id,normalized_source_url_hash,
             normalized_target_url_hash
@@ -352,6 +361,7 @@ export function createPlacementInitialValidationRepository(
               'placementId',p.id,
               'candidateId',p.candidate_id,
               'opportunityId',p.opportunity_id,
+              'replyId',p.reply_id,
               'initialValidationId',p.initial_validation_id,
               'websiteProjectId',p.website_project_id
             ),

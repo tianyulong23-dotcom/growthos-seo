@@ -17,6 +17,9 @@ import {
   runDraftGenerationWorkflow,
 } from "../../../src/modules/backlinks/application/workflows/draft-generation-workflow.js";
 import {
+  AiDraftError,
+} from "../../../src/modules/backlinks/ports/ai-draft.port.js";
+import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
 } from "./harness/postgresql-container.js";
@@ -494,6 +497,54 @@ describe("BL-AI-086 Draft persistence", () => {
       opportunityId: id(301),
       contactId: id(104),
       contactVersion: 1,
+      snapshotId: id(408),
+      requestSnapshotId: id(409),
+      request: {
+        ...generationRequest,
+        promotionTargetUrl: "https://owner.example/products/growthos",
+      },
+      actorId: "test",
+      recordedAt: new Date("2026-07-27T08:28:30.000Z"),
+    })).toEqual({
+      snapshotId: id(408),
+      requestSnapshotId: id(409),
+      replayed: false,
+    });
+    const childTargetSnapshot = (await client.query(`
+      SELECT item->>'value' AS "targetUrl"
+      FROM backlink_evidence_snapshots snapshot
+      CROSS JOIN LATERAL jsonb_array_elements(snapshot.evidence_items) item
+      WHERE snapshot.id='${id(408)}'
+        AND item->>'id'='promotion-target:current'
+    `)).rows[0];
+    expect(childTargetSnapshot).toEqual({
+      targetUrl:
+        "Promotion target https://owner.example/products/growthos",
+    });
+    await expect(repository.prepareEvidenceSnapshot({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      opportunityId: id(301),
+      contactId: id(104),
+      contactVersion: 1,
+      snapshotId: id(410),
+      requestSnapshotId: id(411),
+      request: {
+        ...generationRequest,
+        promotionTargetUrl: "https://unrelated.example/products/growthos",
+      },
+      actorId: "test",
+      recordedAt: new Date("2026-07-27T08:28:45.000Z"),
+    })).rejects.toThrow("DRAFT_PROMOTION_TARGET_OUTSIDE_PROJECT");
+
+    expect(await repository.prepareEvidenceSnapshot({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      opportunityId: id(301),
+      contactId: id(104),
+      contactVersion: 1,
       snapshotId: id(402),
       requestSnapshotId: id(403),
       request: generationRequest,
@@ -629,6 +680,8 @@ describe("BL-AI-086 Draft persistence", () => {
     });
     expect(completedJob).toMatchObject({
       status: "SUCCEEDED",
+      readiness: "AI_DRAFT_READY",
+      fallbackReason: null,
       latencyMs: 200,
       attemptCount: 1,
       lastErrorCategory: null,
@@ -691,9 +744,13 @@ describe("BL-AI-086 Draft persistence", () => {
       versionId: id(704),
     }, repository, {
       async generate() {
-        throw new Error("provider unavailable");
+        throw new AiDraftError({
+          code: "POLICY_VIOLATION",
+          message: "Provider output violated policy.",
+          retryable: false,
+        });
       },
-    })).rejects.toThrow("provider unavailable");
+    })).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
 
     expect(await repository.getJob({
       organizationId: organization,
@@ -702,9 +759,10 @@ describe("BL-AI-086 Draft persistence", () => {
       runId: id(604),
     })).toMatchObject({
       status: "FAILED",
+      readiness: "POLICY_BLOCKED",
       lastSuccessfulVersionId: id(703),
       attemptCount: 1,
-      lastErrorCategory: "DRAFT_GENERATION_FAILED",
+      lastErrorCategory: "POLICY_VIOLATION",
     });
     await expect(repository.createJob({
       ...failedJob,
@@ -723,6 +781,107 @@ describe("BL-AI-086 Draft persistence", () => {
       websiteProjectId: project,
       opportunityId: id(301),
     })).rejects.toThrow("Idempotency key payload mismatch.");
+
+    const retryJob = await repository.createJob({
+      ...failedJob,
+      draftId: id(999),
+      runId: id(607),
+      evidenceSnapshotId: id(402),
+      logicalDraftKey: "workflow-outreach",
+      idempotencyKey: "workflow-request-retry",
+      requestHash: "7".repeat(64),
+      promptVersion: "draft-prompt.v1",
+      outputSchemaVersion: "draft-output.v1",
+      actorId: "test",
+      recordedAt: new Date("2026-07-27T08:33:10.000Z"),
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      opportunityId: id(301),
+    });
+    expect(retryJob).toMatchObject({
+      status: "QUEUED",
+      attemptCount: 0,
+    });
+    const retryMutation = {
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      runId: id(607),
+      actorId: "test",
+      recordedAt: new Date("2026-07-27T08:33:11.000Z"),
+    };
+    expect(await repository.claimJob(retryMutation)).toMatchObject({
+      started: true,
+      status: "RUNNING",
+      attemptCount: 1,
+      lastErrorCategory: null,
+    });
+    await repository.scheduleRetry({
+      ...retryMutation,
+      recordedAt: new Date("2026-07-27T08:33:12.000Z"),
+      errorClass: "AiDraftError",
+      errorCode: "TIMEOUT",
+    });
+    expect(await repository.claimJob({
+      ...retryMutation,
+      recordedAt: new Date("2026-07-27T08:33:13.000Z"),
+    })).toMatchObject({
+      started: true,
+      status: "RUNNING",
+      readiness: "GENERATING",
+      attemptCount: 2,
+      lastErrorCategory: null,
+    });
+    await repository.failJob({
+      ...retryMutation,
+      recordedAt: new Date("2026-07-27T08:33:14.000Z"),
+      errorClass: "TestCleanup",
+      errorCode: "TEST_COMPLETE",
+      refused: false,
+    });
+
+    const concurrentJob = await repository.createJob({
+      ...failedJob,
+      draftId: id(999),
+      runId: id(606),
+      evidenceSnapshotId: id(402),
+      logicalDraftKey: "workflow-outreach",
+      idempotencyKey: "workflow-request-3",
+      requestHash: "f".repeat(64),
+      promptVersion: "draft-prompt.v1",
+      outputSchemaVersion: "draft-output.v1",
+      actorId: "test",
+      recordedAt: new Date("2026-07-27T08:33:30.000Z"),
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      opportunityId: id(301),
+    });
+    expect(concurrentJob).toMatchObject({
+      draftId: id(503),
+      baseDraftVersion: 2,
+      readiness: "QUEUED",
+    });
+    let providerStarted!: () => void;
+    const providerStart = new Promise<void>((resolve) => {
+      providerStarted = resolve;
+    });
+    let rejectProvider!: (error: Error) => void;
+    const providerResult = new Promise<never>((_resolve, reject) => {
+      rejectProvider = reject;
+    });
+    const concurrentWorkflow = runDraftGenerationWorkflow({
+      ...workflowInput,
+      runId: id(606),
+      versionId: id(708),
+    }, repository, {
+      async generate() {
+        providerStarted();
+        return providerResult;
+      },
+    });
+    await providerStart;
 
     const editing = createDraftEditingRepository(client);
     expect(await editing.saveManualVersion({
@@ -753,11 +912,34 @@ describe("BL-AI-086 Draft persistence", () => {
       draftVersion: 3,
       status: "draft",
     });
+    rejectProvider(new AiDraftError({
+      code: "UNAVAILABLE",
+      message: "provider unavailable after manual edit",
+      retryable: false,
+      diagnosticCode: "PROVIDER_NETWORK_ECONNRESET",
+    }));
+    await expect(concurrentWorkflow).rejects.toMatchObject({
+      code: "UNAVAILABLE",
+      diagnosticCode: "PROVIDER_NETWORK_ECONNRESET",
+    });
+    expect(await repository.getJob({
+      organizationId: organization,
+      workspaceId: workspace,
+      websiteProjectId: project,
+      runId: id(606),
+    })).toMatchObject({
+      status: "FAILED",
+      readiness: "FAILED",
+      lastErrorCategory: "UNAVAILABLE",
+      diagnosticCode: "PROVIDER_NETWORK_ECONNRESET",
+      fallbackReason: null,
+      versionId: null,
+    });
     expect((await client.query(`
       SELECT id,subject_text AS "subjectText",body_text AS "bodyText",
         body_document AS "bodyDocument"
       FROM backlink_draft_versions
-      WHERE id IN ('${id(703)}','${id(705)}')
+      WHERE id IN ('${id(703)}','${id(705)}','${id(708)}')
       ORDER BY id
     `)).rows).toEqual([
       {
@@ -793,6 +975,9 @@ describe("BL-AI-086 Draft persistence", () => {
       draftVersion: 3,
       currentVersion: {
         id: id(705),
+        source: "MANUAL",
+        readiness: "EDITED_DRAFT_READY",
+        fallbackReason: null,
         bodyText: "Human-edited body",
         bodyDocument: {
           type: "doc",

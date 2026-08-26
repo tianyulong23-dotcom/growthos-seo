@@ -297,7 +297,7 @@ describe("BL-AI-076 create Opportunity command", () => {
         `UPDATE backlink_recommendation_inventory
             SET publication_status='PUBLISHED',
                 fit_decision='eligible',
-                fit_score_model_version='recommendation-commercial-fit.v3',
+                fit_score_model_version='recommendation-commercial-fit.v4',
                 contact_decision='eligible',
                 contact_reason_code='PUBLIC_EMAIL_FOUND',
                 verified_public_email_count=1,
@@ -391,7 +391,7 @@ describe("BL-AI-076 create Opportunity command", () => {
       `UPDATE backlink_recommendation_inventory
           SET publication_status='PUBLISHED',
               fit_decision='eligible',
-              fit_score_model_version='recommendation-commercial-fit.v3',
+              fit_score_model_version='recommendation-commercial-fit.v4',
               contact_decision='eligible',
               contact_reason_code='PUBLIC_EMAIL_FOUND',
               verified_public_email_count=1,

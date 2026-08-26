@@ -6,6 +6,7 @@ import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from urllib.parse import quote
 
 import httpx
 from fastapi import Request
@@ -25,11 +26,22 @@ _GMAIL_OAUTH_TICKET_VERSION = "GmailOAuthCallbackTicket.v1"
 _GMAIL_OAUTH_TICKET_TTL = timedelta(minutes=10)
 
 
+def _validated_upstream_path(path: str) -> str:
+    if (
+        not path.startswith("/")
+        or path.startswith("//")
+        or any(character in path for character in ("?", "#", "\\", "\r", "\n"))
+    ):
+        raise ValueError("upstream_path must be an absolute path without a query")
+    return path
+
+
 class PlatformContextResolver(Protocol):
     async def resolve_collection(
         self,
         *,
         request: Request,
+        required_permission: str = "backlinks:read",
     ) -> ResolvedPlatformCollectionContext: ...
 
     async def resolve(
@@ -62,8 +74,9 @@ class RejectingPlatformContextResolver:
         self,
         *,
         request: Request,
+        required_permission: str = "backlinks:read",
     ) -> ResolvedPlatformCollectionContext:
-        del request
+        del request, required_permission
         raise self._error()
 
     async def resolve(
@@ -95,20 +108,24 @@ def problem_response(
     code: str,
     request_id: str,
     retryable: bool,
+    extensions: dict[str, object] | None = None,
 ) -> JSONResponse:
+    content: dict[str, object] = {
+        "type": problem_type,
+        "title": title,
+        "status": status,
+        "detail": detail,
+        "code": code,
+        "message": detail,
+        "requestId": request_id,
+        "retryable": retryable,
+    }
+    if extensions is not None:
+        content.update(extensions)
     return JSONResponse(
         status_code=status,
         media_type="application/problem+json",
-        content={
-            "type": problem_type,
-            "title": title,
-            "status": status,
-            "detail": detail,
-            "code": code,
-            "message": detail,
-            "requestId": request_id,
-            "retryable": retryable,
-        },
+        content=content,
     )
 
 
@@ -138,6 +155,7 @@ class BacklinksGateway:
         resolved: ResolvedPlatformRequestContext,
         website_project_key: str,
         query_params: Sequence[tuple[str, str]] | None = None,
+        upstream_path: str | None = None,
     ) -> Response:
         if resolved.project.website_project_key != website_project_key:
             return problem_response(
@@ -163,6 +181,11 @@ class BacklinksGateway:
                     retryable=False,
                 )
 
+        selected_upstream_path = (
+            request.url.path
+            if upstream_path is None
+            else _validated_upstream_path(upstream_path)
+        )
         try:
             signed_context = issue_platform_request_context_v1(
                 resolved,
@@ -192,14 +215,18 @@ class BacklinksGateway:
         try:
             upstream = await self._client.request(
                 request.method,
-                f"{self._base_url}{request.url.path}",
+                f"{self._base_url}{selected_upstream_path}",
                 params=(
                     list(request.query_params.multi_items())
                     if query_params is None
                     else list(query_params)
                 ),
                 headers=forwarded_headers,
-                content=await request.body(),
+                content=(
+                    None
+                    if request.method.upper() in {"GET", "HEAD"}
+                    else await request.body()
+                ),
             )
         except httpx.RequestError:
             return problem_response(
@@ -256,7 +283,71 @@ class BacklinksGateway:
                     else list(query_params)
                 ),
                 headers=forwarded_headers,
-                content=await request.body(),
+                content=(
+                    None
+                    if request.method.upper() in {"GET", "HEAD"}
+                    else await request.body()
+                ),
+            )
+        except httpx.RequestError:
+            return problem_response(
+                status=503,
+                problem_type="urn:growthos:problem:platform:backlinks-unavailable",
+                title="Backlinks service unavailable",
+                detail="The Backlinks service could not be reached.",
+                code="BACKLINKS_UNAVAILABLE",
+                request_id=resolved.correlation_id,
+                retryable=True,
+            )
+        return self._upstream_response(upstream)
+
+    async def publish_project_context(
+        self,
+        *,
+        resolved: ResolvedPlatformRequestContext,
+        website_project_key: str,
+        payload: dict[str, object],
+    ) -> Response:
+        if resolved.project.website_project_key != website_project_key:
+            return problem_response(
+                status=403,
+                problem_type="urn:growthos:problem:platform:project-binding-failed",
+                title="Platform project binding failed",
+                detail="The resolved project does not match the requested project.",
+                code="PLATFORM_PROJECT_BINDING_FAILED",
+                request_id=resolved.correlation_id,
+                retryable=False,
+            )
+        try:
+            signed_context = issue_platform_request_context_v1(
+                resolved,
+                signing_key=self._require_signing_key(),
+                now=datetime.now(UTC),
+            )
+        except ValueError:
+            return problem_response(
+                status=503,
+                problem_type="urn:growthos:problem:platform:backlinks-gateway-misconfigured",
+                title="Backlinks gateway unavailable",
+                detail="The Backlinks gateway signing configuration is unavailable.",
+                code="BACKLINKS_GATEWAY_MISCONFIGURED",
+                request_id=resolved.correlation_id,
+                retryable=False,
+            )
+        headers = {
+            "content-type": "application/json",
+            "x-correlation-id": resolved.correlation_id,
+            **signed_context,
+        }
+        try:
+            upstream = await self._client.post(
+                (
+                    f"{self._base_url}/internal/v1/projects/"
+                    f"{quote(website_project_key, safe='')}"
+                    "/backlinks/project-context-projection"
+                ),
+                headers=headers,
+                json=payload,
             )
         except httpx.RequestError:
             return problem_response(
@@ -285,7 +376,11 @@ class BacklinksGateway:
                 f"{self._base_url}{request.url.path}",
                 params=list(request.query_params.multi_items()),
                 headers=forwarded_headers,
-                content=await request.body(),
+                content=(
+                    None
+                    if request.method.upper() in {"GET", "HEAD"}
+                    else await request.body()
+                ),
             )
         except httpx.RequestError:
             return problem_response(
@@ -494,6 +589,8 @@ class BacklinksGateway:
             request.url.path.endswith("/reject")
             or request.url.path.endswith("/placement-candidates")
             or request.url.path.endswith("/recommendation-refill-jobs")
+            or request.url.path.endswith("/cancel")
+            or request.url.path.endswith("/close-duplicate")
             or request.url.path.endswith("/reverify")
             or request.url.path.endswith("/send-intents")
             or request.url.path.endswith("/transition")

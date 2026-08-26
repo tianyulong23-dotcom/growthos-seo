@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 
 import { projectIdentityColumns } from "./common.js";
+import { backlinkReplyMatchCandidates } from "./mail-sync.js";
 import { backlinkOpportunities } from "./opportunities.js";
 
 type Builder = {
@@ -51,6 +52,8 @@ export const backlinkPlacementCandidates = pg.pgTable(
     id: pg.uuid("id").primaryKey(),
     ...projectIdentityColumns(),
     opportunityId: pg.uuid("opportunity_id"),
+    replyId: pg.uuid("reply_id"),
+    plannedPlacementId: pg.uuid("planned_placement_id").notNull(),
     sourceType: pg.text("source_type").notNull(),
     sourceExternalId: pg.text("source_external_id"),
     sourcePageUrl: pg.text("source_page_url"),
@@ -88,12 +91,32 @@ export const backlinkPlacementCandidates = pg.pgTable(
       table.id,
       table.opportunityId,
     ),
+    pg.uniqueIndex("backlink_placement_candidate_full_lineage_uq").on(
+      ...identity(table),
+      table.id,
+      table.opportunityId,
+      table.replyId,
+      table.plannedPlacementId,
+    ),
     pg.foreignKey({
       name: "backlink_placement_candidate_opportunity_fk",
       columns: [...identity(table), table.opportunityId],
       foreignColumns: [
         ...identity(backlinkOpportunities),
         backlinkOpportunities.id,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_placement_candidate_reply_assignment_fk",
+      columns: [
+        ...identity(table),
+        table.replyId,
+        table.opportunityId,
+      ],
+      foreignColumns: [
+        ...identity(backlinkReplyMatchCandidates),
+        backlinkReplyMatchCandidates.inboundMessageId,
+        backlinkReplyMatchCandidates.opportunityId,
       ],
     }),
   ],
@@ -202,6 +225,7 @@ export const backlinkPlacements = pg.pgTable(
     ...projectIdentityColumns(),
     candidateId: pg.uuid("candidate_id").notNull(),
     opportunityId: pg.uuid("opportunity_id"),
+    replyId: pg.uuid("reply_id"),
     initialValidationId: pg.uuid("initial_validation_id").notNull(),
     initialValidationStatus: pg.text("initial_validation_status").notNull(),
     sourcePageUrl: pg.text("source_page_url").notNull(),
@@ -263,6 +287,23 @@ export const backlinkPlacements = pg.pgTable(
         ...identity(backlinkPlacementCandidates),
         backlinkPlacementCandidates.id,
         backlinkPlacementCandidates.opportunityId,
+      ],
+    }),
+    pg.foreignKey({
+      name: "backlink_placement_full_lineage_fk",
+      columns: [
+        ...identity(table),
+        table.candidateId,
+        table.opportunityId,
+        table.replyId,
+        table.id,
+      ],
+      foreignColumns: [
+        ...identity(backlinkPlacementCandidates),
+        backlinkPlacementCandidates.id,
+        backlinkPlacementCandidates.opportunityId,
+        backlinkPlacementCandidates.replyId,
+        backlinkPlacementCandidates.plannedPlacementId,
       ],
     }),
     pg.foreignKey({

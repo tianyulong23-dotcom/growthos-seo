@@ -9,10 +9,15 @@ import type {
 import type {
   GmailConnectionSecretPersistence,
   GmailConnectionSecretPersistenceCreateInput,
+  GmailConnectionSecretPersistenceRefreshFailureInput,
   GmailConnectionSecretPersistenceRefreshState,
   GmailConnectionSecretPersistenceReplaceInput,
   GmailConnectionSecretPersistenceSaveResult,
 } from "../../application/services/gmail-connection-secret.repository.js";
+import type {
+  GmailProjectReadinessInfrastructure,
+  GmailProjectReadinessInfrastructureReader,
+} from "../../application/services/gmail-readiness.js";
 import type {
   GmailConnectionDisconnectPersistence,
   GmailConnectionRevocationFailureCode,
@@ -34,6 +39,10 @@ type PostgresqlGmailConnectionRepositoryDependencies = Readonly<{
   pool: BacklinkTenantPool;
   newId?: () => string;
   now?: () => Date;
+  projectGovernance?: Readonly<{
+    gmailSendEnabled: boolean;
+    gmailSyncEnabled: boolean;
+  }>;
 }>;
 
 type RefreshLookup = Readonly<{
@@ -44,6 +53,8 @@ type RefreshLookup = Readonly<{
 }>;
 
 class LostRefreshRace extends Error {}
+
+type GmailProjectGovernanceCapability = "GMAIL_SEND" | "GMAIL_SYNC";
 
 const asIso = (value: unknown): string => {
   if (value instanceof Date) {
@@ -180,16 +191,74 @@ export class PostgresqlGmailConnectionRepository
     GmailConnectionSecretPersistence,
     GmailConnectionReader,
     GmailConnectionSelector,
+    GmailProjectReadinessInfrastructureReader,
     GmailConnectionDisconnectPersistence
 {
   readonly #pool: BacklinkTenantPool;
   readonly #newId: () => string;
   readonly #now: () => Date;
+  readonly #enabledProjectGovernanceCapabilities:
+    readonly GmailProjectGovernanceCapability[];
 
   constructor(dependencies: PostgresqlGmailConnectionRepositoryDependencies) {
     this.#pool = dependencies.pool;
     this.#newId = dependencies.newId ?? randomUUID;
     this.#now = dependencies.now ?? (() => new Date());
+    const capabilities: GmailProjectGovernanceCapability[] = [];
+    if (dependencies.projectGovernance?.gmailSendEnabled === true) {
+      capabilities.push("GMAIL_SEND");
+    }
+    if (dependencies.projectGovernance?.gmailSyncEnabled === true) {
+      capabilities.push("GMAIL_SYNC");
+    }
+    this.#enabledProjectGovernanceCapabilities = Object.freeze(capabilities);
+  }
+
+  async #ensureSelectedProjectGovernance(
+    transaction: BacklinkTransactionClient,
+    input: Readonly<{
+      organizationId: string;
+      workspaceId: string;
+      websiteProjectId: string;
+      actorId: string;
+    }>,
+  ): Promise<void> {
+    if (this.#enabledProjectGovernanceCapabilities.length === 0) {
+      return;
+    }
+    await transaction.query(
+      `WITH desired AS (
+         SELECT capability, id
+           FROM unnest($5::text[], $6::uuid[]) AS item(capability, id)
+       )
+       INSERT INTO backlinks.backlink_kill_switch_versions (
+         id, organization_id, workspace_id, website_project_id,
+         layer, capability, provider, version, blocked, reason, created_by
+       )
+       SELECT desired.id, $1, $2, $3, 'project', desired.capability,
+              NULL, 1, false,
+              'Enabled Gmail capability binding initialization', $4
+         FROM desired
+        WHERE NOT EXISTS (
+          SELECT 1
+            FROM backlinks.backlink_kill_switch_versions AS existing
+           WHERE existing.organization_id = $1
+             AND existing.workspace_id = $2
+             AND existing.website_project_id = $3
+             AND existing.layer = 'project'
+             AND existing.capability = desired.capability
+             AND existing.provider IS NULL
+        )
+       ON CONFLICT DO NOTHING`,
+      [
+        input.organizationId,
+        input.workspaceId,
+        input.websiteProjectId,
+        input.actorId,
+        this.#enabledProjectGovernanceCapabilities,
+        this.#enabledProjectGovernanceCapabilities.map(() => this.#newId()),
+      ],
+    );
   }
 
   async findActiveConnectionIdBySubject(
@@ -378,6 +447,12 @@ export class PostgresqlGmailConnectionRepository
             input.connectedByUserId,
           ],
         );
+        await this.#ensureSelectedProjectGovernance(transaction, {
+          organizationId: input.organizationId,
+          workspaceId: input.workspaceId,
+          websiteProjectId: input.websiteProjectId,
+          actorId: input.connectedByUserId,
+        });
         await transaction.query(
           `INSERT INTO backlinks.backlink_gmail_send_identities (
              id, organization_id, gmail_connection_id, normalized_email,
@@ -490,11 +565,102 @@ export class PostgresqlGmailConnectionRepository
         const selectedIndex = result.rows.findIndex(
           (row) => row.isSelected === true,
         );
+        if (selectedIndex >= 0) {
+          await this.#ensureSelectedProjectGovernance(transaction, {
+            organizationId: context.tenant.organizationId,
+            workspaceId: context.tenant.workspaceId,
+            websiteProjectId: context.project.websiteProjectId,
+            actorId: context.actor.userId,
+          });
+        }
         return {
           accounts: Object.freeze(accounts),
           selectedConnection:
             selectedIndex < 0 ? null : (accounts[selectedIndex] ?? null),
         };
+      },
+    );
+  }
+
+  async findProjectReadinessInfrastructure(
+    context: ResolvedProjectContext,
+    connectionId: string,
+  ): Promise<GmailProjectReadinessInfrastructure | null> {
+    return withGmailTenantTransaction(
+      this.#pool,
+      {
+        organizationId: context.tenant.organizationId,
+        workspaceId: context.tenant.workspaceId,
+        websiteProjectId: context.project.websiteProjectId,
+      },
+      async (transaction) => {
+        const result = await transaction.query(
+          `SELECT
+             connection.id AS "connectionId",
+             EXISTS (
+               SELECT 1
+                 FROM backlinks.backlink_gmail_send_identities AS identity
+                WHERE identity.organization_id=connection.organization_id
+                  AND identity.gmail_connection_id=connection.id
+                  AND identity.verification_status='accepted'
+             ) AS "verifiedSendIdentity",
+             secret.provider,
+             secret.secret_kind AS "secretKind",
+             secret.external_secret_id AS "externalSecretId",
+             secret.external_secret_version AS "externalSecretVersion"
+           FROM backlinks.backlink_website_project_mailbox_bindings
+             AS project_binding
+           JOIN backlinks.backlink_gmail_workspace_bindings AS binding
+             ON binding.organization_id=project_binding.organization_id
+            AND binding.workspace_id=project_binding.workspace_id
+            AND binding.id=project_binding.gmail_workspace_binding_id
+            AND binding.binding_status='ACTIVE'
+           JOIN backlinks.backlink_gmail_connections AS connection
+             ON connection.organization_id=binding.organization_id
+            AND connection.id=binding.gmail_connection_id
+           LEFT JOIN backlinks.backlink_secret_references AS secret
+             ON secret.organization_id=connection.organization_id
+            AND secret.id=connection.token_secret_reference_id
+            AND secret.secret_kind=connection.token_secret_kind
+            AND secret.secret_kind='GMAIL_TOKEN_SET'
+            AND secret.status='ACTIVE'
+          WHERE project_binding.organization_id=$1
+            AND project_binding.workspace_id=$2
+            AND project_binding.website_project_id=$3
+            AND project_binding.binding_status='ACTIVE'
+            AND project_binding.is_selected=true
+            AND connection.id=$4
+          LIMIT 1`,
+          [
+            context.tenant.organizationId,
+            context.tenant.workspaceId,
+            context.project.websiteProjectId,
+            connectionId,
+          ],
+        );
+        const row = result.rows[0];
+        if (row === undefined) return null;
+        if (
+          typeof row.connectionId !== "string"
+          || typeof row.verifiedSendIdentity !== "boolean"
+        ) {
+          throw new TypeError(
+            "Gmail readiness infrastructure lookup was invalid.",
+          );
+        }
+        const hasSecretReference =
+          row.provider !== null
+          && row.secretKind !== null
+          && row.externalSecretId !== null
+          && row.externalSecretVersion !== null;
+        return Object.freeze({
+          connectionId: row.connectionId,
+          projectBindingActive: true,
+          verifiedSendIdentity: row.verifiedSendIdentity,
+          tokenSecretReference: hasSecretReference
+            ? referenceFromRow(row)
+            : null,
+        });
       },
     );
   }
@@ -575,6 +741,12 @@ export class PostgresqlGmailConnectionRepository
             context.actor.userId,
           ],
         );
+        await this.#ensureSelectedProjectGovernance(transaction, {
+          organizationId: context.tenant.organizationId,
+          workspaceId: context.tenant.workspaceId,
+          websiteProjectId: context.project.websiteProjectId,
+          actorId: context.actor.userId,
+        });
         return true;
       },
     );
@@ -777,6 +949,58 @@ export class PostgresqlGmailConnectionRepository
                       binding.organization_id
                    AND project_binding.workspace_id = binding.workspace_id
                    AND project_binding.gmail_workspace_binding_id = binding.id
+                 WHERE binding.organization_id = $1
+                   AND binding.workspace_id = $3
+                   AND binding.gmail_connection_id = connection.id
+                   AND binding.binding_status = 'ACTIVE'
+                   AND project_binding.website_project_id = $7
+                   AND project_binding.binding_status = 'ACTIVE'
+              )
+          RETURNING id`,
+          [
+            input.organizationId,
+            input.connectionId,
+            input.workspaceId,
+            input.expectedVersion,
+            input.reason,
+            input.actorId,
+            input.websiteProjectId,
+          ],
+        );
+        return result.rows[0] !== undefined;
+      },
+    );
+    return changed ? this.findRefreshState(input) : null;
+  }
+
+  async markRefreshFailure(
+    input: GmailConnectionSecretPersistenceRefreshFailureInput,
+  ): Promise<GmailConnectionSecretPersistenceRefreshState | null> {
+    const changed = await withGmailTenantTransaction(
+      this.#pool,
+      input,
+      async (transaction) => {
+        const result = await transaction.query(
+          `UPDATE backlinks.backlink_gmail_connections AS connection
+              SET last_api_error_code = $5,
+                  version = version + 1,
+                  updated_at = now(),
+                  updated_by = $6
+            WHERE organization_id = $1
+              AND id = $2
+              AND version = $4
+              AND connection_status = 'CONNECTED'
+              AND send_availability = 'AVAILABLE'
+              AND EXISTS (
+                SELECT 1
+                  FROM backlinks.backlink_gmail_workspace_bindings AS binding
+                  JOIN backlinks.backlink_website_project_mailbox_bindings
+                    AS project_binding
+                    ON project_binding.organization_id =
+                      binding.organization_id
+                   AND project_binding.workspace_id = binding.workspace_id
+                   AND project_binding.gmail_workspace_binding_id =
+                     binding.id
                  WHERE binding.organization_id = $1
                    AND binding.workspace_id = $3
                    AND binding.gmail_connection_id = connection.id

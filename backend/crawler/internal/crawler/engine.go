@@ -725,6 +725,9 @@ func (e *Engine) crawlSite(ctx context.Context, task Task) ([]Page, error) {
 		}
 		return nil, errors.New("site crawl returned no usable HTML pages")
 	}
+	if task.Type == TaskTechnicalAudit && len(pages) == 0 {
+		return nil, errors.New("technical audit returned no crawlable pages")
+	}
 	e.report(StageSelecting, "正在整理重要页面", len(candidates), attempted, len(pages))
 	return pages, nil
 }

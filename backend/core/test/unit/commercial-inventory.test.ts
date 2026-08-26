@@ -14,11 +14,11 @@ const policy = {
 } as const;
 
 describe("commercial candidate inventory", () => {
-  it("back-calculates candidate over-fetch from capped verified-email history", () => {
+  it("refills the visible website deficit without email over-fetch", () => {
     const result = decideCommercialInventoryRefill({
       policy,
       candidateReadyCount: 25,
-      publishedContactReadyCount: 2,
+      publishedVisibleCount: 2,
       historicalVerifiedEmailCount: 1,
       historicalCandidateCount: 20,
       inflight: false,
@@ -28,7 +28,7 @@ describe("commercial candidate inventory", () => {
 
     expect(result).toEqual({
       shouldRefill: true,
-      requestedCandidateCount: 80,
+      requestedCandidateCount: 8,
       effectiveEmailHitRate: 0.1,
       pauseReason: null,
     });
@@ -38,7 +38,7 @@ describe("commercial candidate inventory", () => {
     expect(decideCommercialInventoryRefill({
       policy,
       candidateReadyCount: 0,
-      publishedContactReadyCount: 0,
+      publishedVisibleCount: 0,
       historicalVerifiedEmailCount: 8,
       historicalCandidateCount: 10,
       inflight: false,
@@ -46,7 +46,7 @@ describe("commercial candidate inventory", () => {
       budgetAvailable: false,
     })).toMatchObject({
       shouldRefill: false,
-      requestedCandidateCount: 13,
+      requestedCandidateCount: 10,
       effectiveEmailHitRate: 0.8,
       pauseReason: "budget",
     });
@@ -60,7 +60,7 @@ describe("commercial candidate inventory", () => {
         publishedHighWatermark: 30,
       },
       candidateReadyCount: 68,
-      publishedContactReadyCount: 24,
+      publishedVisibleCount: 24,
       historicalVerifiedEmailCount: 5,
       historicalCandidateCount: 20,
       inflight: false,
@@ -68,7 +68,7 @@ describe("commercial candidate inventory", () => {
       budgetAvailable: true,
     })).toMatchObject({
       shouldRefill: true,
-      requestedCandidateCount: 24,
+      requestedCandidateCount: 6,
       effectiveEmailHitRate: 0.25,
       pauseReason: null,
     });
@@ -78,7 +78,7 @@ describe("commercial candidate inventory", () => {
     expect(decideCommercialInventoryRefill({
       policy,
       candidateReadyCount: 68,
-      publishedContactReadyCount: 7,
+      publishedVisibleCount: 7,
       historicalVerifiedEmailCount: 5,
       historicalCandidateCount: 20,
       refillCycleActive: true,
@@ -87,7 +87,7 @@ describe("commercial candidate inventory", () => {
       budgetAvailable: true,
     })).toMatchObject({
       shouldRefill: true,
-      requestedCandidateCount: 12,
+      requestedCandidateCount: 3,
       pauseReason: null,
     });
   });
@@ -102,7 +102,7 @@ describe("commercial candidate inventory", () => {
     expect(decideCommercialInventoryRefill({
       policy: stablePoolPolicy,
       candidateReadyCount: 20,
-      publishedContactReadyCount: 20,
+      publishedVisibleCount: 20,
       historicalVerifiedEmailCount: 20,
       historicalCandidateCount: 20,
       refillCycleActive: false,
@@ -116,7 +116,7 @@ describe("commercial candidate inventory", () => {
     expect(decideCommercialInventoryRefill({
       policy: stablePoolPolicy,
       candidateReadyCount: 19,
-      publishedContactReadyCount: 19,
+      publishedVisibleCount: 19,
       historicalVerifiedEmailCount: 19,
       historicalCandidateCount: 19,
       refillCycleActive: true,
@@ -125,13 +125,13 @@ describe("commercial candidate inventory", () => {
       budgetAvailable: true,
     })).toMatchObject({
       shouldRefill: true,
-      requestedCandidateCount: 2,
+      requestedCandidateCount: 1,
       pauseReason: null,
     });
     expect(decideCommercialInventoryRefill({
       policy: stablePoolPolicy,
       candidateReadyCount: 20,
-      publishedContactReadyCount: 20,
+      publishedVisibleCount: 20,
       historicalVerifiedEmailCount: 20,
       historicalCandidateCount: 20,
       refillCycleActive: true,

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-14",
+  "generatedAt": "2026-08-25",
   "postgresql": {
     "requiredMajor": 18,
     "image": "postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296"
@@ -13,8 +13,8 @@
     "backlinks": "ROLE-BACKLINKS"
   },
   "heads": {
-    "alembic": "20260724_0007",
-    "backlinks": "0060"
+    "alembic": "20260825_0066",
+    "backlinks": "0079"
   },
   "steps": [
     {
@@ -24,7 +24,9 @@
       "path": "backend/database/roles/0001_growthos_schema_roles.sql",
       "sha256": "7bd126a5d8ada43c7580cc7641102b7f494226ed1cd35c3608ddab455dd0dfea",
       "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
-      "schemas": ["public"],
+      "schemas": [
+        "public"
+      ],
       "prerequisites": [],
       "recovery": "restore",
       "recoveryNote": "Role and schema bootstrap is idempotent; restore role memberships from the protected operations inventory."
@@ -36,9 +38,15 @@
       "path": "backend/api/migrations/versions/20260720_0001_crawler_storage.py",
       "sha256": "45f6a112a036d1fef919e885cdaddbf06b297377e807e2699dbc46ecee01a6ea",
       "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
-      "schemas": ["crawling"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["shared-bootstrap-0001"],
+      "schemas": [
+        "crawling"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "shared-bootstrap-0001"
+      ],
       "recovery": "restore",
       "recoveryNote": "This frozen source revision stages tables in public; the bridge moves them to crawling."
     },
@@ -49,9 +57,15 @@
       "path": "backend/api/migrations/versions/20260721_0002_projects.py",
       "sha256": "2a6bb8356280ff65465bbcecf5d4890834b8c8a6502c9237535943f2a6897419",
       "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
-      "schemas": ["platform"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["alembic-20260720-0001"],
+      "schemas": [
+        "platform"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "alembic-20260720-0001"
+      ],
       "recovery": "restore",
       "recoveryNote": "This frozen source revision stages Projects in public; the bridge moves it to platform."
     },
@@ -62,9 +76,16 @@
       "path": "backend/api/migrations/versions/20260721_0003_site_understanding.py",
       "sha256": "4d62ed3742765af0da799a78d678261e40a2da304aa934058c2668d2d78f78d4",
       "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
-      "schemas": ["platform", "crawling"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["alembic-20260721-0002"],
+      "schemas": [
+        "platform",
+        "crawling"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "alembic-20260721-0002"
+      ],
       "recovery": "restore",
       "recoveryNote": "The frozen revision crosses Project and Crawl facts; final write authority is split by schema."
     },
@@ -75,9 +96,16 @@
       "path": "backend/api/migrations/versions/20260721_0004_audit_parity.py",
       "sha256": "7b9350d5ade9b03450fb6a83c305f767e0346528a8b4b683ec54fa7609045bdc",
       "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
-      "schemas": ["crawling", "audit"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["alembic-20260721-0003"],
+      "schemas": [
+        "crawling",
+        "audit"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "alembic-20260721-0003"
+      ],
       "recovery": "restore",
       "recoveryNote": "The frozen revision crosses Crawl evidence and Audit conclusions; the bridge separates ownership."
     },
@@ -88,9 +116,15 @@
       "path": "backend/api/migrations/versions/20260722_0005_audit_run_state.py",
       "sha256": "9984120ce365c80c4288359d126cc5ddd8a2ee063b88f5c1a850c5d5afa684bc",
       "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
-      "schemas": ["crawling"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["alembic-20260721-0004"],
+      "schemas": [
+        "crawling"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "alembic-20260721-0004"
+      ],
       "recovery": "restore",
       "recoveryNote": "The frozen index is retained byte-for-byte and follows crawl_runs into crawling."
     },
@@ -101,651 +135,2452 @@
       "path": "backend/api/migrations/versions/20260722_0006_audit_external_resources.py",
       "sha256": "5078cba4d9247214817b8cb97a909bfb97f6573b243620af74fe3368471ee87a",
       "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
-      "schemas": ["crawling"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["alembic-20260722-0005"],
+      "schemas": [
+        "crawling"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "alembic-20260722-0005"
+      ],
       "recovery": "restore",
       "recoveryNote": "External resource evidence is a Crawler fact and is moved to crawling by the bridge."
     },
     {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
       "order": 26,
+      "migrationId": "alembic-20260723-0007",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260723_0007_ai_provider_settings.py",
+      "sha256": "faed0ab6a53a59da24af270a8f58ed7dafeaa9d3a15ab470137514e61a5d902d",
+      "prerequisites": [
+        "alembic-20260722-0006"
+      ]
+    },
+    {
+      "order": 27,
       "migrationId": "alembic-20260724-0007",
       "tool": "alembic",
       "path": "backend/api/migrations/versions/20260724_0007_schema_ownership.py",
       "sha256": "b5cff45936a384971ac9c872d6b85e08b03599882a1fd84241a6b15cc444fe08",
       "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
-      "schemas": ["platform", "crawling", "audit"],
-      "prerequisites": ["shared-bootstrap-0001", "alembic-20260722-0006"],
+      "schemas": [
+        "platform",
+        "crawling",
+        "audit"
+      ],
+      "prerequisites": [
+        "alembic-20260722-0006"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Do not reverse schema ownership in place; restore the verified pre-migration backup or apply a reviewed forward repair."
     },
     {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 28,
+      "migrationId": "alembic-20260723-0008",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260723_0008_ai_request_policy.py",
+      "sha256": "0e28ac28b97e73f4cde628478bddf6968c19741c85feba4da0a527fd06eae747",
+      "prerequisites": [
+        "alembic-20260723-0007"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 29,
+      "migrationId": "alembic-20260805-0008",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260805_0008_website_project_authority.py",
+      "sha256": "f47eab47d20ff1e21e78d4a68f4c47cfdf8a4b16cca955421643fdc647545966",
+      "prerequisites": [
+        "alembic-20260724-0007"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
       "order": 30,
+      "migrationId": "alembic-20260724-0009",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260724_0009_profile_integrity_and_dispatch.py",
+      "sha256": "9118dc5b1f3e756e9f73de50f109a2e74877013670f05c4df047b830942631bc",
+      "prerequisites": [
+        "alembic-20260723-0008"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 31,
+      "migrationId": "alembic-20260806-0009",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0009_backlinks_project_scope_authority.py",
+      "sha256": "9c534474ea3d248cf3619749d588e596e01028da8bd72bc0493af45cee631033",
+      "prerequisites": [
+        "alembic-20260805-0008"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 32,
+      "migrationId": "alembic-20260727-0010",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260727_0010_agent_runtime.py",
+      "sha256": "5bf5e5eed91458493771d8c06411a68049e79605f9150a8afd651de857130c81",
+      "prerequisites": [
+        "alembic-20260724-0009"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 33,
+      "migrationId": "alembic-20260727-k010",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260727_0010_keyword_library.py",
+      "sha256": "ab4560ae52ac4f38d71a2a66cb2d2f9e01cdc23289817852bbae38c8df82872a",
+      "prerequisites": [
+        "alembic-20260724-0009"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 34,
+      "migrationId": "alembic-20260813-0010",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260813_0010_website_project_audiences_goals.py",
+      "sha256": "4820206f7b54ec9b8e65cc06faa327131920acedb02e68770ba9a8b0741c5564",
+      "prerequisites": [
+        "alembic-20260806-0009"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 35,
+      "migrationId": "alembic-20260727-0011",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260727_0011_agent_observability.py",
+      "sha256": "4b384f9c42eb673d30d8d58038610261295461670becd986aa8f5410f980eece",
+      "prerequisites": [
+        "alembic-20260727-0010"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 36,
+      "migrationId": "alembic-20260727-k011",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260727_0011_keyword_provider_settings.py",
+      "sha256": "d781972846fa3f6112d3b2a93d0aa3f7bb5cf6ec3259c1d8cc091e6ddc16d9b2",
+      "prerequisites": [
+        "alembic-20260727-k010"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 37,
+      "migrationId": "alembic-20260728-0012",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260728_0012_agent_platform_runtime.py",
+      "sha256": "2196df4bfb95bb0a11f9235c6597908ec35912bf5ea6b59358ca41562ddf55c9",
+      "prerequisites": [
+        "alembic-20260727-0011"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 38,
+      "migrationId": "alembic-20260728-k012",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260728_0012_keyword_workflow_v2.py",
+      "sha256": "d6977dc92b0b060ee34fbcc98af2f560d73f6b7ec7e8e55aa5b073bf4784bf64",
+      "prerequisites": [
+        "alembic-20260727-k011"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 39,
+      "migrationId": "alembic-20260728-0013",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260728_0013_content_api_foundation.py",
+      "sha256": "4b4817a3da7d9f8dc910f72e0ca9750b643e0852d8eb0df80be879e8d3762da8",
+      "prerequisites": [
+        "alembic-20260728-0012"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 40,
+      "migrationId": "alembic-20260728-k013",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260728_0013_seed_candidate_volume_selection.py",
+      "sha256": "3b0d4b5f3d2fc77b0bdec377599d7960bc8dce66f37a210380a336a9399eb324",
+      "prerequisites": [
+        "alembic-20260728-k012"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 41,
+      "migrationId": "alembic-20260728-0014",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260728_0014_content_workflow_runtime.py",
+      "sha256": "d48aadf6e88f29666e048d5de929cbb344bd66f57395919796b91cf8029c20be",
+      "prerequisites": [
+        "alembic-20260728-0013"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 42,
+      "migrationId": "alembic-20260729-k014",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260729_0014_keyword_ideas_modes.py",
+      "sha256": "549492fbbb3b37abd9ee04b1a8f29e5bba25a2a98dd5450a9797e5491d47349b",
+      "prerequisites": [
+        "alembic-20260728-k013"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 43,
+      "migrationId": "alembic-20260728-0015",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260728_0015_agent_profile_operations.py",
+      "sha256": "57f109bbdef3b236632f16374dfdc4db82583ffc6bc95009e03a689e4859b8e8",
+      "prerequisites": [
+        "alembic-20260728-0014"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 44,
+      "migrationId": "alembic-20260730-k015",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260730_0015_keyword_reliability.py",
+      "sha256": "e362880f6dea5f6789c0d5563514007dd1d028a2feaa32a2eca85ff4c7ff26e7",
+      "prerequisites": [
+        "alembic-20260729-k014"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 45,
+      "migrationId": "alembic-20260729-0016",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260729_0016_agent_tool_execution_context.py",
+      "sha256": "d01ad54a48054d8a87bc99c410f09605f778752033d953d6805d818a3d2945e5",
+      "prerequisites": [
+        "alembic-20260728-0015"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 46,
+      "migrationId": "alembic-20260730-k016",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260730_0016_keyword_production_hardening.py",
+      "sha256": "a048193700091143e8b148dca7314d7ee9607732218472153166b8d41eb9a895",
+      "prerequisites": [
+        "alembic-20260730-k015"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 47,
+      "migrationId": "alembic-20260730-0017",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260730_0017_agent_failure_recovery.py",
+      "sha256": "8ed0f995c3783db48f20bda9f703434ba3dbbebf01114c4d7a3308d52a1996f4",
+      "prerequisites": [
+        "alembic-20260729-0016"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 48,
+      "migrationId": "alembic-20260730-k017",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260730_0017_keyword_request_cache_index.py",
+      "sha256": "0ab2402bf8f5eb3fde5fde06699509e136a9c4937449bbf4e0bd1ae82f5645b3",
+      "prerequisites": [
+        "alembic-20260730-k016"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 49,
+      "migrationId": "alembic-20260731-k018",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260731_0018_initial_topics_without_expansion.py",
+      "sha256": "0e7cf3aad32bd02b88a51c739f68769048ef839ab2b1b47cca98143e907c7606",
+      "prerequisites": [
+        "alembic-20260730-k017"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 50,
+      "migrationId": "alembic-20260801-0018",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260801_0018_agent_conversation_branches.py",
+      "sha256": "8e36aa2cc700c6cfda5269c8e0e0ae016516d88a0c9cd4f5d947d85e848487bf",
+      "prerequisites": [
+        "alembic-20260730-0017"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 51,
+      "migrationId": "alembic-20260803-0019",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260803_0019_article_quality_and_costs.py",
+      "sha256": "d240585df84dd1e2f84ef210e592f31a6924264435c78fbc2cdf28ca82c7ba00",
+      "prerequisites": [
+        "alembic-20260801-0018"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 52,
+      "migrationId": "alembic-20260803-k019",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260803_0019_keyword_metric_refresh_jobs.py",
+      "sha256": "e29e054249eab3ec328d95d6bc188c41a4427b3911335fab1a56d42d0bfb29a3",
+      "prerequisites": [
+        "alembic-20260731-k018"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 53,
+      "migrationId": "alembic-20260803-0020",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260803_0020_ai_provider_identity.py",
+      "sha256": "5adb17e2742a9afac944afa053a68c51bc5be251eb2b77fc00941bbe6f8ee127",
+      "prerequisites": [
+        "alembic-20260803-0019"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 54,
+      "migrationId": "alembic-20260803-k020",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260803_0020_metric_refresh_replay_limit.py",
+      "sha256": "72ab4f4faf0f69146291aea03e3e5b138f37500be21440b251c2f8b76ef20bda",
+      "prerequisites": [
+        "alembic-20260803-k019"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 55,
+      "migrationId": "alembic-20260803-0021",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260803_0021_profile_seed_source.py",
+      "sha256": "23cb1ea32d97c46b0f63af15a833fc47b703ebc5b73db68f1224516f1811f020",
+      "prerequisites": [
+        "alembic-20260803-k020"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 56,
+      "migrationId": "alembic-20260804-0022",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260804_0022_merge_integrated_module_heads.py",
+      "sha256": "09d25370c901ce9961b5733f77cf10759002bb25e21cf582ba48ee1b98f0fe6a",
+      "prerequisites": [
+        "alembic-20260724-0007",
+        "alembic-20260803-0020",
+        "alembic-20260803-0021"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 57,
+      "migrationId": "alembic-20260805-0023",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260805_0023_project_service_connections.py",
+      "sha256": "5a8608d7791e74ede8d6a142ce32f917b4d0883b592d372262bdcf034f397952",
+      "prerequisites": [
+        "alembic-20260804-0022"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 58,
+      "migrationId": "alembic-20260805-cp023",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260805_cp023_content_plan_foundation.py",
+      "sha256": "c005ac85494dbe941edb159d2e4cf9b7f41efbbb22f863b70266bcc66ee20787",
+      "prerequisites": [
+        "alembic-20260804-0022"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 59,
+      "migrationId": "alembic-20260806-0023",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0023_competitor_analysis.py",
+      "sha256": "7b48d05e680a2a74ddaa0ebadc71086fd477fb37ebff1b8fb34ba29e9db6e9ab",
+      "prerequisites": [
+        "alembic-20260804-0022"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 60,
+      "migrationId": "alembic-20260806-0024",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0024_competitor_opportunities.py",
+      "sha256": "0de7901d2b2fcf30a3f9e42c28be7fc118f2befbbb9696679a9b485664f368c1",
+      "prerequisites": [
+        "alembic-20260806-0023"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "audit"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 61,
+      "migrationId": "alembic-20260806-cp024",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_cp024_content_plan_serp_feature_audit.py",
+      "sha256": "c3ce985318399a0a6dae721208bd806e70cedeb0ac3a241df87481fa7bc1738f",
+      "prerequisites": [
+        "alembic-20260805-cp023"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 62,
+      "migrationId": "alembic-20260806-0025",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0025_competitor_opportunity_workflow.py",
+      "sha256": "70f14c4dc746f221ba1df1bc0117ac97e41c3248ee7e5970207fef14ad082d42",
+      "prerequisites": [
+        "alembic-20260806-0024"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 63,
+      "migrationId": "alembic-20260806-cp025",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_cp025_content_plan_scheduling_trigger_review.py",
+      "sha256": "5e0d2a9dcc308d8ae9e94266f16ce9c15e0a0f319885518d2daad911bcef6078",
+      "prerequisites": [
+        "alembic-20260806-cp024"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 64,
+      "migrationId": "alembic-20260806-0026",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0026_competitor_analysis_reliability.py",
+      "sha256": "fca42121c6993a7d3e1cab871caa0f4ec9148fe47dbadd52d43519302273b956",
+      "prerequisites": [
+        "alembic-20260806-0025"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 65,
+      "migrationId": "alembic-20260807-cp026",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260807_cp026_content_plan_external_request_failed.py",
+      "sha256": "0737952f95690a064cc02e345f2a0505ee16ccaad61ead02d7764423d372f5e5",
+      "prerequisites": [
+        "alembic-20260806-cp025"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 66,
+      "migrationId": "alembic-20260806-0027",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0027_competitor_dispatch_claim.py",
+      "sha256": "84db67211a7ede6290244a2c5640b2496b4899c27370e4e29cb3d03e1d78cd5c",
+      "prerequisites": [
+        "alembic-20260806-0026"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 67,
+      "migrationId": "alembic-20260806-0028",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0028_competitor_metric_snapshot.py",
+      "sha256": "9929912bad3efca0a9376b9f6d3791f51530b86eceb107dde938213ae292dc77",
+      "prerequisites": [
+        "alembic-20260806-0027"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 68,
+      "migrationId": "alembic-20260806-0029",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0029_competitor_analysis_modes.py",
+      "sha256": "7dacce263aa4bde060b4b6d47bc69e974aec63a5ce7c54b18686bae21009670b",
+      "prerequisites": [
+        "alembic-20260806-0028"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 69,
+      "migrationId": "alembic-20260806-0030",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0030_serp_competitor_discovery.py",
+      "sha256": "1b7b99eca0a1debb59763cca93ce44f88e417745f2b928915ba800648974d209",
+      "prerequisites": [
+        "alembic-20260806-0029"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 70,
+      "migrationId": "alembic-20260806-0031",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0031_gsc_connections.py",
+      "sha256": "5dd7f67425531565719146237cc747d54c4425116dc7df9d2f1ad0b5293a117b",
+      "prerequisites": [
+        "alembic-20260806-0030"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 71,
+      "migrationId": "alembic-20260806-0032",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0032_competitive_landscape.py",
+      "sha256": "15c357798ce7a2f73be7f23f78a1b2df94cac45fed0d19ecfeebcf2160acab5e",
+      "prerequisites": [
+        "alembic-20260806-0031"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 72,
+      "migrationId": "alembic-20260806-0033",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0033_competitor_site_verification.py",
+      "sha256": "6453595ec8ad37b659c52a2e8aa79f2bf560efe8baed79e29f7614ae51188145",
+      "prerequisites": [
+        "alembic-20260806-0032"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 73,
+      "migrationId": "alembic-20260806-0034",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0034_competitor_analysis_resilience.py",
+      "sha256": "869ab6bf48c5bc107a2b44effa4b57852f9d03ed20e30344e5683ce27eab0fdd",
+      "prerequisites": [
+        "alembic-20260806-0033"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 74,
+      "migrationId": "alembic-20260806-0035",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260806_0035_competitor_domain_type_default.py",
+      "sha256": "d4c701ac7a9e1fc9d2bd363e6acf6ba9d7ab6e12dac245485ad3ddeed9592b57",
+      "prerequisites": [
+        "alembic-20260806-0034"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 75,
+      "migrationId": "alembic-20260807-0036",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260807_0036_merge_settings_and_keyword_heads.py",
+      "sha256": "b5f6841848aa7388702f4be39aad1d239d502410d9183fe2d5471678c2d27ed2",
+      "prerequisites": [
+        "alembic-20260805-0023",
+        "alembic-20260806-0035"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 76,
+      "migrationId": "alembic-20260807-0037",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260807_0037_merge_article_runtime_heads.py",
+      "sha256": "61560bef7636b80c6b4a46a1487986698ded7dfa4196f6c46e7343001811a2ca",
+      "prerequisites": [
+        "alembic-20260807-cp026",
+        "alembic-20260807-0036"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 77,
+      "migrationId": "alembic-20260807-0038",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260807_0038_article_run_failure_state.py",
+      "sha256": "ab79475e9a4c047aa59988350708110664a1a307e08e4dc23f2106457f751b5f",
+      "prerequisites": [
+        "alembic-20260807-0037"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 78,
+      "migrationId": "alembic-20260807-0039",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260807_0039_article_document_publication.py",
+      "sha256": "9be2d3c4f892dfc1b6c074da9d196a0d2f1fff91fd8ff06a40bf7a3d637ceb39",
+      "prerequisites": [
+        "alembic-20260807-0038"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "audit"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 79,
+      "migrationId": "alembic-20260808-0040",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260808_0040_article_version_governance.py",
+      "sha256": "9ea29d375d38ae9c24d8bff7f2189278e781b68e6e1f740cac38e19b6c0b7e7c",
+      "prerequisites": [
+        "alembic-20260807-0039"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 80,
+      "migrationId": "alembic-20260808-0041",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260808_0041_article_editor_foundation.py",
+      "sha256": "b8a49c5257d924d57bb2cf246054a9a1130b5ca544b5ca176f13c02218badf54",
+      "prerequisites": [
+        "alembic-20260808-0040"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 81,
+      "migrationId": "alembic-20260809-0042",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260809_0042_asset_upload_processing.py",
+      "sha256": "983a14f203ae143e0d907bd50dd616cd5415c5bf32b2692780614dc63f0be414",
+      "prerequisites": [
+        "alembic-20260808-0041"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 82,
+      "migrationId": "alembic-20260809-0043",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260809_0043_article_seo_links_cards.py",
+      "sha256": "17d9c2c297c27a28484f7930c2d2f3c910b51d0b1b59ae8de7d8fa697874b708",
+      "prerequisites": [
+        "alembic-20260809-0042"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 83,
+      "migrationId": "alembic-20260809-0044",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260809_0044_article_analysis_governance.py",
+      "sha256": "91917b1b2e6f160f2f7cca749936fe269edc1a73abd580e011e56ee2817c7c15",
+      "prerequisites": [
+        "alembic-20260809-0043"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 84,
+      "migrationId": "alembic-20260809-0045",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260809_0045_article_link_lease_indexing.py",
+      "sha256": "d6e554410c7ccc235a36357dc1a206f86104ce00e690a0b3f3345911a0d2c9db",
+      "prerequisites": [
+        "alembic-20260809-0044"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 85,
+      "migrationId": "alembic-20260809-0046",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260809_0046_article_link_input_idempotency.py",
+      "sha256": "fede26dc3001db95e1f276328cc5b1926c6c019e4f6fab6eb375202abddd530b",
+      "prerequisites": [
+        "alembic-20260809-0045"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 86,
+      "migrationId": "alembic-20260810-0047",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260810_0047_article_review_governance.py",
+      "sha256": "315436728394fb49207d25f8664f9645020c949464b53bbc10dc97c24477aebb",
+      "prerequisites": [
+        "alembic-20260809-0046"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 87,
+      "migrationId": "alembic-20260810-0048",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260810_0048_article_preview_publication_orchestration.py",
+      "sha256": "24fafad102dcb1f2914ff035fb07f51399325867ca21a28ca5b5bfbc900333f5",
+      "prerequisites": [
+        "alembic-20260810-0047"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 88,
+      "migrationId": "alembic-20260810-0049",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260810_0049_article_ai_edit_operations.py",
+      "sha256": "f46146393d3889e3ccdee479b03723a0192b56931adc540e473a4696ad82dbea",
+      "prerequisites": [
+        "alembic-20260810-0048"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 89,
+      "migrationId": "alembic-20260810-0050",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260810_0050_backfill_content_plan_settings.py",
+      "sha256": "ce535030d6c19098487d861e68b28ec68f2ce1e88be77bd7664c72731764822c",
+      "prerequisites": [
+        "alembic-20260810-0049"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 90,
+      "migrationId": "alembic-20260811-0051",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260811_0051_gsc_oauth_provider_settings.py",
+      "sha256": "c44de5e474bd62185bf9db539961b08d47fa0c94cb477a9a2269f0706fd1e0a3",
+      "prerequisites": [
+        "alembic-20260810-0050"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 91,
+      "migrationId": "alembic-20260811-0052",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260811_0052_defer_publication_asset_integrity.py",
+      "sha256": "e07708c4522373aa61579c517f2de18e4ab56614f38d8cf27373c851093377ec",
+      "prerequisites": [
+        "alembic-20260811-0051"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "crawling"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 92,
+      "migrationId": "alembic-20260811-0053",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260811_0053_business_profile_ai_calls.py",
+      "sha256": "db02845af7e8a7405eee6867e942007a34e4d1d6f090d4aed3bacac6374dc06e",
+      "prerequisites": [
+        "alembic-20260811-0052"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 93,
+      "migrationId": "alembic-20260811-0054",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260811_0054_wordpress_capability_evidence.py",
+      "sha256": "b99fca29cf8eb04333ce8be81a3674da2a5da59b8ece7aaf7742748b2be83d9a",
+      "prerequisites": [
+        "alembic-20260811-0053"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 94,
+      "migrationId": "alembic-20260811-0055",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260811_0055_ai_task_models.py",
+      "sha256": "6166648e9cbffc9bc034877f300187f3972ce4b8f0766772813f973ee1458751",
+      "prerequisites": [
+        "alembic-20260811-0054"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 95,
+      "migrationId": "alembic-20260811-0056",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260811_0056_ai_reasoning_efforts.py",
+      "sha256": "c06bf1218b884c5e45715667886b558bc08e3c1c15820ae02eef236578164b0b",
+      "prerequisites": [
+        "alembic-20260811-0055"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 96,
+      "migrationId": "alembic-20260812-0057",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260812_0057_content_asset_metadata.py",
+      "sha256": "b43c86de7bfe640684d1ca0d483df311fdb11efb594cb1fd461b86e1929cfead",
+      "prerequisites": [
+        "alembic-20260811-0056"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 97,
+      "migrationId": "alembic-20260812-0058",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260812_0058_agent_timeline_events.py",
+      "sha256": "be2b0fd8bd74fc66611d41729fbf72fc82d73304310a172a2908d55c754b2379",
+      "prerequisites": [
+        "alembic-20260812-0057"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 98,
+      "migrationId": "alembic-20260812-0059",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260812_0059_onboarding_orchestration.py",
+      "sha256": "829b5786b3e02c0fc76332eea36eef7d6a66181ef6f324be7fad8b640166ad37",
+      "prerequisites": [
+        "alembic-20260812-0058"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 99,
+      "migrationId": "alembic-20260812-0060",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260812_0060_onboarding_agent_timeline.py",
+      "sha256": "38a3a2f502e03e862c917dc4f3ebc5300a021de77dbe487a87673d614ac1b5bb",
+      "prerequisites": [
+        "alembic-20260812-0059"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 100,
+      "migrationId": "alembic-20260813-0061",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260813_0061_agent_system_triggers.py",
+      "sha256": "cc4cbc1b4e4ca043e680e7cf3bae874e2585315dd8594c229cf34434ab87b71b",
+      "prerequisites": [
+        "alembic-20260812-0060"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 101,
+      "migrationId": "alembic-20260813-0062",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260813_0062_ai_api_protocol.py",
+      "sha256": "9268390b2bed13fd4ae9c4f5ec0df170866c0ec66425b900f7bed1890d70abe3",
+      "prerequisites": [
+        "alembic-20260813-0061"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 102,
+      "migrationId": "alembic-20260813-0063",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260813_0063_performance_monitoring.py",
+      "sha256": "d2e5a2fdfae1417c392f609680d91f2d1ffe33a22df66978d49c74d3b02ca242",
+      "prerequisites": [
+        "alembic-20260813-0062"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 103,
+      "migrationId": "alembic-20260814-0064",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260814_0064_content_asset_provider_metadata.py",
+      "sha256": "e2577ccaef90dbf56d249362f007ecac07775a0907975ad85c8b838051db3958",
+      "prerequisites": [
+        "alembic-20260813-0063"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply through the reviewed Alembic graph; recover with a verified restore or a reviewed forward repair.",
+      "order": 104,
+      "migrationId": "alembic-20260815-0065",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260815_0065_backlinks_project_persistence_merge.py",
+      "sha256": "259604081f34e2f63576b7e1c7aaad8266491449dbe35c2d728a9e6a3be61fa1",
+      "prerequisites": [
+        "alembic-20260814-0064",
+        "alembic-20260813-0010"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-PLATFORM-DATABASE-OPERATIONS",
+      "schemas": [
+        "platform"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Website Project projection delivery state is forward-only; recover with a verified restore or a reviewed forward repair.",
+      "order": 105,
+      "migrationId": "alembic-20260825-0066",
+      "tool": "alembic",
+      "path": "backend/api/migrations/versions/20260825_0066_project_outbox_delivery_control.py",
+      "sha256": "46a45a9f0e55532db76ec1b77326085c88dbe5826e9d95169680ec4002f15c50",
+      "prerequisites": [
+        "alembic-20260815-0065"
+      ]
+    },
+    {
+      "order": 200,
       "migrationId": "backlinks-0001",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0001_backlink_foundation.sql",
       "sha256": "f355e3489103e3a6278d63843faebef91f9e65e6d9dbebadd678c907231276e2",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["shared-bootstrap-0001"],
+      "schemas": [
+        "backlinks"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "shared-bootstrap-0001"
+      ],
       "recovery": "restore",
       "recoveryNote": "Published migration is immutable and stages its objects in public until backlinks-0005."
     },
     {
-      "order": 31,
+      "order": 201,
       "migrationId": "backlinks-0002",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0002_backlink_provider_seo.sql",
       "sha256": "279406ae1e6eca9d8faaad53c0aad9fe13e5327f98c0b005efddf0ba2c9795e8",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["backlinks-0001"],
+      "schemas": [
+        "backlinks"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "backlinks-0001"
+      ],
       "recovery": "restore",
       "recoveryNote": "Published migration is immutable and moves with the Backlinks schema bridge."
     },
     {
-      "order": 32,
+      "order": 202,
       "migrationId": "backlinks-0003",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0003_backlink_recommendations.sql",
       "sha256": "7da2b77f8034abf20f2576b3538657e87394c439d8c4be9df3e22b36a6199ad3",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["backlinks-0002"],
+      "schemas": [
+        "backlinks"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "backlinks-0002"
+      ],
       "recovery": "restore",
       "recoveryNote": "Published migration is immutable and moves with the Backlinks schema bridge."
     },
     {
-      "order": 33,
+      "order": 203,
       "migrationId": "backlinks-0004",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0004_backlink_contacts_opportunities.sql",
       "sha256": "cdd2eeba9a6ffaa68ebef085666a7df8225b645ae45caa5dedf7413fb218d4d7",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "stagingSchemas": ["public"],
-      "prerequisites": ["backlinks-0003"],
+      "schemas": [
+        "backlinks"
+      ],
+      "stagingSchemas": [
+        "public"
+      ],
+      "prerequisites": [
+        "backlinks-0003"
+      ],
       "recovery": "restore",
       "recoveryNote": "Published migration is immutable and moves with the Backlinks schema bridge."
     },
     {
-      "order": 34,
+      "order": 204,
       "migrationId": "backlinks-0005",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0005_backlink_schema_role_ownership.sql",
       "sha256": "2fc45cee4040122025975843d71347d7d44ea9f9564aa05e462360da45cce3c9",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["shared-bootstrap-0001", "backlinks-0004"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0004"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Do not move released Backlinks objects back to public; restore or apply a reviewed forward repair."
     },
     {
-      "order": 35,
+      "order": 205,
       "migrationId": "backlinks-0006",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0006_backlink_opportunities.sql",
       "sha256": "80fc5b894cba9c387ceb8447e2ee27bd450f08017ebddb2b90b00cfa675b3795",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0005"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0005"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Opportunity facts are forward-only after publication."
     },
     {
-      "order": 36,
+      "order": 206,
       "migrationId": "backlinks-0007",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0007_backlink_opportunity_counter.sql",
       "sha256": "3c0539478faffd50d0d9ed64e2281bdb9dc20bf55d90f487687ed2f8d5879c26",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0006"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0006"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Sequence allocation state is restored from backup or repaired with a reviewed forward migration."
     },
     {
-      "order": 37,
+      "order": 207,
       "migrationId": "backlinks-0010",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0010_backlink_assessments.sql",
       "sha256": "9c0f9e5441d1432fc55dd59caa2ac39add9e6a9717f10bd6af506ae95af4e732",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0007"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0007"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Assessment runs and immutable snapshots are restored from backup or repaired with a reviewed forward migration."
     },
     {
-      "order": 38,
+      "order": 208,
       "migrationId": "backlinks-0011",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0011_backlink_contact_purpose_correction.sql",
       "sha256": "663155409e3cbe20a5e975955dd0e0b6bca6bd42000b7f72a1938640e4ec7a60",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0010"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0010"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Contact purpose decisions and manual corrections are restored from backup or repaired with a reviewed forward migration."
     },
     {
-      "order": 39,
+      "order": 209,
       "migrationId": "backlinks-0012",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0012_backlink_gmail_connections.sql",
       "sha256": "644a10e33e6712fe3e69f7ff14d003666248219c2a61837f105c907e1e6957b4",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0011"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0011"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "OAuth attempts, Gmail connections, bindings, verified send identities, secret references, and revocation work are restored from backup or repaired with a reviewed forward migration."
     },
     {
-      "order": 40,
+      "order": 210,
       "migrationId": "backlinks-0013",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0013_backlink_drafts.sql",
       "sha256": "03d9b4c3cac32fd5d7f1783d8c27adfa1a5aa8512298655985dc21256eb85f5a",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0012"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0012"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Draft evidence snapshots, model runs, and immutable versions are restored from backup or repaired with a reviewed forward migration."
     },
     {
-      "order": 41,
+      "order": 211,
       "migrationId": "backlinks-0014",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0014_backlink_send_intents.sql",
       "sha256": "e95a3de354bbffdf902b59827378b7fd6cbae00aec0fc8f5331a2f5b5af0f0b5",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0013"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0013"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Send intents, append-only attempts, quota reservations, and suppression state are restored from backup or repaired with a reviewed forward migration."
     },
     {
-      "order": 42,
+      "order": 212,
       "migrationId": "backlinks-0015",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0015_backlink_gmail_sync_capabilities.sql",
       "sha256": "10ed1c7ef6bb451821e4757740f7e4faf3fa78c090f02b0bb0c31326add41f35",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0014"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0014"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Gmail read-only synchronization capability is repaired with a reviewed forward migration."
     },
     {
-      "order": 43,
+      "order": 213,
       "migrationId": "backlinks-0016",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0016_backlink_mail_sync.sql",
       "sha256": "83fd7e11d0b83afae8f2e58e8cb3f7d6d10eb8b84107ee977f63b8401a024d8a",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0015"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0015"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Mail synchronization cursors, opaque message references, replies, and match candidates are restored from backup or repaired with a reviewed forward migration."
     },
     {
-      "order": 44,
+      "order": 214,
       "migrationId": "backlinks-0022",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0022_backlink_draft_documents.sql",
       "sha256": "f21a3b62ed0a7adc92521778bbc539fb1ab195073bcf4e630a41f6fbdbe25bd5",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0016"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0016"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Draft document JSON is restored from backup or repaired with a reviewed forward migration."
     },
     {
-      "order": 45,
+      "order": 215,
       "migrationId": "backlinks-0023",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0023_backlink_send_quota_connection_scope.sql",
       "sha256": "2fdca69c69d2e138e93410a1232bd949642fca3c8ba0e11b0c0e2e4338d94c3c",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0022"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0022"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Connection-wide quota reads and project-scoped quota writes are repaired with a reviewed forward migration."
     },
     {
-      "order": 46,
+      "order": 216,
       "migrationId": "backlinks-0024",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0024_backlink_send_attempt_settlement.sql",
       "sha256": "4289b0a8de6733bd0699d9df696b69358d9d043673305a194f79e6b3ffe62129",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0023"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0023"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Send Attempt settlement and persisted retry eligibility are repaired with a reviewed forward migration."
     },
     {
-      "order": 47,
+      "order": 217,
       "migrationId": "backlinks-0025",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0025_backlink_send_reconciliation.sql",
       "sha256": "dcd8c7c93ca0a113f3b3e658888108258affcef5e81d4f6219b686aa5ba1e3c5",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0024"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0024"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Unknown Send Result reconciliation facts are append-only; repair requires a reviewed forward migration."
     },
     {
-      "order": 48,
+      "order": 218,
       "migrationId": "backlinks-0026",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0026_backlink_suppression_feedback.sql",
       "sha256": "eb3c0e6933215efa2cb301c00687507e0873cddc645aa7ce85dabc28cb6d3da6",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0025"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0025"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Delivery feedback facts and soft-bounce threshold suppression are repaired with a reviewed forward migration."
     },
     {
-      "order": 49,
+      "order": 219,
       "migrationId": "backlinks-0027",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0027_backlink_negotiation_facts.sql",
       "sha256": "37ba5f6f80ba61a45ff4047c5b80d2d94ad3694c16f0c38026fe124af87f000e",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0026"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0026"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Append-only reply classification and negotiation fact versions are repaired with a reviewed forward migration."
     },
     {
-      "order": 50,
+      "order": 220,
       "migrationId": "backlinks-0028",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0028_backlink_placements.sql",
       "sha256": "c688b1c88ad5f99978613de3b92d9fa344d625ccb120f992dbe51d658edad996",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0027"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0027"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Placement candidates, validation runs, and confirmed placement facts are repaired with a reviewed forward migration."
     },
     {
-      "order": 51,
+      "order": 221,
       "migrationId": "backlinks-0029",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0029_backlink_monitoring.sql",
       "sha256": "c2fa41acbc27922faaa84c1644af38f9df94b441e59da5942e177af84ca04e51",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0028"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0028"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Placement monitoring policies, runs, and immutable observations are repaired with a reviewed forward migration."
     },
     {
-      "order": 52,
+      "order": 222,
       "migrationId": "backlinks-0030",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0030_backlink_metrics_reports.sql",
       "sha256": "f0c3a2053b79d1e358f5737b3d530af25548c8bc40f37bcc415e87b55f0d648f",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0029"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0029"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Metric snapshots and report publication facts are append-only; repair requires a reviewed forward migration."
     },
     {
-      "order": 53,
+      "order": 223,
       "migrationId": "backlinks-0031",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0031_backlink_tasks_notifications.sql",
       "sha256": "d7d0ddefab7667a3ec451ff6bf4825ba66d120da969b243b72be627fac27769a",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0030"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0030"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Task and notification projections are repaired from immutable source events with a reviewed forward migration."
     },
     {
-      "order": 54,
+      "order": 224,
       "migrationId": "backlinks-0032",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0032_dataforseo_cost_control.sql",
       "sha256": "66dd40d4120b8899fb1eaac8e40f1166f10f79a902461772395841bf8d7d656c",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0031"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0031"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "DataForSEO batch requests, public artifacts, workspace projections, usage allocation, and fetch leases are repaired with a reviewed forward migration."
     },
     {
-      "order": 55,
+      "order": 225,
       "migrationId": "backlinks-0033",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0033_backlink_runtime_governance.sql",
       "sha256": "cce1cda06ebb80a704276058f59bb4a554f99866489e02e673f7224073b55cd9",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0032"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0032"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Runtime settings, kill switches, retention policies, and report export state are repaired with a reviewed forward migration."
     },
     {
-      "order": 56,
+      "order": 226,
       "migrationId": "backlinks-0034",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0034_backlink_outbox_temporal_projection.sql",
       "sha256": "bf14be7adb566496d2f3a66a881b05b6c6e1602c644251d618ca5c7f4cad1023",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0033"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0033"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Outbox relay functions and monitoring projection trace fields are repaired with a reviewed forward migration."
     },
     {
-      "order": 57,
+      "order": 227,
       "migrationId": "backlinks-0035",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0035_backlink_contact_send_snapshots.sql",
       "sha256": "59d3165f4123def9dc32f8bc5b0656401b87eb67a4cbfa099e0f6c85562080ea",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0034"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0034"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Opportunity Contact bindings and immutable Send Snapshots are repaired with a reviewed forward migration."
     },
     {
-      "order": 58,
+      "order": 228,
       "migrationId": "backlinks-0036",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0036_backlink_opportunity_counter_reconciliation.sql",
       "sha256": "9f0da0eb72bf32e79f3e46ceea2de3d84cb8134565fc7f490ea22372dff7b123",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0035"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0035"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Legacy Opportunity sequence counters are reconciled under tenant RLS before the next formal allocation."
     },
     {
-      "order": 59,
+      "order": 229,
       "migrationId": "backlinks-0037",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0037_dataforseo_worker_execution.sql",
       "sha256": "2079f0b542fa52a18f743990e7e1b3b36f1d223ad1eccb2b70fa3e5e5574f797",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0036"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0036"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "DataForSEO worker execution privileges are repaired with a reviewed forward migration."
     },
     {
-      "order": 60,
+      "order": 230,
       "migrationId": "backlinks-0038",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0038_backlink_contact_enrichment.sql",
       "sha256": "208f21ae1d891f02bf8544aa3a7f05651650ab5334b6218edd8cbc1cc5d978f4",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0037"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0037"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Contact enrichment jobs, bounded page evidence, and contact evidence metadata are repaired with a reviewed forward migration."
     },
     {
-      "order": 61,
+      "order": 231,
       "migrationId": "backlinks-0039",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0039_backlink_opportunity_contact_gate.sql",
       "sha256": "29f27573d7691cfefabc500ff6d1c323b7fffab87cb75aea6f2983c854622b37",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0038"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0038"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Opportunity source-contact bindings and review flags are repaired with a reviewed forward migration."
     },
     {
-      "order": 62,
+      "order": 232,
       "migrationId": "backlinks-0040",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0040_backlink_existing_placements.sql",
       "sha256": "1792efae155284703c7e0e68a84e6904c59e9588c9fa5f8c1fc63ad023baccfb",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0039"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0039"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Existing manual and imported links can be repaired as monitored Placements without inventing an Outreach Opportunity."
     },
     {
-      "order": 63,
+      "order": 233,
       "migrationId": "backlinks-0041",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0041_backlink_gmail_project_bindings.sql",
       "sha256": "2fc8f8da3dff626c3df210f3991062371c58c831757622f131c0ace6dd094b29",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0040"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0040"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Gmail connections are bound to one Website Project and require an explicit authorization per project."
     },
     {
-      "order": 64,
+      "order": 234,
       "migrationId": "backlinks-0042",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0042_backlink_project_recommendation_context.sql",
       "sha256": "118be380ff4c505a6b64b2ef114a6dcf98fedd9a663f4116fa282c2cbbec1ce5",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0041"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0041"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Recommendation discovery and Draft generation read immutable products, keywords, and target URLs from the requested Website Project context."
     },
     {
-      "order": 65,
+      "order": 235,
       "migrationId": "backlinks-0043",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0043_backlink_project_scope_provider.sql",
       "sha256": "58df200994f0a4e8ac9c8f4ed8a89cd49d4bb08b13c533a6e38240f49880c160",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0042"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0042"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "The local Worker enumerates latest active Website Project contexts through one workspace-authorized provider and treats superseded contact jobs as stale."
     },
     {
-      "order": 67,
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply in numeric order; recover with a verified restore or a reviewed forward repair.",
+      "order": 236,
+      "migrationId": "backlinks-0044",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0044_backlink_platform_project_authority.sql",
+      "sha256": "2c0f22d0e55e89d203e872baa4e55ba1b086ae38b5b457606ec1ad4824ce6e3f",
+      "prerequisites": [
+        "backlinks-0043"
+      ]
+    },
+    {
+      "order": 237,
       "migrationId": "backlinks-0045",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0045_backlink_commercial_candidate_inventory.sql",
       "sha256": "e8496b30673e1e6a016258a1a94de64470d8ce8c9408eea6094bbf85fde85bcd",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0043"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0044"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Commercial discovery blueprints, provider artifacts, internal candidates, inventory watermarks, publication gates, and Gold Set labels remain tenant-scoped and auditable."
     },
     {
-      "order": 68,
+      "order": 238,
       "migrationId": "backlinks-0046",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0046_backlink_contact_publication_gate.sql",
       "sha256": "555c082f27bb41d98b44f851fec773fd24cbed8865d95367e5daea62ef4ec5ee",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0045"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0045"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Automatic contact batches publish only evidence-backed public email recommendations and freeze the selected contact evidence for later Opportunity creation."
     },
     {
-      "order": 69,
+      "order": 239,
       "migrationId": "backlinks-0047",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0047_backlink_gmail_organization_reuse.sql",
       "sha256": "edbc3a4c48b1145cf0f6659fc9e1562aad10c56e70a7bce499cad4f178f15327",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0046"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0046"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Organization Gmail credentials are reused through workspace bindings while project mailbox selections remain tokenless and project-scoped."
     },
     {
-      "order": 70,
+      "order": 240,
       "migrationId": "backlinks-0048",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0048_backlink_draft_request_snapshots.sql",
       "sha256": "a62313261d97e9b18caac32539af2649d33f7e04b737d06674ee9ab3cf1b103d",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0047"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0047"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Draft requests and evidence context are frozen per generation job, retries are durable, and deterministic template fallback versions remain auditable and human-confirm only."
     },
     {
-      "order": 71,
+      "order": 241,
       "migrationId": "backlinks-0049",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0049_backlink_gmail_send_reply_loop.sql",
       "sha256": "88b59164f3ffffcbba381fdcca260d770b2196f27a188ba36dd00b1715268c72",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0048"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0048"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Approved send facts are frozen into immutable snapshots and Gmail reply cursors are durable per workspace connection while project message projections remain isolated."
     },
     {
-      "order": 72,
+      "order": 242,
       "migrationId": "backlinks-0050",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0050_backlink_profile_inventory.sql",
       "sha256": "26a61271db939c61cf95ee2e42096fe2347c1293a35de97c60d4bab7535814c3",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0049"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0049"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Backlink profile snapshots, pageable inventory, observations, health scores, provider artifacts, and sync cursors remain project-scoped with honest partial coverage."
     },
     {
-      "order": 73,
+      "order": 243,
       "migrationId": "backlinks-0051",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0051_backlink_inventory_monitoring.sql",
       "sha256": "a904d372a2520c4b21caf8999a224ceb768ac54cc561ef16921b0079cbe1ad98",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0050"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0050"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Every canonical source-target inventory item receives one tenant-scoped tiered direct-monitoring policy while immutable observations preserve provider and direct-validation authority separately."
     },
     {
-      "order": 74,
+      "order": 244,
       "migrationId": "backlinks-0052",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0052_backlink_recommendation_publication_default.sql",
       "sha256": "517e3dfd9659a4c00375959109d3da6980a615635288501625fa17833589b62f",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0051"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0051"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "New recommendation inventory rows default to the current contact-publication gate state so inserts remain valid without weakening verified-contact publication requirements."
     },
     {
-      "order": 75,
+      "order": 245,
       "migrationId": "backlinks-0053",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0053_backlink_monitoring_continuity.sql",
       "sha256": "f8cba0bb44c0e203e46b476fc539f5101206b4dd272404a0defd182229ce9a5a",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0052"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0052"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Provider-only inventory remains site-profile evidence until imported, pinned, managed, or linked to a confirmed Placement; existing direct-monitoring history remains intact."
     },
     {
-      "order": 76,
+      "order": 246,
       "migrationId": "backlinks-0054",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0054_backlink_recommendation_fit_contact_contract.sql",
       "sha256": "b2efa73b72da267440a1b7abc898f5d78836d782b763146f65b0718215a69e58",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0053"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0053"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Historical v2 commercial scores remain read-only while v3 fit and public-contact decisions become independent, auditable publication gates."
     },
     {
-      "order": 77,
+      "order": 247,
       "migrationId": "backlinks-0055",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0055_backlink_publishable_refill_cycle.sql",
       "sha256": "44771dd1473f5c6ad6f3216d2630dbd07ac94c0899ee42cb8a85f5bf9a10009a",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0054"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0054"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Project and Context scoped refill tiers, rounds, terminal reasons, and elimination counts persist on the existing commercial inventory policy and discovery batch."
     },
     {
-      "order": 78,
+      "order": 248,
       "migrationId": "backlinks-0056",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0056_backlink_gmail_affected_project_count.sql",
       "sha256": "fbc2f9880c8502e270aa01c74831d2edd8c1e82e4f4600f027d7d318fad274cb",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0055"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0055"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Organization-scoped Gmail impact counts remain accurate across project RLS boundaries without exposing project identities."
     },
     {
-      "order": 79,
+      "order": 249,
       "migrationId": "backlinks-0057",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0057_backlink_resource_library.sql",
       "sha256": "a6a364e711c01d7cb927c90899255ff3e82de2668c5551f7fbc09f26830016b2",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0056"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0056"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Workspace-scoped curated resources and the zero-paid terminal refill tier are additive; corrections are applied by forward migration."
     },
     {
-      "order": 80,
+      "order": 250,
       "migrationId": "backlinks-0058",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0058_backlink_refill_reassessment_cursors.sql",
       "sha256": "b10af8c2b69b47587b68888ea5400eaf01784d032b29d580c704c7bd7315ec90",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0057"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0057"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Paid-provider and curated-resource refill cursors remain separately traceable; restore the verified backup or apply a reviewed forward repair."
     },
     {
-      "order": 81,
+      "order": 251,
       "migrationId": "backlinks-0059",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0059_backlink_recommendation_pool_generations.sql",
       "sha256": "e60a1515a44516b551ba4428648965941d69f7c8c0f6657740b4ac2feba8089f",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0058"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0058"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "Visible recommendation pools advance by immutable generation, archive as a whole, and wait for an explicit user refresh before the next generation starts."
     },
     {
-      "order": 82,
+      "order": 252,
       "migrationId": "backlinks-0060",
       "tool": "psql",
       "path": "backend/core/src/modules/backlinks/db/migrations/0060_backlink_v3_exact_ten_project_context.sql",
       "sha256": "d051cf84e321d53093eb82779a3e06193d860c948cc53344e431cef010316cc4",
       "executionOwner": "ROLE-BACKLINKS",
-      "schemas": ["backlinks"],
-      "prerequisites": ["backlinks-0059"],
+      "schemas": [
+        "backlinks"
+      ],
+      "prerequisites": [
+        "backlinks-0059"
+      ],
       "recovery": "forward-only",
       "recoveryNote": "The exact-ten visible pool and complete Website Project context are forward-only product contracts."
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Apply in numeric order; recover with a verified restore or a reviewed forward repair.",
+      "order": 253,
+      "migrationId": "backlinks-0061",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0061_backlink_project_input_persistence.sql",
+      "sha256": "0af02418d1ab14228268feadc232fc26e9770c505b077c91b67d4f69903b1cf3",
+      "prerequisites": [
+        "backlinks-0060"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "The corrected recommendation generation and qualification contracts are additive; recover with a verified restore or a reviewed forward repair.",
+      "order": 254,
+      "migrationId": "backlinks-0062",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0062_backlink_recommendation_qualification_contract.sql",
+      "sha256": "d062c2a9d93b363ca3f15d7bf7092f2948a270000fa80b14591131f97055f0c5",
+      "prerequisites": [
+        "backlinks-0061"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Visibility, contact, and cooperation-path facts are append-only compatibility storage; recover with a verified restore or a reviewed forward repair.",
+      "order": 255,
+      "migrationId": "backlinks-0063",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0063_backlink_recommendation_visibility_facts.sql",
+      "sha256": "2f4037a38c12d7d5a61a0ee90fb683b6196cb7b776adfe381027c6f17d666a38",
+      "prerequisites": [
+        "backlinks-0062"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "AI capability budget windows and usage ledgers are additive; recover with a verified restore or a reviewed forward repair.",
+      "order": 256,
+      "migrationId": "backlinks-0064",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0064_backlink_ai_capability_budgets.sql",
+      "sha256": "cdeb453387673fd17ef10dbfb4607fc8b15fa7b62c3f3d1a612fadb14491d3ab",
+      "prerequisites": [
+        "backlinks-0063"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "V3.2 qualification checks preserve historical V4 facts and require complete progressive-admission evidence for new V3 facts.",
+      "order": 257,
+      "migrationId": "backlinks-0065",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0065_backlink_recommendation_v3_2_qualification.sql",
+      "sha256": "a991aa1f62570698b52c0f17062f140d22eb3640e81d8915ba72aaab4ea81d7b",
+      "prerequisites": [
+        "backlinks-0064"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Discovery batch ownership is additive and historical lineage is backfilled only when exactly one refill job can be proven.",
+      "order": 258,
+      "migrationId": "backlinks-0066",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0066_backlink_discovery_refill_lineage.sql",
+      "sha256": "ae91e6eb6fb661097ad3fb241a39c2e544900691f69d7851a8e1a08798b5b07e",
+      "prerequisites": [
+        "backlinks-0065"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "The lineage repair temporarily relaxes owner-forced RLS inside one transaction, backfills only uniquely proven historical ownership, and leaves ambiguous rows fail-closed.",
+      "order": 259,
+      "migrationId": "backlinks-0067",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0067_backlink_discovery_refill_lineage_backfill.sql",
+      "sha256": "81c7a09175b434a2749e8fb3f3fd3d4131ff48f9a8f91fb921ff609f3cd69b92",
+      "prerequisites": [
+        "backlinks-0066"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Cooperation-path opportunities and manual-action events are additive, tenant-scoped records; recover with a verified restore or a reviewed forward repair.",
+      "order": 260,
+      "migrationId": "backlinks-0068",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0068_backlink_cooperation_path_opportunities.sql",
+      "sha256": "71eeb90761c95ac5ae2825daeea6d38675e2cd6795928bfde81641287d585baf",
+      "prerequisites": [
+        "backlinks-0067"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "The enrichment-eligible state is an additive workflow state; recover with a reviewed forward repair or verified restore.",
+      "order": 261,
+      "migrationId": "backlinks-0069",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0069_backlink_commercial_candidate_enrichment.sql",
+      "sha256": "4f0884963c2527bdafb3d9bf3faa047509173fb04641a7cd1fa27daca1c8d2ac",
+      "prerequisites": [
+        "backlinks-0068"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "The admission threshold and qualification evidence rules are forward policy changes; recover with a reviewed forward repair or verified restore.",
+      "order": 262,
+      "migrationId": "backlinks-0070",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0070_backlink_recommendation_admission_threshold_50.sql",
+      "sha256": "79fc56ebea39e895a3bf930470b1227832522855420f2a372769ad1d2a6b6aca",
+      "prerequisites": [
+        "backlinks-0069"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "V4 becomes the only current publication and ordering contract while legacy V3 rows remain immutable audit history.",
+      "order": 263,
+      "migrationId": "backlinks-0071",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0071_backlink_v4_publication_contract.sql",
+      "sha256": "c8f9ab45ffbbbf247ee4bfdacd2d348a760512e3f110b7fb015771995ddf7910",
+      "prerequisites": [
+        "backlinks-0070"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Commercial supply authorization bindings are append-only command facts; recover with a reviewed forward repair or verified restore.",
+      "order": 264,
+      "migrationId": "backlinks-0072",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0072_backlink_commercial_supply_operations.sql",
+      "sha256": "bc0bafba9ccb09ada1ea5bcb55e0d2b82dd64c3bdf5961e423c75e12aae1bdc4",
+      "prerequisites": [
+        "backlinks-0071"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Recommendation refill capacity and source order are forward-only product policy; legacy contact-wait states are normalized without rewriting audit history.",
+      "order": 265,
+      "migrationId": "backlinks-0073",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0073_backlink_recommendation_refill_contract.sql",
+      "sha256": "df626bca4adacca6f12b3a67e88e4fb63885d7cd9a499329378dfa1bec0fd6bc",
+      "prerequisites": [
+        "backlinks-0072"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Reply-to-Placement lineage is immutable after creation; recover with a reviewed forward repair or verified restore.",
+      "order": 266,
+      "migrationId": "backlinks-0074",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0074_backlink_placement_reply_lineage.sql",
+      "sha256": "9f401710b75756a5732e145971d2b7fcfb95fc56c981c15ff458a3b27babae6a",
+      "prerequisites": [
+        "backlinks-0073"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Project-analysis recovery only rearms the exact published event for a stale queued job; recover with a reviewed forward repair or verified restore.",
+      "order": 267,
+      "migrationId": "backlinks-0075",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0075_backlink_project_analysis_recovery.sql",
+      "sha256": "e41c36677a466ee81b4bba4a5341512af918579fce61dc8b98848e2822473a96",
+      "prerequisites": [
+        "backlinks-0074"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "Stale project-analysis jobs are rearmed only while pinned to the latest authoritative project snapshot; invalid or superseded jobs close terminally.",
+      "order": 268,
+      "migrationId": "backlinks-0076",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0076_backlink_project_analysis_supersession.sql",
+      "sha256": "faac943942b65b17620e599614a95a83c49286f22c0e90a020617c2b2adda783",
+      "prerequisites": [
+        "backlinks-0075"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "The global Worker receives only tenant scope identifiers for missing or recoverable contact-enrichment work; all mutations remain tenant-scoped and idempotent.",
+      "order": 269,
+      "migrationId": "backlinks-0078",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0078_backlink_contact_enrichment_recovery_scopes.sql",
+      "sha256": "ac347dfd579179dd4e4523e7871172a916ef9887830fbc28c2943e89bc53cb00",
+      "prerequisites": [
+        "backlinks-0076"
+      ]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": [
+        "backlinks"
+      ],
+      "recovery": "forward-only",
+      "recoveryNote": "A terminal Send Intent proven not sent may be replaced only by a fresh human-confirmed Intent; accepted and unknown provider outcomes remain blocked from resubmission.",
+      "order": 270,
+      "migrationId": "backlinks-0079",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0079_backlink_send_intent_resubmission.sql",
+      "sha256": "778d1b91da29ea3fef9cb637dac8a713168c9dccac025406f984f0785de81702",
+      "prerequisites": [
+        "backlinks-0078"
+      ]
     }
   ]
 }

@@ -1063,6 +1063,18 @@ class SQLAlchemyKeywordRepository:
                 )
                 or 0
             )
+            await session.flush()
+            from app.modules.projects.service import (
+                refresh_project_promotion_target_from_authority,
+            )
+
+            await refresh_project_promotion_target_from_authority(
+                session,
+                self.sessions,
+                organization_id=organization_id,
+                project_id=project_id,
+                created_by="keywords:gsc-save",
+            )
             await session.commit()
             return KeywordGSCSaveResponse(
                 saved=len(normalized),
@@ -1888,6 +1900,18 @@ class SQLAlchemyKeywordRepository:
                 )
             build_run.result_version = int(build_run.result_version or 0) + 1
             build_run.updated_at = now
+            await session.flush()
+            from app.modules.projects.service import (
+                refresh_project_promotion_target_from_authority,
+            )
+
+            await refresh_project_promotion_target_from_authority(
+                session,
+                self.sessions,
+                organization_id=organization_id,
+                project_id=project_id,
+                created_by="keywords:competitor-opportunity-accepted",
+            )
             await session.commit()
             return KeywordCompetitorOpportunityBatchResponse(
                 updated=len(opportunities),

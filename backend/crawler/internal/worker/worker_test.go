@@ -428,6 +428,16 @@ func TestFailureMessageDoesNotRenameTechnicalAudit(t *testing.T) {
 	}
 }
 
+func TestFailureMessageExplainsTechnicalAuditWithNoCrawlablePages(t *testing.T) {
+	message := failureMessage(
+		crawler.Task{Type: crawler.TaskTechnicalAudit},
+		errors.New("technical audit returned no crawlable pages"),
+	)
+	if message != "技术审计失败：未抓取到可审计页面" {
+		t.Fatalf("failureMessage() = %q", message)
+	}
+}
+
 func TestApplySynthesizedProfileCompletesAUsableBusinessProfile(t *testing.T) {
 	result := crawler.Result{
 		CompletionStatus: crawler.CompletionPartial,

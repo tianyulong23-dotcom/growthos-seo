@@ -191,6 +191,7 @@ describe("commercial static assessment", () => {
   });
 
   it("keeps a timeout as insufficient data", async () => {
+    let attempts = 0;
     const assessment = await assessCommercialCandidateSite({
       canonicalDomain: "publisher.com",
       workspaceId: "workspace-1",
@@ -198,6 +199,7 @@ describe("commercial static assessment", () => {
       project,
       safeFetch: {
         fetch: async ({ url }) => {
+          attempts += 1;
           throw new SafeFetchError({
             code: safeFetchFailureCodes.timeout,
             requestedUrl: url,
@@ -212,6 +214,78 @@ describe("commercial static assessment", () => {
 
     expect(assessment.decision).toBe("insufficient_data");
     expect(assessment.failedUrls).toEqual(["https://publisher.com/"]);
+    expect(attempts).toBe(2);
+  });
+
+  it("recovers a transient timeout and uses the bounded 2 MB page limit", async () => {
+    const requests: Readonly<{ maxBytes: number }>[] = [];
+    let attempts = 0;
+    const assessment = await assessCommercialCandidateSite({
+      canonicalDomain: "publisher.com",
+      workspaceId: "workspace-1",
+      websiteProjectId: "project-1",
+      project,
+      safeFetch: {
+        fetch: async (request) => {
+          requests.push({ maxBytes: request.maxBytes });
+          attempts += 1;
+          if (attempts === 1) {
+            throw new SafeFetchError({
+              code: safeFetchFailureCodes.timeout,
+              requestedUrl: request.url,
+              message: "Timed out.",
+              retryable: true,
+            });
+          }
+          return response({
+            requestedUrl: request.url,
+            body: "<html lang='en'><head><title>Projector reviews</title>"
+              + "<meta name='description' content='Home cinema projectors'>"
+              + "</head><body><main><article>Independent home cinema "
+              + "projector reviews and streaming guides.</article></main>"
+              + "</body></html>",
+          });
+        },
+      },
+      pageParser: commercialPageParser,
+    });
+
+    expect(assessment.decision).toBe("ready");
+    expect(assessment.failedUrls).toEqual([]);
+    expect(attempts).toBe(2);
+    expect(requests).toEqual([
+      { maxBytes: 2_000_000 },
+      { maxBytes: 2_000_000 },
+    ]);
+  });
+
+  it("retries a transient server response before recording failure", async () => {
+    let attempts = 0;
+    const assessment = await assessCommercialCandidateSite({
+      canonicalDomain: "publisher.com",
+      workspaceId: "workspace-1",
+      websiteProjectId: "project-1",
+      project,
+      safeFetch: {
+        fetch: async ({ url }) => {
+          attempts += 1;
+          return response({
+            requestedUrl: url,
+            status: attempts === 1 ? 503 : 200,
+            body: attempts === 1
+              ? "<html><body>Unavailable</body></html>"
+              : "<html lang='en'><head><title>Projector reviews</title>"
+                + "</head><body><main><article>Home cinema projector "
+                + "reviews and streaming guides.</article></main></body></html>",
+          });
+        },
+      },
+      pageParser: commercialPageParser,
+    });
+
+    expect(assessment.decision).toBe("ready");
+    expect(assessment.failedUrls).toEqual([]);
+    expect(attempts).toBe(2);
   });
 
   it("uses target-page path semantics while preserving the original URL", async () => {

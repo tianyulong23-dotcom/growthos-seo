@@ -13,6 +13,11 @@ import {
   type GmailSyncProviderClient,
   type GmailSyncWatchProviderRequest,
 } from "./sync-client.js";
+import type {
+  GmailSentMessageQueryPort,
+  GmailSentMessageQueryResult,
+} from "../../ports/gmail-sent-message-query.port.js";
+import { GoogleAuthError } from "../../ports/google-auth.port.js";
 
 export type GoogleGmailAccessTokenResolver =
   (gmailConnectionId: string) => Promise<string>;
@@ -115,7 +120,10 @@ const defaultCreateClient = (accessToken: string): gmail_v1.Gmail => {
 };
 
 export class GoogleGmailProviderClient
-implements GmailSendProviderClient, GmailSyncProviderClient {
+implements
+  GmailSendProviderClient,
+  GmailSyncProviderClient,
+  GmailSentMessageQueryPort {
   readonly #resolveAccessToken: GoogleGmailAccessTokenResolver;
   readonly #createClient: (accessToken: string) => gmail_v1.Gmail;
 
@@ -128,11 +136,17 @@ implements GmailSendProviderClient, GmailSyncProviderClient {
     let client: gmail_v1.Gmail;
     try {
       client = await this.client(request.gmailConnectionId);
-    } catch {
+    } catch (error) {
+      if (error instanceof GoogleAuthError) {
+        throw new GmailSendProviderError({
+          kind: "auth",
+          authCode: error.code,
+        }, { cause: error });
+      }
       throw new GmailSendProviderError({
         kind: "transport",
         requestDispatched: false,
-      });
+      }, { cause: error });
     }
 
     try {
@@ -162,6 +176,55 @@ implements GmailSendProviderClient, GmailSyncProviderClient {
         kind: isTimeout(error) ? "timeout" : "transport",
         requestDispatched: true,
       });
+    }
+  }
+
+  async findByRfcMessageId(
+    input: Parameters<GmailSentMessageQueryPort["findByRfcMessageId"]>[0],
+  ): Promise<GmailSentMessageQueryResult> {
+    try {
+      const response = await (
+        await this.client(input.gmailConnectionId)
+      ).users.messages.list({
+        userId: "me",
+        q: `in:sent rfc822msgid:${input.rfcMessageId}`,
+        maxResults: 2,
+      });
+      const messages = (response.data.messages ?? []).filter(
+        (message): message is gmail_v1.Schema$Message & { id: string } =>
+          typeof message.id === "string" && message.id.trim().length > 0,
+      );
+      const message = messages[0];
+      if (message === undefined) {
+        return { kind: "not_found" };
+      }
+      if (messages.length !== 1) {
+        return {
+          kind: "inconclusive",
+          code: "GMAIL_SEND_RFC_MESSAGE_ID_NOT_UNIQUE",
+        };
+      }
+      return {
+        kind: "found",
+        providerMessageId: message.id,
+        ...(typeof message.threadId === "string"
+            && message.threadId.trim().length > 0
+          ? { providerThreadId: message.threadId }
+          : {}),
+        evidenceReference: `gmail:message/${message.id}`,
+      };
+    } catch (error) {
+      const status = httpStatus(error);
+      return {
+        kind: "inconclusive",
+        code: status === 401 || status === 403
+          ? "GMAIL_SEND_RECONCILIATION_AUTH_REQUIRED"
+          : status === 429
+            ? "GMAIL_SEND_RECONCILIATION_RATE_LIMITED"
+            : isTimeout(error)
+              ? "GMAIL_SEND_RECONCILIATION_TIMEOUT"
+              : "GMAIL_SEND_RECONCILIATION_UNAVAILABLE",
+      };
     }
   }
 

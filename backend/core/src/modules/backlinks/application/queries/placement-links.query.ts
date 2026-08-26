@@ -10,15 +10,35 @@ import type { ResolvedProjectContext } from "../../ports/project-context.port.js
 
 export const placementLinkViews = [
   "all",
+  "placements",
   "candidate",
   "confirmed",
+  "pending_verification",
+  "active",
+  "suspected_changed",
   "changed",
+  "suspected_lost",
   "lost",
   "recovered",
 ] as const;
 export type PlacementLinkView = (typeof placementLinkViews)[number];
-export type PlacementLinkDisplayState = Exclude<PlacementLinkView, "all">;
+export type PlacementLinkDisplayState =
+  | "candidate"
+  | "confirmed"
+  | "changed"
+  | "lost"
+  | "recovered";
+export type PlacementMonitoringState =
+  | "pending_verification"
+  | "active"
+  | "suspected_changed"
+  | "changed"
+  | "suspected_lost"
+  | "lost";
 export type PlacementEvidenceFreshness = "fresh" | "stale" | "unknown";
+export type PlacementEvidenceSource =
+  | "DIRECT_VALIDATION"
+  | "DIRECT_MONITOR";
 export type PlacementMonitorPublicStatus =
   | "idle"
   | "scheduled"
@@ -40,11 +60,15 @@ type CandidateLink = Readonly<{
   recordType: "candidate";
   displayState: "candidate";
   candidateId: string;
+  opportunityId: string | null;
+  replyId: string | null;
+  lineageStatus: "OUTREACH_DERIVED" | "UNATTRIBUTED";
   sourcePageUrl: string | null;
   targetUrl: string;
   candidateStatus: string;
   matchStatus: string;
   validationStatus: string;
+  evidenceSource: "DIRECT_VALIDATION";
   version: number;
   createdAt: string;
   countsTowardKpi: false;
@@ -54,11 +78,24 @@ type PlacementLink = Readonly<{
   displayState: Exclude<PlacementLinkDisplayState, "candidate">;
   placementId: string;
   candidateId: string;
+  opportunityId: string | null;
+  replyId: string | null;
+  lineageStatus: "OUTREACH_DERIVED" | "UNATTRIBUTED";
   sourcePageUrl: string;
   targetUrl: string;
   initialValidationStatus: string;
   healthStatus: string;
+  monitoringState: PlacementMonitoringState;
   monitoringStatus: string;
+  latestObservedAt: string | null;
+  lastSuccessfulObservationAt: string | null;
+  nextCheckAt: string | null;
+  freshness: PlacementEvidenceFreshness;
+  latestFailure: Readonly<{
+    status: "none" | "failed";
+    code: string | null;
+  }>;
+  evidenceSource: "DIRECT_MONITOR";
   version: number;
   createdAt: string;
   countsTowardKpi: true;
@@ -67,6 +104,9 @@ export type PlacementLinkListItem = CandidateLink | PlacementLink;
 
 export type PlacementCandidateLinkDetail = CandidateLink & Readonly<{
   opportunityId: string | null;
+  replyId: string | null;
+  placementId: string | null;
+  lineageStatus: "OUTREACH_DERIVED" | "UNATTRIBUTED";
   normalizedSourceUrl: string | null;
   normalizedTargetUrl: string;
   urlNormalizationVersion: string;
@@ -74,6 +114,7 @@ export type PlacementCandidateLinkDetail = CandidateLink & Readonly<{
     validationRunId: string;
     status: string;
     observedAt: string;
+    evidenceSource: "DIRECT_VALIDATION";
     evidenceSnapshotHash: string;
     evidenceContractVersion: string;
     evidenceSchemaVersion: number;
@@ -84,6 +125,7 @@ export type PlacementLatestObservation = Readonly<{
   result: PlacementMonitorObservationResult;
   observedAt: string;
   executionMode: "static" | "browser";
+  evidenceSource: "DIRECT_MONITOR";
   evidence: Readonly<{
     evidenceId: string;
     hash: string;
@@ -104,6 +146,8 @@ export type PlacementLatestMonitorRun = Readonly<{
 }>;
 export type PlacementLinkDetail = PlacementLink & Readonly<{
   opportunityId: string | null;
+  replyId: string | null;
+  lineageStatus: "OUTREACH_DERIVED" | "UNATTRIBUTED";
   normalizedSourceUrl: string;
   normalizedTargetUrl: string;
   urlNormalizationVersion: string;
@@ -111,14 +155,16 @@ export type PlacementLinkDetail = PlacementLink & Readonly<{
   initialValidation: Readonly<{
     validationRunId: string;
     status: string;
+    evidenceSource: "DIRECT_VALIDATION";
     evidenceSnapshotHash: string;
     evidenceContractVersion: string;
     evidenceSchemaVersion: number;
   }>;
-  nextCheckAt: string;
+  nextCheckAt: string | null;
   consecutiveAnomalies: number;
-  browserFallbackEnabled: boolean;
+  browserFallbackEnabled: boolean | null;
   latestObservation: PlacementLatestObservation | null;
+  lastSuccessfulObservation: PlacementLatestObservation | null;
   latestMonitorRun: PlacementLatestMonitorRun;
 }>;
 export type PlacementLinksListInput = Readonly<{
@@ -130,6 +176,34 @@ export type PlacementLinksPage = Readonly<{
   items: PlacementLinkListItem[];
   nextCursor: string | null;
   hasMore: boolean;
+  summary: Readonly<{
+    placements: Readonly<{
+      total: number;
+      pendingVerification: number;
+      active: number;
+      suspectedChanged: number;
+      changed: number;
+      suspectedLost: number;
+      lost: number;
+      recovered: number;
+    }>;
+    candidates: Readonly<{
+      total: number;
+      countsTowardKpi: false;
+    }>;
+    evidence: Readonly<{
+      source: "DIRECT_MONITOR";
+      dataCutoff: string | null;
+      freshness: PlacementEvidenceFreshness;
+      lastSuccessfulObservationAt: string | null;
+      latestAttemptAt: string | null;
+      latestAttemptStatus: PlacementMonitorPublicStatus;
+      latestFailure: Readonly<{
+        status: "none" | "failed";
+        code: string | null;
+      }>;
+    }>;
+  }>;
 }>;
 export type PlacementLifecycleEvent = Readonly<{
   eventId: string;
@@ -150,6 +224,7 @@ export type PlacementEvidence = Readonly<{
   evidenceId: string;
   placementId: string;
   kind: "placement_observation";
+  evidenceSource: "DIRECT_MONITOR";
   immutable: true;
   hashVerified: true;
   hash: string;
@@ -311,9 +386,22 @@ function displayStateForHealth(healthStatus: string): PlacementLink["displayStat
   return "confirmed";
 }
 
+function monitoringState(value: unknown): PlacementMonitoringState {
+  if (
+    value === "pending_verification"
+    || value === "active"
+    || value === "suspected_changed"
+    || value === "changed"
+    || value === "suspected_lost"
+    || value === "lost"
+  ) return value;
+  throw new TypeError("Placement link query returned an invalid healthStatus.");
+}
+
 function mapListItem(
   row: Readonly<Record<string, unknown>>,
   view: PlacementLinkView,
+  generatedAt: Date,
 ): PlacementLinkListItem {
   const recordType = asString(row.recordType, "recordType");
   if (recordType === "candidate") {
@@ -321,11 +409,17 @@ function mapListItem(
       recordType: "candidate",
       displayState: "candidate",
       candidateId: asString(row.candidateId, "candidateId"),
+      opportunityId: asNullableString(row.opportunityId, "opportunityId"),
+      replyId: asNullableString(row.replyId, "replyId"),
+      lineageStatus: row.replyId === null || row.replyId === undefined
+        ? "UNATTRIBUTED"
+        : "OUTREACH_DERIVED",
       sourcePageUrl: asNullableString(row.sourcePageUrl, "sourcePageUrl"),
       targetUrl: asString(row.targetUrl, "targetUrl"),
       candidateStatus: asString(row.candidateStatus, "candidateStatus"),
       matchStatus: asString(row.matchStatus, "matchStatus"),
       validationStatus: asString(row.validationStatus, "validationStatus"),
+      evidenceSource: "DIRECT_VALIDATION",
       version: asPositiveInteger(row.version, "version"),
       createdAt: asIsoTimestamp(row.createdAt, "createdAt"),
       countsTowardKpi: false,
@@ -333,6 +427,21 @@ function mapListItem(
   }
   if (recordType === "placement") {
     const healthStatus = asString(row.healthStatus, "healthStatus");
+    const latestObservedAt = row.latestObservedAt === null
+      || row.latestObservedAt === undefined
+      ? null
+      : asIsoTimestamp(row.latestObservedAt, "latestObservedAt");
+    const lastSuccessfulObservationAt =
+      row.lastSuccessfulObservationAt === null
+      || row.lastSuccessfulObservationAt === undefined
+        ? null
+        : asIsoTimestamp(
+            row.lastSuccessfulObservationAt,
+            "lastSuccessfulObservationAt",
+          );
+    const nextCheckAt = row.nextCheckAt === null || row.nextCheckAt === undefined
+      ? null
+      : asIsoTimestamp(row.nextCheckAt, "nextCheckAt");
     return {
       recordType: "placement",
       displayState: view === "recovered"
@@ -340,11 +449,23 @@ function mapListItem(
         : displayStateForHealth(healthStatus),
       placementId: asString(row.placementId, "placementId"),
       candidateId: asString(row.candidateId, "candidateId"),
+      opportunityId: asNullableString(row.opportunityId, "opportunityId"),
+      replyId: asNullableString(row.replyId, "replyId"),
+      lineageStatus: row.replyId === null || row.replyId === undefined
+        ? "UNATTRIBUTED"
+        : "OUTREACH_DERIVED",
       sourcePageUrl: asString(row.sourcePageUrl, "sourcePageUrl"),
       targetUrl: asString(row.targetUrl, "targetUrl"),
       initialValidationStatus: asString(row.validationStatus, "validationStatus"),
       healthStatus,
+      monitoringState: monitoringState(healthStatus),
       monitoringStatus: asString(row.monitoringStatus, "monitoringStatus"),
+      latestObservedAt,
+      lastSuccessfulObservationAt,
+      nextCheckAt,
+      freshness: freshness(nextCheckAt, generatedAt),
+      latestFailure: failure(row.latestFailureCode),
+      evidenceSource: "DIRECT_MONITOR",
       version: asPositiveInteger(row.version, "version"),
       createdAt: asIsoTimestamp(row.createdAt, "createdAt"),
       countsTowardKpi: true,
@@ -495,10 +616,15 @@ export function createPlacementLinksQuery(
         WITH entries AS (
           SELECT 'candidate'::text "recordType", 'candidate'::text "displayState",
                  c.id, c.id "candidateId", NULL::uuid "placementId",
+                 c.opportunity_id "opportunityId",c.reply_id "replyId",
                  c.source_page_url "sourcePageUrl", c.target_url "targetUrl",
                  c.status "candidateStatus", c.match_status "matchStatus",
                  c.initial_validation_status "validationStatus",
                  NULL::text "healthStatus", NULL::text "monitoringStatus",
+                 NULL::timestamptz "latestObservedAt",
+                 NULL::timestamptz "lastSuccessfulObservationAt",
+                 NULL::timestamptz "nextCheckAt",
+                 NULL::text "latestFailureCode",
                  false "wasRecovered", c.version, c.created_at "createdAt"
             FROM backlink_placement_candidates c
            WHERE (c.organization_id,c.workspace_id,c.website_project_id)=($1,$2,$3)
@@ -509,11 +635,16 @@ export function createPlacementLinksQuery(
                       WHEN p.health_status='lost' THEN 'lost'
                       ELSE 'confirmed' END "displayState",
                  p.id, p.candidate_id "candidateId", p.id "placementId",
+                 p.opportunity_id "opportunityId",p.reply_id "replyId",
                  p.source_page_url "sourcePageUrl", p.target_url "targetUrl",
                  NULL::text "candidateStatus", NULL::text "matchStatus",
                  p.initial_validation_status "validationStatus",
                  p.health_status "healthStatus",
                  p.monitoring_status "monitoringStatus",
+                 latest_observation.observed_at "latestObservedAt",
+                 successful_observation.observed_at "lastSuccessfulObservationAt",
+                 policy.next_check_at "nextCheckAt",
+                 latest_observation.failure_code "latestFailureCode",
                  EXISTS (
                    SELECT 1 FROM backlink_lifecycle_events lifecycle
                     WHERE (
@@ -527,17 +658,58 @@ export function createPlacementLinksQuery(
                  ) "wasRecovered",
                  p.version, p.created_at "createdAt"
             FROM backlink_placements p
+            LEFT JOIN LATERAL (
+              SELECT observation.observed_at,observation.failure_code
+                FROM backlink_monitor_observations observation
+               WHERE (
+                 observation.organization_id,observation.workspace_id,
+                 observation.website_project_id,observation.placement_id
+               )=(p.organization_id,p.workspace_id,p.website_project_id,p.id)
+               ORDER BY observation.observed_at DESC,observation.id DESC
+               LIMIT 1
+            ) latest_observation ON true
+            LEFT JOIN LATERAL (
+              SELECT observation.observed_at
+                FROM backlink_monitor_observations observation
+               WHERE (
+                 observation.organization_id,observation.workspace_id,
+                 observation.website_project_id,observation.placement_id
+               )=(p.organization_id,p.workspace_id,p.website_project_id,p.id)
+                 AND observation.failure_code IS NULL
+               ORDER BY observation.observed_at DESC,observation.id DESC
+               LIMIT 1
+            ) successful_observation ON true
+            LEFT JOIN LATERAL (
+              SELECT current_policy.next_check_at
+                FROM backlink_monitor_policies current_policy
+               WHERE (
+                 current_policy.organization_id,current_policy.workspace_id,
+                 current_policy.website_project_id,current_policy.placement_id
+               )=(p.organization_id,p.workspace_id,p.website_project_id,p.id)
+               ORDER BY current_policy.created_at DESC,current_policy.id DESC
+               LIMIT 1
+            ) policy ON true
            WHERE (p.organization_id,p.workspace_id,p.website_project_id)=($1,$2,$3)
         )
         SELECT "recordType","displayState",id,"candidateId","placementId",
+               "opportunityId","replyId",
                "sourcePageUrl","targetUrl","candidateStatus","matchStatus",
                "validationStatus","healthStatus","monitoringStatus",
+               "latestObservedAt","lastSuccessfulObservationAt","nextCheckAt",
+               "latestFailureCode",
                "wasRecovered",version,"createdAt"
           FROM entries
          WHERE (
            $4::text='all'
+           OR ($4='placements' AND "recordType"='placement')
+           OR ($4='candidate' AND "recordType"='candidate')
            OR ($4='recovered' AND "recordType"='placement' AND "wasRecovered")
-           OR ($4<>'recovered' AND "displayState"=$4)
+           OR ($4='confirmed' AND "recordType"='placement'
+             AND "displayState"='confirmed')
+           OR ($4=ANY(ARRAY[
+             'pending_verification','active','suspected_changed',
+             'changed','suspected_lost','lost'
+           ]::text[]) AND "recordType"='placement' AND "healthStatus"=$4)
          )
            AND ($5::timestamptz IS NULL OR "createdAt" < $5
              OR ("createdAt"=$5 AND "recordType" > $6)
@@ -552,22 +724,189 @@ export function createPlacementLinksQuery(
         after?.[2] ?? null,
         input.limit + 1,
       ]);
+      const summaryResult = await client.query(`
+        WITH scoped_placements AS (
+          SELECT placement.id,placement.health_status
+            FROM backlink_placements placement
+           WHERE (
+             placement.organization_id,placement.workspace_id,
+             placement.website_project_id
+           )=($1,$2,$3)
+        ),
+        scoped_candidates AS (
+          SELECT candidate.id
+            FROM backlink_placement_candidates candidate
+           WHERE (
+             candidate.organization_id,candidate.workspace_id,
+             candidate.website_project_id
+           )=($1,$2,$3)
+             AND candidate.status NOT IN ('PROMOTED','REJECTED')
+        ),
+        placement_counts AS (
+          SELECT
+            count(*)::integer "placementTotal",
+            count(*) FILTER (
+              WHERE placement.health_status='pending_verification'
+            )::integer "pendingVerification",
+            count(*) FILTER (
+              WHERE placement.health_status='active'
+            )::integer "active",
+            count(*) FILTER (
+              WHERE placement.health_status='suspected_changed'
+            )::integer "suspectedChanged",
+            count(*) FILTER (
+              WHERE placement.health_status='changed'
+            )::integer "changed",
+            count(*) FILTER (
+              WHERE placement.health_status='suspected_lost'
+            )::integer "suspectedLost",
+            count(*) FILTER (
+              WHERE placement.health_status='lost'
+            )::integer "lost",
+            count(*) FILTER (
+              WHERE EXISTS (
+                SELECT 1 FROM backlink_lifecycle_events lifecycle
+                 WHERE (
+                   lifecycle.organization_id,lifecycle.workspace_id,
+                   lifecycle.website_project_id,lifecycle.aggregate_type,
+                   lifecycle.aggregate_id,lifecycle.event_type
+                 )=($1,$2,$3,'placement',placement.id,'placement.recovered')
+              )
+            )::integer "recovered"
+          FROM scoped_placements placement
+        ),
+        latest_success AS (
+          SELECT max(observation.observed_at) "lastSuccessfulObservationAt"
+            FROM backlink_monitor_observations observation
+            JOIN scoped_placements placement
+              ON placement.id=observation.placement_id
+           WHERE (
+             observation.organization_id,observation.workspace_id,
+             observation.website_project_id
+           )=($1,$2,$3)
+             AND observation.failure_code IS NULL
+        ),
+        latest_attempt AS (
+          SELECT run.status,run.updated_at "latestAttemptAt",
+                 run.error_code "latestFailureCode"
+            FROM backlink_monitor_runs run
+            JOIN scoped_placements placement ON placement.id=run.placement_id
+           WHERE (
+             run.organization_id,run.workspace_id,run.website_project_id
+           )=($1,$2,$3)
+           ORDER BY run.updated_at DESC,run.id DESC
+           LIMIT 1
+        ),
+        next_checks AS (
+          SELECT min(policy.next_check_at) "nextCheckAt"
+            FROM scoped_placements placement
+            LEFT JOIN LATERAL (
+              SELECT current_policy.next_check_at
+                FROM backlink_monitor_policies current_policy
+               WHERE (
+                 current_policy.organization_id,current_policy.workspace_id,
+                 current_policy.website_project_id,current_policy.placement_id
+               )=($1,$2,$3,placement.id)
+               ORDER BY current_policy.created_at DESC,current_policy.id DESC
+               LIMIT 1
+            ) policy ON true
+        )
+        SELECT
+          counts."placementTotal",counts."pendingVerification",
+          counts.active,counts."suspectedChanged",counts.changed,
+          counts."suspectedLost",counts.lost,counts.recovered,
+          (SELECT count(*)::integer FROM scoped_candidates) "candidateTotal",
+          success."lastSuccessfulObservationAt",
+          attempt."latestAttemptAt",
+          attempt.status "latestAttemptStatus",
+          attempt."latestFailureCode",
+          checks."nextCheckAt"
+        FROM placement_counts counts
+        CROSS JOIN latest_success success
+        CROSS JOIN next_checks checks
+        LEFT JOIN latest_attempt attempt ON true
+      `, scopeValues(context));
       const items = result.rows.slice(0, input.limit)
-        .map((row) => mapListItem(row, input.view));
+        .map((row) => mapListItem(row, input.view, now()));
       const hasMore = result.rows.length > input.limit;
       const last = items.at(-1);
+      const summary = summaryResult.rows[0] ?? {};
+      const lastSuccessfulObservationAt =
+        summary.lastSuccessfulObservationAt === null
+        || summary.lastSuccessfulObservationAt === undefined
+          ? null
+          : asIsoTimestamp(
+              summary.lastSuccessfulObservationAt,
+              "lastSuccessfulObservationAt",
+            );
+      const nextCheckAt = summary.nextCheckAt === null
+        || summary.nextCheckAt === undefined
+        ? null
+        : asIsoTimestamp(summary.nextCheckAt, "nextCheckAt");
+      const latestAttemptAt = summary.latestAttemptAt === null
+        || summary.latestAttemptAt === undefined
+        ? null
+        : asIsoTimestamp(summary.latestAttemptAt, "latestAttemptAt");
       return {
         items,
         hasMore,
         nextCursor: hasMore && last !== undefined
           ? encodeListCursor(last)
           : null,
+        summary: {
+          placements: {
+            total: asNonnegativeInteger(
+              summary.placementTotal ?? 0,
+              "placementTotal",
+            ),
+            pendingVerification: asNonnegativeInteger(
+              summary.pendingVerification ?? 0,
+              "pendingVerification",
+            ),
+            active: asNonnegativeInteger(summary.active ?? 0, "active"),
+            suspectedChanged: asNonnegativeInteger(
+              summary.suspectedChanged ?? 0,
+              "suspectedChanged",
+            ),
+            changed: asNonnegativeInteger(summary.changed ?? 0, "changed"),
+            suspectedLost: asNonnegativeInteger(
+              summary.suspectedLost ?? 0,
+              "suspectedLost",
+            ),
+            lost: asNonnegativeInteger(summary.lost ?? 0, "lost"),
+            recovered: asNonnegativeInteger(
+              summary.recovered ?? 0,
+              "recovered",
+            ),
+          },
+          candidates: {
+            total: asNonnegativeInteger(
+              summary.candidateTotal ?? 0,
+              "candidateTotal",
+            ),
+            countsTowardKpi: false,
+          },
+          evidence: {
+            source: "DIRECT_MONITOR",
+            dataCutoff: lastSuccessfulObservationAt,
+            freshness: lastSuccessfulObservationAt === null
+              ? "unknown"
+              : freshness(nextCheckAt, now()),
+            lastSuccessfulObservationAt,
+            latestAttemptAt,
+            latestAttemptStatus: monitorStatus(
+              summary.latestAttemptStatus,
+            ),
+            latestFailure: failure(summary.latestFailureCode),
+          },
+        },
       };
     },
 
     async getCandidateLink(context, candidateId) {
       const result = await client.query(`
         SELECT c.id AS "candidateId", c.opportunity_id "opportunityId",
+               c.reply_id "replyId",c.planned_placement_id "placementId",
                c.source_page_url "sourcePageUrl",
                c.normalized_source_url "normalizedSourceUrl",
                c.target_url "targetUrl", c.normalized_target_url "normalizedTargetUrl",
@@ -602,6 +941,11 @@ export function createPlacementLinksQuery(
         displayState: "candidate",
         candidateId: asString(row.candidateId, "candidateId"),
         opportunityId: asNullableString(row.opportunityId, "opportunityId"),
+        replyId: asNullableString(row.replyId, "replyId"),
+        placementId: asNullableString(row.placementId, "placementId"),
+        lineageStatus: row.replyId === null || row.replyId === undefined
+          ? "UNATTRIBUTED"
+          : "OUTREACH_DERIVED",
         sourcePageUrl: asNullableString(row.sourcePageUrl, "sourcePageUrl"),
         normalizedSourceUrl: asNullableString(row.normalizedSourceUrl, "normalizedSourceUrl"),
         targetUrl: asString(row.targetUrl, "targetUrl"),
@@ -610,6 +954,7 @@ export function createPlacementLinksQuery(
         candidateStatus: asString(row.candidateStatus, "candidateStatus"),
         matchStatus: asString(row.matchStatus, "matchStatus"),
         validationStatus: asString(row.validationStatus, "validationStatus"),
+        evidenceSource: "DIRECT_VALIDATION",
         version: asPositiveInteger(row.version, "version"),
         createdAt: asIsoTimestamp(row.createdAt, "createdAt"),
         countsTowardKpi: false,
@@ -620,6 +965,7 @@ export function createPlacementLinksQuery(
             row.latestValidationObservedAt,
             "latestValidationObservedAt",
           ),
+          evidenceSource: "DIRECT_VALIDATION",
           evidenceSnapshotHash: asString(
             row.latestEvidenceSnapshotHash,
             "latestEvidenceSnapshotHash",
@@ -639,7 +985,8 @@ export function createPlacementLinksQuery(
     async getPlacementLink(context, placementId) {
       const result = await client.query(`
         SELECT p.id AS "placementId", p.candidate_id "candidateId",
-               p.opportunity_id "opportunityId", p.source_page_url "sourcePageUrl",
+               p.opportunity_id "opportunityId",p.reply_id "replyId",
+               p.source_page_url "sourcePageUrl",
                p.normalized_source_url "normalizedSourceUrl",
                p.target_url "targetUrl", p.normalized_target_url "normalizedTargetUrl",
                p.url_normalization_version "urlNormalizationVersion",
@@ -658,6 +1005,15 @@ export function createPlacementLinksQuery(
                observation.evidence_contract_version "latestEvidenceContractVersion",
                observation.evidence_schema_version "latestEvidenceSchemaVersion",
                observation.failure_code "latestFailureCode",
+               successful_observation.id "lastSuccessfulObservationId",
+               successful_observation.result "lastSuccessfulObservationResult",
+               successful_observation.observed_at "lastSuccessfulObservedAt",
+               successful_observation.execution_mode "lastSuccessfulExecutionMode",
+               successful_observation.evidence_snapshot_hash "lastSuccessfulEvidenceHash",
+               successful_observation.evidence_contract_version
+                 "lastSuccessfulEvidenceContractVersion",
+               successful_observation.evidence_schema_version
+                 "lastSuccessfulEvidenceSchemaVersion",
                policy.next_check_at "nextCheckAt",
                policy.browser_fallback_enabled "browserFallbackEnabled",
                anomalies."consecutiveAnomalies",
@@ -675,6 +1031,17 @@ export function createPlacementLinksQuery(
              ORDER BY observation.observed_at DESC,observation.id DESC
              LIMIT 1
           ) observation ON true
+          LEFT JOIN LATERAL (
+            SELECT successful.*
+              FROM backlink_monitor_observations successful
+             WHERE (
+               successful.organization_id,successful.workspace_id,
+               successful.website_project_id,successful.placement_id
+             )=(p.organization_id,p.workspace_id,p.website_project_id,p.id)
+               AND successful.failure_code IS NULL
+             ORDER BY successful.observed_at DESC,successful.id DESC
+             LIMIT 1
+          ) successful_observation ON true
           LEFT JOIN LATERAL (
             SELECT policy.next_check_at,policy.browser_fallback_enabled
               FROM backlink_monitor_policies policy
@@ -729,12 +1096,34 @@ export function createPlacementLinksQuery(
         row.latestMonitorRunId,
         "latestMonitorRunId",
       );
+      const lastSuccessfulObservationId = asNullableString(
+        row.lastSuccessfulObservationId,
+        "lastSuccessfulObservationId",
+      );
+      const nextCheckAt = row.nextCheckAt === null
+        || row.nextCheckAt === undefined
+        ? null
+        : asIsoTimestamp(row.nextCheckAt, "nextCheckAt");
+      const latestObservedAt = latestObservationId === null
+        ? null
+        : asIsoTimestamp(row.latestObservedAt, "latestObservedAt");
+      const lastSuccessfulObservationAt =
+        lastSuccessfulObservationId === null
+          ? null
+          : asIsoTimestamp(
+              row.lastSuccessfulObservedAt,
+              "lastSuccessfulObservedAt",
+            );
       return {
         recordType: "placement",
         displayState: displayStateForHealth(healthStatus),
         placementId: asString(row.placementId, "placementId"),
         candidateId: asString(row.candidateId, "candidateId"),
         opportunityId: asNullableString(row.opportunityId, "opportunityId"),
+        replyId: asNullableString(row.replyId, "replyId"),
+        lineageStatus: row.replyId === null || row.replyId === undefined
+          ? "UNATTRIBUTED"
+          : "OUTREACH_DERIVED",
         sourcePageUrl: asString(row.sourcePageUrl, "sourcePageUrl"),
         normalizedSourceUrl: asString(row.normalizedSourceUrl, "normalizedSourceUrl"),
         targetUrl: asString(row.targetUrl, "targetUrl"),
@@ -742,7 +1131,14 @@ export function createPlacementLinksQuery(
         urlNormalizationVersion: asString(row.urlNormalizationVersion, "urlNormalizationVersion"),
         initialValidationStatus: asString(row.validationStatus, "validationStatus"),
         healthStatus,
+        monitoringState: monitoringState(healthStatus),
         monitoringStatus: asString(row.monitoringStatus, "monitoringStatus"),
+        latestObservedAt,
+        lastSuccessfulObservationAt,
+        nextCheckAt,
+        freshness: freshness(nextCheckAt, now()),
+        latestFailure: failure(row.latestFailureCode),
+        evidenceSource: "DIRECT_MONITOR",
         version: asPositiveInteger(row.version, "version"),
         createdAt: asIsoTimestamp(row.createdAt, "createdAt"),
         updatedAt: asIsoTimestamp(row.updatedAt, "updatedAt"),
@@ -750,6 +1146,7 @@ export function createPlacementLinksQuery(
         initialValidation: {
           validationRunId: asString(row.initialValidationId, "initialValidationId"),
           status: asString(row.validationStatus, "validationStatus"),
+          evidenceSource: "DIRECT_VALIDATION",
           evidenceSnapshotHash: asString(
             row.initialEvidenceSnapshotHash,
             "initialEvidenceSnapshotHash",
@@ -763,20 +1160,23 @@ export function createPlacementLinksQuery(
             "initialEvidenceSchemaVersion",
           ),
         },
-        nextCheckAt: asIsoTimestamp(row.nextCheckAt, "nextCheckAt"),
         consecutiveAnomalies: asNonnegativeInteger(
           row.consecutiveAnomalies,
           "consecutiveAnomalies",
         ),
-        browserFallbackEnabled: asBoolean(
-          row.browserFallbackEnabled,
-          "browserFallbackEnabled",
-        ),
+        browserFallbackEnabled: row.browserFallbackEnabled === null
+          || row.browserFallbackEnabled === undefined
+          ? null
+          : asBoolean(
+              row.browserFallbackEnabled,
+              "browserFallbackEnabled",
+            ),
         latestObservation: latestObservationId === null ? null : {
           observationId: latestObservationId,
           result: observationResult(row.latestObservationResult),
-          observedAt: asIsoTimestamp(row.latestObservedAt, "latestObservedAt"),
+          observedAt: latestObservedAt as string,
           executionMode: executionMode(row.latestExecutionMode),
+          evidenceSource: "DIRECT_MONITOR",
           evidence: {
             evidenceId: latestObservationId,
             hash: asString(row.latestEvidenceHash, "latestEvidenceHash"),
@@ -788,10 +1188,40 @@ export function createPlacementLinksQuery(
               row.latestEvidenceSchemaVersion,
               "latestEvidenceSchemaVersion",
             ),
-            freshness: freshness(row.nextCheckAt, now()),
+            freshness: freshness(nextCheckAt, now()),
           },
           failure: failure(row.latestFailureCode),
         },
+        lastSuccessfulObservation: lastSuccessfulObservationId === null
+          ? null
+          : {
+              observationId: lastSuccessfulObservationId,
+              result: observationResult(
+                row.lastSuccessfulObservationResult,
+              ),
+              observedAt: lastSuccessfulObservationAt as string,
+              executionMode: executionMode(
+                row.lastSuccessfulExecutionMode,
+              ),
+              evidenceSource: "DIRECT_MONITOR",
+              evidence: {
+                evidenceId: lastSuccessfulObservationId,
+                hash: asString(
+                  row.lastSuccessfulEvidenceHash,
+                  "lastSuccessfulEvidenceHash",
+                ),
+                contractVersion: asString(
+                  row.lastSuccessfulEvidenceContractVersion,
+                  "lastSuccessfulEvidenceContractVersion",
+                ),
+                schemaVersion: asPositiveInteger(
+                  row.lastSuccessfulEvidenceSchemaVersion,
+                  "lastSuccessfulEvidenceSchemaVersion",
+                ),
+                freshness: freshness(nextCheckAt, now()),
+              },
+              failure: { status: "none", code: null },
+            },
         latestMonitorRun: {
           monitorRunId: latestMonitorRunId,
           status: monitorStatus(row.latestMonitorRunStatus),
@@ -945,6 +1375,7 @@ export function createPlacementLinksQuery(
         evidenceId: asString(row.evidenceId, "evidenceId"),
         placementId: asString(row.placementId, "placementId"),
         kind: "placement_observation",
+        evidenceSource: "DIRECT_MONITOR",
         immutable: true,
         hashVerified: true,
         hash: expectedHash,

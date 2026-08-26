@@ -22,6 +22,9 @@ import type {
 export type PlacementCandidateCreation = Readonly<{
   candidateId: string;
   opportunityId?: string;
+  replyId?: string;
+  placementId: string;
+  lineageStatus: "OUTREACH_DERIVED" | "UNATTRIBUTED";
   status: "PENDING_MATCH" | "PENDING_VALIDATION";
   matchStatus: "UNMATCHED" | "AUTO_MATCHED";
   initialValidationStatus: "PENDING";
@@ -35,6 +38,8 @@ export type CreatePlacementCandidateRepositoryInput = Readonly<{
   actorId: string;
   candidateId: string;
   opportunityId?: string;
+  replyId?: string;
+  plannedPlacementId: string;
   sourceType: CreatePlacementCandidateBody["sourceType"];
   sourceExternalId?: string;
   sourcePageUrl?: string;
@@ -197,6 +202,7 @@ export function createPlacementCandidateCommand(
       const discoveryEvidenceHash = digest(discoveryEvidenceSnapshot);
       const requestHash = digest({
         opportunityId: input.opportunityId ?? null,
+        replyId: input.replyId ?? null,
         sourceType: input.sourceType,
         sourceExternalId: input.sourceExternalId ?? null,
         normalizedSourceUrlHash:
@@ -217,6 +223,9 @@ export function createPlacementCandidateCommand(
         ? {}
         : { sourceExternalId: input.sourceExternalId };
       const candidateId = newId();
+      const plannedPlacementId = deterministicUuid(
+        `${candidateId}:placement`,
+      );
       const row = await dependencies.repository.create({
         organizationId: input.context.tenant.organizationId,
         workspaceId: input.context.tenant.workspaceId,
@@ -226,6 +235,8 @@ export function createPlacementCandidateCommand(
         ...(input.opportunityId === undefined
           ? {}
           : { opportunityId: input.opportunityId }),
+        ...(input.replyId === undefined ? {} : { replyId: input.replyId }),
+        plannedPlacementId,
         sourceType: input.sourceType,
         ...sourceExternalId,
         ...sourceFields,
@@ -270,9 +281,7 @@ export function createPlacementCandidateCommand(
                 validationRunId: deterministicUuid(
                   `${createdCandidateId}:initial-validation`,
                 ),
-                placementId: deterministicUuid(
-                  `${createdCandidateId}:placement`,
-                ),
+                placementId: row.responseBody.placementId,
                 monitoringOutboxEventId: deterministicUuid(
                   `${createdCandidateId}:monitoring-outbox`,
                 ),

@@ -86,7 +86,10 @@ export function DraftEditor({
 
   if (!editor) {
     return (
-      <div className="min-h-72 bg-muted/30" aria-label="草稿编辑器加载中" />
+      <div
+        className="min-h-[360px] bg-muted/20 sm:min-h-[440px]"
+        aria-label="草稿编辑器加载中"
+      />
     )
   }
 
@@ -112,9 +115,13 @@ export function DraftEditor({
   )
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-background">
+    <div className="bg-background">
       {!readOnly && (
-        <div className="flex min-h-11 flex-wrap items-center gap-1 border-b bg-muted/30 px-2 py-1.5">
+        <div
+          role="toolbar"
+          aria-label="邮件格式"
+          className="flex min-h-12 flex-wrap items-center gap-1 border-b bg-muted/20 px-3 py-1.5"
+        >
           {tool(
             "粗体",
             editor.isActive("bold"),
@@ -174,7 +181,7 @@ export function DraftEditor({
       )}
       <EditorContent
         editor={editor}
-        className="min-h-72 [&_.ProseMirror]:min-h-72 [&_.ProseMirror]:px-4 [&_.ProseMirror]:py-3 [&_.ProseMirror]:text-sm [&_.ProseMirror]:leading-6 [&_.ProseMirror]:outline-none [&_.ProseMirror_a]:text-primary [&_.ProseMirror_a]:underline [&_.ProseMirror_ol]:my-3 [&_.ProseMirror_ol]:list-decimal [&_.ProseMirror_ol]:pl-6 [&_.ProseMirror_p]:my-2 [&_.ProseMirror_ul]:my-3 [&_.ProseMirror_ul]:list-disc [&_.ProseMirror_ul]:pl-6"
+        className="min-h-[360px] sm:min-h-[440px] [&_.ProseMirror]:min-h-[360px] [&_.ProseMirror]:px-5 [&_.ProseMirror]:py-5 [&_.ProseMirror]:text-[15px] [&_.ProseMirror]:leading-7 [&_.ProseMirror]:outline-none sm:[&_.ProseMirror]:min-h-[440px] sm:[&_.ProseMirror]:px-6 [&_.ProseMirror_a]:text-primary [&_.ProseMirror_a]:underline [&_.ProseMirror_ol]:my-3 [&_.ProseMirror_ol]:list-decimal [&_.ProseMirror_ol]:pl-6 [&_.ProseMirror_p]:my-3 [&_.ProseMirror_ul]:my-3 [&_.ProseMirror_ul]:list-disc [&_.ProseMirror_ul]:pl-6"
       />
     </div>
   )

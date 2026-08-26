@@ -13,6 +13,9 @@ import {
   type CreateSendIntentRecordInput,
 } from "../../../src/modules/backlinks/application/services/send-intent.repository.js";
 import {
+  createGmailSendReadinessSnapshot,
+} from "../../../src/modules/backlinks/application/services/send-policy-gate.js";
+import {
   PostgresqlSendAttemptRepository,
 } from "../../../src/modules/backlinks/application/services/send-attempt.repository.js";
 import {
@@ -572,28 +575,83 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
   const atomicInput = (
     index: number,
     overrides: Partial<CreateSendIntentRecordInput> = {},
-  ): CreateSendIntentRecordInput => ({
-    ...firstContext,
-    sendIntentId: atomicIntentIds[index] ?? "",
-    sendSnapshotId: atomicSnapshotIds[index] ?? "",
-    quotaReservationId: atomicReservationIds[index] ?? "",
-    outboxEventId: atomicOutboxIds[index] ?? "",
-    draftId: id(106),
-    approvedDraftVersionId: id(107),
-    contactId: id(109),
-    contactVersion: 1,
-    gmailConnectionId,
-    clientIdempotencyKey: `atomic-client-${index}`,
-    logicalMessageKey: (1000 + index).toString(16).padStart(64, "0"),
-    messagePurpose: "INITIAL_OUTREACH",
-    followUpIndex: 0,
-    requestedSendAt: new Date("2026-07-27T10:15:00.000Z"),
-    rolling24HourSendLimit: 5,
-    minimumIntervalSeconds: 300,
-    reservationTtlSeconds: 600,
-    actorId: "user-bl-ai-115",
-    ...overrides,
-  });
+    readinessOverrides: Readonly<{
+      approvalFactId?: string;
+      usedSlots?: number;
+      cooldownRevision?: string;
+    }> = {},
+  ): CreateSendIntentRecordInput => {
+    const requestedSendAt = overrides.requestedSendAt
+      ?? new Date("2026-07-27T10:15:00.000Z");
+    const approvedDraftVersionId = overrides.approvedDraftVersionId ?? id(107);
+    const contactId = overrides.contactId ?? id(109);
+    const contactVersion = overrides.contactVersion ?? 1;
+    const selectedGmailConnectionId =
+      overrides.gmailConnectionId ?? gmailConnectionId;
+    const rolling24HourSendLimit = overrides.rolling24HourSendLimit ?? 5;
+    const readinessSnapshot = createGmailSendReadinessSnapshot({
+      evaluatedAt: new Date(requestedSendAt.getTime() - 60_000),
+      ttlSeconds: 60 * 60,
+      conditions: [
+        {
+          code: "DRAFT_APPROVAL",
+          revision: `${approvedDraftVersionId}:`
+            + (readinessOverrides.approvalFactId ?? id(110)),
+        },
+        {
+          code: "CONTACT_VERSION",
+          revision: `${contactId}:${contactVersion}`,
+        },
+        {
+          code: "GMAIL_BINDING",
+          revision: `${selectedGmailConnectionId}:1:1:1:1`,
+        },
+        {
+          code: "GMAIL_IDENTITY",
+          revision: `${gmailIdentityId}:1`,
+        },
+        { code: "SUPPRESSION", revision: "CLEAR" },
+        { code: "KILL_SWITCH", revision: "1:OPEN" },
+        {
+          code: "COOLDOWN",
+          revision: readinessOverrides.cooldownRevision ?? "CLEAR",
+        },
+        {
+          code: "QUOTA",
+          revision: `${readinessOverrides.usedSlots ?? 0}/`
+            + rolling24HourSendLimit,
+        },
+      ],
+    });
+    return {
+      ...firstContext,
+      sendIntentId: atomicIntentIds[index] ?? "",
+      sendSnapshotId: atomicSnapshotIds[index] ?? "",
+      quotaReservationId: atomicReservationIds[index] ?? "",
+      outboxEventId: atomicOutboxIds[index] ?? "",
+      draftId: id(106),
+      approvedDraftVersionId,
+      contactId,
+      contactVersion,
+      gmailConnectionId: selectedGmailConnectionId,
+      clientIdempotencyKey: `atomic-client-${index}`,
+      logicalMessageKey: (1000 + index).toString(16).padStart(64, "0"),
+      messagePurpose: "INITIAL_OUTREACH",
+      followUpIndex: 0,
+      requestedSendAt,
+      rolling24HourSendLimit,
+      minimumIntervalSeconds: 300,
+      reservationTtlSeconds: 600,
+      actorId: "user-bl-ai-115",
+      ...overrides,
+      readinessSnapshot,
+      humanConfirmation: {
+        confirmed: true,
+        confirmedAt: new Date(requestedSendAt.getTime() - 30_000),
+        readinessSnapshotVersion: readinessSnapshot.snapshotVersion,
+      },
+    };
+  };
 
   it("upgrades the published 0014 quota policy through forward migration 0023", () => {
     expect(publishedPolicies).toEqual([
@@ -651,6 +709,26 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
     if (claimed.state !== "claimed") {
       throw new Error("Expected a claimed Send Attempt.");
     }
+    const reconciliations = new PostgresqlSendReconciliationRepository({
+      pool: tenantPool,
+    });
+    await expect(reconciliations.load({
+      ...firstContext,
+      gmailConnectionId,
+      actorId: "worker-bl-ai-118",
+      sendIntentId,
+    })).resolves.toEqual({
+      state: "pending",
+      attempt: {
+        sendIntentId,
+        attemptId,
+        attemptNo: 1,
+        fencingToken: 1,
+        rfcMessageId: claimed.attempt.rfcMessageId,
+        errorCode: "GMAIL_SEND_DISPATCH_STALLED",
+        status: "DISPATCHING",
+      },
+    });
 
     await expect(attempts.settle({
       ...firstContext,
@@ -847,8 +925,11 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
       attempt: {
         sendIntentId,
         attemptId,
+        attemptNo: claimed.attempt.attemptNo,
+        fencingToken: claimed.attempt.fencingToken,
         rfcMessageId: claimed.attempt.rfcMessageId,
         errorCode: "GMAIL_SEND_TIMEOUT",
+        status: "DELIVERY_UNKNOWN",
       },
     });
     await expect(reconciliations.reconcile({
@@ -856,8 +937,11 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
       attempt: {
         sendIntentId,
         attemptId,
+        attemptNo: claimed.attempt.attemptNo,
+        fencingToken: claimed.attempt.fencingToken,
         rfcMessageId: claimed.attempt.rfcMessageId,
         errorCode: "GMAIL_SEND_TIMEOUT",
+        status: "DELIVERY_UNKNOWN",
       },
       decision: {
         outcome: "PROVIDER_ACCEPTED",
@@ -884,8 +968,11 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
       attempt: {
         sendIntentId,
         attemptId,
+        attemptNo: claimed.attempt.attemptNo,
+        fencingToken: claimed.attempt.fencingToken,
         rfcMessageId: claimed.attempt.rfcMessageId,
         errorCode: "GMAIL_SEND_TIMEOUT",
+        status: "DELIVERY_UNKNOWN",
       },
       decision: {
         outcome: "CONFIRMED_NOT_SENT",
@@ -1185,12 +1272,12 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
         quotaReservationId: atomicReservationIds[0] ?? "",
         messagePurpose: "FOLLOW_UP",
         followUpIndex: 1,
-      }))).resolves.toEqual({ state: "conflict" });
+      }, { usedSlots: 1 }))).resolves.toEqual({ state: "conflict" });
       await expect(repo.create(atomicInput(2, {
         outboxEventId: atomicOutboxIds[0] ?? "",
         messagePurpose: "FOLLOW_UP",
         followUpIndex: 2,
-      }))).resolves.toEqual({ state: "conflict" });
+      }, { usedSlots: 1 }))).resolves.toEqual({ state: "conflict" });
 
       const persisted = await admin.query(
         `SELECT
@@ -1219,9 +1306,15 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
         messagePurpose: "FOLLOW_UP",
         followUpIndex: 1,
       }))).resolves.toEqual({
-        state: "quota_exceeded",
-        dailyLimit: 1,
-        retryAt: "2026-07-27T10:25:00.000Z",
+        state: "readiness_changed",
+        changedConditions: [{
+          code: "QUOTA",
+          reason: "CHANGED",
+          expectedRevision: "0/1",
+          currentRevision: "1/1",
+          retryable: true,
+          recoveryAction: "WAIT_AND_RUN_PREFLIGHT",
+        }],
       });
       const persisted = await admin.query(
         `SELECT count(*)::integer AS total
@@ -1319,9 +1412,18 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
         draftId: id(1306),
         approvedDraftVersionId: id(1307),
         requestedSendAt: new Date("2026-07-28T10:15:00.000Z"),
+      }, {
+        approvalFactId: id(1310),
       }))).resolves.toEqual({
-        state: "initial_outreach_cooldown",
-        retryAt: "2026-08-26T10:15:00.000Z",
+        state: "readiness_changed",
+        changedConditions: [{
+          code: "COOLDOWN",
+          reason: "CHANGED",
+          expectedRevision: "CLEAR",
+          currentRevision: "2026-08-26T10:15:00.000Z",
+          retryable: true,
+          recoveryAction: "WAIT_AND_RUN_PREFLIGHT",
+        }],
       });
     });
 

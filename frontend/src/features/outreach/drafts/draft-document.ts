@@ -11,10 +11,81 @@ import type {
 const MAX_CHARACTERS = 50_000
 const MAX_NODES = 20_000
 const MAX_DEPTH = 12
+const INTERNAL_DRAFT_METADATA_MARKER =
+  /\[\s*[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]*(?:\s*,\s*[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]*)*\s*\]/giu
 
 export const emptyDraftDocument: DraftDocument = {
   type: "doc",
   content: [{ type: "paragraph" }],
+}
+
+export function sanitizeDraftRecipientText(value: string): {
+  value: string
+  removedInternalMetadata: boolean
+} {
+  const sanitized = value
+    .replace(INTERNAL_DRAFT_METADATA_MARKER, "")
+    .replace(/[ \t]{2,}/gu, " ")
+    .trim()
+  return {
+    value: sanitized,
+    removedInternalMetadata: sanitized !== value,
+  }
+}
+
+function sanitizeInlineNode(
+  node: DraftTextNode | DraftHardBreakNode
+): DraftTextNode | DraftHardBreakNode | null {
+  if (node.type === "hardBreak") return node
+  const sanitized = node.text
+    .replace(INTERNAL_DRAFT_METADATA_MARKER, "")
+    .replace(/[ \t]{2,}/gu, " ")
+    .replace(/[ \t]+$/u, "")
+  if (sanitized === "") return null
+  return {
+    ...node,
+    text: sanitized,
+  }
+}
+
+function sanitizeBlockNode(node: DraftBlockNode): DraftBlockNode {
+  if (node.type === "paragraph") {
+    const content = node.content
+      ?.map(sanitizeInlineNode)
+      .filter(
+        (
+          item
+        ): item is DraftTextNode | DraftHardBreakNode => item !== null
+      )
+    return {
+      type: "paragraph",
+      ...(content && content.length > 0 ? { content } : {}),
+    }
+  }
+  return {
+    ...node,
+    content: node.content.map((item) => ({
+      ...item,
+      content: item.content.map(sanitizeBlockNode),
+    })),
+  }
+}
+
+export function sanitizeDraftRecipientDocument(
+  document: DraftDocument
+): {
+  document: DraftDocument
+  removedInternalMetadata: boolean
+} {
+  const sanitized: DraftDocument = {
+    type: "doc",
+    content: document.content.map(sanitizeBlockNode),
+  }
+  return {
+    document: sanitized,
+    removedInternalMetadata:
+      JSON.stringify(sanitized) !== JSON.stringify(document),
+  }
 }
 
 type InspectionState = {

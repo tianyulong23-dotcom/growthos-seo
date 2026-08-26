@@ -170,3 +170,46 @@ test("protected Outreach workspace mounts Links with the routed project and shar
   assert.doesNotMatch(outreachWorkspace, /const placements/)
   assert.doesNotMatch(outreachWorkspace, /mock|fallback|demo/i)
 })
+
+test("Phase 10 Links preserves placement lineage and authoritative deep links", async () => {
+  const generated = await read("../../../api/generated/backlinks.ts")
+  const types = await read("types.ts")
+  const workspace = await read("links-workspace.tsx")
+
+  assert.match(generated, /replyId\?: string/)
+  assert.match(generated, /placementId: string/)
+  assert.match(generated, /lineageStatus: "OUTREACH_DERIVED" \| "UNATTRIBUTED"/)
+  assert.match(types, /replyId\?: string/)
+  assert.match(workspace, /useSearchParams/)
+  assert.match(workspace, /deepLinkOpportunityId/)
+  assert.match(workspace, /deepLinkPlacementId/)
+  assert.match(workspace, /client\.getPlacementLink/)
+  assert.match(
+    workspace,
+    /client\.getPlacementLink\(\s*websiteProjectKey,\s*deepLinkPlacementId/
+  )
+  assert.match(
+    workspace,
+    /createProjectQueryKey\(\s*websiteProjectKey,\s*"link-detail"/
+  )
+  assert.match(workspace, /外联归因 Placement/)
+  assert.match(workspace, /Candidate 证据/)
+  assert.match(workspace, /detail\.opportunityId/)
+  assert.match(workspace, /detail\.replyId/)
+  assert.match(workspace, /detail\.lineageStatus === "OUTREACH_DERIVED"/)
+  assert.match(workspace, /deepLinkReplyId/)
+  assert.match(workspace, /opportunityId === deepLinkOpportunityId/)
+  assert.match(workspace, /\.\.\.\(replyId \? \{ replyId \} : \{\}\)/)
+  assert.match(
+    workspace,
+    /if \(persistedReplyId\) search\.set\("replyId", persistedReplyId\)/
+  )
+  assert.doesNotMatch(
+    workspace,
+    /sourceType: "import",[\s\S]{0,300}\.\.\.\(replyId \? \{ replyId \}/
+  )
+  assert.match(workspace, /placementId/)
+  assert.match(workspace, /returnTo/)
+  assert.match(workspace, /linkedPath\("opportunities"\)/)
+  assert.match(workspace, /linkedPath\("reports"\)/)
+})

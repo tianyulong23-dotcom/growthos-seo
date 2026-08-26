@@ -2,9 +2,15 @@ import { randomUUID } from "node:crypto";
 
 import { createSendIntentCommands } from "../application/commands/send-intent.command.js";
 import { GmailSendActivity } from "../application/activities/send-activity.js";
+import {
+  UnknownSendResultActivity,
+} from "../application/activities/unknown-send-result-activity.js";
 import { SecretBackedGmailConnectionRepository } from "../application/services/gmail-connection-secret.repository.js";
 import { PostgresqlSendAttemptRepository } from "../application/services/send-attempt.repository.js";
 import { PostgresqlSendIntentRepository } from "../application/services/send-intent.repository.js";
+import {
+  PostgresqlSendReconciliationRepository,
+} from "../application/services/send-reconciliation.repository.js";
 import { GmailSendClientAdapter } from "../adapters/gmail/send-client.js";
 import { GoogleGmailProviderClient } from "../adapters/gmail/google-gmail-provider-client.js";
 import { buildGmailMimeMessage } from "../adapters/gmail/message-builder.js";
@@ -37,6 +43,9 @@ import type {
   GmailSendCommand,
   GmailSendPort,
 } from "../ports/gmail-send.port.js";
+import type {
+  GmailSentMessageQueryPort,
+} from "../ports/gmail-sent-message-query.port.js";
 import type { ResolvedProjectContext } from "../ports/project-context.port.js";
 import { secretKinds } from "../ports/secret-store.port.js";
 import {
@@ -156,6 +165,82 @@ export async function createLocalProductGmailSendRuntime(
     persistence: connectionPersistence,
     refreshLock: new PostgresqlGmailConnectionRefreshLock(pool),
   });
+  const loadReconciliationContext = async (
+    input: Readonly<{
+      organizationId: string;
+      workspaceId: string;
+      websiteProjectId: string;
+      gmailConnectionId: string;
+      actorId: string;
+      sendIntentId: string;
+    }>,
+  ): Promise<ResolvedProjectContext> => {
+    const scope = {
+      organizationId: input.organizationId,
+      workspaceId: input.workspaceId,
+      websiteProjectId: input.websiteProjectId,
+    };
+    const row = await withBacklinkTenantTransaction(
+      pool,
+      scope,
+      async (client) => (
+        await client.query(
+          `SELECT
+             context.canonical_domain AS "canonicalDomain",
+             context.locale,
+             context.country_code AS "countryCode",
+             context.profile_version_id AS "profileVersionId",
+             context.promotion_target_version_id AS "promotionTargetVersionId"
+           FROM backlinks.backlink_send_intents AS intent
+           JOIN LATERAL (
+             SELECT snapshot.*
+               FROM backlinks.backlink_project_context_snapshots AS snapshot
+              WHERE snapshot.organization_id=intent.organization_id
+                AND snapshot.workspace_id=intent.workspace_id
+                AND snapshot.website_project_id=intent.website_project_id
+              ORDER BY snapshot.snapshot_version DESC
+              LIMIT 1
+           ) AS context ON true
+          WHERE intent.organization_id=$1
+            AND intent.workspace_id=$2
+            AND intent.website_project_id=$3
+            AND intent.id=$4
+            AND intent.gmail_connection_id=$5`,
+          [
+            scope.organizationId,
+            scope.workspaceId,
+            scope.websiteProjectId,
+            input.sendIntentId,
+            input.gmailConnectionId,
+          ],
+        )
+      ).rows[0],
+    );
+    if (row === undefined) {
+      throw new Error(
+        "BACKLINK_LOCAL_PRODUCT_GMAIL_RECONCILIATION_CONTEXT_MISSING",
+      );
+    }
+    return Object.freeze({
+      actor: createActorContext({
+        userId: input.actorId,
+        sessionId: `gmail-send-reconciliation:${input.sendIntentId}`,
+        roles: ["member"],
+      }),
+      tenant: createTenantContext({
+        organizationId: scope.organizationId,
+        workspaceId: scope.workspaceId,
+      }),
+      project: createProjectContext({
+        websiteProjectId: scope.websiteProjectId,
+        canonicalDomain: String(row.canonicalDomain),
+        locale: String(row.locale),
+        countryCode: String(row.countryCode),
+        profileVersionId: String(row.profileVersionId),
+        promotionTargetVersionId: String(row.promotionTargetVersionId),
+      }),
+    });
+  };
   const contexts = new Map<string, Readonly<{
     context: ResolvedProjectContext;
     gmailConnectionVersion: number;
@@ -380,11 +465,17 @@ export async function createLocalProductGmailSendRuntime(
           "BACKLINK_LOCAL_PRODUCT_GMAIL_SEND_CONTEXT_MISSING",
         );
       }
-      const refreshed = await tokenRepository.refresh({
-        context: entry.context,
-        connectionId: input.context.gmailConnectionId,
-        expectedVersion: entry.gmailConnectionVersion,
-      });
+      let refreshed;
+      try {
+        refreshed = await tokenRepository.refresh({
+          context: entry.context,
+          connectionId: input.context.gmailConnectionId,
+          expectedVersion: entry.gmailConnectionVersion,
+        });
+      } catch (error) {
+        contexts.delete(input.attempt.attemptId);
+        throw error;
+      }
       if (
         refreshed.outcome === "REAUTH_REQUIRED"
         || refreshed.connection.connectionStatus !== "CONNECTED"
@@ -395,6 +486,16 @@ export async function createLocalProductGmailSendRuntime(
           "BACKLINK_LOCAL_PRODUCT_GMAIL_CONNECTION_HEALTH_FAILED",
         );
       }
+    },
+  };
+
+  const commandContextCleanup = {
+    async run(input: Readonly<{
+      attempt: {
+        attemptId: string;
+      };
+    }>) {
+      contexts.delete(input.attempt.attemptId);
     },
   };
 
@@ -550,6 +651,7 @@ export async function createLocalProductGmailSendRuntime(
     connectionHealthCheck,
     policyInputLoader,
     gmail,
+    commandContextCleanup,
     ...(capabilities.gmailSyncEnabled
       ? {
           acceptedSendHandler: {
@@ -566,17 +668,108 @@ export async function createLocalProductGmailSendRuntime(
         }
       : {}),
   });
+  const gmailQuery: GmailSentMessageQueryPort = {
+    async findByRfcMessageId(input) {
+      const context = await loadReconciliationContext(input);
+      return new GoogleGmailProviderClient({
+        resolveAccessToken: async (connectionId) =>
+          tokenRepository.resolveAccessToken({
+            context,
+            connectionId,
+          }),
+      }).findByRfcMessageId(input);
+    },
+  };
+  const reconciliationActivity = new UnknownSendResultActivity({
+    repository: new PostgresqlSendReconciliationRepository({ pool }),
+    gmailQuery,
+    dispatchRecovery: activity,
+  });
+  const consumer = createTemporalGmailSendConsumer(
+    options.workflowClient,
+    options.taskQueue,
+  );
   const relay = createGmailSendOutboxRelay({
     repository: createOutboxRelayRepository(options.outboxClient),
-    consumer: createTemporalGmailSendConsumer(
-      options.workflowClient,
-      options.taskQueue,
-    ),
+    consumer,
   });
 
   return Object.freeze({
     activity,
+    reconciliationActivity,
     relay,
+    async recoverStaleSends(input: Readonly<{
+      context: ResolvedProjectContext;
+      staleBefore: Date;
+      limit: number;
+    }>) {
+      if (
+        Number.isNaN(input.staleBefore.getTime())
+        || !Number.isSafeInteger(input.limit)
+        || input.limit < 1
+      ) {
+        throw new TypeError("Invalid Gmail send recovery scan.");
+      }
+      const scope = {
+        organizationId: input.context.tenant.organizationId,
+        workspaceId: input.context.tenant.workspaceId,
+        websiteProjectId: input.context.project.websiteProjectId,
+      };
+      const rows = await withBacklinkTenantTransaction(
+        pool,
+        scope,
+        async (client) => (
+          await client.query(
+            `SELECT
+               intent.id AS "sendIntentId",
+               intent.gmail_connection_id AS "gmailConnectionId"
+             FROM backlinks.backlink_send_intents AS intent
+             JOIN backlinks.backlink_rate_limit_reservations AS reservation
+               ON reservation.organization_id=intent.organization_id
+              AND reservation.workspace_id=intent.workspace_id
+              AND reservation.website_project_id=intent.website_project_id
+              AND reservation.send_intent_id=intent.id
+             JOIN LATERAL (
+               SELECT attempt.status, attempt.started_at
+                 FROM backlinks.backlink_send_attempts AS attempt
+                WHERE attempt.organization_id=intent.organization_id
+                  AND attempt.workspace_id=intent.workspace_id
+                  AND attempt.website_project_id=intent.website_project_id
+                  AND attempt.send_intent_id=intent.id
+                ORDER BY attempt.attempt_no DESC
+                LIMIT 1
+             ) AS attempt ON true
+            WHERE intent.organization_id=$1
+              AND intent.workspace_id=$2
+              AND intent.website_project_id=$3
+              AND intent.status='DISPATCHING'
+              AND reservation.status='RESERVED'
+              AND attempt.status='DISPATCHING'
+              AND attempt.started_at <= $4
+            ORDER BY attempt.started_at
+            LIMIT $5`,
+            [
+              scope.organizationId,
+              scope.workspaceId,
+              scope.websiteProjectId,
+              input.staleBefore,
+              input.limit,
+            ],
+          )
+        ).rows,
+      );
+      for (const row of rows) {
+        await consumer.consume({
+          organizationId: scope.organizationId,
+          workspaceId: scope.workspaceId,
+          websiteProjectId: scope.websiteProjectId,
+          gmailConnectionId: String(row.gmailConnectionId),
+          actorId: input.context.actor.userId,
+          sendIntentId: String(row.sendIntentId),
+        });
+      }
+      return rows.length;
+    },
     async findSelectedConnection(context: ResolvedProjectContext) {
       return (await connectionPersistence.findProjectMailboxState(context))
         .selectedConnection;

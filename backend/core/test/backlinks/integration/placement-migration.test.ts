@@ -63,9 +63,11 @@ const candidateSql = (
   sourceHash: string,
   targetHash: string,
   evidenceSchemaVersion = 1,
+  plannedPlacementId = candidateId,
 ) => `
   INSERT INTO backlink_placement_candidates (
     id, organization_id, workspace_id, website_project_id, opportunity_id,
+    planned_placement_id,
     source_type, source_page_url, normalized_source_url,
     normalized_source_url_hash, target_url, normalized_target_url,
     normalized_target_url_hash, url_normalization_version, status,
@@ -74,6 +76,7 @@ const candidateSql = (
     evidence_schema_version, created_by, updated_by
   ) VALUES (
     '${candidateId}', ${projectIdentity}, '${opportunityId}',
+    '${plannedPlacementId}',
     'crawler_discovery', 'https://publisher.example/article',
     'https://publisher.example/article', '${sourceHash}',
     'https://owner.example/guide', 'https://owner.example/guide',
@@ -150,8 +153,11 @@ describe("BL-AI-144 Placement persistence", () => {
       "0012_backlink_gmail_connections.sql",
       "0013_backlink_drafts.sql",
       "0014_backlink_send_intents.sql",
+      "0015_backlink_gmail_sync_capabilities.sql",
+      "0016_backlink_mail_sync.sql",
       "0028_backlink_placements.sql",
       "0040_backlink_existing_placements.sql",
+      "0074_backlink_placement_reply_lineage.sql",
     ]) {
       await client.query(await readFile(migration(name), "utf8"));
     }
@@ -239,7 +245,15 @@ describe("BL-AI-144 Placement persistence", () => {
     const sourceHash = "a".repeat(64);
     const targetHash = "b".repeat(64);
     await client.query(
-      candidateSql(id(401), identity, id(301), sourceHash, targetHash),
+      candidateSql(
+        id(401),
+        identity,
+        id(301),
+        sourceHash,
+        targetHash,
+        1,
+        id(602),
+      ),
     );
     expect((await client.query(`
       SELECT
@@ -408,6 +422,8 @@ describe("BL-AI-144 Placement persistence", () => {
       id(301),
       "5".repeat(64),
       "6".repeat(64),
+      1,
+      placementId,
     ));
     const repository = createPlacementInitialValidationRepository(client);
     expect(await repository.getCandidate({
@@ -502,6 +518,7 @@ describe("BL-AI-144 Placement persistence", () => {
     await client.query(`
       INSERT INTO backlink_placement_candidates (
         id,organization_id,workspace_id,website_project_id,opportunity_id,
+        planned_placement_id,
         source_type,source_external_id,source_page_url,normalized_source_url,
         normalized_source_url_hash,target_url,normalized_target_url,
         normalized_target_url_hash,url_normalization_version,status,
@@ -509,7 +526,8 @@ describe("BL-AI-144 Placement persistence", () => {
         discovery_evidence_hash,evidence_contract_version,
         evidence_schema_version,created_by,updated_by
       ) VALUES (
-        '${candidateId}',${identity},NULL,'manual','existing-link-490',
+        '${candidateId}',${identity},NULL,'${placementId}',
+        'manual','existing-link-490',
         'https://existing.example/article',
         'https://existing.example/article','${sourceHash}',
         'https://owner.example/existing',
@@ -667,6 +685,8 @@ describe("BL-AI-144 Placement persistence", () => {
       id(301),
       "9".repeat(64),
       "a".repeat(64),
+      1,
+      placementId,
     ));
     await client.query(`
       UPDATE backlink_opportunities

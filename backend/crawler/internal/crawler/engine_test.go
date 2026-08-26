@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1113,6 +1114,46 @@ func TestSiteCrawlWithZeroPagesReturnsError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Run() succeeded with zero pages")
+	}
+}
+
+func TestTechnicalAuditWithNoCrawlablePagesReturnsError(t *testing.T) {
+	httpFetcher := &fakeFetcher{resources: map[string]Resource{
+		"https://example.com/robots.txt": {
+			FinalURL:   "https://example.com/robots.txt",
+			StatusCode: 403,
+		},
+		"https://example.com/sitemap.xml": {
+			FinalURL:   "https://example.com/sitemap.xml",
+			StatusCode: 404,
+		},
+	}}
+	pageFetcher := &fakeFetcher{resources: map[string]Resource{}}
+	engine := NewEngine(
+		Config{UserAgent: "SEOPlatformBot/1.0", DiscoveryLimit: 1},
+		httpFetcher,
+		pageFetcher,
+		nil,
+	)
+
+	_, err := engine.Run(context.Background(), Task{
+		OrganizationID: "org",
+		ProjectID:      "project",
+		RunID:          "blocked-audit-run",
+		Type:           TaskTechnicalAudit,
+		TargetURL:      "https://example.com",
+		Country:        "US",
+		Language:       "en",
+		MaxPages:       1,
+	})
+	if err == nil {
+		t.Fatal("Run() succeeded with no crawlable pages")
+	}
+	if !strings.Contains(err.Error(), "no crawlable pages") {
+		t.Fatalf("Run() error = %q", err)
+	}
+	if pageFetcher.callCount("https://example.com/") != 0 {
+		t.Fatalf("homepage fetch count = %d", pageFetcher.callCount("https://example.com/"))
 	}
 }
 

@@ -6,8 +6,12 @@ import {
 } from "../../domain/drafts/draft.js";
 import {
   approveDraftEvidence,
+  containsInternalDraftMetadataMarker,
   type ApprovedDraftEvidence,
 } from "../../domain/drafts/evidence-policy.js";
+import {
+  resolveDraftPromotionTarget,
+} from "../../domain/drafts/promotion-target.js";
 import type {
   AiDraftInput,
   AiDraftResult,
@@ -19,6 +23,10 @@ import {
   draftRequestSchema,
   type DraftRequest,
 } from "../schemas/draft-request.schema.js";
+import {
+  deriveDraftFreshness,
+  type DraftFreshness,
+} from "../read-models/draft-freshness.js";
 
 type Scope = Readonly<{
   organizationId: string;
@@ -40,6 +48,16 @@ export type DraftGenerationJobStatus =
   | "SUCCEEDED"
   | "FAILED"
   | "REFUSED";
+
+export type DraftGenerationReadiness =
+  | "QUEUED"
+  | "GENERATING"
+  | "RETRYING"
+  | "AI_DRAFT_READY"
+  | "BASIC_DRAFT_READY"
+  | "POLICY_BLOCKED"
+  | "BUDGET_BLOCKED"
+  | "FAILED";
 
 export type DraftGenerationJob = Readonly<{
   runId: string;
@@ -64,7 +82,25 @@ export type DraftGenerationJob = Readonly<{
   latencyMs: number | null;
   attemptCount: number;
   lastErrorCategory: string | null;
+  diagnosticCode: string | null;
   persistenceLatencyMs: number | null;
+  readiness: DraftGenerationReadiness;
+  fallbackReason: string | null;
+}>;
+
+export type DraftInputSnapshot = Readonly<{
+  evidenceSnapshotId: string;
+  evidenceSnapshotHash: string;
+  requestSnapshotId: string;
+  request: DraftRequest;
+  requestHash: string;
+  recommendationId: string | null;
+  profileVersionId: string | null;
+  promotionTargetVersionId: string | null;
+  opportunityVersion: number | null;
+  contactId: string;
+  contactVersion: number;
+  createdAt: string;
 }>;
 
 export type DraftSnapshot = Readonly<{
@@ -82,8 +118,15 @@ export type DraftSnapshot = Readonly<{
     bodyText: string;
     bodyDocument: unknown | null;
     source: "MODEL" | "TEMPLATE_FALLBACK" | "MANUAL" | "RESTORED";
+    readiness:
+      | "AI_DRAFT_READY"
+      | "BASIC_DRAFT_READY"
+      | "EDITED_DRAFT_READY";
+    fallbackReason: string | null;
     createdAt: string;
   }> | null;
+  inputSnapshot?: DraftInputSnapshot | null;
+  freshness?: DraftFreshness;
 }>;
 
 export type CreateDraftGenerationJobInput = Scope & Readonly<{
@@ -146,6 +189,7 @@ export type DraftGenerationRepository = Readonly<{
     versionId: string;
     result: AiDraftResult;
     source: "MODEL" | "TEMPLATE_FALLBACK";
+    fallbackReason: string | null;
   }>): Promise<Readonly<{
     versionId: string;
     draftVersion: number;
@@ -154,6 +198,7 @@ export type DraftGenerationRepository = Readonly<{
   failJob(input: JobMutation & Readonly<{
     errorClass: string;
     errorCode: string;
+    diagnosticCode: string | null;
     refused: boolean;
   }>): Promise<void>;
   scheduleRetry(input: JobMutation & Readonly<{
@@ -185,7 +230,8 @@ type DraftEditingCompleted = Readonly<{
 
 type DraftEditingFailure =
   | Readonly<{ state: "not_found" }>
-  | Readonly<{ state: "version_conflict"; currentVersion: number }>;
+  | Readonly<{ state: "version_conflict"; currentVersion: number }>
+  | Readonly<{ state: "invalid_content" }>;
 
 export type DraftEditingRepository = Readonly<{
   saveManualVersion(
@@ -233,6 +279,17 @@ const readRecord = (value: unknown): Record<string, unknown> =>
     ? value as Record<string, unknown>
     : {};
 
+const nullableString = (value: unknown): string | null =>
+  value === null || value === undefined || String(value).trim() === ""
+    ? null
+    : String(value);
+
+const nullableNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const summarizeStructuredValue = (value: unknown): string => {
   if (value === null || value === undefined) return "not recorded";
   const serialized = typeof value === "string"
@@ -262,15 +319,26 @@ const projectMarketingContext = (
   const targetUrls = readStringList(row.targetUrls);
   const products = readStringList(row.products);
   const keywords = readStringList(row.keywords);
-  const targetUrl = requestedTargetUrl ?? targetUrls[0];
   if (
     canonicalDomain === ""
-    || targetUrl === undefined
     || products.length === 0
     || keywords.length === 0
-    || !targetUrls.includes(targetUrl)
   ) {
     throw new Error("DRAFT_PROJECT_CONTEXT_INCOMPLETE");
+  }
+  const promotionTarget = resolveDraftPromotionTarget({
+    canonicalDomain,
+    configuredTargetUrls: targetUrls,
+    ...(requestedTargetUrl === undefined ? {} : { requestedTargetUrl }),
+  });
+  if (promotionTarget.state === "missing") {
+    throw new Error("DRAFT_PROJECT_CONTEXT_INCOMPLETE");
+  }
+  if (promotionTarget.state === "invalid") {
+    throw new Error("DRAFT_PROMOTION_TARGET_INVALID");
+  }
+  if (promotionTarget.state === "outside_project") {
+    throw new Error("DRAFT_PROMOTION_TARGET_OUTSIDE_PROJECT");
   }
   return {
     products,
@@ -279,7 +347,7 @@ const projectMarketingContext = (
       nonBlank(row.locale, ""),
       nonBlank(row.countryCode, ""),
     ].filter((value) => value !== ""),
-    targetUrl,
+    targetUrl: promotionTarget.targetUrl,
   };
 };
 
@@ -352,14 +420,46 @@ const asJob = (
   message: string,
 ): DraftGenerationJob => {
   if (row === undefined) throw new Error(message);
+  const status = row.status as DraftGenerationJobStatus;
+  const generator = row.generator === "AI"
+      || row.generator === "TEMPLATE_FALLBACK"
+    ? row.generator
+    : null;
+  const lastErrorCategory = row.lastErrorCategory === null
+      || row.lastErrorCategory === undefined
+    ? null
+    : String(row.lastErrorCategory);
+  const readiness: DraftGenerationReadiness = status === "QUEUED"
+    ? "QUEUED"
+    : status === "RUNNING"
+      ? "GENERATING"
+      : status === "RETRY_SCHEDULED"
+        ? "RETRYING"
+        : status === "SUCCEEDED"
+          ? generator === "TEMPLATE_FALLBACK"
+            ? "BASIC_DRAFT_READY"
+            : "AI_DRAFT_READY"
+          : status === "REFUSED"
+            || lastErrorCategory === "POLICY_VIOLATION"
+            || lastErrorCategory === "REFUSED"
+            ? "POLICY_BLOCKED"
+            : lastErrorCategory === "BUDGET_EXCEEDED"
+              ? "BUDGET_BLOCKED"
+              : "FAILED";
   return {
     ...(row as DraftGenerationJob),
+    status,
     request: row.request === null || row.request === undefined
       ? null
       : draftRequestSchema.parse(row.request),
-    generator: row.generator === "AI" || row.generator === "TEMPLATE_FALLBACK"
-      ? row.generator
-      : null,
+    generator,
+    lastErrorCategory,
+    diagnosticCode: nullableString(row.diagnosticCode),
+    readiness,
+    fallbackReason: row.fallbackReason === null
+        || row.fallbackReason === undefined
+      ? null
+      : String(row.fallbackReason),
   };
 };
 
@@ -368,6 +468,63 @@ const asDraft = (
 ): DraftSnapshot => {
   if (row === undefined) throw new Error("Draft was not found.");
   const currentVersionId = row.currentVersionId;
+  const snapshotContext = readRecord(row.snapshotContextData);
+  const snapshotProject = readRecord(snapshotContext.project);
+  const snapshotOpportunity = readRecord(snapshotContext.opportunity);
+  const requestPayload = row.requestPayload === null
+      || row.requestPayload === undefined
+    ? null
+    : draftRequestSchema.parse(row.requestPayload);
+  const inputSnapshot: DraftInputSnapshot | null =
+    currentVersionId === null
+      || row.evidenceSnapshotId === null
+      || row.evidenceSnapshotId === undefined
+      || row.requestSnapshotId === null
+      || row.requestSnapshotId === undefined
+      || requestPayload === null
+      || row.evidenceSnapshotHash === null
+      || row.evidenceSnapshotHash === undefined
+      || row.requestHash === null
+      || row.requestHash === undefined
+      ? null
+      : {
+          evidenceSnapshotId: String(row.evidenceSnapshotId),
+          evidenceSnapshotHash: String(row.evidenceSnapshotHash),
+          requestSnapshotId: String(row.requestSnapshotId),
+          request: requestPayload,
+          requestHash: String(row.requestHash),
+          recommendationId: nullableString(
+            snapshotOpportunity.recommendationId,
+          ),
+          profileVersionId: nullableString(
+            snapshotProject.profileVersionId,
+          ),
+          promotionTargetVersionId: nullableString(
+            snapshotProject.promotionTargetVersionId,
+          ),
+          opportunityVersion: nullableNumber(
+            snapshotOpportunity.version,
+          ),
+          contactId: String(row.snapshotContactId),
+          contactVersion: Number(row.snapshotContactVersion),
+          createdAt: asIsoString(row.evidenceSnapshotCreatedAt),
+        };
+  const freshness = deriveDraftFreshness({
+    snapshotProfileVersionId: inputSnapshot?.profileVersionId ?? null,
+    currentProfileVersionId: nullableString(row.currentProfileVersionId),
+    snapshotPromotionTargetVersionId:
+      inputSnapshot?.promotionTargetVersionId ?? null,
+    currentPromotionTargetVersionId: nullableString(
+      row.currentPromotionTargetVersionId,
+    ),
+    snapshotOpportunityVersion: inputSnapshot?.opportunityVersion ?? null,
+    currentOpportunityVersion: nullableNumber(row.currentOpportunityVersion),
+    snapshotContactId: inputSnapshot?.contactId ?? null,
+    snapshotContactVersion: inputSnapshot?.contactVersion ?? null,
+    currentContactId: nullableString(row.currentContactId),
+    currentContactVersion: nullableNumber(row.currentContactVersion),
+    currentContactUsable: row.currentContactUsable === true,
+  });
   return {
     draftId: String(row.draftId),
     opportunityId: String(row.opportunityId),
@@ -391,10 +548,21 @@ const asDraft = (
           source: row.source as NonNullable<
             DraftSnapshot["currentVersion"]
           >["source"],
+          readiness: row.source === "MODEL"
+            ? "AI_DRAFT_READY"
+            : row.source === "TEMPLATE_FALLBACK"
+              ? "BASIC_DRAFT_READY"
+              : "EDITED_DRAFT_READY",
+          fallbackReason: row.currentVersionFallbackReason === null
+              || row.currentVersionFallbackReason === undefined
+            ? null
+            : String(row.currentVersionFallbackReason),
           createdAt: row.currentVersionCreatedAt instanceof Date
             ? row.currentVersionCreatedAt.toISOString()
             : String(row.currentVersionCreatedAt),
         },
+    inputSnapshot,
+    freshness,
   };
 };
 
@@ -428,6 +596,9 @@ export function createDraftGenerationRepository(
         r.latency_ms AS "latencyMs",
         r.attempt_count AS "attemptCount",
         COALESCE(r.error_code,r.error_class) AS "lastErrorCategory",
+        NULLIF(r.quality_result->>'providerDiagnosticCode','')
+          AS "diagnosticCode",
+        NULLIF(r.quality_result->>'fallbackReason','') AS "fallbackReason",
         CASE
           WHEN (r.quality_result->>'persistenceLatencyMs') ~ '^[0-9]+$'
           THEN (r.quality_result->>'persistenceLatencyMs')::integer
@@ -464,6 +635,7 @@ export function createDraftGenerationRepository(
           p.keywords,
           p.target_urls AS "targetUrls",
           p.created_at AS "projectContextCreatedAt",
+          o.recommendation_id AS "recommendationId",
           o.target_host_ascii AS "targetHost",
           o.version AS "opportunityVersion",
           o.updated_at AS "opportunityUpdatedAt",
@@ -757,6 +929,8 @@ export function createDraftGenerationRepository(
           targetUrls: readStringList(row.targetUrls),
         },
         opportunity: {
+          recommendationId: String(row.recommendationId),
+          version: Number(row.opportunityVersion),
           targetHost: String(row.targetHost),
           cooperationType: String(row.cooperationType),
           recommendationReason: recommendationReason(row),
@@ -770,6 +944,8 @@ export function createDraftGenerationRepository(
           },
         },
         contact: {
+          id: input.contactId,
+          version: input.contactVersion,
           displayName: nonBlank(row.contactRole, "Contact"),
           role: nonBlank(row.contactRole, "contact"),
           purpose: nonBlank(row.contactPurpose, "unknown"),
@@ -934,6 +1110,9 @@ export function createDraftGenerationRepository(
           r.latency_ms AS "latencyMs",
           r.attempt_count AS "attemptCount",
           COALESCE(r.error_code,r.error_class) AS "lastErrorCategory",
+          NULLIF(r.quality_result->>'providerDiagnosticCode','')
+            AS "diagnosticCode",
+          NULLIF(r.quality_result->>'fallbackReason','') AS "fallbackReason",
           CASE
             WHEN (r.quality_result->>'persistenceLatencyMs') ~ '^[0-9]+$'
             THEN (r.quality_result->>'persistenceLatencyMs')::integer
@@ -973,17 +1152,21 @@ export function createDraftGenerationRepository(
         WITH timing AS MATERIALIZED (
           SELECT clock_timestamp() AS started_at
         ), started AS (
-          UPDATE backlink_model_runs
+          UPDATE backlink_model_runs AS run
           SET status='RUNNING',attempt_count=attempt_count+1,
             started_at=timing.started_at,finished_at=NULL,
             error_class=NULL,error_code=NULL,
             updated_at=timing.started_at,updated_by=$5
           FROM timing
-          WHERE (organization_id,workspace_id,website_project_id,id)=
+          WHERE (
+            run.organization_id,run.workspace_id,run.website_project_id,run.id
+          )=
             ($1,$2,$3,$4) AND status IN ('QUEUED','RETRY_SCHEDULED')
-          RETURNING id
+          RETURNING run.id,run.status,run.started_at,run.finished_at,
+            run.attempt_count,run.error_class,run.error_code
         )
-        SELECT r.id AS "runId",r.draft_id AS "draftId",r.status,
+        SELECT r.id AS "runId",r.draft_id AS "draftId",
+          COALESCE(s.status,r.status) AS status,
           (s.id IS NOT NULL) started,
           r.opportunity_id AS "opportunityId",
           r.contact_id AS "contactId",
@@ -1002,11 +1185,20 @@ export function createDraftGenerationRepository(
           v.id AS "versionId",
           d.last_successful_version_id AS "lastSuccessfulVersionId",
           r.created_at AS "queuedAt",
-          r.started_at AS "startedAt",
-          r.finished_at AS "finishedAt",
+          COALESCE(s.started_at,r.started_at) AS "startedAt",
+          CASE
+            WHEN s.id IS NOT NULL THEN s.finished_at
+            ELSE r.finished_at
+          END AS "finishedAt",
           r.latency_ms AS "latencyMs",
-          r.attempt_count AS "attemptCount",
-          COALESCE(r.error_code,r.error_class) AS "lastErrorCategory",
+          COALESCE(s.attempt_count,r.attempt_count) AS "attemptCount",
+          CASE
+            WHEN s.id IS NOT NULL THEN COALESCE(s.error_code,s.error_class)
+            ELSE COALESCE(r.error_code,r.error_class)
+          END AS "lastErrorCategory",
+          NULLIF(r.quality_result->>'providerDiagnosticCode','')
+            AS "diagnosticCode",
+          NULLIF(r.quality_result->>'fallbackReason','') AS "fallbackReason",
           CASE
             WHEN (r.quality_result->>'persistenceLatencyMs') ~ '^[0-9]+$'
             THEN (r.quality_result->>'persistenceLatencyMs')::integer
@@ -1275,6 +1467,7 @@ export function createDraftGenerationRepository(
           generator: input.source === "MODEL" ? "AI" : "TEMPLATE_FALLBACK",
           requiresUserConfirmation: true,
           canAutoSend: false,
+          fallbackReason: input.fallbackReason,
         }),
       ]);
       const row = result.rows[0] as
@@ -1299,7 +1492,13 @@ export function createDraftGenerationRepository(
         SET status=$6,error_class=$7,error_code=$8,
           finished_at=timing.finished_at,
           estimated_cost_usd=NULL,
-          quality_result=quality_result-'budgetReservationUsd',
+          quality_result=jsonb_strip_nulls(
+            (quality_result-'budgetReservationUsd')
+            || jsonb_build_object(
+              'providerDiagnosticCode',
+              $9::text
+            )
+          ),
           updated_at=timing.finished_at,updated_by=$5
         FROM timing
         WHERE (organization_id,workspace_id,website_project_id,id)=
@@ -1311,6 +1510,7 @@ export function createDraftGenerationRepository(
         input.refused ? "REFUSED" : "FAILED",
         input.errorClass,
         input.errorCode,
+        input.diagnosticCode,
       ]);
     },
 
@@ -1357,6 +1557,9 @@ export function createDraftGenerationRepository(
           r.latency_ms AS "latencyMs",
           r.attempt_count AS "attemptCount",
           COALESCE(r.error_code,r.error_class) AS "lastErrorCategory",
+          NULLIF(r.quality_result->>'providerDiagnosticCode','')
+            AS "diagnosticCode",
+          NULLIF(r.quality_result->>'fallbackReason','') AS "fallbackReason",
           CASE
             WHEN (r.quality_result->>'persistenceLatencyMs') ~ '^[0-9]+$'
             THEN (r.quality_result->>'persistenceLatencyMs')::integer
@@ -1398,6 +1601,29 @@ export function createDraftGenerationRepository(
           v.id AS "currentVersionId",v.version_no AS "currentVersionNo",
           v.subject_text AS "subjectText",v.body_text AS "bodyText",
           v.body_document AS "bodyDocument",v.source,
+          v.evidence_snapshot_id AS "evidenceSnapshotId",
+          v.request_snapshot_id AS "requestSnapshotId",
+          evidence.snapshot_hash AS "evidenceSnapshotHash",
+          evidence.context_data AS "snapshotContextData",
+          evidence.created_at AS "evidenceSnapshotCreatedAt",
+          request.request_payload AS "requestPayload",
+          request.request_hash AS "requestHash",
+          request.contact_id AS "snapshotContactId",
+          request.contact_version AS "snapshotContactVersion",
+          opportunity.version AS "currentOpportunityVersion",
+          current_context.profile_version_id AS "currentProfileVersionId",
+          current_context.promotion_target_version_id
+            AS "currentPromotionTargetVersionId",
+          current_contact.id AS "currentContactId",
+          current_contact.version AS "currentContactVersion",
+          COALESCE(
+            current_contact.status='active'
+            AND current_contact.guessed=false
+            AND current_contact.invalidated_at IS NULL,
+            false
+          ) AS "currentContactUsable",
+          NULLIF(r.quality_result->>'fallbackReason','')
+            AS "currentVersionFallbackReason",
           v.created_at AS "currentVersionCreatedAt"
         FROM backlink_email_drafts d
         LEFT JOIN backlink_draft_versions v ON
@@ -1405,6 +1631,44 @@ export function createDraftGenerationRepository(
            v.id,v.draft_id,v.opportunity_id)=
           (d.organization_id,d.workspace_id,d.website_project_id,
            d.current_version_id,d.id,d.opportunity_id)
+        LEFT JOIN backlink_model_runs r ON
+          (r.organization_id,r.workspace_id,r.website_project_id,r.id)=
+          (v.organization_id,v.workspace_id,v.website_project_id,v.model_run_id)
+        LEFT JOIN backlink_evidence_snapshots evidence ON
+          (evidence.organization_id,evidence.workspace_id,
+           evidence.website_project_id,evidence.id,
+           evidence.opportunity_id)=
+          (v.organization_id,v.workspace_id,v.website_project_id,
+           v.evidence_snapshot_id,v.opportunity_id)
+        LEFT JOIN backlink_draft_request_snapshots request ON
+          (request.organization_id,request.workspace_id,
+           request.website_project_id,request.id,
+           request.opportunity_id)=
+          (v.organization_id,v.workspace_id,v.website_project_id,
+           v.request_snapshot_id,v.opportunity_id)
+        LEFT JOIN backlink_opportunities opportunity ON
+          (opportunity.organization_id,opportunity.workspace_id,
+           opportunity.website_project_id,opportunity.id)=
+          (d.organization_id,d.workspace_id,d.website_project_id,
+           d.opportunity_id)
+        LEFT JOIN backlink_contacts current_contact ON
+          (current_contact.organization_id,current_contact.workspace_id,
+           current_contact.website_project_id,current_contact.id)=
+          (request.organization_id,request.workspace_id,
+           request.website_project_id,request.contact_id)
+        LEFT JOIN LATERAL (
+          SELECT context.profile_version_id,
+            context.promotion_target_version_id
+          FROM backlink_project_context_snapshots context
+          WHERE (
+            context.organization_id,
+            context.workspace_id,
+            context.website_project_id
+          )=(d.organization_id,d.workspace_id,d.website_project_id)
+            AND context.project_status='ACTIVE'
+          ORDER BY context.snapshot_version DESC
+          LIMIT 1
+        ) current_context ON true
         WHERE (d.organization_id,d.workspace_id,d.website_project_id,d.id)=
           ($1,$2,$3,$4)
       `, [...scopeValues(input), input.draftId]);
@@ -1512,6 +1776,34 @@ export function createDraftEditingRepository(
     },
 
     async approve(input) {
+      const currentContent = await client.query(`
+        SELECT v.subject_text AS "subjectText",v.body_text AS "bodyText"
+        FROM backlink_email_drafts d
+        JOIN backlink_draft_versions v ON
+          (v.organization_id,v.workspace_id,v.website_project_id,
+           v.draft_id,v.id)=
+          (d.organization_id,d.workspace_id,d.website_project_id,
+           d.id,d.current_version_id)
+        WHERE (d.organization_id,d.workspace_id,d.website_project_id,d.id)=
+          ($1,$2,$3,$4)
+          AND d.version=$5
+      `, [
+        ...scopeValues(input),
+        input.draftId,
+        input.expectedVersion,
+      ]);
+      const currentContentRow = currentContent.rows[0] as Readonly<{
+        subjectText: string;
+        bodyText: string;
+      }> | undefined;
+      if (currentContentRow === undefined) return failure(input);
+      if (
+        containsInternalDraftMetadataMarker(currentContentRow.subjectText)
+        || containsInternalDraftMetadataMarker(currentContentRow.bodyText)
+      ) {
+        return { state: "invalid_content" };
+      }
+
       const lifecycleEventId = newId();
       const auditEventId = newId();
       const integrityHash = createHash("sha256").update(JSON.stringify({

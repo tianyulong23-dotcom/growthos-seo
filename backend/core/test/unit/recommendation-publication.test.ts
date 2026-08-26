@@ -21,6 +21,17 @@ describe("recommendation publication gate", () => {
     expect(count).toBe(1);
     const sql = String(query.mock.calls[0]?.[0]);
     expect(sql).toContain("publication_status=CASE");
+    expect(sql).toContain(
+      "WHEN fit_candidate.fit_decision='eligible' THEN 'PUBLISHED'",
+    );
+    expect(sql).toContain("'recommendation-commercial-fit.v4'");
+    expect(sql).not.toContain("'recommendation-commercial-fit.v3'");
+    expect(sql).not.toContain(
+      "AND inventory.contact_reason_code='PUBLIC_EMAIL_FOUND'",
+    );
+    expect(sql).not.toContain(
+      "AND inventory.verified_public_email_count>=1",
+    );
     expect(sql).not.toContain(
       "latest_job.terminal_reason_code='PUBLIC_EMAIL_FOUND'",
     );
@@ -34,16 +45,29 @@ describe("recommendation publication gate", () => {
     expect(sql).toContain("evidence.expires_at>now()");
     expect(sql).toContain("candidate.email_domain_ascii NOT LIKE '%.invalid'");
     expect(sql).toContain("FOR UPDATE");
+    expect(sql).toContain("EXISTS (SELECT 1 FROM generation_contract)");
+    expect(sql).toContain("corrected_visibility_capacity.visible_count");
     expect(sql).toContain(
-      "published_capacity.published_count<\n            pool_policy.visible_pool_target_count",
+      "pool_policy.visible_pool_state IN ('building','active')",
     );
     expect(sql).toContain("LIMIT 1");
-    expect(sql).toContain(
-      "current_pool.published_count>=\n                pool_policy.visible_pool_target_count",
+    const activation = sql.slice(
+      sql.indexOf("activated AS"),
+      sql.indexOf("RETURNING policy.visible_pool_generation"),
+    );
+    expect(activation).toContain("current_pool.published_count>0");
+    expect(activation).not.toMatch(
+      /AND current_pool\.published_count>=\s*pool_policy\.visible_pool_target_count/,
+    );
+    expect(activation).toContain(
+      "current_pool.published_count>=pool_policy.visible_pool_target_count",
     );
     expect(sql).toContain(
       "last_publishable_count=current_pool.published_count",
     );
-    expect(sql).toContain("pause_reason=NULL");
+    expect(sql).toContain("pause_reason=CASE");
+    expect(sql).not.toContain("backlink_opportunities");
+    expect(sql).not.toContain("backlink_mail");
+    expect(sql).not.toContain("backlink_placements");
   });
 });

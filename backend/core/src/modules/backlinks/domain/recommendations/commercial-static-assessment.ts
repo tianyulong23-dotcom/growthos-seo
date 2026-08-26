@@ -9,9 +9,11 @@ import { createRecommendationDomainKey } from "./domain-key.js";
 export const commercialStaticAssessmentRuleVersion =
   "commercial-static-assessment.v3";
 
-const maxPageBytes = 512_000;
+const maxPageBytes = 2_000_000;
 const maxRedirects = 4;
 const maxSecondaryPages = 4;
+const maxFetchAttempts = 2;
+const retryableHttpStatuses = new Set([408, 425, 500, 502, 503, 504]);
 export type CommercialStaticAssessment = Readonly<{
   canonicalDomain: string;
   decision: "ready" | "insufficient_data" | "manual_review";
@@ -206,39 +208,55 @@ export async function assessCommercialCandidateSite(input: Readonly<{
     url: string,
   ): Promise<CommercialPageFacts | null> => {
     attemptedUrls.push(url);
-    try {
-      const result = await input.safeFetch.fetch({
-        url,
-        purpose: "seo-assessment",
-        workspaceId: input.workspaceId,
-        websiteProjectId: input.websiteProjectId,
-        maxBytes: maxPageBytes,
-        maxRedirects,
-      });
-      if (result.status === 403 || result.status === 429) {
+    for (let attempt = 1; attempt <= maxFetchAttempts; attempt += 1) {
+      try {
+        const result = await input.safeFetch.fetch({
+          url,
+          purpose: "seo-assessment",
+          workspaceId: input.workspaceId,
+          websiteProjectId: input.websiteProjectId,
+          maxBytes: maxPageBytes,
+          maxRedirects,
+        });
+        if (result.status === 403 || result.status === 429) {
+          failedUrls.push(url);
+          degradedDecision = "manual_review";
+          return null;
+        }
+        if (result.status < 200 || result.status >= 400) {
+          if (
+            retryableHttpStatuses.has(result.status)
+            && attempt < maxFetchAttempts
+          ) {
+            continue;
+          }
+          failedUrls.push(url);
+          degradedDecision ??= "insufficient_data";
+          return null;
+        }
+        return input.pageParser.parse({
+          body: result.body,
+          finalUrl: result.finalUrl,
+          fetchedAt: result.fetchedAt,
+          canonicalDomain,
+        });
+      } catch (error) {
+        if (
+          error instanceof SafeFetchError
+          && error.retryable
+          && attempt < maxFetchAttempts
+        ) {
+          continue;
+        }
         failedUrls.push(url);
-        degradedDecision = "manual_review";
+        const decision = failureDecision(error);
+        if (decision === "manual_review" || degradedDecision === null) {
+          degradedDecision = decision;
+        }
         return null;
       }
-      if (result.status < 200 || result.status >= 400) {
-        failedUrls.push(url);
-        degradedDecision ??= "insufficient_data";
-        return null;
-      }
-      return input.pageParser.parse({
-        body: result.body,
-        finalUrl: result.finalUrl,
-        fetchedAt: result.fetchedAt,
-        canonicalDomain,
-      });
-    } catch (error) {
-      failedUrls.push(url);
-      const decision = failureDecision(error);
-      if (decision === "manual_review" || degradedDecision === null) {
-        degradedDecision = decision;
-      }
-      return null;
     }
+    return null;
   };
 
   const initialUrls = uniqueInOrder([

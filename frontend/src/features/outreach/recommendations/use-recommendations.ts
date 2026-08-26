@@ -11,12 +11,15 @@ import { listRecommendations, type RecommendationItem } from "./api"
 
 export type RecommendationsState =
   "loading" | "data" | "empty" | "forbidden" | "conflict" | "offline" | "error"
+export type RecommendationPresentationState = "current" | "legacy_stale"
 
 export function useRecommendations(
   websiteProjectKey: string,
   enabled: boolean
 ) {
   const [items, setItems] = useState<readonly RecommendationItem[]>([])
+  const [presentationState, setPresentationState] =
+    useState<RecommendationPresentationState>("current")
   const [status, setStatus] = useState<RecommendationsState>("loading")
   const key = useMemo(
     () =>
@@ -35,6 +38,7 @@ export function useRecommendations(
         listRecommendations(websiteProjectKey, signal)
       )
       setItems(response.items)
+      setPresentationState(response.presentationState)
       setStatus(response.items.length === 0 ? "empty" : "data")
       return response.items
     } catch (error) {
@@ -42,6 +46,7 @@ export function useRecommendations(
         return null
       }
       setItems([])
+      setPresentationState("current")
       setStatus(
         isOutreachOffline()
           ? "offline"
@@ -77,5 +82,5 @@ export function useRecommendations(
     return load(false)
   }, [key, load])
 
-  return { items, status, refresh, poll }
+  return { items, presentationState, status, refresh, poll }
 }

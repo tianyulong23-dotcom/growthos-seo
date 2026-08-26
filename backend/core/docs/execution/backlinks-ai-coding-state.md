@@ -1,5 +1,65 @@
 # Backlinks AI Coding State
 
+## Current Authority Override (`2026-08-17`)
+
+The current coding entry is
+`docs/architecture/backlinks-integrated-remediation-coding-master-plan-v1.md`.
+The current exact task is `BACKLINKS-CORE-REMEDIATION-PHASE-4`, with status
+`INPUT_REQUIRED`. Phase 4 screening now uses the active
+`recommendation-commercial-fit.v3` model with rule version
+`recommendation-commercial-fit-rules.v3.2`. V3.2 applies seven explicit hard
+exclusions, a `100`-point weighted score, country/language as a ranking
+reduction instead of a hard exclusion, and progressive admission beginning at
+`55` then falling by five points while reusing the same evidence. Fresh
+DataForSEO Traffic, Spam, and Rank values are scoring evidence only and do not
+recreate the historical V4 hard thresholds. Shadow, production, runtime
+parsing, persistence, forward migration `0065`, startup detection, manifest,
+focused tests, and the complete Backlinks gate pass.
+
+Live non-empty qualification remains unproven because the current project has
+no commercial candidate carrying complete V3.2 critical evidence. The worker
+remains quiesced so the broader refill workflow cannot trigger unauthorized
+discovery or SafeFetch work. Tenant-scoped inspection records zero provider
+requests, zero usage-ledger rows, zero actual or reserved cost, zero
+`unknown_charge`, zero generation contracts, and zero V3.2 qualification
+facts. This is a candidate-supply acceptance gap, not a code or contract
+failure. Phase 5 remains `NOT_AUTHORIZED`. Exact scope, provider ceiling,
+verification, runtime evidence, and stop evidence are in
+`backend/core/docs/execution/BACKLINKS-CORE-REMEDIATION-PHASE-4-result.md`.
+
+Sequence control is satisfied by the immutable original M1A result
+(`INPUT_REQUIRED`), its accepted input-resolution record, M1B `PASS`, and M1C
+`PASS`. This is recorded as `GATE_SATISFIED_BY_RESOLUTION`; the original M1A
+result is not rewritten.
+
+`WEBSITE-PROJECT-V3-E2E-002` is `SUPERSEDED_DO_NOT_EXECUTE`. Phase 1 remains
+`PASS` for provider configuration and diagnostics. Phase 2 is `PASS` with
+Backlinks SQL head `0063`; corrected recommendation storage and repository
+compatibility exist but are not wired into the current Worker or UI. Phase 3
+adds SQL head `0064` and independent `AI_DISCOVERY` /
+`AI_OUTREACH_DRAFT` capability budgets. Its focused tests pass. The authorized
+gate recovery resolved the four historical assertion failures; serialized
+Unit `692/692` and API `123/123` pass. The separately authorized importer
+recovery restored both missing scripts, their focused tests pass, and Contract
+passes `185/185`. The separately authorized Integration recovery resolves the
+three recorded failures. The separately authorized Resilience recovery
+restored the missing formal runbook. The complete gate passes Unit `692/692`,
+API `123/123`, Contract `185/185`, Integration `220` tests with `13` skips,
+Security `110/110`, and Resilience `8/8`. Phase 3 is `PASS`. Provider,
+Browser, paid AI, Gmail,
+Temporal business-job, production migration, and external-action counts are
+all zero. Phase 4 was authorized by the user's next-step instruction on
+`2026-08-16`; Phase 5 and every later phase remain `NOT_AUTHORIZED`. Phase 3
+did not commit, push, pull, merge, rebase, checkout, clean, or revert unrelated
+work.
+
+The latest Phase 4 complete serialized gate passes migrations through `0065`,
+Unit `745/745`, API `130/130`, Contract `185/185`, Integration `223` tests
+with `13` skips, Security `110/110`, and Resilience `8/8`.
+
+Everything below this override is historical context unless an exact phase is
+reissued under the current coding master plan.
+
 > Current control (`2026-07-29`): `SHARED-REPO-GATE = PASS`,
 > `BL-AI-085 = DONE`, `BL-AI-CORR-3C-001 = DONE`,
 > `BL-AI-084 = INTEGRATED`, `PB-B-DRAFT-BE = INTEGRATED`,

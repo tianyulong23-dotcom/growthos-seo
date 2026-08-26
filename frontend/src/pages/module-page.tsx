@@ -24,6 +24,7 @@ import { ContentLibrary } from "@/features/content/content-library"
 import { ContentPlan } from "@/features/content/content-plan"
 import { CreateArticleDialog } from "@/features/content/create-article-dialog"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
+import { ProjectOutreachReadiness } from "@/features/projects/project-outreach-readiness"
 import { AIModelSettings } from "@/features/settings/ai-model-settings"
 import { DataForSEOSettings } from "@/features/settings/data-source-settings"
 import { GSCOAuthSettings } from "@/features/settings/gsc-oauth-settings"
@@ -134,56 +135,57 @@ function SettingsContent({
     )
   }
 
-  if (project.siteProfile) {
+  const readiness = <ProjectOutreachReadiness projectId={project.id} />
+
+  if (project.siteProfile || project.understandingStatus === "failed") {
     return (
-      <BusinessProfileForm
-        project={project}
-        onSave={onSaveBusinessProfile}
-        onRefresh={onRefreshBusinessProfile}
-        refreshing={understandingInProgress}
-      />
+      <>
+        {readiness}
+        <div id="business-profile-settings">
+          <BusinessProfileForm
+            project={project}
+            onSave={onSaveBusinessProfile}
+            onRefresh={onRefreshBusinessProfile}
+            refreshing={understandingInProgress}
+          />
+        </div>
+      </>
     )
   }
 
   if (waitingForProfile) {
     return (
-      <div className="max-w-2xl py-10">
-        <div className="flex items-start gap-3">
-          <LoaderCircle className="mt-0.5 size-5 animate-spin text-primary" />
-          <div className="min-w-0 flex-1">
-            <h2 className="font-medium">正在识别网站业务</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              完成后可在这里确认企业、客户和产品服务信息。
-            </p>
-            <Progress
-              value={project.understandingProgress}
-              className="mt-4 h-1.5"
-            />
+      <>
+        {readiness}
+        <div className="max-w-2xl py-10">
+          <div className="flex items-start gap-3">
+            <LoaderCircle className="mt-0.5 size-5 animate-spin text-primary" />
+            <div className="min-w-0 flex-1">
+              <h2 className="font-medium">正在识别网站业务</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                完成后可在这里确认企业、客户和产品服务信息。
+              </p>
+              <Progress
+                value={project.understandingProgress}
+                className="mt-4 h-1.5"
+              />
+            </div>
           </div>
         </div>
-      </div>
-    )
-  }
-
-  if (project.understandingStatus === "failed") {
-    return (
-      <div className="max-w-2xl py-10">
-        <h2 className="font-medium">暂时无法生成业务资料</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {project.understandingMessage ||
-            "网站业务识别未完成，当前没有可确认的业务资料。"}
-        </p>
-      </div>
+      </>
     )
   }
 
   return (
-    <div className="max-w-2xl py-10">
-      <h2 className="font-medium">还没有业务资料</h2>
-      <p className="mt-1 text-sm text-muted-foreground">
-        网站业务识别完成后，业务资料会显示在这里。
-      </p>
-    </div>
+    <>
+      {readiness}
+      <div className="max-w-2xl py-10">
+        <h2 className="font-medium">还没有业务资料</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          网站业务识别完成后，业务资料会显示在这里。
+        </p>
+      </div>
+    </>
   )
 }
 
@@ -294,7 +296,11 @@ function ModuleBody({
           </div>
         }
       >
-        <OutreachWorkspace view={view} project={project} />
+        <OutreachWorkspace
+          key={`${project.id}:${view}`}
+          view={view}
+          project={project}
+        />
       </React.Suspense>
     )
   if (moduleId === "performance")
@@ -341,8 +347,7 @@ function RegisteredModulePage({
   beforeContent,
 }: RegisteredModulePageProps) {
   const navigate = useNavigate()
-  const { projects } = useProjects()
-  const { projectId = projects[0]?.id ?? "", view } = useParams<{
+  const { projectId = "", view } = useParams<{
     projectId: string
     view?: string
   }>()
@@ -415,13 +420,12 @@ function LegacyModulePage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const {
-    projects,
     getProject,
     refreshProject,
     updateBusinessProfile,
     refreshBusinessProfile,
   } = useProjects()
-  const { projectId = projects[0]?.id ?? "", module = "", view } = useParams()
+  const { projectId = "", module = "", view } = useParams()
   const project = getProject(projectId)
   const currentModule = modules.find((item) => item.id === module)
   const requestedAuditRunId =

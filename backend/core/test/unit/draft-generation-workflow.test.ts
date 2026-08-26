@@ -157,7 +157,10 @@ const createRepository = () => {
         latencyMs: null,
         attemptCount: claims,
         lastErrorCategory: null,
+        diagnosticCode: null,
         persistenceLatencyMs: null,
+        readiness: "GENERATING",
+        fallbackReason: null,
       };
     },
     async loadPromptContext() {
@@ -196,7 +199,7 @@ const createRepository = () => {
   };
 };
 
-describe("LOCAL-PRODUCT-038 Draft generation fail-closed workflow", () => {
+describe("BACKLINKS-CORE-REMEDIATION-PHASE-7 Draft recovery workflow", () => {
   it("fails MODEL mode explicitly when no AI provider is configured", async () => {
     const fake = createRepository();
 
@@ -211,33 +214,41 @@ describe("LOCAL-PRODUCT-038 Draft generation fail-closed workflow", () => {
     });
     expect(fake.completed).toHaveLength(0);
     expect(fake.failed).toMatchObject([{
-      errorClass: "AiDraftError",
       errorCode: "MISCONFIGURED",
-      refused: false,
+      diagnosticCode: null,
     }]);
   });
 
-  it("does not convert a terminal model error into a successful fallback", async () => {
+  it("retries malformed output once, then preserves the provider failure", async () => {
     const fake = createRepository();
+    const prompts: unknown[] = [];
 
     await expect(runDraftGenerationWorkflow(
       workflowInput,
       fake.repository,
       {
-        async generate() {
+        async generate(prompt) {
+          prompts.push(prompt);
           throw new AiDraftError({
             code: "MALFORMED_OUTPUT",
             message: "Provider output did not match the schema.",
             retryable: false,
+            diagnosticCode: "PROVIDER_OUTPUT_SCHEMA_INVALID",
           });
         },
       },
     )).rejects.toMatchObject({
       code: "MALFORMED_OUTPUT",
-      retryable: false,
+      diagnosticCode: "PROVIDER_OUTPUT_SCHEMA_INVALID",
     });
+    expect(prompts).toEqual([context.prompt, context.prompt]);
+    expect(fake.claims()).toBe(2);
+    expect(fake.retries).toHaveLength(1);
     expect(fake.completed).toHaveLength(0);
-    expect(fake.failed[0]?.errorCode).toBe("MALFORMED_OUTPUT");
+    expect(fake.failed).toMatchObject([{
+      errorCode: "MALFORMED_OUTPUT",
+      diagnosticCode: "PROVIDER_OUTPUT_SCHEMA_INVALID",
+    }]);
   });
 
   it("retries one recoverable failure on the same Job and persists MODEL", async () => {
@@ -269,7 +280,62 @@ describe("LOCAL-PRODUCT-038 Draft generation fail-closed workflow", () => {
     expect(fake.claims()).toBe(2);
     expect(fake.retries).toHaveLength(1);
     expect(fake.failed).toHaveLength(0);
-    expect(fake.completed).toMatchObject([{ source: "MODEL" }]);
+    expect(fake.completed).toMatchObject([{
+      source: "MODEL",
+      fallbackReason: null,
+    }]);
+  });
+
+  it.each([
+    ["RATE_LIMITED", true],
+    ["UNAVAILABLE", false],
+  ] as const)(
+    "persists %s as a failed MODEL Job",
+    async (code, retryable) => {
+      const fake = createRepository();
+
+      await expect(runDraftGenerationWorkflow(
+        workflowInput,
+        fake.repository,
+        {
+          async generate() {
+            throw new AiDraftError({
+              code,
+              message: `${code} from provider.`,
+              retryable,
+              diagnosticCode: "PROVIDER_NETWORK_ECONNRESET",
+            });
+          },
+        },
+      )).rejects.toMatchObject({
+        code,
+        diagnosticCode: "PROVIDER_NETWORK_ECONNRESET",
+      });
+      expect(fake.completed).toHaveLength(0);
+      expect(fake.failed).toMatchObject([{
+        errorCode: code,
+        diagnosticCode: "PROVIDER_NETWORK_ECONNRESET",
+      }]);
+    },
+  );
+
+  it("fails an unclassified provider failure without creating a template", async () => {
+    const fake = createRepository();
+
+    await expect(runDraftGenerationWorkflow(
+      workflowInput,
+      fake.repository,
+      {
+        async generate() {
+          throw new Error("provider unavailable");
+        },
+      },
+    )).rejects.toThrow("provider unavailable");
+    expect(fake.completed).toHaveLength(0);
+    expect(fake.failed).toMatchObject([{
+      errorCode: "DRAFT_GENERATION_FAILED",
+      diagnosticCode: null,
+    }]);
   });
 
   it("maps semantic policy rejection to an explicit failed Job", async () => {
@@ -294,7 +360,57 @@ describe("LOCAL-PRODUCT-038 Draft generation fail-closed workflow", () => {
     expect(fake.failed[0]?.errorCode).toBe("POLICY_VIOLATION");
   });
 
-  it("keeps MANUAL fallback as a diagnostic version only", async () => {
+  it("does not use a basic draft to bypass a provider refusal", async () => {
+    const fake = createRepository();
+
+    await expect(runDraftGenerationWorkflow(
+      workflowInput,
+      fake.repository,
+      {
+        async generate() {
+          throw new AiDraftError({
+            code: "REFUSED",
+            message: "Provider refused generation.",
+            retryable: false,
+          });
+        },
+      },
+    )).rejects.toMatchObject({ code: "REFUSED" });
+    expect(fake.completed).toHaveLength(0);
+    expect(fake.failed).toMatchObject([{
+      errorCode: "REFUSED",
+      refused: true,
+    }]);
+  });
+
+  it("fails explicitly when the AI budget is exhausted", async () => {
+    const fake = createRepository();
+    let generationAttempts = 0;
+
+    await expect(runDraftGenerationWorkflow(
+      workflowInput,
+      fake.repository,
+      {
+        async generate() {
+          generationAttempts += 1;
+          throw new AiDraftError({
+            code: "BUDGET_EXCEEDED",
+            message: "AI Draft budget is exhausted.",
+            retryable: false,
+          });
+        },
+      },
+    )).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    expect(generationAttempts).toBe(1);
+    expect(fake.retries).toHaveLength(0);
+    expect(fake.completed).toHaveLength(0);
+    expect(fake.failed).toMatchObject([{
+      errorCode: "BUDGET_EXCEEDED",
+      diagnosticCode: null,
+    }]);
+  });
+
+  it("creates an explicitly labelled basic draft in MANUAL mode", async () => {
     const fake = createRepository();
 
     await expect(runDraftGenerationWorkflow(
@@ -302,11 +418,12 @@ describe("LOCAL-PRODUCT-038 Draft generation fail-closed workflow", () => {
       fake.repository,
       null,
     )).resolves.toMatchObject({
-      outcome: "completed",
+      outcome: "completed_with_basic_draft",
       versionId: "version-1",
     });
     expect(fake.completed).toMatchObject([{
       source: "TEMPLATE_FALLBACK",
+      fallbackReason: "MODEL_DISABLED",
       result: {
         model: { providerRef: "template-fallback" },
       },

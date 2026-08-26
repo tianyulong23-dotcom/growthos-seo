@@ -5,6 +5,7 @@ import { createBacklinksModule } from "../../../src/modules/backlinks/applicatio
 import {
   createPlacementCandidateCommand,
   type CreatePlacementCandidateRepositoryInput,
+  type PlacementCandidateCreation,
   type PlacementCandidateRepository,
 } from "../../../src/modules/backlinks/application/commands/placement-candidate.command.js";
 import { registerBacklinksOpenApi } from "../../../src/modules/backlinks/api/openapi.js";
@@ -20,6 +21,8 @@ import {
 } from "../../../src/modules/backlinks/domain/errors/backlink-error.js";
 
 const candidateId = "018f0000-0000-7000-8000-000000000147";
+const opportunityId = "018f0000-0000-7000-8000-000000000148";
+const replyId = "018f0000-0000-7000-8000-000000000149";
 const member = createActorContext({
   userId: "user-147",
   sessionId: "session-147",
@@ -64,13 +67,7 @@ function createRepository(): PlacementCandidateRepository & Readonly<{
   const writes: CreatePlacementCandidateRepositoryInput[] = [];
   const idempotencyRecords = new Map<string, Readonly<{
     requestHash: string;
-    responseBody: Readonly<{
-      candidateId: string;
-      status: "PENDING_VALIDATION";
-      matchStatus: "UNMATCHED";
-      initialValidationStatus: "PENDING";
-      version: number;
-    }>;
+    responseBody: PlacementCandidateCreation;
   }>>();
 
   return {
@@ -87,6 +84,14 @@ function createRepository(): PlacementCandidateRepository & Readonly<{
 
       const responseBody = {
         candidateId: input.candidateId,
+        ...(input.opportunityId === undefined
+          ? {}
+          : { opportunityId: input.opportunityId }),
+        ...(input.replyId === undefined ? {} : { replyId: input.replyId }),
+        placementId: input.plannedPlacementId,
+        lineageStatus: input.replyId === undefined
+          ? "UNATTRIBUTED"
+          : "OUTREACH_DERIVED",
         status: input.status,
         matchStatus: input.matchStatus,
         initialValidationStatus: input.initialValidationStatus,
@@ -169,6 +174,7 @@ describe("BL-AI-147 Placement Candidate creation API", () => {
       version: 1,
       countsTowardKpi: false,
       replayed: false,
+      lineageStatus: "UNATTRIBUTED",
       meta: {
         organizationId: "org-147",
         workspaceId: "workspace-147",
@@ -176,8 +182,11 @@ describe("BL-AI-147 Placement Candidate creation API", () => {
         requestId: "request-147",
       },
     });
-    expect(created.json()).not.toHaveProperty("placementId");
+    expect(created.json().placementId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
     expect(created.json()).not.toHaveProperty("opportunityId");
+    expect(created.json()).not.toHaveProperty("replyId");
     expect(repository.writes).toHaveLength(1);
     expect(repository.writes[0]).toMatchObject({
       candidateId,
@@ -190,6 +199,7 @@ describe("BL-AI-147 Placement Candidate creation API", () => {
       status: "PENDING_VALIDATION",
       matchStatus: "UNMATCHED",
       initialValidationStatus: "PENDING",
+      plannedPlacementId: created.json().placementId,
       evidenceContractVersion: "placement.discovery.manual.v1",
       evidenceSchemaVersion: 1,
     });
@@ -221,6 +231,61 @@ describe("BL-AI-147 Placement Candidate creation API", () => {
     expect(conflict.json()).toMatchObject({
       code: backlinkErrorCodes.conflict,
     });
+  });
+
+  it("persists confirmed reply lineage and keeps import lineage unattributed", async () => {
+    const app = await appPromise;
+    const url =
+      "/api/v1/projects/project-key/backlinks/placement-candidates";
+    const outreach = await app.inject({
+      method: "POST",
+      url,
+      headers: { "idempotency-key": "candidate-outreach-lineage-147" },
+      payload: {
+        ...requestBody,
+        opportunityId,
+        replyId,
+      },
+    });
+
+    expect(outreach.statusCode).toBe(201);
+    expect(outreach.json()).toMatchObject({
+      candidateId,
+      opportunityId,
+      replyId,
+      lineageStatus: "OUTREACH_DERIVED",
+      countsTowardKpi: false,
+    });
+    expect(repository.writes.at(-1)).toMatchObject({
+      opportunityId,
+      replyId,
+      plannedPlacementId: outreach.json().placementId,
+      sourceType: "manual",
+    });
+
+    const importedReply = await app.inject({
+      method: "POST",
+      url,
+      headers: { "idempotency-key": "candidate-import-reply-147" },
+      payload: {
+        ...requestBody,
+        sourceType: "import",
+        opportunityId,
+        replyId,
+      },
+    });
+    expect(importedReply.statusCode).toBe(400);
+
+    const replyWithoutOpportunity = await app.inject({
+      method: "POST",
+      url,
+      headers: { "idempotency-key": "candidate-reply-only-147" },
+      payload: {
+        ...requestBody,
+        replyId,
+      },
+    });
+    expect(replyWithoutOpportunity.statusCode).toBe(400);
   });
 
   it("requires source evidence and rejects unsupported placement URLs", async () => {

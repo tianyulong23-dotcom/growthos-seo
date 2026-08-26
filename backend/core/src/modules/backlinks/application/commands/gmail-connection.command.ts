@@ -120,15 +120,27 @@ function translateOAuthError(error: unknown): never {
       googleAuthFailureCodes.authorizationDenied,
       googleAuthFailureCodes.authExpired,
     ]);
+    const providerUnavailableCodes = new Set<GoogleAuthFailureCode>([
+      googleAuthFailureCodes.rateLimited,
+      googleAuthFailureCodes.temporaryFailure,
+    ]);
     const clientError = clientFailureCodes.has(error.code);
+    const providerUnavailable = providerUnavailableCodes.has(error.code);
     throw new BacklinkError({
-      code: clientError
-        ? backlinkErrorCodes.invalidRequest
-        : backlinkErrorCodes.internal,
-      message: clientError
-        ? "Google authorization could not be completed."
-        : "Google authorization is temporarily unavailable.",
+      code:
+        clientError
+          ? backlinkErrorCodes.invalidRequest
+          : providerUnavailable
+            ? backlinkErrorCodes.gmailOAuthProviderUnavailable
+            : backlinkErrorCodes.internal,
+      message:
+        clientError
+          ? "Google authorization could not be completed."
+          : providerUnavailable
+            ? "Google authorization is temporarily unavailable."
+            : "Google authorization could not be completed.",
       retryable: error.retryable,
+      cause: error,
     });
   }
   throw error;

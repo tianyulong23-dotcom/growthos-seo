@@ -14,6 +14,7 @@ const placementId = "018f0000-0000-7000-8000-000000000158";
 const candidateId = "018f0000-0000-7000-8000-000000000159";
 const observationId = "018f0000-0000-7000-8000-000000000160";
 const monitorRunId = "018f0000-0000-7000-8000-000000000161";
+const replyId = "018f0000-0000-7000-8000-000000000166";
 const context = {
   actor: createActorContext({
     userId: "user-158",
@@ -40,6 +41,8 @@ const placementRow = {
   id: placementId,
   candidateId,
   placementId,
+  opportunityId: "018f0000-0000-7000-8000-000000000162",
+  replyId,
   sourcePageUrl: "https://publisher.example/article",
   targetUrl: "https://owner.example/guide",
   candidateStatus: null,
@@ -47,6 +50,10 @@ const placementRow = {
   validationStatus: "VALID",
   healthStatus: "active",
   monitoringStatus: "enabled",
+  latestObservedAt: "2026-07-29T08:00:00.000Z",
+  lastSuccessfulObservationAt: "2026-07-28T08:00:00.000Z",
+  nextCheckAt: "2026-07-29T09:30:00.000Z",
+  latestFailureCode: "PROVIDER_TIMEOUT",
   wasRecovered: true,
   version: 4,
   createdAt: "2026-07-28T09:00:00.000Z",
@@ -54,14 +61,35 @@ const placementRow = {
 
 describe("BL-AI-158 Links public query", () => {
   it("builds Recovered from the immutable placement.recovered fact", async () => {
-    let sql = "";
-    let values: readonly unknown[] | undefined;
+    const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
     const query = createPlacementLinksQuery({
       query: async (text, parameters) => {
-        sql = text;
-        values = parameters;
+        calls.push({ text, values: parameters });
+        if (text.includes("placement_counts AS")) {
+          return {
+            rows: [{
+              placementTotal: 1,
+              pendingVerification: 0,
+              active: 1,
+              suspectedChanged: 0,
+              changed: 0,
+              suspectedLost: 0,
+              lost: 0,
+              recovered: 1,
+              candidateTotal: 2,
+              lastSuccessfulObservationAt:
+                "2026-07-28T08:00:00.000Z",
+              latestAttemptAt: "2026-07-29T08:15:00.000Z",
+              latestAttemptStatus: "FAILED",
+              latestFailureCode: "PROVIDER_TIMEOUT",
+              nextCheckAt: "2026-07-29T09:30:00.000Z",
+            }],
+          };
+        }
         return { rows: [placementRow] };
       },
+    }, {
+      now: () => new Date("2026-07-29T10:00:00.000Z"),
     });
 
     await expect(query.listLinks(context, {
@@ -72,17 +100,52 @@ describe("BL-AI-158 Links public query", () => {
         placementId,
         displayState: "recovered",
         healthStatus: "active",
+        monitoringState: "active",
+        freshness: "stale",
+        latestFailure: {
+          status: "failed",
+          code: "PROVIDER_TIMEOUT",
+        },
       }],
+      summary: {
+        placements: {
+          total: 1,
+          active: 1,
+          recovered: 1,
+        },
+        candidates: {
+          total: 2,
+          countsTowardKpi: false,
+        },
+        evidence: {
+          source: "DIRECT_MONITOR",
+          dataCutoff: "2026-07-28T08:00:00.000Z",
+          freshness: "stale",
+          latestAttemptStatus: "failed",
+          latestFailure: {
+            status: "failed",
+            code: "PROVIDER_TIMEOUT",
+          },
+        },
+      },
     });
-    expect(sql).toContain("FROM backlink_lifecycle_events lifecycle");
-    expect(sql).toContain("'placement',p.id,'placement.recovered'");
-    expect(sql).toContain("$4='recovered'");
-    expect(values?.slice(0, 4)).toEqual([
+    expect(calls[0]?.text).toContain("FROM backlink_lifecycle_events lifecycle");
+    expect(calls[0]?.text).toContain("'placement',p.id,'placement.recovered'");
+    expect(calls[0]?.text).toContain("$4='recovered'");
+    expect(calls[0]?.values?.slice(0, 4)).toEqual([
       "organization-158",
       "workspace-158",
       "project-158",
       "recovered",
     ]);
+    expect(calls[1]?.values).toEqual([
+      "organization-158",
+      "workspace-158",
+      "project-158",
+    ]);
+    expect(calls[1]?.text).toContain(
+      "candidate.status NOT IN ('PROMOTED','REJECTED')",
+    );
   });
 
   it("returns server freshness, safe failure, and latest Monitor Run status", async () => {
@@ -92,6 +155,7 @@ describe("BL-AI-158 Links public query", () => {
           placementId,
           candidateId,
           opportunityId: "018f0000-0000-7000-8000-000000000162",
+          replyId,
           sourcePageUrl: placementRow.sourcePageUrl,
           normalizedSourceUrl: placementRow.sourcePageUrl,
           targetUrl: placementRow.targetUrl,
@@ -116,6 +180,15 @@ describe("BL-AI-158 Links public query", () => {
           latestEvidenceContractVersion: "placement.monitor-observation.v1",
           latestEvidenceSchemaVersion: 1,
           latestFailureCode: "unsafe/path/provider-token",
+          lastSuccessfulObservationId:
+            "018f0000-0000-7000-8000-000000000167",
+          lastSuccessfulObservationResult: "present",
+          lastSuccessfulObservedAt: "2026-07-28T08:00:00.000Z",
+          lastSuccessfulExecutionMode: "static",
+          lastSuccessfulEvidenceHash: "c".repeat(64),
+          lastSuccessfulEvidenceContractVersion:
+            "placement.monitor-observation.v1",
+          lastSuccessfulEvidenceSchemaVersion: 1,
           nextCheckAt: "2026-07-29T09:30:00.000Z",
           consecutiveAnomalies: 1,
           browserFallbackEnabled: true,
@@ -148,6 +221,18 @@ describe("BL-AI-158 Links public query", () => {
           monitorRunId,
           status: "retry_wait",
         },
+        lastSuccessfulObservation: {
+          observationId: "018f0000-0000-7000-8000-000000000167",
+          result: "present",
+          failure: {
+            status: "none",
+            code: null,
+          },
+        },
+        monitoringState: "active",
+        lastSuccessfulObservationAt: "2026-07-28T08:00:00.000Z",
+        replyId,
+        lineageStatus: "OUTREACH_DERIVED",
       });
   });
 

@@ -16,6 +16,8 @@ test("Opportunities use generated list, detail, and versioned commands", async (
     "backlinksGetOpportunityV1",
     "backlinksTransitionOpportunityBusinessStageV1",
     "backlinksPatchOpportunityManagementV1",
+    "backlinksPatchCooperationPathContentV1",
+    "backlinksTransitionManualActionV1",
   ]) {
     assert.match(api, new RegExp(operation))
   }
@@ -23,10 +25,31 @@ test("Opportunities use generated list, detail, and versioned commands", async (
   assert.match(api, /search\?: string/)
   assert.match(workspace, /expectedVersion: detail\.version/)
   assert.match(workspace, /backlinksProjectQueries/)
-  assert.match(workspace, /撰写邮件/)
+  assert.match(workspace, /WAIT_FOR_DRAFT: "等待草稿生成"/)
+  assert.doesNotMatch(
+    workspace,
+    /primaryNextActionLabels\[item\.primaryNextAction\.kind\]/
+  )
+  assert.match(workspace, /engagementPathState === "EMAIL_READY"/)
+  assert.match(workspace, /drafts\/new\?opportunityId=\$\{detail\.id\}/)
+  assert.match(workspace, /drafts\/\$\{detail\.draftId\}/)
   assert.match(
     workspace,
-    /drafts\/new\?opportunityId=\$\{detail\.id\}/
+    /recommendations\?recommendationId=\$\{detail\.recommendationId\}/
+  )
+  assert.match(workspace, /detail\?\.selectionSnapshot \?\? null/)
+  assert.match(workspace, /detail\.primaryNextAction\?\.kind/)
+  assert.match(workspace, /return "CONTACT_PENDING"/)
+  assert.match(workspace, /engagementPathState === "CONTACT_PENDING"/)
+  assert.match(workspace, /function contactResolutionHref/)
+  assert.match(workspace, /detail\.engagementChannel !== "EMAIL"/)
+  assert.match(workspace, /完善联系人并创建草稿/)
+  assert.match(workspace, /草稿仍需审阅、批准和最终发送确认/)
+  assert.doesNotMatch(workspace, /请先从推荐记录补齐有效联系人/)
+  assert.doesNotMatch(workspace, /createSendIntent/)
+  assert.doesNotMatch(
+    workspace,
+    /detail\.engagementChannel === "EMAIL" && \(\s*<Link[\s\S]{0,500}撰写邮件/
   )
   assert.match(api, /\{ signal \}/)
 })
@@ -80,4 +103,35 @@ test("Opportunities keep ordering, archive, and restore server authoritative", a
   assert.match(workspace, /response\.item\.version <= action\.expectedVersion/)
   assert.match(api, /"idempotency-key": idempotencyKey/)
   assert.doesNotMatch(workspace, /DELETE/)
+})
+
+test("Cooperation paths require explicit manual submission confirmation", async () => {
+  const workspace = await read("opportunities-workspace.tsx")
+
+  const cooperationPanel = workspace.slice(
+    workspace.indexOf('engagementPathState === "MANUAL_PATH_READY"'),
+    workspace.indexOf(
+      "<AlertDialog",
+      workspace.indexOf('engagementPathState === "MANUAL_PATH_READY"')
+    )
+  )
+  const openLink = cooperationPanel.slice(
+    cooperationPanel.indexOf("<a"),
+    cooperationPanel.indexOf("</a>") + 4
+  )
+
+  assert.match(openLink, /href=\{detail\.cooperationPath\.pathUrl\}/)
+  assert.match(openLink, /target="_blank"/)
+  assert.doesNotMatch(openLink, /onClick|applyManualTransition/)
+  assert.match(cooperationPanel, /setSubmissionConfirmationOpen\(true\)/)
+  assert.doesNotMatch(
+    cooperationPanel,
+    /applyManualTransition\("SUBMITTED", true\)/
+  )
+  assert.match(workspace, /applyManualTransition\("SUBMITTED", true\)/)
+  assert.match(workspace, /submissionConfirmed: true/)
+  assert.match(
+    workspace,
+    /打开或复制不会改变状态；只有明确确认后才会记录为已提交。/
+  )
 })

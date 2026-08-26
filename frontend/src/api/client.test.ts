@@ -62,6 +62,57 @@ describe("apiRequest", () => {
     })
   })
 
+  it("keeps exact readiness changes from RFC Problem Details", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            type: "about:blank",
+            title: "Send readiness changed",
+            status: 409,
+            code: "SEND_READINESS_STALE",
+            message:
+              "The confirmed send readiness conditions changed.",
+            retryable: true,
+            changedConditions: [
+              {
+                code: "QUOTA",
+                reason: "CHANGED",
+                expectedRevision: "0/5",
+                currentRevision: "5/5",
+                retryable: true,
+                recoveryAction: "WAIT_AND_RUN_PREFLIGHT",
+              },
+            ],
+          },
+          { status: 409 }
+        )
+      )
+    )
+
+    const error = await apiRequest("/send-intent").catch(
+      (reason: unknown) => reason
+    )
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({
+      status: 409,
+      code: "SEND_READINESS_STALE",
+      retryable: true,
+      changedConditions: [
+        {
+          code: "QUOTA",
+          reason: "CHANGED",
+          expectedRevision: "0/5",
+          currentRevision: "5/5",
+          retryable: true,
+          recoveryAction: "WAIT_AND_RUN_PREFLIGHT",
+        },
+      ],
+    })
+  })
+
   it("formats FastAPI validation details with their field paths", async () => {
     vi.stubGlobal(
       "fetch",

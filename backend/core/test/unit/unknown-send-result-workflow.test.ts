@@ -7,11 +7,22 @@ import {
 } from "../../src/modules/backlinks/application/workflows/unknown-send-result-workflow.js";
 
 const sendIntentId = "018f0000-0000-7000-8000-000000000119";
+const workflowInput = {
+  organizationId: "018f0000-0000-7000-8000-000000000001",
+  workspaceId: "018f0000-0000-7000-8000-000000000002",
+  websiteProjectId: "018f0000-0000-7000-8000-000000000003",
+  gmailConnectionId: "018f0000-0000-7000-8000-000000000004",
+  actorId: "operator-bl-ai-119",
+  sendIntentId,
+};
 const attempt = {
   sendIntentId,
   attemptId: "018f0000-0000-7000-8000-000000000219",
+  attemptNo: 1,
+  fencingToken: 1,
   rfcMessageId: `<${sendIntentId}.1@send.growthos.invalid>`,
   errorCode: "GMAIL_SEND_TIMEOUT",
+  status: "DELIVERY_UNKNOWN" as const,
 };
 
 describe("BL-AI-119 unknown send result workflow", () => {
@@ -38,10 +49,12 @@ describe("BL-AI-119 unknown send result workflow", () => {
         providerThreadId: "gmail-thread-119",
         rfcMessageId: attempt.rfcMessageId,
       });
+    const recoverDispatch =
+      vi.fn<UnknownSendResultWorkflowActivities["recoverDispatch"]>();
 
     await expect(runUnknownSendResultWorkflow(
-      { sendIntentId },
-      { load, query, reconcile },
+      workflowInput,
+      { load, query, recoverDispatch, reconcile },
     )).resolves.toEqual({
       outcome: "completed",
       providerMessageId: "gmail-message-119",
@@ -49,10 +62,11 @@ describe("BL-AI-119 unknown send result workflow", () => {
       rfcMessageId: attempt.rfcMessageId,
     });
     expect(query).toHaveBeenCalledWith({
-      sendIntentId,
+      ...workflowInput,
       rfcMessageId: attempt.rfcMessageId,
     });
     expect(reconcile).toHaveBeenCalledWith({
+      ...workflowInput,
       attempt,
       decision: {
         outcome: "PROVIDER_ACCEPTED",
@@ -67,11 +81,12 @@ describe("BL-AI-119 unknown send result workflow", () => {
     const activities: UnknownSendResultWorkflowActivities = {
       load: vi.fn().mockResolvedValue({ state: "pending", attempt }),
       query: vi.fn().mockResolvedValue({ kind: "not_found" }),
+      recoverDispatch: vi.fn(),
       reconcile: vi.fn(),
     };
 
     await expect(runUnknownSendResultWorkflow(
-      { sendIntentId },
+      workflowInput,
       activities,
     )).resolves.toEqual({
       outcome: "manual_confirmation_required",
@@ -92,11 +107,12 @@ describe("BL-AI-119 unknown send result workflow", () => {
     const activities: UnknownSendResultWorkflowActivities = {
       load: vi.fn().mockResolvedValue({ state: "pending", attempt }),
       query: vi.fn(),
+      recoverDispatch: vi.fn(),
       reconcile,
     };
 
     await expect(runUnknownSendResultWorkflow({
-      sendIntentId,
+      ...workflowInput,
       manualDecision: {
         outcome: "CONFIRMED_NOT_SENT",
         evidenceReference: "case:ops-119",
@@ -108,6 +124,7 @@ describe("BL-AI-119 unknown send result workflow", () => {
     });
     expect(activities.query).not.toHaveBeenCalled();
     expect(reconcile).toHaveBeenCalledWith({
+      ...workflowInput,
       attempt,
       decision: {
         outcome: "CONFIRMED_NOT_SENT",
@@ -126,11 +143,12 @@ describe("BL-AI-119 unknown send result workflow", () => {
         rfcMessageId: attempt.rfcMessageId,
       }),
       query: vi.fn(),
+      recoverDispatch: vi.fn(),
       reconcile: vi.fn(),
     };
 
     await expect(runUnknownSendResultWorkflow(
-      { sendIntentId },
+      workflowInput,
       activities,
     )).resolves.toEqual({
       outcome: "completed",
@@ -139,6 +157,43 @@ describe("BL-AI-119 unknown send result workflow", () => {
       rfcMessageId: attempt.rfcMessageId,
     });
     expect(activities.query).not.toHaveBeenCalled();
+    expect(activities.reconcile).not.toHaveBeenCalled();
+  });
+
+  it("routes a stale dispatch through exact Gmail recovery", async () => {
+    const dispatchAttempt = {
+      ...attempt,
+      status: "DISPATCHING" as const,
+      errorCode: "GMAIL_SEND_DISPATCH_STALLED",
+    };
+    const recoverDispatch =
+      vi.fn<UnknownSendResultWorkflowActivities["recoverDispatch"]>()
+        .mockResolvedValue({
+          outcome: "retry_scheduled",
+          retryAfterSeconds: 5,
+        });
+    const activities: UnknownSendResultWorkflowActivities = {
+      load: vi.fn().mockResolvedValue({
+        state: "pending",
+        attempt: dispatchAttempt,
+      }),
+      query: vi.fn().mockResolvedValue({ kind: "not_found" }),
+      recoverDispatch,
+      reconcile: vi.fn(),
+    };
+
+    await expect(runUnknownSendResultWorkflow(
+      workflowInput,
+      activities,
+    )).resolves.toEqual({
+      outcome: "retry_scheduled",
+      retryAfterSeconds: 5,
+    });
+    expect(recoverDispatch).toHaveBeenCalledWith({
+      context: workflowInput,
+      attempt: dispatchAttempt,
+      queryResult: { kind: "not_found" },
+    });
     expect(activities.reconcile).not.toHaveBeenCalled();
   });
 });

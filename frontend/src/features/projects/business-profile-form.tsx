@@ -47,7 +47,7 @@ function FieldStatus({
 export function BusinessProfileForm({
   project,
   onSave,
-  submitLabel = "保存更改",
+  submitLabel = "确认并保存",
   onSaved,
   onRefresh,
   refreshing = false,
@@ -75,6 +75,7 @@ export function BusinessProfileForm({
   const [saved, setSaved] = React.useState(false)
   const [error, setError] = React.useState("")
   const [startingRefresh, setStartingRefresh] = React.useState(false)
+  const confirmed = saved || Boolean(profile?.confirmedAt)
   const syncedProjectId = React.useRef(project.id)
   const syncedRunId = React.useRef(
     project.understandingStatus === "completed" ||
@@ -147,7 +148,7 @@ export function BusinessProfileForm({
       onSaved?.()
     } catch (saveError) {
       setError(
-        saveError instanceof Error ? saveError.message : "保存业务资料失败"
+        saveError instanceof Error ? saveError.message : "确认业务资料失败"
       )
     } finally {
       setSaving(false)
@@ -177,7 +178,13 @@ export function BusinessProfileForm({
     <form className="max-w-4xl" onSubmit={handleSubmit}>
       <section className="space-y-6 pb-8">
         <div className="space-y-2">
-          <h2 className="text-lg font-semibold">业务信息</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">业务信息</h2>
+            <Badge variant={confirmed ? "secondary" : "outline"}>
+              {confirmed && <Check />}
+              {confirmed ? "已确认" : "待确认"}
+            </Badge>
+          </div>
           <p className="text-sm text-muted-foreground">{project.domain}</p>
           <p className="text-xs text-muted-foreground">
             {recognitionDescription}
@@ -209,7 +216,7 @@ export function BusinessProfileForm({
 
         <div data-slot="form-field" className="max-w-xl space-y-2">
           <Label htmlFor="business-type">
-            业务类型
+            业务类型（选填）
             <FieldStatus
               field="business_type"
               overriddenFields={profile?.userOverriddenFields ?? []}
@@ -221,7 +228,6 @@ export function BusinessProfileForm({
             value={businessType}
             onChange={(event) => setBusinessType(event.target.value)}
             disabled={busy}
-            required
           />
         </div>
 
@@ -301,14 +307,14 @@ export function BusinessProfileForm({
       <div className="mt-8 flex flex-wrap items-center gap-3 border-t pt-6">
         <Button
           type="submit"
-          disabled={busy || !businessName.trim() || !businessType.trim()}
+          disabled={busy || !businessName.trim()}
         >
           {saving ? (
             <LoaderCircle className="animate-spin" />
           ) : saved ? (
             <Check />
           ) : null}
-          {saving ? "保存中..." : saved ? "已保存" : submitLabel}
+          {saving ? "保存中..." : saved ? "已确认" : submitLabel}
         </Button>
         {onRefresh && (
           <Button

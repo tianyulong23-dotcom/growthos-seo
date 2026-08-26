@@ -1,11 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  createAiSdkObjectOutput,
   createAiSdkDraftTransport,
+  createAiSdkProviderModel,
+  defaultGenerateProviderText,
+  mapAiSdkProviderError,
+  selectAiSdkResponseMode,
 } from "../../src/modules/backlinks/adapters/ai/ai-sdk-draft.transport.js";
 import type {
   AiDraftInput,
 } from "../../src/modules/backlinks/ports/ai-draft.port.js";
+import { z } from "zod";
 
 const draft: AiDraftInput = {
   organizationId: "organization-1",
@@ -99,6 +105,7 @@ describe("ai@7 structured Draft Transport", () => {
     for (const [request] of generateProviderText.mock.calls) {
       expect(request).toMatchObject({
         maxRetries: 0,
+        responseMode: "native-structured",
         telemetry: { isEnabled: false },
       });
       expect(request.output).toMatchObject({ name: "object" });
@@ -187,6 +194,48 @@ describe("ai@7 structured Draft Transport", () => {
     });
   });
 
+  it("repairs recipient-visible internal Evidence metadata", async () => {
+    const generateProviderText = vi.fn()
+      .mockResolvedValueOnce({
+        text: JSON.stringify({
+          ...JSON.parse(validOutput),
+          bodyText:
+            `${validBody}\n\n[profile:1, opportunity:current]`,
+        }),
+        finishReason: "stop",
+        usage: { inputTokens: 20, outputTokens: 20 },
+      })
+      .mockResolvedValueOnce({
+        text: validOutput,
+        finishReason: "stop",
+        usage: { inputTokens: 30, outputTokens: 40 },
+      });
+    const transport = createAiSdkDraftTransport({
+      providerBaseUrl: "https://ai-gateway.vercel.sh/v1",
+      resolveSecret: async () => "PROTECTED_API_KEY",
+      inputCostUsdPerMillionTokens: 1,
+      outputCostUsdPerMillionTokens: 2,
+      createModel: () => ({ model: true }),
+      generateProviderText,
+    });
+
+    await expect(transport.generate(input)).resolves.toMatchObject({
+      repairCount: 1,
+    });
+    expect(JSON.parse(
+      generateProviderText.mock.calls[1]?.[0].prompt as string,
+    )).toMatchObject({
+      repair: {
+        instruction: expect.stringContaining(
+          "Remove internal evidence metadata",
+        ),
+        validationIssues: [
+          "Draft output contains internal evidence metadata.",
+        ],
+      },
+    });
+  });
+
   it("allows the approved direct OpenAI provider", async () => {
     const createModel = vi.fn(() => ({ model: true }));
     const transport = createAiSdkDraftTransport({
@@ -218,7 +267,122 @@ describe("ai@7 structured Draft Transport", () => {
       modelId: "gpt-5.6-sol",
       providerRef: "openai",
     });
+    expect(createModel).toHaveBeenCalledTimes(1);
   });
+
+  it("uses Chat Completions for OpenAI-compatible base URLs", () => {
+    const model = createAiSdkProviderModel({
+      apiKey: "PROTECTED_OPENAI_KEY",
+      baseUrl: "https://sub2.indexarc.net/v1",
+      modelId: "gpt-5.6-sol",
+      providerRef: "openai",
+    }) as Readonly<{
+      config?: Readonly<{ provider?: string }>;
+      modelId?: string;
+    }>;
+
+    expect(model.modelId).toBe("gpt-5.6-sol");
+    expect(model.config?.provider).toBe("openai.chat");
+  });
+
+  it("uses JSON text mode for compatible gateways and native mode for official providers", () => {
+    expect(selectAiSdkResponseMode({
+      providerRef: "openai",
+      providerBaseUrl: "https://sub2.indexarc.net/v1",
+    })).toBe("json-text");
+    expect(selectAiSdkResponseMode({
+      providerRef: "openai",
+      providerBaseUrl: "https://api.openai.com/v1",
+    })).toBe("native-structured");
+    expect(selectAiSdkResponseMode({
+      providerRef: "vercel-ai-gateway",
+      providerBaseUrl: "https://ai-gateway.vercel.sh/v1",
+    })).toBe("native-structured");
+  });
+
+  it("normalizes reasoning-model requests for an OpenAI-compatible gateway", async () => {
+    const requests: Array<Readonly<{ url: string; body: unknown }>> = [];
+    const model = createAiSdkProviderModel({
+      apiKey: "PROTECTED_OPENAI_KEY",
+      baseUrl: "https://provider.example/v1",
+      modelId: "gpt-5.4-mini",
+      providerRef: "openai",
+      fetch: async (url, init) => {
+        requests.push({
+          url: String(url),
+          body: JSON.parse(String(init?.body)),
+        });
+        return new Response(JSON.stringify({
+          id: "chatcmpl-contract",
+          object: "chat.completion",
+          created: 1,
+          model: "gpt-5.4-mini",
+          choices: [{
+            index: 0,
+            message: {
+              role: "assistant",
+              content: '{"subject":"Contract response"}',
+            },
+            finish_reason: "stop",
+          }],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+          },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(defaultGenerateProviderText({
+      model,
+      system: "Return JSON.",
+      prompt: "{}",
+      output: createAiSdkObjectOutput(z.object({ subject: z.string() })),
+      responseMode: "json-text",
+      maxRetries: 0,
+      maxOutputTokens: 100,
+      timeout: 1_000,
+      telemetry: { isEnabled: false },
+    })).resolves.toMatchObject({
+      text: '{"subject":"Contract response"}',
+      finishReason: "stop",
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      "https://provider.example/v1/chat/completions",
+    );
+    expect(requests[0]?.body).not.toHaveProperty("response_format");
+    expect(requests[0]?.body).not.toHaveProperty("max_completion_tokens");
+    expect(requests[0]?.body).toMatchObject({
+      max_tokens: 100,
+      messages: [
+        { role: "system", content: "Return JSON." },
+        { role: "user", content: "{}" },
+      ],
+    });
+  });
+
+  it.each([
+    [{ statusCode: 400 }, "MISCONFIGURED", false, "PROVIDER_HTTP_400"],
+    [{
+      name: "APICallError",
+      cause: { code: "ECONNRESET" },
+    }, "UNAVAILABLE", true, "PROVIDER_NETWORK_ECONNRESET"],
+  ] as const)(
+    "keeps provider diagnostics safe for %s",
+    (failure, code, retryable, diagnosticCode) => {
+      expect(mapAiSdkProviderError(failure)).toMatchObject({
+        code,
+        retryable,
+        diagnosticCode,
+      });
+    },
+  );
 
   it("rejects providers outside the exact allowlist before secret resolution", async () => {
     const resolveSecret = vi.fn(async () => "SHOULD_NOT_BE_READ");
@@ -245,7 +409,13 @@ describe("ai@7 structured Draft Transport", () => {
 
   it.each([
     [{ name: "TimeoutError", message: "timed out" }, "TIMEOUT"],
+    [{
+      name: "APICallError",
+      message: "request failed",
+      cause: { code: "UND_ERR_CONNECT_TIMEOUT" },
+    }, "TIMEOUT"],
     [{ statusCode: 429, message: "provider returned 429" }, "RATE_LIMITED"],
+    [{ statusCode: 401, message: "unauthorized" }, "MISCONFIGURED"],
   ] as const)("maps provider failure to %s", async (failure, code) => {
     const transport = createAiSdkDraftTransport({
       providerBaseUrl: "https://ai-gateway.vercel.sh/v1",
@@ -259,7 +429,7 @@ describe("ai@7 structured Draft Transport", () => {
     });
     await expect(transport.generate(input)).rejects.toMatchObject({
       code,
-      retryable: true,
+      retryable: code !== "MISCONFIGURED",
     });
   });
 

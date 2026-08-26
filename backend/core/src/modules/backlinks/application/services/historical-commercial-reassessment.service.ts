@@ -8,8 +8,9 @@ import {
 } from "../../db/tenant-transaction.js";
 import {
   commercialFitWeights,
+  commercialRecommendationFitModelVersion,
   type CommercialFitDecision,
-} from "../../domain/recommendations/commercial-score-v3.js";
+} from "../../domain/recommendations/commercial-score-v4.js";
 import {
   reassessHistoricalCommercialCandidate,
   type HistoricalCommercialReassessment,
@@ -19,8 +20,8 @@ import {
   type HistoricalContactEnrichmentQueueSummary,
 } from "../commands/contact-enrichment.command.js";
 import {
-  synchronizeRecommendationPublication,
-} from "./recommendation-publication.service.js";
+  synchronizeRecommendationContactState,
+} from "./recommendation-contact-synchronization.service.js";
 
 type HistoricalCandidateRow = Readonly<{
   id: string;
@@ -149,12 +150,11 @@ export function decideRefillPolicyRecovery(
 
 function candidateState(
   score: HistoricalCommercialReassessment,
-  promoted: boolean,
 ): string {
   if (score.decision === "ineligible") return "excluded";
   if (score.decision === "insufficient_data") return "insufficient_data";
   if (score.decision === "manual_review") return "manual_review";
-  return promoted ? "contact_enrichment" : "candidate_ready";
+  return "candidate_ready";
 }
 
 function requiredText(
@@ -251,11 +251,11 @@ async function loadHistoricalCandidates(
               source.website_project_id,source.project_context_version_id,
               source.visible_pool_generation,source.canonical_domain
             )
-             AND target.score_model_version=
-               'recommendation-commercial-fit.v3'
+             AND target.score_model_version=$1
         )
       ORDER BY source.project_context_version_id,
                source.canonical_domain,source.id`,
+    [commercialRecommendationFitModelVersion],
   );
   return result.rows.map((row) => Object.freeze({
     id: requiredText(row, "id"),
@@ -392,8 +392,7 @@ async function insertReassessment(
        created_by,updated_by
      ) VALUES (
        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,
-       $14::jsonb,$15::jsonb,'recommendation-commercial-fit.v3',
-       $16,$17,$18,$18
+       $14::jsonb,$15::jsonb,$16,$17,$18,$19,$19
      )
      ON CONFLICT (
        organization_id,workspace_id,website_project_id,
@@ -421,7 +420,8 @@ async function insertReassessment(
         missingEvidence: score.missingEvidence,
       }),
       JSON.stringify(score),
-      candidateState(score, promoted),
+      commercialRecommendationFitModelVersion,
+      candidateState(score),
       row.providerCollectedAt,
       actorId,
     ],
@@ -493,7 +493,7 @@ async function insertReassessment(
       publicationSynchronized: 0,
     });
   }
-  await synchronizeRecommendationPublication(client, {
+  await synchronizeRecommendationContactState(client, {
     ...scope,
     prospectId: row.prospectId,
     recommendationContextVersionId: row.projectContextVersionId,

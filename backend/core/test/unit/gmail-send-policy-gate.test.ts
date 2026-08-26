@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  compareGmailSendReadinessSnapshot,
+  createGmailSendReadinessSnapshot,
   evaluateGmailSendPolicy,
+  gmailSendReadinessDefaultTtlSeconds,
+  gmailSendReadinessConditionCodes,
   gmailSendPolicyBlockCodes,
   gmailSendPolicyVersion,
   runAfterGmailSendPolicyGate,
@@ -37,7 +41,76 @@ const allowedInput = (): GmailSendPolicyInput => ({
   cooldownUntil: null,
 });
 
+const readinessConditions = gmailSendReadinessConditionCodes.map(
+  (code, index) => ({
+    code,
+    revision: `revision-${index + 1}`,
+  }),
+);
+
 describe("BL-AI-111 Gmail send policy gate", () => {
+  it("creates a stable versioned snapshot independent of condition order", () => {
+    const evaluatedAt = new Date("2026-08-18T01:00:00.000Z");
+    const first = createGmailSendReadinessSnapshot({
+      evaluatedAt,
+      conditions: readinessConditions,
+    });
+    const second = createGmailSendReadinessSnapshot({
+      evaluatedAt,
+      conditions: [...readinessConditions].reverse(),
+    });
+
+    expect(first).toEqual(second);
+    expect(first.snapshotVersion).toMatch(/^[a-f0-9]{64}$/);
+    expect(gmailSendReadinessDefaultTtlSeconds).toBe(15 * 60);
+    expect(first.expiresAt).toBe("2026-08-18T01:15:00.000Z");
+  });
+
+  it("reports exact changed, expired, and tampered snapshot conditions", () => {
+    const snapshot = createGmailSendReadinessSnapshot({
+      evaluatedAt: new Date("2026-08-18T01:00:00.000Z"),
+      conditions: readinessConditions,
+    });
+
+    expect(compareGmailSendReadinessSnapshot({
+      expected: snapshot,
+      currentConditions: readinessConditions.map((condition) =>
+        condition.code === "QUOTA"
+          ? { ...condition, revision: "quota-revision-changed" }
+          : condition),
+      comparedAt: new Date("2026-08-18T01:01:00.000Z"),
+    })).toEqual([{
+      code: "QUOTA",
+      reason: "CHANGED",
+      expectedRevision: "revision-8",
+      currentRevision: "quota-revision-changed",
+      retryable: true,
+      recoveryAction: "WAIT_AND_RUN_PREFLIGHT",
+    }]);
+
+    expect(compareGmailSendReadinessSnapshot({
+      expected: snapshot,
+      currentConditions: readinessConditions,
+      comparedAt: new Date("2026-08-18T01:15:01.000Z"),
+    })).toMatchObject([{
+      code: "SNAPSHOT_VALIDITY",
+      reason: "EXPIRED",
+      retryable: true,
+      recoveryAction: "RUN_PREFLIGHT_AGAIN",
+    }]);
+
+    expect(compareGmailSendReadinessSnapshot({
+      expected: { ...snapshot, snapshotVersion: "0".repeat(64) },
+      currentConditions: readinessConditions,
+      comparedAt: new Date("2026-08-18T01:01:00.000Z"),
+    })).toMatchObject([{
+      code: "SNAPSHOT_VALIDITY",
+      reason: "MISSING",
+      retryable: true,
+      recoveryAction: "RUN_PREFLIGHT_AGAIN",
+    }]);
+  });
+
   it("allows an approved and fully eligible send operation", async () => {
     const operation = vi.fn(async () => "provider-accepted");
 

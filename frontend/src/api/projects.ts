@@ -2,6 +2,10 @@ import { apiRequest, resolveApiUrl } from "@/api/client"
 import type {
   BusinessProfileInput,
   BusinessProfileRun,
+  ConfirmPromotionTargetInput,
+  ProjectOutreachReadinessState,
+  PromotionTargetVersion,
+  PublishPromotionTargetInput,
   Project,
   SiteProfile,
 } from "@/features/projects/types"
@@ -22,6 +26,8 @@ type SiteProfileResponse = {
   languages: string[]
   content_topics: string[]
   conversion_actions: string[]
+  partnership_goals?: string[]
+  input_required?: string[] | null
   key_pages: {
     url: string
     title: string
@@ -41,6 +47,12 @@ type SiteProfileResponse = {
 
 type ProjectResponse = {
   id: string
+  workspace_id: string
+  lifecycle_status: "ACTIVE" | "ARCHIVED"
+  lifecycle_version: number
+  archived_at: string | null
+  archive_reason: string | null
+  context_version: number
   name: string
   domain: string
   country: string
@@ -82,6 +94,32 @@ type CreateProjectInput = {
   competitorDomain?: string
 }
 
+type ProjectOutreachReadinessResponse = {
+  website_project_id: string
+  status: ProjectOutreachReadinessState["status"]
+  site_profile_version_id: string | null
+  outreach_profile_version_id: string | null
+  promotion_target_version_id: string | null
+  fingerprint: string
+  input_required: string[]
+  primary_recovery_action: ProjectOutreachReadinessState["primaryRecoveryAction"]
+}
+
+type PromotionTargetVersionResponse = {
+  id: string
+  project_id: string
+  version: number
+  keywords: string[]
+  target_urls: string[]
+  target_audiences: string[]
+  partnership_goals: string[]
+  input_required: string[]
+  source_keyword_ids: string[]
+  source_published_target_ids: string[]
+  source_site_profile_version_id: string | null
+  created_at: string
+}
+
 function mapSiteProfile(profile: SiteProfileResponse): SiteProfile {
   return {
     profileVersion: profile.profile_version,
@@ -99,6 +137,8 @@ function mapSiteProfile(profile: SiteProfileResponse): SiteProfile {
     languages: profile.languages,
     contentTopics: profile.content_topics,
     conversionActions: profile.conversion_actions,
+    partnershipGoals: profile.partnership_goals ?? [],
+    inputRequired: profile.input_required ?? null,
     keyPages: profile.key_pages,
     evidence: profile.evidence.map((item) => ({
       field: item.field,
@@ -116,6 +156,12 @@ function mapSiteProfile(profile: SiteProfileResponse): SiteProfile {
 function mapProject(project: ProjectResponse): Project {
   return {
     id: project.id,
+    workspaceId: project.workspace_id,
+    lifecycleStatus: project.lifecycle_status,
+    lifecycleVersion: project.lifecycle_version,
+    archivedAt: project.archived_at,
+    archiveReason: project.archive_reason,
+    contextVersion: project.context_version,
     name: project.name,
     domain: project.domain,
     country: project.country,
@@ -140,10 +186,13 @@ function mapProject(project: ProjectResponse): Project {
   }
 }
 
-export async function listProjects(): Promise<Project[]> {
-  return (await apiRequest<ProjectResponse[]>("/api/v1/projects")).map(
-    mapProject
-  )
+export async function listProjects(
+  lifecycleStatus: "ACTIVE" | "ARCHIVED" = "ACTIVE"
+): Promise<Project[]> {
+  const query = new URLSearchParams({ lifecycle_status: lifecycleStatus })
+  return (
+    await apiRequest<ProjectResponse[]>(`/api/v1/projects?${query.toString()}`)
+  ).map(mapProject)
 }
 
 export async function getProject(projectId: string): Promise<Project> {
@@ -152,6 +201,92 @@ export async function getProject(projectId: string): Promise<Project> {
       `/api/v1/projects/${encodeURIComponent(projectId)}`
     )
   )
+}
+
+export async function getProjectOutreachReadiness(
+  projectId: string,
+  signal?: AbortSignal
+): Promise<ProjectOutreachReadinessState> {
+  const response = await apiRequest<ProjectOutreachReadinessResponse>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/outreach-readiness`,
+    { signal }
+  )
+  return {
+    websiteProjectId: response.website_project_id,
+    status: response.status,
+    siteProfileVersionId: response.site_profile_version_id,
+    outreachProfileVersionId: response.outreach_profile_version_id,
+    promotionTargetVersionId: response.promotion_target_version_id,
+    fingerprint: response.fingerprint,
+    inputRequired: response.input_required,
+    primaryRecoveryAction: response.primary_recovery_action,
+  }
+}
+
+export async function publishPromotionTarget(
+  projectId: string,
+  input: PublishPromotionTargetInput
+): Promise<PromotionTargetVersion> {
+  const response = await apiRequest<PromotionTargetVersionResponse>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/promotion-target`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approved_keyword_ids: input.approvedKeywordIds,
+        published_target_ids: input.publishedTargetIds,
+        expected_project_context_version: input.expectedProjectContextVersion,
+        expected_site_profile_version_id: input.expectedSiteProfileVersionId,
+      }),
+    }
+  )
+  return {
+    id: response.id,
+    projectId: response.project_id,
+    version: response.version,
+    keywords: response.keywords,
+    targetUrls: response.target_urls,
+    targetAudiences: response.target_audiences,
+    partnershipGoals: response.partnership_goals,
+    inputRequired: response.input_required,
+    sourceKeywordIds: response.source_keyword_ids,
+    sourcePublishedTargetIds: response.source_published_target_ids,
+    sourceSiteProfileVersionId: response.source_site_profile_version_id,
+    createdAt: response.created_at,
+  }
+}
+
+export async function confirmPromotionTarget(
+  projectId: string,
+  input: ConfirmPromotionTargetInput
+): Promise<PromotionTargetVersion> {
+  const response = await apiRequest<PromotionTargetVersionResponse>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/promotion-target/confirm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirmed_topics: input.confirmedTopics,
+        confirmed_target_urls: input.confirmedTargetUrls,
+        expected_project_context_version: input.expectedProjectContextVersion,
+        expected_site_profile_version_id: input.expectedSiteProfileVersionId,
+      }),
+    }
+  )
+  return {
+    id: response.id,
+    projectId: response.project_id,
+    version: response.version,
+    keywords: response.keywords,
+    targetUrls: response.target_urls,
+    targetAudiences: response.target_audiences,
+    partnershipGoals: response.partnership_goals,
+    inputRequired: response.input_required,
+    sourceKeywordIds: response.source_keyword_ids,
+    sourcePublishedTargetIds: response.source_published_target_ids,
+    sourceSiteProfileVersionId: response.source_site_profile_version_id,
+    createdAt: response.created_at,
+  }
 }
 
 export async function createProject(
@@ -174,6 +309,24 @@ export async function deleteProject(projectId: string): Promise<void> {
   await apiRequest<void>(`/api/v1/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
   })
+}
+
+export async function archiveProject(projectId: string): Promise<Project> {
+  return mapProject(
+    await apiRequest<ProjectResponse>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/archive`,
+      { method: "POST" }
+    )
+  )
+}
+
+export async function restoreProject(projectId: string): Promise<Project> {
+  return mapProject(
+    await apiRequest<ProjectResponse>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/restore`,
+      { method: "POST" }
+    )
+  )
 }
 
 export async function updateBusinessProfile(

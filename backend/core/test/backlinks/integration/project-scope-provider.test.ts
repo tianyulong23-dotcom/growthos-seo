@@ -137,9 +137,13 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
         migrationId.startsWith("backlinks-")
         && migrationId !== "backlinks-0001"
     );
-    for (const step of backlinkSteps.filter(
-      ({ migrationId }) => migrationId !== "backlinks-0043",
-    )) {
+    const scopeMigrationIndex = backlinkSteps.findIndex(
+      ({ migrationId }) => migrationId === "backlinks-0043",
+    );
+    if (scopeMigrationIndex === -1) {
+      throw new Error("BACKLINKS_PROJECT_SCOPE_MIGRATION_MISSING");
+    }
+    for (const step of backlinkSteps.slice(0, scopeMigrationIndex)) {
       await admin.query(await readFile(migrationUrl(step.path), "utf8"));
     }
     await admin.query("SET search_path = backlinks, pg_catalog");
@@ -203,12 +207,7 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
         legacyWorkflowId,
       ],
     );
-    const scopeMigration = backlinkSteps.find(
-      ({ migrationId }) => migrationId === "backlinks-0043",
-    );
-    if (scopeMigration === undefined) {
-      throw new Error("BACKLINKS_PROJECT_SCOPE_MIGRATION_MISSING");
-    }
+    const scopeMigration = backlinkSteps[scopeMigrationIndex];
     await admin.query(await readFile(
       migrationUrl(scopeMigration.path),
       "utf8",

@@ -10,7 +10,7 @@ import type { ResolvedProjectContext } from "../../ports/project-context.port.js
 
 export type CreateOpportunityCommand = Readonly<{
   context: ResolvedProjectContext; recommendationId: string;
-  contactCandidateId: string; expectedVersion: number;
+  contactCandidateId?: string | null; expectedVersion: number;
   idempotencyKey: string; requestId: string;
 }>;
 export type CreateOpportunityResult = OpportunityCreation &
@@ -46,15 +46,16 @@ export function createOpportunityCommands(repository: OpportunityRepository) {
       input: CreateOpportunityCommand,
     ): Promise<CreateOpportunityResult> {
       authorize(input.context);
+      const contactCandidateId = input.contactCandidateId ?? null;
       const requestHash = digest({ recommendationId: input.recommendationId,
-        contactCandidateId: input.contactCandidateId,
+        contactCandidateId,
         expectedVersion: input.expectedVersion });
       const row = await repository.createFromRecommendation({
         organizationId: input.context.tenant.organizationId,
         workspaceId: input.context.tenant.workspaceId,
         websiteProjectId: input.context.project.websiteProjectId,
         actorId: input.context.actor.userId, recommendationId: input.recommendationId,
-        contactCandidateId: input.contactCandidateId,
+        contactCandidateId,
         expectedVersion: input.expectedVersion, idempotencyKey: input.idempotencyKey,
         requestHash, requestId: input.requestId, idempotencyRecordId: randomUUID(),
         opportunityId: randomUUID(), cycleId: randomUUID(),
