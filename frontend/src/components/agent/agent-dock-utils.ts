@@ -1,3 +1,6 @@
+import remarkParse from "remark-parse"
+import { unified } from "unified"
+
 import type {
   AgentDisplayPart,
   AgentMessage,
@@ -15,6 +18,40 @@ export type BusinessProgressItem = {
 export type ConversationTimelineItem =
   | { type: "message"; id: string; createdAt: string; message: AgentMessage }
   | { type: "event"; id: string; createdAt: string; event: AgentTimelineEvent }
+
+const markdownParser = unified().use(remarkParse)
+const spacingNoise = /^(?:(?:\\)|(?:&#x20;)|(?:&nbsp;)|\s)+$/i
+
+export function cleanAgentMessageContent(content: string) {
+  const lines = content.split("\n")
+  if (!lines.some((line) => spacingNoise.test(line.trim()))) return content
+
+  const codeLines = new Set<number>()
+  function protectCode(node: {
+    type: string
+    position?: { start: { line: number }; end: { line: number } }
+    children?: Parameters<typeof protectCode>[0][]
+  }) {
+    if ((node.type === "code" || node.type === "inlineCode") && node.position) {
+      for (
+        let line = node.position.start.line;
+        line <= node.position.end.line;
+        line++
+      ) {
+        codeLines.add(line)
+      }
+    }
+    node.children?.forEach(protectCode)
+  }
+  // Use Markdown positions so fenced, indented and multiline inline code stay literal.
+  protectCode(markdownParser.parse(content))
+  return lines
+    .filter(
+      (line, index) =>
+        codeLines.has(index + 1) || !spacingNoise.test(line.trim())
+    )
+    .join("\n")
+}
 
 function messageBusinessProgress(
   metadata: AgentMessage["metadata"]
@@ -53,7 +90,8 @@ export function messageDisplayParts(message: AgentMessage): AgentDisplayPart[] {
       if (!item || typeof item !== "object") return []
       const entry = item as Record<string, unknown>
       if (entry.type === "text" && typeof entry.text === "string") {
-        return entry.text.trim() ? [{ type: "text", text: entry.text }] : []
+        const text = cleanAgentMessageContent(entry.text)
+        return text.trim() ? [{ type: "text", text }] : []
       }
       const status = String(entry.status)
       if (
@@ -79,12 +117,13 @@ export function messageDisplayParts(message: AgentMessage): AgentDisplayPart[] {
     })
     if (parts.length > 0) return parts
   }
+  const content = cleanAgentMessageContent(message.content)
   return [
     ...messageBusinessProgress(message.metadata).map(
       (item): AgentDisplayPart => ({ type: "tool", ...item })
     ),
-    ...(message.content.trim()
-      ? ([{ type: "text", text: message.content }] satisfies AgentDisplayPart[])
+    ...(content.trim()
+      ? ([{ type: "text", text: content }] satisfies AgentDisplayPart[])
       : []),
   ]
 }

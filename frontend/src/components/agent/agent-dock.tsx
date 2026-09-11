@@ -1,16 +1,18 @@
 import * as React from "react"
 import {
+  AlertTriangle,
   Bot,
   Check,
   CircleDot,
   CircleStop,
-  CircleX,
+  Copy,
   Ellipsis,
   History,
   LoaderCircle,
   Pencil,
   Plus,
   Send,
+  Sparkles,
   Undo2,
   X,
 } from "lucide-react"
@@ -37,20 +39,12 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { AgentActionCard } from "@/features/agent/agent-action-card"
 import {
+  cleanAgentMessageContent,
   conversationTimelineItems,
   hasVisibleAssistantReply,
   messageDisplayParts,
-  runStatusLabel,
   shouldShowAgentWelcomeFallback,
   shouldShowRunError,
   type BusinessProgressItem,
@@ -71,24 +65,52 @@ type AgentDockContentProps = {
   onClose?: () => void
 }
 
-export function AgentMessageContent({
-  content,
-  streaming = false,
-}: {
-  content: string
-  streaming?: boolean
+const AGENT_SCROLL_BOTTOM_THRESHOLD = 48
+
+export function AgentScrollViewport({
+  followVersion,
+  className,
+  onScroll,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement> & {
+  followVersion: unknown
 }) {
+  const viewportRef = React.useRef<HTMLDivElement>(null)
+  const shouldFollowRef = React.useRef(true)
+
+  React.useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport || !shouldFollowRef.current) return
+    viewport.scrollTo?.({ top: viewport.scrollHeight, behavior: "auto" })
+  }, [followVersion])
+
   return (
     <div
-      className={`min-w-0 break-words text-foreground/85 ${streaming ? "text-sm" : ""}`}
-    >
+      ref={viewportRef}
+      className={className}
+      onScroll={(event) => {
+        const viewport = event.currentTarget
+        const distanceFromBottom =
+          viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop
+        shouldFollowRef.current =
+          distanceFromBottom <= AGENT_SCROLL_BOTTOM_THRESHOLD
+        onScroll?.(event)
+      }}
+      {...props}
+    />
+  )
+}
+
+export function AgentMessageContent({ content }: { content: string }) {
+  const cleanedContent = cleanAgentMessageContent(content)
+
+  return (
+    <div className="min-w-0 text-sm break-words">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => (
-            <h1
-              className={`mt-5 mb-2 font-semibold text-foreground first:mt-0 ${streaming ? "text-sm" : "text-base"}`}
-            >
+            <h1 className="mt-5 mb-2 text-base font-semibold text-foreground first:mt-0">
               {children}
             </h1>
           ),
@@ -102,20 +124,21 @@ export function AgentMessageContent({
               {children}
             </h3>
           ),
+          h4: ({ children }) => (
+            <h4 className="mt-3 mb-1 text-sm font-semibold text-foreground first:mt-0">
+              {children}
+            </h4>
+          ),
           p: ({ children }) => (
             <p className="my-2 leading-relaxed first:mt-0 last:mb-0">
               {children}
             </p>
           ),
           ul: ({ children }) => (
-            <ul className="my-3 ml-5 list-disc space-y-1.5 marker:text-muted-foreground">
-              {children}
-            </ul>
+            <ul className="my-2 ml-5 list-disc space-y-1">{children}</ul>
           ),
           ol: ({ children }) => (
-            <ol className="my-3 ml-5 list-decimal space-y-1.5 marker:text-muted-foreground">
-              {children}
-            </ol>
+            <ol className="my-2 ml-5 list-decimal space-y-1">{children}</ol>
           ),
           li: ({ children }) => <li className="leading-relaxed">{children}</li>,
           strong: ({ children }) => (
@@ -125,11 +148,11 @@ export function AgentMessageContent({
           ),
           em: ({ children }) => <em className="italic">{children}</em>,
           blockquote: ({ children }) => (
-            <blockquote className="my-3 border-l-2 border-primary/30 pl-3 text-muted-foreground">
+            <blockquote className="my-2 border-l-2 border-border pl-3 text-foreground/80 italic">
               {children}
             </blockquote>
           ),
-          hr: () => <hr className="my-4 border-border" />,
+          hr: () => <hr className="my-3 border-border" />,
           code: ({ children, className }) =>
             typeof className === "string" &&
             className.startsWith("language-") ? (
@@ -140,25 +163,27 @@ export function AgentMessageContent({
               </code>
             ),
           pre: ({ children }) => (
-            <pre className="my-3 overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs leading-relaxed text-foreground">
+            <pre className="my-2 overflow-x-auto rounded-lg bg-muted p-3 font-mono text-xs text-foreground">
               {children}
             </pre>
           ),
           table: ({ children }) => (
-            <Table className="my-3 border text-xs">{children}</Table>
+            <div className="my-3 overflow-x-auto">
+              <table className="w-full border border-border text-xs">
+                {children}
+              </table>
+            </div>
           ),
-          thead: ({ children }) => <TableHeader>{children}</TableHeader>,
-          tbody: ({ children }) => <TableBody>{children}</TableBody>,
-          tr: ({ children }) => <TableRow>{children}</TableRow>,
+          thead: ({ children }) => <thead>{children}</thead>,
+          tbody: ({ children }) => <tbody>{children}</tbody>,
+          tr: ({ children }) => (
+            <tr className="border-b border-border last:border-0">{children}</tr>
+          ),
           th: ({ children }) => (
-            <TableHead className="h-auto bg-muted/50 px-2 py-2 text-xs font-semibold whitespace-normal">
-              {children}
-            </TableHead>
+            <th className="px-2 py-1.5 text-left font-semibold">{children}</th>
           ),
           td: ({ children }) => (
-            <TableCell className="px-2 py-2 align-top text-xs leading-relaxed whitespace-normal">
-              {children}
-            </TableCell>
+            <td className="px-2 py-1.5 align-top">{children}</td>
           ),
           a: ({ href, children }) =>
             isSafeAgentLink(href) ? (
@@ -175,8 +200,43 @@ export function AgentMessageContent({
             ),
         }}
       >
-        {content}
+        {cleanedContent}
       </ReactMarkdown>
+    </div>
+  )
+}
+
+export function AgentTypingIndicator() {
+  return (
+    <div
+      className="flex items-center gap-2 pt-1 text-foreground/40"
+      aria-label="Agent 正在输入"
+    >
+      <span className="flex items-center gap-1.5">
+        <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.3s]" />
+        <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.15s]" />
+        <span className="size-1.5 animate-bounce rounded-full bg-current" />
+      </span>
+    </div>
+  )
+}
+
+function AgentWelcomeMessage() {
+  return (
+    <div className="flex gap-3">
+      <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+        <Sparkles className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-3 pt-0.5 text-sm text-foreground/80">
+        <p>我是 Aris，你的 SEO 负责人。</p>
+        <p>
+          接下来几分钟，我会先理解这个网站在卖什么、服务谁，以及客户为什么选择它。
+        </p>
+        <p>
+          完成后，我会把业务判断交给你确认。确认无误，我们再建立关键词库和 30
+          篇内容计划。
+        </p>
+      </div>
     </div>
   )
 }
@@ -192,28 +252,94 @@ function AgentDisplayTool({
       variant={failed ? "destructive" : "secondary"}
       className={
         failed
-          ? "h-auto min-h-5 py-1 whitespace-normal"
-          : "h-auto min-h-5 bg-emerald-500/10 py-1 text-emerald-700 dark:text-emerald-400"
+          ? "h-auto min-h-0 gap-1.5 rounded-full px-2.5 py-1 font-normal whitespace-normal"
+          : "h-auto min-h-0 gap-1.5 rounded-full bg-muted px-2.5 py-1 font-normal text-foreground/70"
       }
     >
-      {failed ? <CircleX /> : <Check />}
+      {failed ? <AlertTriangle /> : <Check />}
       <span>{item.label}</span>
     </Badge>
   )
 }
 
-export function AgentAssistantMessage({ message }: { message: AgentMessage }) {
+function AgentCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = React.useState(false)
+  const resetTimerRef = React.useRef<number | null>(null)
+
+  React.useEffect(
+    () => () => {
+      if (resetTimerRef.current !== null) {
+        window.clearTimeout(resetTimerRef.current)
+      }
+    },
+    []
+  )
+
+  async function copyMessage() {
+    if (!navigator.clipboard?.writeText) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      if (resetTimerRef.current !== null) {
+        window.clearTimeout(resetTimerRef.current)
+      }
+      resetTimerRef.current = window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+
   return (
-    <div className="space-y-2.5">
-      {messageDisplayParts(message).map((part, index) =>
-        part.type === "text" ? (
-          <AgentMessageContent key={`text:${index}`} content={part.text} />
-        ) : (
-          <AgentDisplayTool
-            key={part.toolCallId ?? `${part.tool}:${index}`}
-            item={part}
-          />
-        )
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-xs"
+      title="复制"
+      aria-label="复制消息"
+      onClick={() => void copyMessage()}
+    >
+      {copied ? <Check /> : <Copy />}
+    </Button>
+  )
+}
+
+export function AgentAssistantMessage({ message }: { message: AgentMessage }) {
+  const parts = messageDisplayParts(message).reduce<AgentDisplayPart[]>(
+    (visibleParts, part) => {
+      if (part.type !== "text") {
+        visibleParts.push(part)
+        return visibleParts
+      }
+      const text = cleanAgentMessageContent(part.text)
+      if (text.trim()) visibleParts.push({ ...part, text })
+      return visibleParts
+    },
+    []
+  )
+  const copyText = parts
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("\n")
+    .trim()
+
+  return (
+    <div className="group flex flex-col gap-1">
+      <div className="min-w-0 space-y-2 text-sm">
+        {parts.map((part, index) =>
+          part.type === "text" ? (
+            <AgentMessageContent key={`text:${index}`} content={part.text} />
+          ) : (
+            <AgentDisplayTool
+              key={part.toolCallId ?? `${part.tool}:${index}`}
+              item={part}
+            />
+          )
+        )}
+        {message.streaming && parts.length === 0 && <AgentTypingIndicator />}
+      </div>
+      {copyText && !message.streaming && (
+        <div className="flex gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+          <AgentCopyButton text={copyText} />
+        </div>
       )}
     </div>
   )
@@ -255,15 +381,15 @@ export function AgentTimelineItem({
             : "未完成"
   const statusIcon =
     event.status === "running" ? (
-      <LoaderCircle className="size-3.5 shrink-0 animate-spin text-primary" />
+      <LoaderCircle className="animate-spin" />
     ) : event.status === "waiting" ? (
-      <CircleDot className="size-3.5 shrink-0 text-primary" />
+      <CircleDot />
     ) : event.status === "completed" ? (
-      <Check className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+      <Check />
     ) : event.status === "cancelled" ? (
-      <CircleStop className="size-3.5 shrink-0 text-muted-foreground" />
+      <CircleStop />
     ) : (
-      <CircleX className="size-3.5 shrink-0 text-destructive" />
+      <AlertTriangle />
     )
   const retryable =
     event.status === "failed" &&
@@ -272,6 +398,24 @@ export function AgentTimelineItem({
     Boolean(onRetry)
   const retryLabel =
     event.metadata.source === "site_understanding" ? "重新识别" : "重试任务"
+  const isOnboardingEvent = event.eventKey.startsWith("onboarding:")
+  const isBusinessUnderstandingResult =
+    event.eventKey.startsWith("onboarding:business-understanding:") &&
+    event.status === "completed"
+  const isBusinessConfirmationPrompt =
+    event.eventKey === "onboarding:business-confirmation" &&
+    event.status === "waiting"
+  const hasVisibleAction =
+    event.kind === "action" &&
+    event.status === "waiting" &&
+    Boolean(actionLabel && (internalTarget || externalTarget))
+  const isCompactOnboardingStep =
+    isOnboardingEvent &&
+    event.kind !== "message" &&
+    event.status !== "failed" &&
+    !isBusinessUnderstandingResult &&
+    !isBusinessConfirmationPrompt &&
+    !hasVisibleAction
 
   async function retry() {
     if (!onRetry || retrying) return
@@ -286,6 +430,37 @@ export function AgentTimelineItem({
     }
   }
 
+  if (isCompactOnboardingStep) {
+    return (
+      <Badge
+        aria-label={`${event.title}，${statusLabel}`}
+        variant="secondary"
+        className={
+          event.status === "running"
+            ? "h-auto min-h-0 gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 font-normal text-primary"
+            : event.status === "waiting"
+              ? "h-auto min-h-0 gap-1.5 rounded-full border border-primary/25 bg-primary/5 px-2.5 py-1 font-normal text-primary"
+              : "h-auto min-h-0 gap-1.5 rounded-full bg-muted px-2.5 py-1 font-normal text-foreground/70"
+        }
+      >
+        {statusIcon}
+        <span>
+          {event.title}
+          {event.status === "running" ? "…" : isPartial ? "（部分完成）" : ""}
+        </span>
+      </Badge>
+    )
+  }
+
+  if (isBusinessUnderstandingResult) {
+    if (!event.content) return null
+    return (
+      <div className="text-sm leading-6" aria-label={`${event.title}结果`}>
+        <AgentMessageContent content={event.content} />
+      </div>
+    )
+  }
+
   if (event.kind === "message") {
     return (
       <div className="text-sm leading-6">
@@ -298,45 +473,42 @@ export function AgentTimelineItem({
 
   return (
     <section
-      className="space-y-2.5 text-sm"
+      className="space-y-2 text-sm"
       aria-label={`${event.title}，${statusLabel}`}
     >
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <div
-          className={
-            event.status === "failed"
-              ? "min-w-0 font-semibold text-destructive"
-              : "min-w-0 font-semibold text-foreground"
-          }
-        >
-          {event.title}
+      {!isBusinessConfirmationPrompt && (
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <div
+            className={
+              event.status === "failed"
+                ? "min-w-0 font-medium text-destructive"
+                : "min-w-0 font-medium text-foreground"
+            }
+          >
+            {event.title}
+          </div>
+          <Badge
+            aria-label={statusLabel}
+            variant={event.status === "failed" ? "destructive" : "secondary"}
+            className={
+              event.status === "running"
+                ? "shrink-0 bg-primary/10 text-primary"
+                : event.status === "waiting"
+                  ? "shrink-0 border border-primary/25 bg-primary/5 text-primary"
+                  : event.status === "completed"
+                    ? "shrink-0 text-muted-foreground"
+                    : event.status === "cancelled"
+                      ? "shrink-0 text-muted-foreground"
+                      : "shrink-0"
+            }
+          >
+            {statusIcon}
+            <span>{statusLabel}</span>
+          </Badge>
         </div>
-        <Badge
-          aria-label={statusLabel}
-          variant={event.status === "failed" ? "destructive" : "secondary"}
-          className={
-            event.status === "running"
-              ? "bg-primary/10 text-primary"
-              : event.status === "waiting"
-                ? "border border-primary/25 bg-primary/5 text-primary"
-                : event.status === "completed"
-                  ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                  : "text-muted-foreground"
-          }
-        >
-          {statusIcon}
-          {statusLabel}
-        </Badge>
-      </div>
+      )}
       {event.content && (
-        <div
-          className={
-            event.status === "waiting"
-              ? "border-l-2 border-primary/30 pl-3"
-              : "border-l-2 border-border pl-3"
-          }
-          aria-label={`${event.title}结果`}
-        >
+        <div aria-label={`${event.title}结果`}>
           <AgentMessageContent content={event.content} />
         </div>
       )}
@@ -344,13 +516,7 @@ export function AgentTimelineItem({
         event.status === "waiting" &&
         actionLabel &&
         internalTarget && (
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            className="ml-3"
-            onClick={() => onNavigate?.(internalTarget)}
-          >
+          <Button type="button" onClick={() => onNavigate?.(internalTarget)}>
             {actionLabel}
           </Button>
         )}
@@ -362,17 +528,13 @@ export function AgentTimelineItem({
             href={externalTarget}
             target="_blank"
             rel="noreferrer"
-            className={buttonVariants({
-              variant: "outline",
-              size: "xs",
-              className: "ml-3",
-            })}
+            className={buttonVariants()}
           >
             {actionLabel}
           </a>
         )}
       {retryable && (
-        <div className="ml-3 space-y-1.5">
+        <div className="space-y-1.5">
           <Button
             type="button"
             variant="outline"
@@ -399,18 +561,18 @@ export function AgentBusinessProgress({
 }) {
   if (items.length === 0) return null
   return (
-    <div className="mb-3 flex flex-wrap gap-1.5" aria-label="任务进度">
+    <div className="flex flex-wrap gap-1.5" aria-label="任务进度">
       {items.map((item, index) => (
         <Badge
           key={item.toolCallId ?? `${item.tool}:${index}`}
           variant={item.status === "completed" ? "secondary" : "destructive"}
           className={
             item.status === "completed"
-              ? "h-auto min-h-5 bg-emerald-500/10 py-1 text-emerald-700 dark:text-emerald-400"
-              : "h-auto min-h-5 py-1 whitespace-normal"
+              ? "h-auto min-h-0 gap-1.5 rounded-full bg-muted px-2.5 py-1 font-normal text-foreground/70"
+              : "h-auto min-h-0 gap-1.5 rounded-full px-2.5 py-1 font-normal whitespace-normal"
           }
         >
-          {item.status === "completed" ? <Check /> : <CircleX />}
+          {item.status === "completed" ? <Check /> : <AlertTriangle />}
           <span>{item.label}</span>
         </Badge>
       ))}
@@ -444,7 +606,6 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
     null
   )
   const [editingDraft, setEditingDraft] = React.useState("")
-  const viewportRef = React.useRef<HTMLDivElement>(null)
   const messages = React.useMemo(
     () => agent.detail?.messages ?? [],
     [agent.detail?.messages]
@@ -467,16 +628,11 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
     run?.status === "running" ||
     run?.status === "executing" ||
     run?.status === "verifying"
-  const isStreaming = messages.some(
-    (message) => message.role === "assistant" && message.streaming
-  )
   const hasPersistedReply = hasVisibleAssistantReply(messages, run?.id)
-  React.useEffect(() => {
-    viewportRef.current?.scrollTo?.({
-      top: viewportRef.current.scrollHeight,
-      behavior: "smooth",
-    })
-  }, [timelineItems, isThinking, runtime?.lastEventType])
+  const followVersion = React.useMemo(
+    () => ({ timelineItems, runtime, isThinking }),
+    [timelineItems, runtime, isThinking]
+  )
 
   async function sendMessage() {
     const content = draft.trim()
@@ -633,15 +789,13 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
         )}
       </div>
 
-      <div
-        ref={viewportRef}
-        className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 [&>*]:mx-auto [&>*]:w-full [&>*]:max-w-2xl"
+      <AgentScrollViewport
+        key={agent.detail?.conversation.id ?? project.id}
+        followVersion={followVersion}
+        className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-6 [&>*]:mx-auto [&>*]:w-full [&>*]:max-w-2xl"
       >
         {shouldShowAgentWelcomeFallback(agent.loading, timelineItems) && (
-          <div className="text-sm leading-relaxed text-foreground/80">
-            我是 Aris，负责当前项目的 SEO
-            增长。我会读取真实数据，并直接执行平台允许的操作。
-          </div>
+          <AgentWelcomeMessage />
         )}
 
         {timelineItems.map((item) =>
@@ -724,8 +878,14 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
               </div>
             </div>
           ) : item.message.role === "user" ? (
-            <div key={item.message.id} className="group flex justify-end gap-1">
-              <div className="flex shrink-0 items-start gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+            <div key={item.message.id} className="group flex flex-col gap-1">
+              <div className="flex justify-end pl-8 sm:pl-16">
+                <div className="max-w-xl rounded-md rounded-br-sm bg-primary px-4 py-2.5 text-sm whitespace-pre-wrap text-primary-foreground">
+                  {item.message.content}
+                </div>
+              </div>
+              <div className="flex justify-end gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+                <AgentCopyButton text={item.message.content} />
                 <Button
                   variant="ghost"
                   size="icon-xs"
@@ -748,14 +908,11 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
                   <Undo2 />
                 </Button>
               </div>
-              <div className="max-w-[88%] rounded-md bg-muted px-3 py-2 text-sm leading-6">
-                {item.message.content}
-              </div>
             </div>
           ) : (
             <div
               key={item.message.id}
-              className="text-sm leading-relaxed"
+              className="text-sm"
               aria-live={item.message.streaming ? "polite" : undefined}
             >
               <AgentAssistantMessage message={item.message} />
@@ -776,19 +933,14 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
           (runtime && runtime.runId === run?.id && isRunActive ? (
             <AgentRuntimeProgress runtime={runtime} />
           ) : (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <LoaderCircle className="size-3.5 animate-spin" />
-              {isStreaming
-                ? "正在整理回答..."
-                : runStatusLabel(run?.status, sending || agent.awaitingRun)}
-            </div>
+            <AgentTypingIndicator />
           ))}
         <AgentFailureNotice
           requestError={agent.error}
           run={run}
           messages={messages}
         />
-      </div>
+      </AgentScrollViewport>
 
       <div className="shrink-0 border-t bg-background p-3">
         <div className="rounded-md border bg-background p-2 shadow-xs focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
@@ -845,8 +997,17 @@ export function AgentRuntimeProgress({ runtime }: { runtime: AgentRuntime }) {
   const tools = latestBusinessToolAttempts(runtime.tools)
   const parts = [
     ...runtime.messages.flatMap((message) =>
-      message.phase === "final" && message.text.trim()
-        ? [{ type: "text" as const, order: message.order ?? 0, message }]
+      message.phase === "final" && cleanAgentMessageContent(message.text).trim()
+        ? [
+            {
+              type: "text" as const,
+              order: message.order ?? 0,
+              message: {
+                ...message,
+                text: cleanAgentMessageContent(message.text),
+              },
+            },
+          ]
         : []
     ),
     ...tools.map((tool) => ({
@@ -858,54 +1019,59 @@ export function AgentRuntimeProgress({ runtime }: { runtime: AgentRuntime }) {
   const showTyping = runtime.agentStatus === "running" && parts.length === 0
 
   return (
-    <div className="space-y-1.5" aria-label="实时执行进度">
+    <div className="space-y-2 text-sm" aria-label="实时执行进度">
       {parts.map((part) =>
         part.type === "text" ? (
           <AgentMessageContent
             key={`message:${part.message.id}`}
             content={part.message.text}
-            streaming
           />
         ) : (
           <AgentRuntimeToolProgress
             key={`${part.tool.toolCallId}:${part.tool.attempt}`}
             tool={part.tool}
+            live={runtime.agentStatus === "running"}
           />
         )
       )}
-      {showTyping && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <LoaderCircle className="size-3.5 animate-spin text-primary" />
-          正在处理任务...
-        </div>
-      )}
+      {showTyping && <AgentTypingIndicator />}
     </div>
   )
 }
 
-function AgentRuntimeToolProgress({ tool }: { tool: AgentRuntimeTool }) {
-  const active = isToolActive(tool)
+function AgentRuntimeToolProgress({
+  tool,
+  live,
+}: {
+  tool: AgentRuntimeTool
+  live: boolean
+}) {
+  const active = live && isToolActive(tool)
   const cancelled = tool.stage === "cancelled"
+  const settled = tool.stage === "completed" || tool.stage === "recovered"
   const failed =
-    tool.isError || tool.stage === "failed" || tool.stage === "rejected"
-  const label = runtimeToolLabel(tool)
+    tool.isError ||
+    tool.stage === "failed" ||
+    tool.stage === "rejected" ||
+    (!active && !cancelled && !settled)
+  const label = runtimeToolLabel(tool, { active, failed })
   return (
     <Badge
       variant={failed ? "destructive" : "secondary"}
       className={
         active
-          ? "h-auto min-h-5 bg-primary/10 py-1 text-primary"
+          ? "h-auto min-h-0 gap-1.5 rounded-full bg-muted px-2.5 py-1 font-normal text-foreground/70"
           : failed
-            ? "h-auto min-h-5 py-1 whitespace-normal"
+            ? "h-auto min-h-0 gap-1.5 rounded-full px-2.5 py-1 font-normal whitespace-normal"
             : cancelled
-              ? "h-auto min-h-5 py-1 text-muted-foreground"
-              : "h-auto min-h-5 bg-emerald-500/10 py-1 text-emerald-700 dark:text-emerald-400"
+              ? "h-auto min-h-0 gap-1.5 rounded-full px-2.5 py-1 font-normal text-muted-foreground"
+              : "h-auto min-h-0 gap-1.5 rounded-full bg-muted px-2.5 py-1 font-normal text-foreground/70"
       }
     >
       {active ? (
         <LoaderCircle className="animate-spin" />
       ) : failed ? (
-        <CircleX />
+        <AlertTriangle />
       ) : cancelled ? (
         <CircleStop />
       ) : (
@@ -950,102 +1116,103 @@ const toolLabels: Record<
   { running: string; done: string; failed: string }
 > = {
   get_project_profile: {
-    running: "正在读取项目资料...",
+    running: "正在读取项目资料",
     done: "项目资料已读取",
     failed: "项目资料读取未完成",
   },
   search_project_memory: {
-    running: "正在检索项目信息...",
+    running: "正在检索项目信息",
     done: "项目信息已检索",
     failed: "项目信息检索未完成",
   },
   get_latest_audit: {
-    running: "正在读取技术审核...",
+    running: "正在读取技术审核",
     done: "技术审核已读取",
     failed: "技术审核读取未完成",
   },
   get_audit_status: {
-    running: "正在检查技术审核进度...",
+    running: "正在检查技术审核进度",
     done: "技术审核进度已检查",
     failed: "技术审核进度检查未完成",
   },
   get_audit_issues: {
-    running: "正在读取技术审核问题...",
+    running: "正在读取技术审核问题",
     done: "技术审核问题已读取",
     failed: "技术审核问题读取未完成",
   },
   get_audit_pages: {
-    running: "正在读取技术审核页面...",
+    running: "正在读取技术审核页面",
     done: "技术审核页面已读取",
     failed: "技术审核页面读取未完成",
   },
   update_project_memory: {
-    running: "正在更新项目信息...",
+    running: "正在更新项目信息",
     done: "项目信息已更新",
     failed: "项目信息更新未完成",
   },
   update_business_profile: {
-    running: "正在更新业务资料...",
+    running: "正在更新业务资料",
     done: "业务资料已更新",
     failed: "业务资料更新未完成",
   },
   refresh_business_profile: {
-    running: "正在重新识别网站业务...",
+    running: "正在重新识别网站业务",
     done: "网站业务识别已启动",
     failed: "网站业务识别启动未完成",
   },
   start_technical_audit: {
-    running: "正在启动技术审核...",
+    running: "正在启动技术审核",
     done: "技术审核已启动",
     failed: "技术审核启动未完成",
   },
   start_keyword_library: {
-    running: "正在建立关键词库...",
+    running: "正在建立关键词库",
     done: "关键词库已启动",
     failed: "关键词库启动未完成",
   },
   get_keyword_library_status: {
-    running: "正在检查关键词库进度...",
+    running: "正在检查关键词库进度",
     done: "关键词库进度已检查",
     failed: "关键词库进度检查未完成",
   },
   start_content_plan: {
-    running: "正在生成 30 篇内容计划...",
+    running: "正在生成 30 篇内容计划",
     done: "内容计划已启动",
     failed: "内容计划启动未完成",
   },
   get_content_plan_status: {
-    running: "正在检查内容计划进度...",
+    running: "正在检查内容计划进度",
     done: "内容计划进度已检查",
     failed: "内容计划进度检查未完成",
   },
   start_articles: {
-    running: "正在启动文章生成...",
+    running: "正在启动文章生成",
     done: "文章生成已启动",
     failed: "文章生成启动未完成",
   },
   get_article_generation_status: {
-    running: "正在检查文章生成进度...",
+    running: "正在检查文章生成进度",
     done: "文章生成进度已检查",
     failed: "文章生成进度检查未完成",
   },
 }
 
-function runtimeToolLabel(tool: AgentRuntimeTool) {
+function runtimeToolLabel(
+  tool: AgentRuntimeTool,
+  state: { active: boolean; failed: boolean }
+) {
   const labels = toolLabels[tool.toolName] ?? {
-    running: "正在执行任务...",
+    running: "正在执行任务",
     done: "任务已完成",
     failed: "任务未完成",
   }
-  if (tool.stage === "retrying") return "任务暂时中断，正在重试..."
-  if (tool.stage === "failed" || tool.stage === "rejected" || tool.isError) {
-    return labels.failed
-  }
+  if (state.failed) return labels.failed
   if (tool.stage === "cancelled") return "任务已取消"
   if (tool.stage === "completed" || tool.stage === "recovered") {
     return labels.done
   }
-  return labels.running
+  if (tool.stage === "retrying") return "任务暂时中断，正在重试…"
+  return state.active ? `${labels.running}…` : labels.failed
 }
 
 export function AgentFailureNotice({

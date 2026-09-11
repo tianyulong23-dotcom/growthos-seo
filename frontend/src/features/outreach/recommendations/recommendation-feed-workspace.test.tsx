@@ -78,7 +78,9 @@ const project: OutreachProject = {
   inputRequired: [],
 }
 
-const response: RecommendationFeedResponse = {
+const response: RecommendationFeedResponse & {
+  latestGeneration: NonNullable<RecommendationFeedResponse["latestGeneration"]>
+} = {
   items: [
     {
       itemId: "00000000-0000-4000-8000-000000000001",
@@ -150,7 +152,7 @@ const response: RecommendationFeedResponse = {
   },
 }
 
-const completedResponse: RecommendationFeedResponse = {
+const completedResponse: typeof response = {
   ...response,
   latestGeneration: {
     ...response.latestGeneration,

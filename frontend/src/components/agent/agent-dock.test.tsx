@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
@@ -7,7 +13,9 @@ import {
   AgentFailureNotice,
   AgentMessageContent,
   AgentRuntimeProgress,
+  AgentScrollViewport,
   AgentTimelineItem,
+  AgentTypingIndicator,
 } from "@/components/agent/agent-dock"
 import {
   conversationTimelineItems,
@@ -58,6 +66,39 @@ function timelineEvent(
 }
 
 describe("durable Agent timeline", () => {
+  it("stops following new updates after the user scrolls away from the bottom", () => {
+    const { rerender } = render(
+      <AgentScrollViewport followVersion="first" data-testid="agent-viewport">
+        <div>第一条</div>
+      </AgentScrollViewport>
+    )
+    const viewport = screen.getByTestId("agent-viewport")
+    const scrollTo = vi.fn()
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1000 },
+      scrollTop: { configurable: true, writable: true, value: 200 },
+      scrollTo: { configurable: true, value: scrollTo },
+    })
+
+    fireEvent.scroll(viewport)
+    rerender(
+      <AgentScrollViewport followVersion="second" data-testid="agent-viewport">
+        <div>第二条</div>
+      </AgentScrollViewport>
+    )
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    viewport.scrollTop = 600
+    fireEvent.scroll(viewport)
+    rerender(
+      <AgentScrollViewport followVersion="third" data-testid="agent-viewport">
+        <div>第三条</div>
+      </AgentScrollViewport>
+    )
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "auto" })
+  })
+
   it("does not duplicate the fallback welcome once onboarding events exist", () => {
     const items = conversationTimelineItems([], [timelineEvent()])
 
@@ -136,23 +177,65 @@ describe("durable Agent timeline", () => {
   ] as const)("renders the %s task state", (status, label) => {
     render(<AgentTimelineItem event={timelineEvent({ status })} />)
 
-    expect(screen.getByLabelText(label)).toBeTruthy()
-    expect(screen.getByText("通用时间线事件")).toBeTruthy()
+    expect(
+      screen.getByText("通用时间线事件").closest('[data-slot="badge"]')
+    ).toBeNull()
+    expect(screen.getByText(label).closest('[data-slot="badge"]')).toBeTruthy()
+  })
+
+  it("compresses ordinary onboarding progress into one status badge", () => {
+    const { rerender } = render(
+      <AgentTimelineItem
+        event={timelineEvent({
+          eventKey: "onboarding:site-entry:run-1",
+          title: "检查网站入口",
+          status: "running",
+          content: "正在检查网站是否可以正常访问。",
+        })}
+      />
+    )
+
+    expect(
+      screen.getByText("检查网站入口…").closest('[data-slot="badge"]')
+    ).toBeTruthy()
+    expect(screen.queryByText("进行中")).toBeNull()
+    expect(screen.queryByText(/正在检查网站是否/)).toBeNull()
+
+    rerender(
+      <AgentTimelineItem
+        event={timelineEvent({
+          eventKey: "onboarding:site-entry:run-1",
+          title: "检查网站入口",
+          status: "completed",
+          content: "网站入口已经确认。",
+        })}
+      />
+    )
+    expect(
+      screen.getByText("检查网站入口").closest('[data-slot="badge"]')
+    ).toBeTruthy()
+    expect(screen.queryByText("已完成")).toBeNull()
+    expect(screen.queryByText("网站入口已经确认。")).toBeNull()
   })
 
   it("labels a usable partial onboarding result as partially completed", () => {
     render(
       <AgentTimelineItem
         event={timelineEvent({
+          eventKey: "onboarding:keyword_library",
           title: "关键词库",
           status: "completed",
+          content: "关键词库已经建立。",
           metadata: { source_status: "partial" },
         })}
       />
     )
 
     expect(screen.getByLabelText("关键词库，部分完成")).toBeTruthy()
-    expect(screen.getByText("部分完成")).toBeTruthy()
+    expect(
+      screen.getByText("关键词库（部分完成）").closest('[data-slot="badge"]')
+    ).toBeTruthy()
+    expect(screen.queryByText("关键词库已经建立。")).toBeNull()
   })
 
   it("shows the confirmation action only while the event is waiting", () => {
@@ -163,12 +246,30 @@ describe("durable Agent timeline", () => {
     }
     const { rerender } = render(
       <AgentTimelineItem
-        event={timelineEvent({ kind: "action", status: "waiting", action })}
+        event={timelineEvent({
+          eventKey: "onboarding:business-confirmation",
+          kind: "action",
+          status: "waiting",
+          title: "确认业务资料",
+          content: "请重点确认主要客户，以及客户选择你的原因是否准确。",
+          action,
+        })}
         onNavigate={navigate}
       />
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "确认业务资料" }))
+    expect(
+      screen.getByText(/请重点确认主要客户/).closest('[data-slot="badge"]')
+    ).toBeNull()
+    const confirmationButton = screen.getByRole("button", {
+      name: "确认业务资料",
+    })
+    expect(confirmationButton.className).toContain("h-9")
+    expect(confirmationButton.className).toContain("bg-primary")
+    expect(confirmationButton.className).not.toContain("w-full")
+    expect(confirmationButton.querySelector("svg")).toBeNull()
+
+    fireEvent.click(confirmationButton)
     expect(navigate).toHaveBeenCalledWith(
       "/projects/project-1/settings/business"
     )
@@ -176,14 +277,21 @@ describe("durable Agent timeline", () => {
     rerender(
       <AgentTimelineItem
         event={timelineEvent({
+          eventKey: "onboarding:business-confirmation",
           kind: "action",
           status: "completed",
+          title: "确认业务资料",
+          content: "业务资料已经确认，后续任务会以这份资料为准。",
           action: {},
         })}
         onNavigate={navigate}
       />
     )
     expect(screen.queryByRole("button", { name: "确认业务资料" })).toBeNull()
+    expect(screen.queryByText(/后续任务会以这份资料为准/)).toBeNull()
+    expect(
+      screen.getByText("确认业务资料").closest('[data-slot="badge"]')
+    ).toBeTruthy()
   })
 
   it("retries failed website understanding from the failed timeline step", async () => {
@@ -191,8 +299,10 @@ describe("durable Agent timeline", () => {
     render(
       <AgentTimelineItem
         event={timelineEvent({
+          eventKey: "onboarding:core-pages:run-1",
           status: "failed",
           title: "读取核心页面",
+          content: "读取核心页面失败，请重试。",
           metadata: { source: "site_understanding" },
         })}
         onRetry={retry}
@@ -201,6 +311,7 @@ describe("durable Agent timeline", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "重新识别" }))
 
+    expect(screen.getByText("读取核心页面失败，请重试。")).toBeTruthy()
     expect(retry).toHaveBeenCalledOnce()
   })
 
@@ -253,10 +364,11 @@ describe("durable Agent timeline", () => {
     expect(screen.getByRole("button", { name: "重试任务" })).toBeTruthy()
   })
 
-  it("groups task findings separately from the compact status badge", () => {
+  it("renders the completed business understanding as a normal assistant message", () => {
     render(
       <AgentTimelineItem
         event={timelineEvent({
+          eventKey: "onboarding:business-understanding:run-1",
           status: "completed",
           title: "业务理解",
           content: "我目前对这个网站的判断：\n\n- **业务定位**：SEO 软件",
@@ -264,10 +376,8 @@ describe("durable Agent timeline", () => {
       />
     )
 
-    expect(screen.getByLabelText("业务理解，已完成")).toBeTruthy()
-    expect(
-      screen.getByText("已完成").closest('[data-slot="badge"]')
-    ).toBeTruthy()
+    expect(screen.queryByText("业务理解")).toBeNull()
+    expect(screen.queryByText("已完成")).toBeNull()
     expect(screen.getByLabelText("业务理解结果")).toBeTruthy()
     expect(screen.getByText("业务定位")).toBeTruthy()
   })
@@ -351,6 +461,64 @@ describe("AgentMessageContent", () => {
       screen.getByText("这项判断需要确认。").closest("blockquote")
     ).toBeTruthy()
   })
+
+  it("matches the OpenSEO heading hierarchy and compact spacing", () => {
+    const { container } = render(
+      <AgentMessageContent
+        content={[
+          "# 一级标题",
+          "",
+          "#### 四级标题",
+          "",
+          "- 第一项",
+          "- 第二项",
+        ].join("\n")}
+      />
+    )
+
+    expect(container.querySelector("h1")?.className).toContain("text-base")
+    expect(container.querySelector("h4")?.className).toContain("text-sm")
+    expect(container.querySelector("ul")?.className).toContain("my-2")
+    expect(container.querySelector("ul")?.className).toContain("space-y-1")
+  })
+})
+
+describe("Agent text presentation", () => {
+  it("shows the OpenSEO-style typing dots before visible content", () => {
+    render(<AgentTypingIndicator />)
+
+    expect(
+      screen.getByLabelText("Agent 正在输入").firstElementChild?.children
+    ).toHaveLength(3)
+  })
+
+  it("removes empty Markdown noise without delaying the real content", () => {
+    render(
+      <AgentMessageContent
+        content={"第一段。\n\n\\\n\n&#x20;\n\n&nbsp;\n\n第二段。"}
+      />
+    )
+
+    expect(screen.getByText("第一段。")).toBeTruthy()
+    expect(screen.getByText("第二段。")).toBeTruthy()
+    expect(screen.queryByText("\\")).toBeNull()
+    expect(screen.queryByText("&#x20;")).toBeNull()
+  })
+
+  it("uses the same compact table structure as OpenSEO", () => {
+    const { container } = render(
+      <AgentMessageContent
+        content={"| 项目 | 状态 |\n| --- | --- |\n| 审核 | 完成 |"}
+      />
+    )
+
+    expect(container.querySelectorAll("table")).toHaveLength(1)
+    expect(
+      container.querySelector("table")?.parentElement?.className
+    ).toContain("my-3 overflow-x-auto")
+    expect(container.querySelector("th")?.className).toContain("px-2 py-1.5")
+    expect(container.querySelector("td")?.className).toContain("align-top")
+  })
 })
 
 describe("AgentRuntimeProgress", () => {
@@ -377,8 +545,7 @@ describe("AgentRuntimeProgress", () => {
 
     const heading = container.querySelector("h1")
     expect(heading?.textContent).toBe("技术审核")
-    expect(heading?.className).toContain("text-sm")
-    expect(heading?.className).not.toContain("text-base")
+    expect(heading?.className).toContain("text-base")
   })
 
   it("keeps completed runtime headings stable until the persisted reply replaces them", () => {
@@ -404,8 +571,7 @@ describe("AgentRuntimeProgress", () => {
 
     const heading = container.querySelector("h1")
     expect(heading?.textContent).toBe("技术审核")
-    expect(heading?.className).toContain("text-sm")
-    expect(heading?.className).not.toContain("text-base")
+    expect(heading?.className).toContain("text-base")
   })
 
   it("renders settled final text as Markdown", () => {
@@ -452,7 +618,7 @@ describe("AgentRuntimeProgress", () => {
       />
     )
 
-    expect(screen.getByText("正在读取技术审核...")).toBeTruthy()
+    expect(screen.getByText("正在读取技术审核…")).toBeTruthy()
     expect(screen.queryByText("第 2 轮")).toBeNull()
     expect(screen.queryByText(/内部数据/)).toBeNull()
     expect(screen.queryByText(/第 2 次尝试/)).toBeNull()
@@ -481,7 +647,7 @@ describe("AgentRuntimeProgress", () => {
 
     expect(screen.queryByText("任务已完成")).toBeNull()
     expect(screen.queryByText("内部上下文整理完成")).toBeNull()
-    expect(screen.getByText("正在处理任务...")).toBeTruthy()
+    expect(screen.getByLabelText("Agent 正在输入")).toBeTruthy()
   })
 
   it("does not duplicate a typing indicator beside visible tool progress", () => {
@@ -619,6 +785,31 @@ describe("AgentRuntimeProgress", () => {
 
     expect(screen.getByText("技术审核读取未完成")).toBeTruthy()
     expect(screen.queryByText(/SQLSTATE|password|internal failure/)).toBeNull()
+  })
+
+  it("marks an unfinished tool as failed after the Agent stops", () => {
+    const { container } = render(
+      <AgentRuntimeProgress
+        runtime={runtime({
+          agentStatus: "failed",
+          tools: [
+            {
+              toolCallId: "tool-interrupted",
+              toolName: "get_latest_audit",
+              attempt: 1,
+              stage: "running",
+              isError: false,
+              summary: "",
+              errorCode: "",
+              retryable: false,
+            },
+          ],
+        })}
+      />
+    )
+
+    expect(screen.getByText("技术审核读取未完成")).toBeTruthy()
+    expect(container.querySelector(".animate-spin")).toBeNull()
   })
 
   it("does not present a cancelled tool as completed", () => {
@@ -761,6 +952,75 @@ describe("AgentAssistantMessage", () => {
     expect(container.textContent).toBe(
       "我先读取项目资料。项目资料已读取资料准确，但还不完整。"
     )
+  })
+
+  it("copies visible text parts without tool labels", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    })
+    const message = assistantMessage({
+      display_parts: [
+        { type: "text", text: "第一段" },
+        {
+          type: "tool",
+          tool_call_id: "profile-1",
+          tool: "get_project_profile",
+          label: "项目资料已读取",
+          status: "completed",
+        },
+        { type: "text", text: "第二段" },
+      ],
+    })
+
+    render(<AgentAssistantMessage message={message} />)
+    fireEvent.click(screen.getByRole("button", { name: "复制消息" }))
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("第一段\n第二段")
+    )
+    expect(screen.getByRole("button", { name: "复制消息" }).title).toBe("复制")
+  })
+
+  it("does not show copy success when clipboard access fails", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"))
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    })
+
+    render(<AgentAssistantMessage message={assistantMessage({}, "最终结论")} />)
+    const copyButton = screen.getByRole("button", { name: "复制消息" })
+    fireEvent.click(copyButton)
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("最终结论"))
+    expect(copyButton.querySelector('[class*="lucide-check"]')).toBeNull()
+  })
+
+  it("hides message actions while the assistant message is streaming", () => {
+    render(
+      <AgentAssistantMessage
+        message={{ ...assistantMessage({}, "正在回答"), streaming: true }}
+      />
+    )
+
+    expect(screen.queryByRole("button", { name: "复制消息" })).toBeNull()
+  })
+
+  it("shows typing dots when a streaming message only contains display noise", () => {
+    render(
+      <AgentAssistantMessage
+        message={{
+          ...assistantMessage({}, "\\\n\n&#x20;"),
+          streaming: true,
+        }}
+      />
+    )
+
+    expect(screen.getByLabelText("Agent 正在输入")).toBeTruthy()
+    expect(screen.queryByText("\\")).toBeNull()
+    expect(screen.queryByText("&#x20;")).toBeNull()
   })
 
   it("falls back to legacy progress followed by message content", () => {
@@ -971,6 +1231,29 @@ describe("hasVisibleAssistantReply", () => {
     ).toBe(false)
     expect(
       hasVisibleAssistantReply([assistantMessage("run-1", "")], "run-1")
+    ).toBe(false)
+  })
+
+  it("does not treat Markdown spacing noise as a visible reply", () => {
+    expect(
+      hasVisibleAssistantReply(
+        [assistantMessage("run-1", "\\\n\n&#x20;\n\n&nbsp;")],
+        "run-1"
+      )
+    ).toBe(false)
+
+    expect(
+      hasVisibleAssistantReply(
+        [
+          {
+            ...assistantMessage("run-1", ""),
+            metadata: {
+              display_parts: [{ type: "text", text: "\\\n\n&#x20;" }],
+            },
+          },
+        ],
+        "run-1"
+      )
     ).toBe(false)
   })
 })
