@@ -5,6 +5,7 @@ import {
   selectCommercialCandidateEnrichment,
 } from "../../src/modules/backlinks/domain/recommendations/commercial-candidate-enrichment.js";
 import {
+  applyCommercialCandidateAdmissionThreshold,
   evaluateCommercialCandidate,
   type CommercialCandidateBusinessFacts,
   type CommercialCandidateProviderFacts,
@@ -201,6 +202,37 @@ describe("commercial candidate evidence enrichment", () => {
       "gate.mega_platform_without_placement_evidence",
     );
     expect(unresolvedHardGate.state).toBe("insufficient_data");
+  });
+
+  it("preserves a candidate's progressive admission threshold after enrichment", () => {
+    const original = candidate("progressive.example");
+    const progressivelyAdmitted = Object.freeze({
+      ...original,
+      commercialScore: applyCommercialCandidateAdmissionThreshold(
+        original.commercialScore,
+        40,
+      ),
+    });
+
+    const finalized = finalizeCommercialCandidateEnrichment({
+      candidate: progressivelyAdmitted,
+      metrics: {
+        ...completeMetrics,
+        trafficOrganicEtv: provider.traffic,
+        spamScore: provider.spamScore,
+        authorityRank: provider.rank,
+      },
+      qualificationDecision: "eligible",
+    });
+
+    expect(finalized.commercialScore.total).toBe(48.3333);
+    expect(finalized.commercialScore.admission).toMatchObject({
+      baselineThreshold: 50,
+      appliedThreshold: 40,
+      fallbackApplied: true,
+    });
+    expect(finalized.commercialScore.decision).toBe("eligible");
+    expect(finalized.state).toBe("candidate_ready");
   });
 
   it("keeps complete candidates below 50 and incomplete candidates unpublished", () => {

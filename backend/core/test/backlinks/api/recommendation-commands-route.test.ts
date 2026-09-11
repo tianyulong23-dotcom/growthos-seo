@@ -234,6 +234,7 @@ describe("BL-AI-063 recommendation command APIs", () => {
               archivedGeneration: 1,
               nextGeneration: 2,
               archivedCount: 20,
+              preparedCandidateCount: 8,
               state: "awaiting_refresh",
               version: 2,
               lifecycleEventId: "life-archive",
@@ -273,6 +274,7 @@ describe("BL-AI-063 recommendation command APIs", () => {
       archivedGeneration: 1,
       nextGeneration: 2,
       archivedCount: 20,
+      preparedCandidateCount: 8,
       state: "awaiting_refresh",
       replayed: false,
     });

@@ -23,11 +23,7 @@ import {
 export type GoogleAuthLibraryClientOptions = Readonly<{
   clientId: string;
   clientSecret: string;
-  providerConnectivityProbe?: () => Promise<void>;
 }>;
-
-const googleOAuthTokenEndpoint = "https://oauth2.googleapis.com/token";
-const googleOAuthProbeTimeoutMs = 5_000;
 
 const transportCode = (error: unknown): string | undefined => {
   if (typeof error !== "object" || error === null) return undefined;
@@ -169,40 +165,6 @@ const requireText = (
   return value;
 };
 
-const probeGoogleOAuthProvider = async (): Promise<void> => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), googleOAuthProbeTimeoutMs);
-  try {
-    const response = await fetch(googleOAuthTokenEndpoint, {
-      method: "HEAD",
-      redirect: "manual",
-      signal: controller.signal,
-    });
-    if (response.status === 429 || response.status >= 500) {
-      throw Object.assign(
-        new Error(`Google OAuth probe returned HTTP ${response.status}.`),
-        {
-          response: {
-            status: response.status,
-            headers: Object.fromEntries(response.headers.entries()),
-            data: {},
-          },
-        },
-      );
-    }
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw Object.assign(
-        new Error("Google OAuth provider connectivity probe timed out."),
-        { code: "ETIMEDOUT" },
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-};
-
 const tokenSet = async (
   client: OAuth2Client,
   credentials: Credentials,
@@ -235,7 +197,6 @@ const tokenSet = async (
 export class GoogleAuthLibraryClient implements GoogleAuthClient {
   readonly #clientId: string;
   readonly #clientSecret: string;
-  readonly #providerConnectivityProbe: () => Promise<void>;
 
   constructor(options: GoogleAuthLibraryClientOptions) {
     if (
@@ -246,15 +207,12 @@ export class GoogleAuthLibraryClient implements GoogleAuthClient {
     }
     this.#clientId = options.clientId;
     this.#clientSecret = options.clientSecret;
-    this.#providerConnectivityProbe =
-      options.providerConnectivityProbe ?? probeGoogleOAuthProvider;
   }
 
   async createAuthorizationUrl(
     input: GoogleAuthRequestInput,
   ): Promise<GoogleAuthRequestResult> {
     try {
-      await this.#providerConnectivityProbe();
       const client = this.client(input.redirectUri);
       return {
         authorizationUrl: client.generateAuthUrl({

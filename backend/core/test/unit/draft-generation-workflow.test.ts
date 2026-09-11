@@ -200,23 +200,25 @@ const createRepository = () => {
 };
 
 describe("BACKLINKS-CORE-REMEDIATION-PHASE-7 Draft recovery workflow", () => {
-  it("fails MODEL mode explicitly when no AI provider is configured", async () => {
+  it("creates a labelled basic draft when MODEL mode has no AI provider", async () => {
     const fake = createRepository();
 
     await expect(runDraftGenerationWorkflow(
       workflowInput,
       fake.repository,
       null,
-    )).rejects.toMatchObject({
-      name: "AiDraftError",
-      code: "MISCONFIGURED",
-      retryable: false,
+    )).resolves.toMatchObject({
+      outcome: "completed_with_basic_draft",
+      versionId: "version-1",
     });
-    expect(fake.completed).toHaveLength(0);
-    expect(fake.failed).toMatchObject([{
-      errorCode: "MISCONFIGURED",
-      diagnosticCode: null,
+    expect(fake.completed).toMatchObject([{
+      source: "TEMPLATE_FALLBACK",
+      fallbackReason: "MISCONFIGURED",
+      result: {
+        model: { providerRef: "template-fallback" },
+      },
     }]);
+    expect(fake.failed).toHaveLength(0);
   });
 
   it("retries malformed output once, then preserves the provider failure", async () => {

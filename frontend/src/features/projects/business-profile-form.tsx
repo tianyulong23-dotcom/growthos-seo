@@ -1,5 +1,6 @@
 import * as React from "react"
-import { Check, LoaderCircle, RefreshCw } from "lucide-react"
+import { Check, Globe2, LoaderCircle, RefreshCw, Save } from "lucide-react"
+import "./business-profile-form.css"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -77,6 +78,7 @@ export function BusinessProfileForm({
   const [startingRefresh, setStartingRefresh] = React.useState(false)
   const confirmed = saved || Boolean(profile?.confirmedAt)
   const syncedProjectId = React.useRef(project.id)
+  const editedFields = React.useRef(new Set<string>())
   const syncedRunId = React.useRef(
     project.understandingStatus === "completed" ||
       project.understandingStatus === "partial"
@@ -91,7 +93,7 @@ export function BusinessProfileForm({
     project.understandingStatus === "completed"
       ? "AI 已完成识别，可检查并修改。"
       : project.understandingStatus === "partial"
-        ? "AI 已生成可用资料，建议检查后再使用。"
+        ? "已生成部分资料，请检查并补充。"
         : project.understandingStatus === "failed"
           ? "上次识别失败，当前资料仍可修改。"
           : "AI 正在重新识别，完成后会更新这些资料。"
@@ -106,12 +108,19 @@ export function BusinessProfileForm({
       return
     }
 
-    setBusinessName(profile?.businessName || project.name)
-    setBusinessType(profile?.businessType ?? "")
-    setBusinessSummary(profile?.businessSummary ?? "")
-    setTargetAudiences(valuesToLines(profile?.targetAudiences ?? []))
-    setProductsServices(valuesToLines(profile?.productsServices ?? []))
-    setValuePropositions(valuesToLines(profile?.valuePropositions ?? []))
+    if (projectChanged) editedFields.current.clear()
+    if (!editedFields.current.has("businessName"))
+      setBusinessName(profile?.businessName || project.name)
+    if (!editedFields.current.has("businessType"))
+      setBusinessType(profile?.businessType ?? "")
+    if (!editedFields.current.has("businessSummary"))
+      setBusinessSummary(profile?.businessSummary ?? "")
+    if (!editedFields.current.has("targetAudiences"))
+      setTargetAudiences(valuesToLines(profile?.targetAudiences ?? []))
+    if (!editedFields.current.has("productsServices"))
+      setProductsServices(valuesToLines(profile?.productsServices ?? []))
+    if (!editedFields.current.has("valuePropositions"))
+      setValuePropositions(valuesToLines(profile?.valuePropositions ?? []))
     setSaved(false)
     setError("")
     syncedProjectId.current = project.id
@@ -175,28 +184,36 @@ export function BusinessProfileForm({
   }
 
   return (
-    <form className="max-w-4xl" onSubmit={handleSubmit}>
-      <section className="space-y-6 pb-8">
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold">业务信息</h2>
-            <Badge variant={confirmed ? "secondary" : "outline"}>
-              {confirmed && <Check />}
-              {confirmed ? "已确认" : "待确认"}
-            </Badge>
-          </div>
-          <p className="text-sm text-muted-foreground">{project.domain}</p>
-          <p className="text-xs text-muted-foreground">
-            {recognitionDescription}
-          </p>
-          {showRecognitionMessage && (
-            <p className="text-sm text-muted-foreground">
-              {project.understandingMessage}
+    <form className="business-profile-editor" onSubmit={handleSubmit}>
+      <section className="profile-fields">
+        <div className="profile-heading">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-lg font-semibold">业务信息</h2>
+              <Badge variant={confirmed ? "secondary" : "outline"}>
+                {confirmed && <Check />}
+                {confirmed ? "已确认" : "待确认"}
+              </Badge>
+            </div>
+            <p className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Globe2 className="size-3.5" />
+              {project.domain}
             </p>
-          )}
+          </div>
+          <div className="min-w-0 space-y-1">
+            <p className="text-xs text-muted-foreground">
+              {recognitionDescription}
+            </p>
+            {showRecognitionMessage && (
+              <p className="text-sm text-muted-foreground">
+                {project.understandingMessage}
+              </p>
+            )}
+          </div>
         </div>
 
-        <div data-slot="form-field" className="max-w-xl space-y-2">
+        <h3 className="profile-section-title">基本信息</h3>
+        <div data-slot="form-field" className="min-w-0 space-y-2">
           <Label htmlFor="business-name">
             企业 / 品牌名称
             <FieldStatus
@@ -208,13 +225,16 @@ export function BusinessProfileForm({
             id="business-name"
             aria-label="企业 / 品牌名称"
             value={businessName}
-            onChange={(event) => setBusinessName(event.target.value)}
+            onChange={(event) => {
+              editedFields.current.add("businessName")
+              setBusinessName(event.target.value)
+            }}
             disabled={busy}
             required
           />
         </div>
 
-        <div data-slot="form-field" className="max-w-xl space-y-2">
+        <div data-slot="form-field" className="min-w-0 space-y-2">
           <Label htmlFor="business-type">
             业务类型（选填）
             <FieldStatus
@@ -226,12 +246,15 @@ export function BusinessProfileForm({
             id="business-type"
             aria-label="业务类型"
             value={businessType}
-            onChange={(event) => setBusinessType(event.target.value)}
+            onChange={(event) => {
+              editedFields.current.add("businessType")
+              setBusinessType(event.target.value)
+            }}
             disabled={busy}
           />
         </div>
 
-        <div data-slot="form-field" className="space-y-2">
+        <div data-slot="form-field" className="profile-full-width space-y-2">
           <Label htmlFor="business-summary">
             公司简介
             <FieldStatus
@@ -243,13 +266,17 @@ export function BusinessProfileForm({
             id="business-summary"
             aria-label="公司简介"
             value={businessSummary}
-            onChange={(event) => setBusinessSummary(event.target.value)}
+            onChange={(event) => {
+              editedFields.current.add("businessSummary")
+              setBusinessSummary(event.target.value)
+            }}
             className="min-h-28 resize-y"
             disabled={busy}
           />
         </div>
 
-        <div data-slot="form-field" className="space-y-2">
+        <h3 className="profile-section-title">客户与产品</h3>
+        <div data-slot="form-field" className="min-w-0 space-y-2">
           <Label htmlFor="target-audiences">
             目标客户
             <FieldStatus
@@ -261,13 +288,16 @@ export function BusinessProfileForm({
             id="target-audiences"
             aria-label="目标客户"
             value={targetAudiences}
-            onChange={(event) => setTargetAudiences(event.target.value)}
+            onChange={(event) => {
+              editedFields.current.add("targetAudiences")
+              setTargetAudiences(event.target.value)
+            }}
             className="min-h-40 resize-y"
             disabled={busy}
           />
         </div>
 
-        <div data-slot="form-field" className="space-y-2">
+        <div data-slot="form-field" className="min-w-0 space-y-2">
           <Label htmlFor="products-services">
             产品与服务
             <FieldStatus
@@ -279,13 +309,16 @@ export function BusinessProfileForm({
             id="products-services"
             aria-label="产品与服务"
             value={productsServices}
-            onChange={(event) => setProductsServices(event.target.value)}
+            onChange={(event) => {
+              editedFields.current.add("productsServices")
+              setProductsServices(event.target.value)
+            }}
             className="min-h-40 resize-y"
             disabled={busy}
           />
         </div>
 
-        <div data-slot="form-field" className="space-y-2">
+        <div data-slot="form-field" className="profile-full-width space-y-2">
           <Label htmlFor="value-propositions">
             客户为什么选择您
             <FieldStatus
@@ -297,15 +330,19 @@ export function BusinessProfileForm({
             id="value-propositions"
             aria-label="客户为什么选择您"
             value={valuePropositions}
-            onChange={(event) => setValuePropositions(event.target.value)}
+            onChange={(event) => {
+              editedFields.current.add("valuePropositions")
+              setValuePropositions(event.target.value)
+            }}
             className="min-h-36 resize-y"
             disabled={busy}
           />
         </div>
       </section>
 
-      <div className="mt-8 flex flex-wrap items-center gap-3 border-t pt-6">
+      <div className="profile-actions">
         <Button
+          className="order-2 rounded-md"
           type="submit"
           disabled={busy || !businessName.trim()}
         >
@@ -313,13 +350,16 @@ export function BusinessProfileForm({
             <LoaderCircle className="animate-spin" />
           ) : saved ? (
             <Check />
-          ) : null}
+          ) : (
+            <Save />
+          )}
           {saving ? "保存中..." : saved ? "已确认" : submitLabel}
         </Button>
         {onRefresh && (
           <Button
             type="button"
             variant="outline"
+            className="rounded-md"
             disabled={busy}
             onClick={handleRefresh}
           >
@@ -331,7 +371,11 @@ export function BusinessProfileForm({
             {refreshing || startingRefresh ? "正在重新识别" : "重新识别"}
           </Button>
         )}
-        {error && <span className="text-sm text-destructive">{error}</span>}
+        {error && (
+          <span role="alert" className="w-full text-sm text-destructive">
+            {error}
+          </span>
+        )}
       </div>
     </form>
   )

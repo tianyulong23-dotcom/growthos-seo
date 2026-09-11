@@ -279,13 +279,18 @@ def validate_temporal_registry(document: dict[str, Any]) -> list[str]:
             if (
                 not isinstance(workflow_type, str)
                 or not workflow_type.startswith(module_id)
-                or not workflow_type.endswith("V1Workflow")
+                or re.search(r"V[1-9][0-9]*Workflow$", workflow_type) is None
             ):
                 errors.append(f"{module_id} Workflow type is not namespaced and versioned")
             if workflow_type in workflow_types:
                 errors.append(f"Workflow type is shared: {workflow_type}")
             workflow_types.add(workflow_type)
-            if not workflow_id_pattern.startswith(workflow_id_prefix):
+            expected_prefix = (
+                f"{module_id}:<organizationId>:<workspaceId>:<websiteProjectId>:"
+                if workflow_type == "backlinksRecommendationPoolV2Workflow"
+                else workflow_id_prefix
+            )
+            if not workflow_id_pattern.startswith(expected_prefix):
                 errors.append(f"{module_id} Workflow ID is not module-namespaced")
             if workflow.get("replayPolicy") != "deterministic":
                 errors.append(f"{module_id} Workflow replay policy is not deterministic")

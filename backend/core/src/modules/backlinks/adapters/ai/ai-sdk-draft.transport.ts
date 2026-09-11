@@ -221,6 +221,16 @@ export const mapAiSdkProviderError = (error: unknown): AiDraftError => {
     Number(candidate.statusCode),
   ]).filter(Number.isFinite);
   const diagnosticCode = safeProviderDiagnosticCode(chain, statuses);
+  if (messages.some((message) =>
+    /model.*(?:not supported|not found|does not exist|do not have access)/iu.test(message)
+  )) {
+    return new AiDraftError({
+      code: "MISCONFIGURED",
+      message: "AI Draft model is not supported by the configured provider account.",
+      retryable: false,
+      diagnosticCode: "PROVIDER_MODEL_UNSUPPORTED",
+    });
+  }
   if (
     names.some((name) => name === "AbortError" || name === "TimeoutError")
     || codes.some((code) =>
@@ -273,6 +283,9 @@ export const normalizeOpenAiCompatibleRequestBody = (
 ): unknown => {
   if (!isJsonObject(value)) return value;
   const normalized: JsonObject = { ...value };
+  if (typeof normalized.model === "string" && normalized.model.startsWith("gpt-5")) {
+    normalized.reasoning_effort ??= "low";
+  }
   if (
     normalized.max_tokens === undefined
     && typeof normalized.max_completion_tokens === "number"

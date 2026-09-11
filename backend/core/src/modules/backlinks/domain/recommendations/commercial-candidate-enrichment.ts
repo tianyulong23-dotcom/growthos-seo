@@ -1,4 +1,5 @@
 import {
+  applyCommercialCandidateAdmissionThreshold,
   evaluateCommercialCandidate,
   type CommercialCandidateBusinessFacts,
   type CommercialCandidateFitDecision,
@@ -223,11 +224,14 @@ export function finalizeCommercialCandidateEnrichment(
       ]),
     ]),
   });
-  const rescored = evaluateCommercialCandidate({
-    business: input.candidate.business,
-    provider,
-    staticAssessment: input.candidate.staticAssessment,
-  });
+  const rescored = applyCommercialCandidateAdmissionThreshold(
+    evaluateCommercialCandidate({
+      business: input.candidate.business,
+      provider,
+      staticAssessment: input.candidate.staticAssessment,
+    }),
+    input.candidate.commercialScore.admission.appliedThreshold,
+  );
   const scoredWithEvidence = withMetricEvidence(rescored, input.metrics);
   if (
     input.qualificationDecision === "insufficient_data"
@@ -255,7 +259,8 @@ export function finalizeCommercialCandidateEnrichment(
   }
   if (
     scoredWithEvidence.decision === "eligible"
-    && (scoredWithEvidence.total ?? 0) >= commercialFitBaselineAdmissionThreshold
+    && (scoredWithEvidence.total ?? 0)
+      >= scoredWithEvidence.admission.appliedThreshold
   ) {
     return Object.freeze({
       state: "candidate_ready",

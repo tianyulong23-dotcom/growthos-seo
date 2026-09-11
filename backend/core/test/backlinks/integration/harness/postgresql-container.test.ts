@@ -29,8 +29,10 @@ describe("BL-AI-035 PostgreSQL Testcontainers harness", () => {
     harness = undefined;
   });
 
-  it("starts, migrates, and destroys an isolated PostgreSQL container", async () => {
+  it("starts, migrates, and destroys isolated PostgreSQL", async () => {
     const previousDatabaseUrl = process.env.BACKLINKS_TEST_DATABASE_URL;
+    const externalAdminUrl =
+      process.env.BACKLINKS_TEST_POSTGRES_ADMIN_URL?.trim();
     process.env.BACKLINKS_TEST_DATABASE_URL =
       "postgresql://must-not-connect@127.0.0.1:5432/production";
 
@@ -45,10 +47,15 @@ describe("BL-AI-035 PostgreSQL Testcontainers harness", () => {
     }
 
     const url = new URL(harness.connectionString);
-    expect(url.port).not.toBe("5432");
-    expect(harness.image).toMatch(
-      /^postgres:18-bookworm@sha256:[a-f0-9]{64}$/,
-    );
+    if (externalAdminUrl) {
+      expect(url.port).toBe(new URL(externalAdminUrl).port);
+      expect(harness.image).toBe("external-postgresql");
+    } else {
+      expect(url.port).not.toBe("5432");
+      expect(harness.image).toMatch(
+        /^postgres:18-bookworm@sha256:[a-f0-9]{64}$/,
+      );
+    }
 
     await harness.migrate();
     const client = new Client({

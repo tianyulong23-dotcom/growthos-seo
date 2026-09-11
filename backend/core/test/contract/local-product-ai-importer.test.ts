@@ -198,7 +198,16 @@ describe("LOCAL_PRODUCT AI credential importer", () => {
       ...["backlinks-api.env", "backlinks-worker.env"].map((name) =>
         writeFile(
           join(runtimeRoot, name),
-          "BACKLINKS_RUNTIME_MODE=LOCAL_PRODUCT\nAI_PROVIDER_ENABLED=true\n",
+          [
+            "BACKLINKS_RUNTIME_MODE=LOCAL_PRODUCT",
+            "AI_PROVIDER_ENABLED=true",
+            "OUTBOUND_PROXY_MODE=explicit",
+            "HTTP_PROXY=http://127.0.0.1:33210",
+            "HTTPS_PROXY=http://127.0.0.1:33210",
+            "NO_PROXY=localhost,127.0.0.1",
+            "NODE_USE_ENV_PROXY=1",
+            "",
+          ].join("\n"),
           "utf8",
         )),
     ]);
@@ -215,8 +224,10 @@ describe("LOCAL_PRODUCT AI credential importer", () => {
       aiProviderEnabled: true,
     });
     for (const name of ["backlinks-api.env", "backlinks-worker.env"]) {
-      expect(await readFile(join(runtimeRoot, name), "utf8")).toContain(
-        "AI_PROVIDER_ENABLED=true",
+      const environment = await readFile(join(runtimeRoot, name), "utf8");
+      expect(environment).toContain("AI_PROVIDER_ENABLED=true");
+      expect(environment).not.toMatch(
+        /^(?:OUTBOUND_PROXY_MODE|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|NODE_USE_ENV_PROXY)=/mu,
       );
     }
   });

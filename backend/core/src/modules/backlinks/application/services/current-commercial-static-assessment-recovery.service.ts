@@ -312,6 +312,7 @@ export async function recoverCurrentCommercialStaticAssessments(
         refillTier: candidate.refillTier,
         locale: candidate.locale,
         countryCode: candidate.countryCode,
+        visiblePoolGeneration: input.visiblePoolGeneration,
       });
       const persisted = await client.query(
         `UPDATE backlink_commercial_candidates AS candidate

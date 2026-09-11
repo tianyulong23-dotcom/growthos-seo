@@ -15,13 +15,12 @@ import {
   reassessHistoricalCommercialCandidate,
   type HistoricalCommercialReassessment,
 } from "../../domain/recommendations/historical-commercial-reassessment.js";
+import { guardV1RecommendationPoolProjectWrites } from "../../domain/recommendations/recommendation-pool-contract-guard.js";
 import {
   queueHistoricalContactEnrichmentJobs,
   type HistoricalContactEnrichmentQueueSummary,
 } from "../commands/contact-enrichment.command.js";
-import {
-  synchronizeRecommendationContactState,
-} from "./recommendation-contact-synchronization.service.js";
+import { synchronizeRecommendationContactState } from "./recommendation-contact-synchronization.service.js";
 
 type HistoricalCandidateRow = Readonly<{
   id: string;
@@ -117,30 +116,25 @@ export function decideRefillPolicyRecovery(
       reason: "TIERS_EXHAUSTED_PRESERVED",
     });
   }
-  if (
-    policy.activeJob
-    || policy.activeBatch
-    || policy.pendingRefillOutbox
-  ) {
+  if (policy.activeJob || policy.activeBatch || policy.pendingRefillOutbox) {
     return Object.freeze({ recover: false, reason: "ACTIVE_WORK" });
   }
-  if (
-    policy.paidRefillTier === null
-    || policy.paidRefillRound === null
-  ) {
+  if (policy.paidRefillTier === null || policy.paidRefillRound === null) {
     return Object.freeze({ recover: false, reason: "NO_PAID_CURSOR" });
   }
   if (policy.terminationReason === "BUDGET") {
-    const newBudgetPeriod = policy.budgetPeriodStart !== null
-      && Date.parse(policy.budgetPeriodStart) > Date.parse(policy.updatedAt);
+    const newBudgetPeriod =
+      policy.budgetPeriodStart !== null &&
+      Date.parse(policy.budgetPeriodStart) > Date.parse(policy.updatedAt);
     const remaining = policy.budgetRemainingMicros ?? 0;
     return newBudgetPeriod && remaining > 0
       ? Object.freeze({ recover: true, reason: "NEW_BUDGET_PERIOD" })
       : Object.freeze({ recover: false, reason: "SAME_BUDGET_PERIOD" });
   }
   if (policy.terminationReason === "PROVIDER_UNAVAILABLE") {
-    const recoveryDue = policy.nextRefillAt !== null
-      && Date.parse(policy.nextRefillAt) <= now.getTime();
+    const recoveryDue =
+      policy.nextRefillAt !== null &&
+      Date.parse(policy.nextRefillAt) <= now.getTime();
     return recoveryDue
       ? Object.freeze({ recover: true, reason: "PROVIDER_RECOVERY_DUE" })
       : Object.freeze({ recover: false, reason: "RECOVERY_NOT_DUE" });
@@ -148,9 +142,7 @@ export function decideRefillPolicyRecovery(
   return Object.freeze({ recover: false, reason: "NOT_RECOVERABLE" });
 }
 
-function candidateState(
-  score: HistoricalCommercialReassessment,
-): string {
+function candidateState(score: HistoricalCommercialReassessment): string {
   if (score.decision === "ineligible") return "excluded";
   if (score.decision === "insufficient_data") return "insufficient_data";
   if (score.decision === "manual_review") return "manual_review";
@@ -257,25 +249,27 @@ async function loadHistoricalCandidates(
                source.canonical_domain,source.id`,
     [commercialRecommendationFitModelVersion],
   );
-  return result.rows.map((row) => Object.freeze({
-    id: requiredText(row, "id"),
-    blueprintId: requiredText(row, "blueprintId"),
-    discoveryBatchId: requiredText(row, "discoveryBatchId"),
-    recommendationId: nullableText(row, "recommendationId"),
-    prospectId: nullableText(row, "prospectId"),
-    projectContextVersionId: requiredText(row, "projectContextVersionId"),
-    visiblePoolGeneration: Number(row.visiblePoolGeneration),
-    canonicalDomain: requiredText(row, "canonicalDomain"),
-    sourceTypes: row.sourceTypes,
-    staticAssessment: row.staticAssessment,
-    gateDecision: row.gateDecision,
-    commercialScore: row.commercialScore,
-    providerCollectedAt: nullableText(row, "providerCollectedAt"),
-    createdAt: requiredText(row, "createdAt"),
-    locale: requiredText(row, "locale"),
-    countryCode: requiredText(row, "countryCode"),
-    hasReusableContactEvidence: row.hasReusableContactEvidence === true,
-  }));
+  return result.rows.map((row) =>
+    Object.freeze({
+      id: requiredText(row, "id"),
+      blueprintId: requiredText(row, "blueprintId"),
+      discoveryBatchId: requiredText(row, "discoveryBatchId"),
+      recommendationId: nullableText(row, "recommendationId"),
+      prospectId: nullableText(row, "prospectId"),
+      projectContextVersionId: requiredText(row, "projectContextVersionId"),
+      visiblePoolGeneration: Number(row.visiblePoolGeneration),
+      canonicalDomain: requiredText(row, "canonicalDomain"),
+      sourceTypes: row.sourceTypes,
+      staticAssessment: row.staticAssessment,
+      gateDecision: row.gateDecision,
+      commercialScore: row.commercialScore,
+      providerCollectedAt: nullableText(row, "providerCollectedAt"),
+      createdAt: requiredText(row, "createdAt"),
+      locale: requiredText(row, "locale"),
+      countryCode: requiredText(row, "countryCode"),
+      hasReusableContactEvidence: row.hasReusableContactEvidence === true,
+    }),
+  );
 }
 
 async function loadRefillPolicies(
@@ -338,34 +332,36 @@ async function loadRefillPolicies(
       )
       ORDER BY policy.project_context_version_id`,
   );
-  return result.rows.map((row) => Object.freeze({
-    organizationId: requiredText(row, "organizationId"),
-    workspaceId: requiredText(row, "workspaceId"),
-    projectContextVersionId:
-      requiredText(row, "projectContextVersionId"),
-    refillState: requiredText(row, "refillState"),
-    currentRefillTier: requiredText(row, "currentRefillTier"),
-    currentRefillRound: Number(row.currentRefillRound),
-    paidRefillTier: nullableText(row, "paidRefillTier"),
-    paidRefillRound: row.paidRefillRound === null
-      ? null
-      : Number(row.paidRefillRound),
-    resourceRefillTier: nullableText(row, "resourceRefillTier"),
-    resourceRefillRound: row.resourceRefillRound === null
-      ? null
-      : Number(row.resourceRefillRound),
-    terminationReason: nullableText(row, "terminationReason"),
-    nextRefillAt: nullableText(row, "nextRefillAt"),
-    updatedAt: requiredText(row, "updatedAt"),
-    version: Number(row.version),
-    budgetPeriodStart: nullableText(row, "budgetPeriodStart"),
-    budgetRemainingMicros: row.budgetRemainingMicros === null
-      ? null
-      : Number(row.budgetRemainingMicros),
-    activeJob: row.activeJob === true,
-    activeBatch: row.activeBatch === true,
-    pendingRefillOutbox: row.pendingRefillOutbox === true,
-  }));
+  return result.rows.map((row) =>
+    Object.freeze({
+      organizationId: requiredText(row, "organizationId"),
+      workspaceId: requiredText(row, "workspaceId"),
+      projectContextVersionId: requiredText(row, "projectContextVersionId"),
+      refillState: requiredText(row, "refillState"),
+      currentRefillTier: requiredText(row, "currentRefillTier"),
+      currentRefillRound: Number(row.currentRefillRound),
+      paidRefillTier: nullableText(row, "paidRefillTier"),
+      paidRefillRound:
+        row.paidRefillRound === null ? null : Number(row.paidRefillRound),
+      resourceRefillTier: nullableText(row, "resourceRefillTier"),
+      resourceRefillRound:
+        row.resourceRefillRound === null
+          ? null
+          : Number(row.resourceRefillRound),
+      terminationReason: nullableText(row, "terminationReason"),
+      nextRefillAt: nullableText(row, "nextRefillAt"),
+      updatedAt: requiredText(row, "updatedAt"),
+      version: Number(row.version),
+      budgetPeriodStart: nullableText(row, "budgetPeriodStart"),
+      budgetRemainingMicros:
+        row.budgetRemainingMicros === null
+          ? null
+          : Number(row.budgetRemainingMicros),
+      activeJob: row.activeJob === true,
+      activeBatch: row.activeBatch === true,
+      pendingRefillOutbox: row.pendingRefillOutbox === true,
+    }),
+  );
 }
 
 async function insertReassessment(
@@ -375,11 +371,13 @@ async function insertReassessment(
   score: HistoricalCommercialReassessment,
   actorId: string,
   generatedAt: Date,
-): Promise<Readonly<{
-  candidateInserted: number;
-  scoreInserted: number;
-  publicationSynchronized: number;
-}>> {
+): Promise<
+  Readonly<{
+    candidateInserted: number;
+    scoreInserted: number;
+    publicationSynchronized: number;
+  }>
+> {
   const promoted = row.recommendationId !== null && row.prospectId !== null;
   const inserted = await client.query(
     `INSERT INTO backlink_commercial_candidates (
@@ -436,10 +434,10 @@ async function insertReassessment(
 
   let scoreInserted = 0;
   if (
-    promoted
-    && row.recommendationId !== null
-    && row.prospectId !== null
-    && score.total !== null
+    promoted &&
+    row.recommendationId !== null &&
+    row.prospectId !== null &&
+    score.total !== null
   ) {
     const result = await client.query(
       `INSERT INTO backlink_recommendation_scores (
@@ -474,8 +472,7 @@ async function insertReassessment(
           reassessmentReason: "HISTORICAL_V2_REASSESSED",
           historicalV2CandidateId: row.id,
           sourceScoreModelVersion: "recommendation-commercial-fit.v2",
-          sourceEvidenceCollectedAt:
-            row.providerCollectedAt ?? row.createdAt,
+          sourceEvidenceCollectedAt: row.providerCollectedAt ?? row.createdAt,
           projectContextVersionId: row.projectContextVersionId,
         }),
         generatedAt,
@@ -575,19 +572,21 @@ async function recoverPolicy(
   return result.rowCount ?? 0;
 }
 
-export async function runHistoricalCommercialReassessment(input: Readonly<{
-  pool: BacklinkTenantPool;
-  scopes: readonly BacklinkTenantContext[];
-  mode: HistoricalReassessmentMode;
-  actorId: string;
-  now: Date;
-  contactOptions: Readonly<{
-    maxPages: number;
-    maxDepth: number;
-    maxAttempts: number;
-    browserAllowed: boolean;
-  }>;
-}>): Promise<HistoricalReassessmentSummary> {
+export async function runHistoricalCommercialReassessment(
+  input: Readonly<{
+    pool: BacklinkTenantPool;
+    scopes: readonly BacklinkTenantContext[];
+    mode: HistoricalReassessmentMode;
+    actorId: string;
+    now: Date;
+    contactOptions: Readonly<{
+      maxPages: number;
+      maxDepth: number;
+      maxAttempts: number;
+      browserAllowed: boolean;
+    }>;
+  }>,
+): Promise<HistoricalReassessmentSummary> {
   const decisionCounts = {
     eligible: 0,
     ineligible: 0,
@@ -625,6 +624,17 @@ export async function runHistoricalCommercialReassessment(input: Readonly<{
 
   for (const scope of input.scopes) {
     await withBacklinkTenantTransaction(input.pool, scope, async (client) => {
+      if (input.mode === "apply") {
+        const contract = await guardV1RecommendationPoolProjectWrites(
+          client,
+          scope,
+        );
+        if (contract.status === "contract_not_applicable") {
+          throw new Error(
+            "BACKLINK_RECOMMENDATION_POOL_CONTRACT_NOT_APPLICABLE",
+          );
+        }
+      }
       const rows = await loadHistoricalCandidates(client);
       const policies = await loadRefillPolicies(client);
       const assessments = rows.map((row) => ({
@@ -644,8 +654,8 @@ export async function runHistoricalCommercialReassessment(input: Readonly<{
         recovery: decideRefillPolicyRecovery(policy, input.now),
       }));
       if (
-        assessments.length > 0
-        || policyRecoveries.some(({ recovery }) => recovery.recover)
+        assessments.length > 0 ||
+        policyRecoveries.some(({ recovery }) => recovery.recover)
       ) {
         projectCount += 1;
       }
@@ -658,9 +668,9 @@ export async function runHistoricalCommercialReassessment(input: Readonly<{
           row.recommendationId !== null && row.prospectId !== null;
         if (promoted) promotedCandidateCount += 1;
         if (
-          promoted
-          && row.recommendationId !== null
-          && score.decision === "eligible"
+          promoted &&
+          row.recommendationId !== null &&
+          score.decision === "eligible"
         ) {
           eligibleRecommendationIds.push(row.recommendationId);
           if (row.hasReusableContactEvidence) {
@@ -681,8 +691,7 @@ export async function runHistoricalCommercialReassessment(input: Readonly<{
           );
           applied.candidatesInserted += result.candidateInserted;
           applied.scoresInserted += result.scoreInserted;
-          applied.publicationSynchronizations +=
-            result.publicationSynchronized;
+          applied.publicationSynchronizations += result.publicationSynchronized;
         }
       }
       if (input.mode === "apply") {
@@ -726,8 +735,8 @@ export async function runHistoricalCommercialReassessment(input: Readonly<{
     });
   }
 
-  const recoverablePolicies = policyCounts.budgetRecoverable
-    + policyCounts.providerRecoverable;
+  const recoverablePolicies =
+    policyCounts.budgetRecoverable + policyCounts.providerRecoverable;
   return Object.freeze({
     mode: input.mode,
     scannedProjectCount: input.scopes.length,

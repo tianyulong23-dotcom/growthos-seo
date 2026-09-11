@@ -12,36 +12,27 @@ import {
   createLocalProductDataForSeoRuntime,
   localProductDataForSeoAvailabilityDecision,
   parseLocalProductRecommendationContext,
+  parseLocalProductRecommendationContextDatabaseRow,
   readLocalProductDataForSeoConfiguration,
   resolveExistingCandidateQualificationPlan,
   resolveLocalProductDataForSeoOperationBudget,
   resolveLocalProductCommercialRefillCycle,
   resolveLocalProductProjectDiscoveryInput,
 } from "../../src/modules/backlinks/runtime/local-product-dataforseo-runtime.js";
-import {
-  parseProviderOperationBudgetAuthorization,
-} from "../../src/modules/backlinks/domain/recommendations/provider-operation-budget.js";
+import { parseProviderOperationBudgetAuthorization } from "../../src/modules/backlinks/domain/recommendations/provider-operation-budget.js";
 import {
   LocalProductSecretStoreClient,
   parseLocalProductSecretReference,
 } from "../../src/modules/backlinks/adapters/security/local-product-secret-store-client.js";
-import {
-  CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-  CORRECTED_SCORE_MODEL_VERSION,
-  CORRECTED_VISIBILITY_CONTRACT_VERSION,
-} from "../../src/modules/backlinks/ports/recommendation-contract.port.js";
+import { CORRECTED_QUALIFICATION_CONTRACT_VERSION } from "../../src/modules/backlinks/ports/recommendation-contract.port.js";
 import type {
   GenerationInputBinding,
   SharedSeoEvidenceSourceModule,
 } from "../../src/modules/backlinks/ports/shared-seo-evidence.port.js";
-import type {
-  BacklinkTenantPool,
-  BacklinkTransactionQueryResult,
-} from "../../src/modules/backlinks/db/tenant-transaction.js";
+
+import { evaluateRecommendationCandidate } from "../../src/modules/backlinks/domain/recommendations/evaluation.js";
 import {
-  evaluateRecommendationCandidate,
-} from "../../src/modules/backlinks/domain/recommendations/evaluation.js";
-import {
+  applyProgressiveCommercialCandidateAdmission,
   evaluateCommercialCandidate,
 } from "../../src/modules/backlinks/domain/recommendations/commercial-candidate-evaluation.js";
 import { secretKinds } from "../../src/modules/backlinks/ports/secret-store.port.js";
@@ -75,14 +66,29 @@ const environment = Object.freeze({
 });
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const websiteProjectId = "33333333-3333-4333-8333-333333333333";
-const recommendationContextVersionId =
-  "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const recommendationContextVersionId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+describe("DataForSEO execution ceiling configuration", () => {
+  it("requires both ceiling fields and validates the fixed timestamp", () => {
+    expect(() => readLocalProductDataForSeoConfiguration({
+      ...environment, DATAFORSEO_EXECUTION_LIMIT_MICROS: "16800",
+    })).toThrow();
+    expect(() => readLocalProductDataForSeoConfiguration({
+      ...environment, DATAFORSEO_EXECUTION_STARTED_AT: "not-a-date",
+      DATAFORSEO_EXECUTION_LIMIT_MICROS: "16800",
+    })).toThrow();
+    expect(readLocalProductDataForSeoConfiguration({
+      ...environment, DATAFORSEO_EXECUTION_STARTED_AT: "2026-09-08T02:00:00Z",
+      DATAFORSEO_EXECUTION_LIMIT_MICROS: "16800",
+    }).executionCeiling).toEqual({
+      startedAt: "2026-09-08T02:00:00Z", limitMicros: 16800,
+    });
+  });
+});
 const profileVersionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const promotionTargetVersionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
-function projectContext(
-  overrides: Readonly<Record<string, unknown>> = {},
-) {
+function projectContext(overrides: Readonly<Record<string, unknown>> = {}) {
   return parseLocalProductRecommendationContext({
     snapshotVersion: 4,
     profileVersionId,
@@ -107,15 +113,16 @@ function evidence(
   sourceModule: SharedSeoEvidenceSourceModule,
   overrides: Readonly<Record<string, unknown>> = {},
 ) {
-  const recordId = sourceModule === "site-profile"
-    ? "10000000-0000-4000-8000-000000000001"
-    : sourceModule === "content"
-      ? "10000000-0000-4000-8000-000000000002"
-      : sourceModule === "keywords"
-        ? "10000000-0000-4000-8000-000000000003"
-        : sourceModule === "competitor-serp"
-          ? "10000000-0000-4000-8000-000000000004"
-          : "10000000-0000-4000-8000-000000000005";
+  const recordId =
+    sourceModule === "site-profile"
+      ? "10000000-0000-4000-8000-000000000001"
+      : sourceModule === "content"
+        ? "10000000-0000-4000-8000-000000000002"
+        : sourceModule === "keywords"
+          ? "10000000-0000-4000-8000-000000000003"
+          : sourceModule === "competitor-serp"
+            ? "10000000-0000-4000-8000-000000000004"
+            : "10000000-0000-4000-8000-000000000005";
   return Object.freeze({
     recordId,
     snapshot: Object.freeze({
@@ -179,8 +186,7 @@ function inputBinding(
         sharedEvidence.map(({ recordId }) => recordId),
       ),
       market: "ZA",
-      qualificationContractVersion:
-        CORRECTED_QUALIFICATION_CONTRACT_VERSION,
+      qualificationContractVersion: CORRECTED_QUALIFICATION_CONTRACT_VERSION,
     }),
     outreachProfile: Object.freeze({
       organizationId,
@@ -234,16 +240,12 @@ function currentCommercialCandidate(
     matchedTargetPages: Object.freeze([]),
     matchedAudiences: Object.freeze(["South African viewers"]),
     matchedPartnershipGoals: Object.freeze([]),
-    relatedContentPages: Object.freeze([
-      `https://${hostnameAscii}/reviews`,
-    ]),
+    relatedContentPages: Object.freeze([`https://${hostnameAscii}/reviews`]),
     productRelevance: 0.9,
     editorialQuality: 0.9,
     siteType: "specialist_blog",
     monetizationMethods: Object.freeze(["advertising"]),
-    cooperationPages: Object.freeze([
-      "https://publisher.co.za/contribute",
-    ]),
+    cooperationPages: Object.freeze(["https://publisher.co.za/contribute"]),
     outboundLinkDensity: 0.1,
     technicalAccessibility: 1,
     unsafeOrMalicious: overrides.unsafeOrMalicious ?? false,
@@ -295,6 +297,37 @@ function currentCommercialCandidate(
 }
 
 describe("LOCAL-REAL-002 DataForSEO runtime", () => {
+  it("does not expose the V1 store or execute a legacy provider request", async () => {
+    let queries = 0;
+    const runtime = createLocalProductDataForSeoRuntime({
+      pool: {
+        async connect() {
+          queries += 1;
+          throw new Error("Retired requests must not reach the database");
+        },
+      },
+      secretStoreRoot: join(tmpdir(), "unused-retirement-test"),
+      configuration: readLocalProductDataForSeoConfiguration(environment),
+    });
+    expect(runtime).not.toHaveProperty("store");
+    for (const source of ["paid", "existing"] as const) {
+      await expect(runtime.execute({
+        source,
+      } as Parameters<typeof runtime.execute>[0])).rejects.toThrow(
+        "BACKLINKS_V1_RECOMMENDATION_PROVIDER_RETIRED",
+      );
+    }
+    expect(queries).toBe(0);
+    const source = await readFile(
+      new URL("../../src/modules/backlinks/runtime/local-product-dataforseo-runtime.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source).not.toContain("FROM backlink_recommendation_refills");
+    expect(source).not.toContain("writeCorrectedRecommendationFactsInTransaction");
+    expect(source).not.toContain("commercial-score-v4");
+    expect(source).not.toContain("INSERT INTO backlink_recommendations");
+  });
+
   it("allows only calls below the configured paid-call ceiling", () => {
     expect(isLocalProductDataForSeoPaidCallAllowed(0, 25, 0)).toBe(true);
     expect(isLocalProductDataForSeoPaidCallAllowed(24, 25, 0)).toBe(true);
@@ -310,26 +343,24 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
       DATAFORSEO_ABSOLUTE_BUDGET_MICROS: "1000000",
       DATAFORSEO_MAX_PAID_CALLS: "3",
     });
-    const authorization = parseProviderOperationBudgetAuthorization(
-      {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        recommendationContextVersionId,
-        visiblePoolGeneration: 1,
-        authorizedBy: "local-product-operator",
-      },
-    );
-    expect(authorization).not.toHaveProperty(
-      "recommendationContextVersionId",
-    );
+    const authorization = parseProviderOperationBudgetAuthorization({
+      provider: "dataforseo",
+      reasonCode: "user_authorized_bounded_real_refill",
+      maxPaidCalls: 4,
+      maxCostMicros: 1_000_000,
+      recommendationContextVersionId,
+      visiblePoolGeneration: 1,
+      authorizedBy: "local-product-operator",
+    });
+    expect(authorization).not.toHaveProperty("recommendationContextVersionId");
     expect(authorization).not.toHaveProperty("visiblePoolGeneration");
 
-    expect(resolveLocalProductDataForSeoOperationBudget({
-      configuration,
-      authorization,
-    })).toEqual({
+    expect(
+      resolveLocalProductDataForSeoOperationBudget({
+        configuration,
+        authorization,
+      }),
+    ).toEqual({
       maxPaidCalls: 4,
       operationBudgetLimitMicros: 1_000_000,
       dailyBudgetLimitMicros: 1_000_000,
@@ -338,10 +369,12 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
     expect(parseProviderOperationBudgetAuthorization(authorization)).toEqual(
       authorization,
     );
-    expect(resolveLocalProductDataForSeoOperationBudget({
-      configuration,
-      authorization: null,
-    })).toEqual({
+    expect(
+      resolveLocalProductDataForSeoOperationBudget({
+        configuration,
+        authorization: null,
+      }),
+    ).toEqual({
       maxPaidCalls: 3,
       operationBudgetLimitMicros: 1_000_000,
       dailyBudgetLimitMicros: 1_000_000,
@@ -359,9 +392,7 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
     );
 
     expect(source).toContain("WITH current_budget AS");
-    expect(source).toContain(
-      "FROM backlink_provider_usage_ledger AS usage",
-    );
+    expect(source).toContain("FROM backlink_provider_usage_ledger AS usage");
     expect(source).toContain(
       "JOIN current_budget AS budget ON budget.id=usage.budget_id",
     );
@@ -377,7 +408,7 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
     );
   });
 
-  it("shares one refill operation ceiling across discovery and qualification", async () => {
+  it("keeps the native discovery request ceiling without V1 qualification calls", async () => {
     const source = await readFile(
       new URL(
         "../../src/modules/backlinks/runtime/local-product-dataforseo-runtime.ts",
@@ -386,346 +417,12 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
       "utf8",
     );
 
-    expect(source).toContain(
-      "`commercial-refill-operation:${input.jobId}`",
-    );
-    expect(source).toContain(
-      "budgetReservationPrefix: providerBudgetOperationPrefix",
-    );
-    expect(source).toContain(
-      "providerBudgetOperationPrefix,\n          requestClientFactory",
-    );
+    expect(source).toContain("`commercial-refill-operation:${input.jobId}`");
+    expect(source).not.toContain("createCommercialQualificationOfficialRuntime");
+    expect(source).toContain("providerBudgetOperationPrefix,");
+    expect(source).toContain("requestClientFactory: async () => {");
     expect(source).toContain(
       "gate: createGate(client, providerBudgetOperationPrefix)",
-    );
-  });
-
-  it("marks existing candidates complete only in the successful store update", async () => {
-    const source = await readFile(
-      new URL(
-        "../../src/modules/backlinks/runtime/local-product-dataforseo-runtime.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-
-    expect(source).toContain(
-      'input.refillWindowKey.startsWith("commercial-existing:")',
-    );
-    expect(source).toContain("{ existingCandidatesCompleted: true }");
-  });
-
-  it("publishes seven candidates with matching facts and rejects an ineligible fact", async () => {
-    const generationContractId =
-      "00000000-0000-4000-8000-000000000090";
-    const candidates = Array.from({ length: 8 }, (_, index) =>
-      currentCommercialCandidate({
-        candidateId:
-          `00000000-0000-4000-8000-${String(index + 10).padStart(12, "0")}`,
-        hostnameAscii: `publisher-${index + 1}.co.za`,
-      }));
-    const candidateByDomain = new Map(
-      candidates.map((candidate) => [candidate.hostnameAscii, candidate]),
-    );
-    const eligibleCandidateIds = new Set(
-      candidates.slice(0, 7).map(({ candidateId }) => candidateId),
-    );
-    const selectedCandidateIds: string[] = [];
-    const selectedQualificationIds: string[] = [];
-    const publishedCandidateIds: string[] = [];
-    const result = (
-      rows: readonly Record<string, unknown>[] = [],
-    ): BacklinkTransactionQueryResult => ({
-      rows: [...rows],
-      rowCount: rows.length,
-    });
-    const pool: BacklinkTenantPool = {
-      async connect() {
-        return {
-          async query(text, values = []) {
-            const sql = text.replace(/\s+/gu, " ").trim();
-            if (sql.includes(
-              "FROM backlink_commercial_inventory_policies AS policy",
-            )) {
-              return result([{ ready: 1 }]);
-            }
-            if (sql.includes("FROM backlink_project_context_snapshots")) {
-              return result([{ id: recommendationContextVersionId }]);
-            }
-            if (sql.includes("FROM backlink_commercial_candidates")) {
-              const candidate = candidateByDomain.get(String(values[4]));
-              if (candidate !== undefined) {
-                selectedCandidateIds.push(candidate.candidateId);
-              }
-              return candidate === undefined
-                ? result()
-                : result([{
-                    id: candidate.candidateId,
-                    sourceTypes: candidate.sourceTypes,
-                    staticAssessment: candidate.staticAssessment,
-                    gateDecision: { decision: "ready" },
-                    commercialScore: candidate.commercialScore,
-                    providerCollectedAt: candidate.provider.collectedAt,
-                  }]);
-            }
-            if (sql.includes(
-              "FROM backlinks.backlink_recommendation_qualification_facts",
-            )) {
-              const candidateId = String(values[4]);
-              if (!eligibleCandidateIds.has(candidateId)) return result();
-              selectedQualificationIds.push(candidateId);
-              const candidate = candidates.find(
-                (item) => item.candidateId === candidateId,
-              );
-              return result([{
-                qualificationFactId:
-                  `00000000-0000-4000-8001-${candidateId.slice(-12)}`,
-                generationContractId,
-                metricScope: "TARGET_MARKET",
-                trafficOrganicEtv: candidate?.provider.traffic ?? null,
-                spamScore: candidate?.provider.spamScore ?? null,
-                authorityRank: candidate?.provider.rank ?? null,
-                accessibilityDecision: "accessible",
-                semanticScore: candidate?.commercialScore.total ?? null,
-                decision: "eligible",
-                decisionReasonCode:
-                  "COMMERCIAL_FIT_V4_ELIGIBLE_PARTIAL_EVIDENCE",
-                modelVersion: "commercial-qualification-model.v1",
-                promptVersion: "commercial-qualification-prompt.v1",
-                ruleVersion: candidate?.commercialScore.ruleVersion,
-                requestFingerprints: {},
-                evidence: { freshMetricsRole: "evidence_only" },
-                observedAt: new Date("2026-08-21T00:00:00.000Z"),
-              }]);
-            }
-            if (sql.includes(
-              "FROM backlinks.backlink_recommendation_generation_contracts",
-            )) {
-              return result([{
-                id: generationContractId,
-                qualificationContractVersion:
-                  CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-                visibilityContractVersion:
-                  CORRECTED_VISIBILITY_CONTRACT_VERSION,
-                scoreModelVersion: CORRECTED_SCORE_MODEL_VERSION,
-              }]);
-            }
-            if (
-              sql.includes("INSERT INTO backlink_prospects")
-              && sql.includes("WITH inserted AS")
-            ) {
-              return result([{ id: values[0] }]);
-            }
-            if (
-              sql.includes("INSERT INTO backlink_recommendations")
-              && sql.includes("WITH inserted AS")
-            ) {
-              return result([{ id: values[0], status: "ready" }]);
-            }
-            if (sql.includes(
-              "INSERT INTO backlink_recommendation_inventory",
-            )) {
-              return result([{ id: values[0] }]);
-            }
-            if (
-              sql.includes("UPDATE backlink_commercial_candidates")
-              && sql.includes("state='contact_enrichment'")
-            ) {
-              publishedCandidateIds.push(String(values[3]));
-            }
-            return result();
-          },
-          release() {},
-        };
-      },
-    };
-    const runtime = createLocalProductDataForSeoRuntime({
-      pool,
-      secretStoreRoot: join(tmpdir(), "unused-in-store-test"),
-      configuration: readLocalProductDataForSeoConfiguration(environment),
-    });
-    const recommendations = candidates.map((candidate) => {
-      const evaluated = evaluateRecommendationCandidate(
-        buildStoredCommercialRecommendationEvidenceCandidate({
-          candidate,
-          sourceReleaseId: "commercial-existing:store-contract-test",
-        }),
-      );
-      if (evaluated.decision !== "ready") {
-        throw new Error("Fixture candidate must be ready");
-      }
-      return evaluated;
-    });
-
-    const stored = await runtime.store({
-      organizationId,
-      workspaceId: "22222222-2222-4222-8222-222222222222",
-      websiteProjectId,
-      recommendationContextVersionId,
-      visiblePoolGeneration: 1,
-      jobId: "00000000-0000-4000-8000-000000000091",
-      workflowId: "publication-contract-test",
-      correlationId: "publication-contract-test",
-      actorId: "publication-contract-test",
-      refillWindowKey: "commercial-existing:store-contract-test",
-      lowWatermark: 9,
-      highWatermark: 10,
-      recommendations,
-      provider: {
-        source: "cache",
-        acquiredAt: "2026-08-21T00:00:00.000Z",
-        costMicros: 0,
-        requestFingerprint: "commercial-existing:store-contract-test",
-      },
-      evaluationSummary: {
-        evaluated: 8,
-        ready: 8,
-        excluded: 0,
-        insufficientData: 0,
-      },
-    });
-    expect({
-      stored,
-      selectedCandidateIds,
-      selectedQualificationIds,
-      publishedCandidateIds,
-    }).toEqual({
-      stored: { addedCount: 7 },
-      selectedCandidateIds: candidates.map(({ candidateId }) => candidateId),
-      selectedQualificationIds: candidates
-        .slice(0, 7)
-        .map(({ candidateId }) => candidateId),
-      publishedCandidateIds: candidates
-        .slice(0, 7)
-        .map(({ candidateId }) => candidateId),
-    });
-    expect(publishedCandidateIds).toEqual(
-      candidates.slice(0, 7).map(({ candidateId }) => candidateId),
-    );
-    expect(publishedCandidateIds).not.toContain(candidates[7]?.candidateId);
-  });
-
-  it("wires bounded qualification results through V3 before recommendation publication", async () => {
-    const source = await readFile(
-      new URL(
-        "../../src/modules/backlinks/runtime/local-product-dataforseo-runtime.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-
-    expect(source).toMatch(
-      /executeCommercialRecommendationDiscovery\([\s\S]*?recoverCurrentCommercialStaticAssessments\([\s\S]*?prepareCurrentCommercialCandidateEnrichment\(/,
-    );
-    expect(source).toContain(
-      "const qualificationPlan =",
-    );
-    expect(source).toContain(
-      "qualificationPlan.candidates",
-    );
-    expect(source).toContain(
-      "qualificationPlan.metricCollectionMode",
-    );
-    expect(source).toContain("finalizeCommercialCandidateEnrichment({");
-    expect(source).toContain("commercial_score=$6::jsonb");
-    expect(source).toContain("state=$7");
-    expect(source).toContain(
-      "const finalCandidates = finalizedCandidates.filter(",
-    );
-    expect(source).toContain(
-      '({ state }) => state === "candidate_ready"',
-    );
-    expect(source).toContain(
-      "mapConcurrent(\n          finalCandidates,",
-    );
-    expect(source).toContain(
-      "writeCorrectedRecommendationFactsInTransaction(",
-    );
-    expect(source).toContain("qualification: {");
-    expect(source).toContain("attempt: 2,");
-    expect(source).toContain('decision: "visible"');
-    expect(source).toContain(
-      '"recommendation-publication:qualification"',
-    );
-    expect(source).toContain(
-      '"recommendation-publication:visibility"',
-    );
-    expect(source).toContain(
-      '"recommendation-publication:contact"',
-    );
-    expect(source).toContain(
-      '"recommendation-publication:cooperation-path"',
-    );
-    expect(source).toContain(
-      "const contactJobsQueued =",
-    );
-    expect(source).toContain(
-      "await ensureReadyContactEnrichmentJobs(client, {",
-    );
-    expect(source).toMatch(
-      /ensureReadyContactEnrichmentJobs\([\s\S]*?UPDATE backlink_jobs/,
-    );
-    expect(source).toContain(
-      "contactJobsQueued,",
-    );
-    expect(source).not.toContain("factId: randomUUID()");
-  });
-
-  it("publishes current eligible supply before paying to enrich near-threshold candidates", async () => {
-    const source = await readFile(
-      new URL(
-        "../../src/modules/backlinks/runtime/local-product-dataforseo-runtime.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-
-    expect(source).toContain(
-      "prepareCurrentCommercialCandidateEnrichment(",
-    );
-    expect(source).toContain(
-      "recoverCurrentCommercialStaticAssessments(providerClient, {",
-    );
-    expect(source).toMatch(
-      /recoverCurrentCommercialStaticAssessments\([\s\S]*?prepareCurrentCommercialCandidateEnrichment\(/,
-    );
-    expect(source).toMatch(
-      /prepareCurrentCommercialCandidateEnrichment\([\s\S]*?apply: true,/,
-    );
-    expect(source).toContain(
-      "const existingQualification = await runQualification(",
-    );
-    expect(source).not.toContain("runQualificationShadow(");
-    expect(source).toContain(
-      "resolveExistingCandidateQualificationPlan({",
-    );
-    expect(source).toContain(
-      "supplyMode: input.supplyMode",
-    );
-    expect(source).toContain(
-      "publishableCandidates: existing.publishableCandidates",
-    );
-    expect(source).toContain(
-      'metricCollectionMode: "existing_evidence"',
-    );
-    expect(source).toContain(
-      'metricCollectionMode: "provider"',
-    );
-    expect(source).toContain(
-      "finalizeCommercialCandidateEnrichment({",
-    );
-    expect(source).toContain(
-      "qualificationDecision: metrics.decision",
-    );
-    expect(source).toContain(
-      "resolvedProjectInput.binding.immutableFingerprint",
-    );
-    expect(source).toContain(
-      "resolvedProjectInput.binding.inputPinId",
-    );
-    expect(source.match(/AND state='enrichment_eligible'/g)).toHaveLength(2);
-    expect(source).toContain(
-      "state=$7",
     );
   });
 
@@ -733,94 +430,109 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
     const publishable = [{ candidateId: "publishable-1" }];
     const enrichment = [{ candidateId: "enrichment-1" }];
 
-    expect(resolveExistingCandidateQualificationPlan({
-      supplyMode: "existing_evidence",
-      publishableCandidates: publishable,
-      enrichmentCandidates: enrichment,
-    })).toEqual({
+    expect(
+      resolveExistingCandidateQualificationPlan({
+        supplyMode: "existing_evidence",
+        publishableCandidates: publishable,
+        enrichmentCandidates: enrichment,
+      }),
+    ).toEqual({
       candidates: publishable,
       metricCollectionMode: "existing_evidence",
     });
-    expect(resolveExistingCandidateQualificationPlan({
-      supplyMode: "existing_evidence",
-      publishableCandidates: [],
-      enrichmentCandidates: enrichment,
-    })).toEqual({
+    expect(
+      resolveExistingCandidateQualificationPlan({
+        supplyMode: "existing_evidence",
+        publishableCandidates: [],
+        enrichmentCandidates: enrichment,
+      }),
+    ).toEqual({
       candidates: [],
       metricCollectionMode: "existing_evidence",
     });
-    expect(resolveExistingCandidateQualificationPlan({
-      publishableCandidates: [],
-      enrichmentCandidates: enrichment,
-    })).toEqual({
+    expect(
+      resolveExistingCandidateQualificationPlan({
+        publishableCandidates: [],
+        enrichmentCandidates: enrichment,
+      }),
+    ).toEqual({
       candidates: enrichment,
       metricCollectionMode: "provider",
     });
   });
 
   it("resolves provider failures through the zero-paid curated fallback", () => {
-    expect(resolveLocalProductCommercialRefillCycle({
-      refillWindowKey: "manual:1786359107748:request-1",
-      triggerReason: "manual",
-      websiteProjectId: "project-1",
-      projectContextVersionId: "context-1",
-      currentTier: "resource_media_review_partner_ecosystem",
-      currentRound: 1,
-      terminationReason: "PROVIDER_UNAVAILABLE",
-    })).toEqual({
+    expect(
+      resolveLocalProductCommercialRefillCycle({
+        refillWindowKey: "manual:1786359107748:request-1",
+        triggerReason: "manual",
+        websiteProjectId: "project-1",
+        projectContextVersionId: "context-1",
+        currentTier: "resource_media_review_partner_ecosystem",
+        currentRound: 1,
+        terminationReason: "PROVIDER_UNAVAILABLE",
+      }),
+    ).toEqual({
       tier: "curated_resource_library",
       round: 1,
       window: 1,
     });
 
-    expect(resolveLocalProductCommercialRefillCycle({
-      refillWindowKey: "manual:1786359107748:request-2",
-      triggerReason: "manual",
-      websiteProjectId: "project-1",
-      projectContextVersionId: "context-1",
-      currentTier: "same_language_expansion",
-      currentRound: 1,
-      terminationReason: "PROVIDER_UNAVAILABLE",
-    })).toEqual({
+    expect(
+      resolveLocalProductCommercialRefillCycle({
+        refillWindowKey: "manual:1786359107748:request-2",
+        triggerReason: "manual",
+        websiteProjectId: "project-1",
+        projectContextVersionId: "context-1",
+        currentTier: "same_language_expansion",
+        currentRound: 1,
+        terminationReason: "PROVIDER_UNAVAILABLE",
+      }),
+    ).toEqual({
       tier: "curated_resource_library",
       round: 1,
       window: 1,
     });
 
-    expect(() => resolveLocalProductCommercialRefillCycle({
-      refillWindowKey: "manual:1786359107748:request-3",
-      triggerReason: "manual",
-      websiteProjectId: "project-1",
-      projectContextVersionId: "context-1",
-      currentTier: "curated_resource_library",
-      currentRound: 1,
-      terminationReason: "PROVIDER_UNAVAILABLE",
-    })).toThrow("COMMERCIAL_REFILL_TIERS_EXHAUSTED");
+    expect(() =>
+      resolveLocalProductCommercialRefillCycle({
+        refillWindowKey: "manual:1786359107748:request-3",
+        triggerReason: "manual",
+        websiteProjectId: "project-1",
+        projectContextVersionId: "context-1",
+        currentTier: "curated_resource_library",
+        currentRound: 1,
+        terminationReason: "PROVIDER_UNAVAILABLE",
+      }),
+    ).toThrow("COMMERCIAL_REFILL_TIERS_EXHAUSTED");
   });
 
   it("rejects cross-project cycles and sends budget blocks to the curated fallback", () => {
-    expect(() => resolveLocalProductCommercialRefillCycle({
-      refillWindowKey:
-        "commercial-refill:project-2:context-1:g1:t1:r1:w1",
-      triggerReason: "inventory_low",
-      websiteProjectId: "project-1",
-      projectContextVersionId: "context-1",
-      visiblePoolGeneration: 1,
-      currentTier: "exact_product_target_market",
-      currentRound: 1,
-      terminationReason: null,
-    })).toThrow("COMMERCIAL_REFILL_CYCLE_KEY_INVALID");
+    expect(() =>
+      resolveLocalProductCommercialRefillCycle({
+        refillWindowKey: "commercial-refill:project-2:context-1:g1:t1:r1:w1",
+        triggerReason: "inventory_low",
+        websiteProjectId: "project-1",
+        projectContextVersionId: "context-1",
+        visiblePoolGeneration: 1,
+        currentTier: "exact_product_target_market",
+        currentRound: 1,
+        terminationReason: null,
+      }),
+    ).toThrow("COMMERCIAL_REFILL_CYCLE_KEY_INVALID");
 
-    expect(resolveLocalProductCommercialRefillCycle({
-      refillWindowKey: "manual:1786359107748:request-4",
-      triggerReason: "manual",
-      websiteProjectId: "project-1",
-      projectContextVersionId: "context-1",
-      visiblePoolGeneration: 1,
-      currentTier: "exact_product_target_market",
-      currentRound: 1,
-      terminationReason: "BUDGET",
-    })).toEqual({
+    expect(
+      resolveLocalProductCommercialRefillCycle({
+        refillWindowKey: "manual:1786359107748:request-4",
+        triggerReason: "manual",
+        websiteProjectId: "project-1",
+        projectContextVersionId: "context-1",
+        visiblePoolGeneration: 1,
+        currentTier: "exact_product_target_market",
+        currentRound: 1,
+        terminationReason: "BUDGET",
+      }),
+    ).toEqual({
       tier: "curated_resource_library",
       round: 1,
       window: 1,
@@ -828,36 +540,22 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
   });
 
   it("keeps a planned paid window authoritative during budget recovery", () => {
-    expect(resolveLocalProductCommercialRefillCycle({
-      refillWindowKey:
-        "commercial-refill:project-1:context-1:g1:t1:r1:w1",
-      triggerReason: "inventory_low",
-      websiteProjectId: "project-1",
-      projectContextVersionId: "context-1",
-      visiblePoolGeneration: 1,
-      currentTier: "exact_product_target_market",
-      currentRound: 1,
-      terminationReason: "BUDGET",
-    })).toEqual({
+    expect(
+      resolveLocalProductCommercialRefillCycle({
+        refillWindowKey: "commercial-refill:project-1:context-1:g1:t1:r1:w1",
+        triggerReason: "inventory_low",
+        websiteProjectId: "project-1",
+        projectContextVersionId: "context-1",
+        visiblePoolGeneration: 1,
+        currentTier: "exact_product_target_market",
+        currentRound: 1,
+        terminationReason: "BUDGET",
+      }),
+    ).toEqual({
       tier: "exact_product_target_market",
       round: 1,
       window: 1,
     });
-  });
-
-  it("accepts active paid-cycle execution only for a corrected V4 generation", async () => {
-    const source = await readFile(
-      new URL(
-        "../../src/modules/backlinks/runtime/local-product-dataforseo-runtime.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-    const correctedActivePredicates = source.match(
-      /visible_pool_state='active'[\s\S]{0,1200}?backlink_recommendation_generation_contracts[\s\S]{0,1200}?recommendation-commercial-fit\.v4/gu,
-    );
-
-    expect(correctedActivePredicates).toHaveLength(3);
   });
 
   it("accepts bounded local real-product configuration", () => {
@@ -872,6 +570,8 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
       absoluteBudgetMicros: 100_000,
       maxPaidCalls: 25,
       candidateLimit: 20,
+      discoveryConcurrency: 2,
+      qualificationConcurrency: 2,
       externalAvailability: "not_checked",
       externalReasonCode: "provider_not_checked",
       externalRecoveryAction: "run_provider_diagnostic",
@@ -880,21 +580,39 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
     expect(configuration).not.toHaveProperty("discoveryTargets");
     expect(configuration).not.toHaveProperty("locationCode");
     expect(configuration).not.toHaveProperty("languageCode");
-    expect(readLocalProductDataForSeoConfiguration({
-      ...environment,
-      DATAFORSEO_REQUEST_TIMEOUT_MS: "300000",
-    })).toMatchObject({ timeoutMs: 300_000 });
+    expect(
+      readLocalProductDataForSeoConfiguration({
+        ...environment,
+        DATAFORSEO_REQUEST_TIMEOUT_MS: "300000",
+      }),
+    ).toMatchObject({ timeoutMs: 300_000 });
 
-    expect(() => readLocalProductDataForSeoConfiguration({
-      ...environment,
-      DATAFORSEO_ENDPOINT_ALLOWLIST: JSON.stringify([
-        "https://provider.invalid/live",
-      ]),
-    })).toThrow();
-    expect(() => readLocalProductDataForSeoConfiguration({
-      ...environment,
-      DATAFORSEO_REQUEST_TIMEOUT_MS: "300001",
-    })).toThrow();
+    expect(() =>
+      readLocalProductDataForSeoConfiguration({
+        ...environment,
+        DATAFORSEO_ENDPOINT_ALLOWLIST: JSON.stringify([
+          "https://provider.invalid/live",
+        ]),
+      }),
+    ).toThrow();
+    expect(() =>
+      readLocalProductDataForSeoConfiguration({
+        ...environment,
+        DATAFORSEO_REQUEST_TIMEOUT_MS: "300001",
+      }),
+    ).toThrow();
+    expect(() =>
+      readLocalProductDataForSeoConfiguration({
+        ...environment,
+        DATAFORSEO_DISCOVERY_CONCURRENCY: "5",
+      }),
+    ).toThrow();
+    expect(() =>
+      readLocalProductDataForSeoConfiguration({
+        ...environment,
+        DATAFORSEO_QUALIFICATION_CONCURRENCY: "0",
+      }),
+    ).toThrow();
   });
 
   it("turns explicit external unavailability into an execution decision", () => {
@@ -917,10 +635,12 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
     );
     const configuration = readLocalProductDataForSeoConfiguration(environment);
 
-    await expect(assertLocalProductDataForSeoCredentialReady({
-      secretStoreRoot,
-      configuration,
-    })).rejects.toThrow(
+    await expect(
+      assertLocalProductDataForSeoCredentialReady({
+        secretStoreRoot,
+        configuration,
+      }),
+    ).rejects.toThrow(
       `BACKLINKS_DATAFORSEO_CREDENTIAL_UNAVAILABLE root=${secretStoreRoot}`,
     );
 
@@ -941,10 +661,12 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
       },
     });
 
-    await expect(assertLocalProductDataForSeoCredentialReady({
-      secretStoreRoot,
-      configuration,
-    })).resolves.toBeUndefined();
+    await expect(
+      assertLocalProductDataForSeoCredentialReady({
+        secretStoreRoot,
+        configuration,
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("keeps startup and runtime configuration project-generic", async () => {
@@ -954,16 +676,10 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
         "utf8",
       ),
       readFile(
-        new URL(
-          "../../../../deploy/compose/.env.example",
-          import.meta.url,
-        ),
+        new URL("../../../../deploy/compose/.env.example", import.meta.url),
         "utf8",
       ),
-      readFile(
-        new URL("../../src/index.ts", import.meta.url),
-        "utf8",
-      ),
+      readFile(new URL("../../src/index.ts", import.meta.url), "utf8"),
     ]);
     for (const source of [startup, environmentExample, coreEntry]) {
       expect(source).not.toContain("LOCAL_PRODUCT_WEBSITE_PROJECT_ID");
@@ -984,52 +700,97 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
     expect(environmentExample).toContain(
       "DATAFORSEO_ABSOLUTE_BUDGET_MICROS=5000000",
     );
-    expect(environmentExample).toContain(
-      "DATAFORSEO_MAX_PAID_CALLS=25",
-    );
+    expect(environmentExample).toContain("DATAFORSEO_MAX_PAID_CALLS=25");
   });
 
   it("binds discovery and scoring facts to one immutable Website Project context", () => {
-    expect(parseLocalProductRecommendationContext({
-      snapshotVersion: 4,
-      profileVersionId,
-      promotionTargetVersionId,
-      projectSettingsVersionId: "00000000-0000-4000-8000-000000000011",
-      projectSettingsVersion: 2,
-      projectStatus: "ACTIVE",
-      canonicalDomain: "awolvision.com",
-      locale: "en-US",
-      countryCode: "US",
-      products: ["Home cinema projector"],
-      keywords: ["home cinema"],
-      targetUrls: ["https://awolvision.com/"],
-      targetAudiences: ["home cinema buyers"],
-      partnershipGoals: ["editorial review"],
-      explicitCompetitorDomains: [],
-    })).toMatchObject({
+    expect(
+      parseLocalProductRecommendationContext({
+        snapshotVersion: 4,
+        profileVersionId,
+        promotionTargetVersionId,
+        projectSettingsVersionId: "00000000-0000-4000-8000-000000000011",
+        projectSettingsVersion: 2,
+        projectStatus: "ACTIVE",
+        canonicalDomain: "awolvision.com",
+        locale: "en-US",
+        countryCode: "US",
+        products: ["Home cinema projector"],
+        keywords: ["home cinema"],
+        targetUrls: ["https://awolvision.com/"],
+        targetAudiences: ["home cinema buyers"],
+        partnershipGoals: ["editorial review"],
+        explicitCompetitorDomains: [],
+      }),
+    ).toMatchObject({
       snapshotVersion: 4,
       canonicalDomain: "awolvision.com",
       countryCode: "US",
       keywords: ["home cinema"],
     });
 
-    expect(() => parseLocalProductRecommendationContext({
+    expect(() =>
+      parseLocalProductRecommendationContext({
+        snapshotVersion: 4,
+        profileVersionId,
+        promotionTargetVersionId,
+        projectSettingsVersionId: "00000000-0000-4000-8000-000000000011",
+        projectSettingsVersion: 2,
+        projectStatus: "PAUSED",
+        canonicalDomain: "awolvision.com",
+        locale: "en",
+        countryCode: "US",
+        products: ["Home cinema projector"],
+        keywords: ["home cinema"],
+        targetUrls: ["https://awolvision.com/"],
+        targetAudiences: [],
+        partnershipGoals: [],
+        explicitCompetitorDomains: [],
+      }),
+    ).toThrow();
+  });
+
+  it("separates validated V2 pool metadata from the strict project context", () => {
+    const parsed = parseLocalProductRecommendationContextDatabaseRow({
       snapshotVersion: 4,
       profileVersionId,
       promotionTargetVersionId,
       projectSettingsVersionId: "00000000-0000-4000-8000-000000000011",
       projectSettingsVersion: 2,
-      projectStatus: "PAUSED",
-      canonicalDomain: "awolvision.com",
-      locale: "en",
-      countryCode: "US",
-      products: ["Home cinema projector"],
-      keywords: ["home cinema"],
-      targetUrls: ["https://awolvision.com/"],
-      targetAudiences: [],
-      partnershipGoals: [],
+      projectStatus: "ACTIVE",
+      canonicalDomain: "elephtv.com",
+      locale: "en-ZA",
+      countryCode: "ZA",
+      products: ["streaming entertainment"],
+      keywords: ["streaming service in South Africa"],
+      targetUrls: [],
+      targetAudiences: ["South African viewers"],
+      partnershipGoals: ["editorial review"],
       explicitCompetitorDomains: [],
-    })).toThrow();
+      poolContractVersion: "recommendation-pool.v2",
+      poolMigrationState: "V2_ACTIVE",
+      poolRecommendationContextVersionId: recommendationContextVersionId,
+    });
+
+    expect(parsed).toMatchObject({
+      poolContractVersion: "recommendation-pool.v2",
+      migrationState: "V2_ACTIVE",
+      contractRecommendationContextVersionId: recommendationContextVersionId,
+      context: {
+        canonicalDomain: "elephtv.com",
+        countryCode: "ZA",
+      },
+    });
+    expect(parsed.context).not.toHaveProperty("poolContractVersion");
+
+    expect(() =>
+      parseLocalProductRecommendationContextDatabaseRow({
+        ...parsed.context,
+        poolContractVersion: "recommendation-pool.v2",
+        poolMigrationState: "V2_ACTIVE",
+        poolRecommendationContextVersionId: "not-a-uuid",
+      }),
+    ).toThrow();
   });
 
   it("accepts the minimum sufficient project evidence without optional modules", () => {
@@ -1047,12 +808,9 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
       keywords: ["streaming service in South Africa"],
       explicitCompetitorDomains: [],
     });
-    expect(
-      resolved.binding.outreachProfile.authorizedDiscoverySources,
-    ).toEqual([
-      "WEBSITE_PROJECT",
-      "CURATED_RESOURCE_LIBRARY",
-    ]);
+    expect(resolved.binding.outreachProfile.authorizedDiscoverySources).toEqual(
+      ["WEBSITE_PROJECT", "CURATED_RESOURCE_LIBRARY"],
+    );
   });
 
   it("uses a published target as the promotion proof and ignores expired optional evidence", () => {
@@ -1087,89 +845,90 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
 
     expect(resolved.context.targetUrls).toEqual([publishedTarget]);
     expect(resolved.context.explicitCompetitorDomains).toEqual([]);
-    expect(
-      resolved.binding.outreachProfile.authorizedDiscoverySources,
-    ).toEqual([
-      "WEBSITE_PROJECT",
-      "CURATED_RESOURCE_LIBRARY",
-      "CONTENT",
-    ]);
+    expect(resolved.binding.outreachProfile.authorizedDiscoverySources).toEqual(
+      ["WEBSITE_PROJECT", "CURATED_RESOURCE_LIBRARY", "CONTENT"],
+    );
   });
 
   it("uses stale required evidence but rejects version mismatches", () => {
-    expect(() => resolveLocalProductProjectDiscoveryInput({
-      organizationId,
-      websiteProjectId,
-      context: projectContext(),
-      binding: inputBinding({
-        sharedEvidence: [
-          evidence("site-profile", {
-            expiresAt: "2026-08-17T00:00:00.000Z",
-            status: "expired",
-          }),
-        ],
+    expect(() =>
+      resolveLocalProductProjectDiscoveryInput({
+        organizationId,
+        websiteProjectId,
+        context: projectContext(),
+        binding: inputBinding({
+          sharedEvidence: [
+            evidence("site-profile", {
+              expiresAt: "2026-08-17T00:00:00.000Z",
+              status: "expired",
+            }),
+          ],
+        }),
+        now: new Date("2026-08-18T00:00:00.000Z"),
       }),
-      now: new Date("2026-08-18T00:00:00.000Z"),
-    })).not.toThrow();
+    ).not.toThrow();
 
-    expect(() => resolveLocalProductProjectDiscoveryInput({
-      organizationId,
-      websiteProjectId,
-      context: projectContext({ snapshotVersion: 5 }),
-      binding: inputBinding(),
-      now: new Date("2026-08-18T00:00:00.000Z"),
-    })).toThrow(
+    expect(() =>
+      resolveLocalProductProjectDiscoveryInput({
+        organizationId,
+        websiteProjectId,
+        context: projectContext({ snapshotVersion: 5 }),
+        binding: inputBinding(),
+        now: new Date("2026-08-18T00:00:00.000Z"),
+      }),
+    ).toThrow(
       "owner=WEBSITE_PROJECT recovery=reproject_current_website_project reason=project_or_version_binding_mismatch",
     );
   });
 
   it("builds an evaluable non-demo candidate from provider and SafeFetch evidence", async () => {
-    const candidate =
-      await buildLocalProductRecommendationEvidenceCandidate({
-        context: {
-          workspaceId: "workspace-1",
-          websiteProjectId: "project-1",
-        },
-        evidence: {
-          domain: "sportsnews.co.za",
-          backlinkCount: 1_200,
-          rank: 72,
-          spamScore: 4,
-          countryCode: "ZA",
-        },
-        sourceReleaseId: "dataforseo:release-1",
-        acquiredAt: "2026-08-04T08:00:00.000Z",
-        locationCode: "ZA",
-        languageCode: "en",
-        projectTerms: [
-          "live sports",
-          "streaming movies",
-          "ElephTV Android streaming app",
-        ],
-        existingHostname: false,
-        existingBacklink: false,
-        previouslyExcluded: false,
-        duplicateDomain: false,
-        safeFetch: {
-          fetch: async () => ({
-            requestedUrl: "https://sportsnews.co.za/",
-            finalUrl: "https://sportsnews.co.za/",
-            status: 200,
-            contentType: "text/html",
-            body: Uint8Array.from(Buffer.from(
-              "<html lang='en'><head><title>Live sports and streaming news</title>"
-                + "<meta name='description' content='Movies, TV and sports'></head>"
-                + "<body><a href='/football'>Football</a>"
-                + "<p>Independent editorial coverage of African live sports.</p>"
-                + "</body></html>",
+    const candidate = await buildLocalProductRecommendationEvidenceCandidate({
+      context: {
+        workspaceId: "workspace-1",
+        websiteProjectId: "project-1",
+      },
+      evidence: {
+        domain: "sportsnews.co.za",
+        backlinkCount: 1_200,
+        rank: 72,
+        spamScore: 4,
+        countryCode: "ZA",
+      },
+      sourceReleaseId: "dataforseo:release-1",
+      acquiredAt: "2026-08-04T08:00:00.000Z",
+      locationCode: "ZA",
+      languageCode: "en",
+      projectTerms: [
+        "live sports",
+        "streaming movies",
+        "ElephTV Android streaming app",
+      ],
+      existingHostname: false,
+      existingBacklink: false,
+      previouslyExcluded: false,
+      duplicateDomain: false,
+      safeFetch: {
+        fetch: async () => ({
+          requestedUrl: "https://sportsnews.co.za/",
+          finalUrl: "https://sportsnews.co.za/",
+          status: 200,
+          contentType: "text/html",
+          body: Uint8Array.from(
+            Buffer.from(
+              "<html lang='en'><head><title>Live sports and streaming news</title>" +
+                "<meta name='description' content='Movies, TV and sports'></head>" +
+                "<body><a href='/football'>Football</a>" +
+                "<p>Independent editorial coverage of African live sports.</p>" +
+                "</body></html>",
               "utf8",
-            )),
-            redirectChain: [],
-            resolvedIps: ["203.0.113.10"],
-            fetchedAt: "2026-08-04T08:00:01.000Z",
-          }),
-        },
-      });
+            ),
+          ),
+          redirectChain: [],
+          resolvedIps: ["203.0.113.10"],
+          fetchedAt: "2026-08-04T08:00:01.000Z",
+        }),
+      },
+    });
 
     const evaluated = evaluateRecommendationCandidate(candidate);
     expect(evaluated.decision).toBe("ready");
@@ -1178,34 +937,33 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
   });
 
   it("fails closed when static website evidence cannot be collected", async () => {
-    const candidate =
-      await buildLocalProductRecommendationEvidenceCandidate({
-        context: {
-          workspaceId: "workspace-1",
-          websiteProjectId: "project-1",
+    const candidate = await buildLocalProductRecommendationEvidenceCandidate({
+      context: {
+        workspaceId: "workspace-1",
+        websiteProjectId: "project-1",
+      },
+      evidence: {
+        domain: "unreachable.co.za",
+        backlinkCount: 100,
+        rank: 20,
+        spamScore: null,
+        countryCode: "ZA",
+      },
+      sourceReleaseId: "dataforseo:release-1",
+      acquiredAt: "2026-08-04T08:00:00.000Z",
+      locationCode: "ZA",
+      languageCode: "en",
+      projectTerms: ["live sports"],
+      existingHostname: false,
+      existingBacklink: false,
+      previouslyExcluded: false,
+      duplicateDomain: false,
+      safeFetch: {
+        fetch: async () => {
+          throw new Error("network unavailable");
         },
-        evidence: {
-          domain: "unreachable.co.za",
-          backlinkCount: 100,
-          rank: 20,
-          spamScore: null,
-          countryCode: "ZA",
-        },
-        sourceReleaseId: "dataforseo:release-1",
-        acquiredAt: "2026-08-04T08:00:00.000Z",
-        locationCode: "ZA",
-        languageCode: "en",
-        projectTerms: ["live sports"],
-        existingHostname: false,
-        existingBacklink: false,
-        previouslyExcluded: false,
-        duplicateDomain: false,
-        safeFetch: {
-          fetch: async () => {
-            throw new Error("network unavailable");
-          },
-        },
-      });
+      },
+    });
 
     expect(evaluateRecommendationCandidate(candidate)).toMatchObject({
       decision: "insufficient_data",
@@ -1236,11 +994,74 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
       3,
     );
     expect(candidate.components).toHaveLength(5);
-    expect(candidate.components.every(({ evidence }) =>
-      evidence.evidenceRefs.includes(
-        "commercial-fit-v4:publisher.co.za",
-      )
-    )).toBe(true);
+    expect(
+      candidate.components.every(({ evidence }) =>
+        evidence.evidenceRefs.includes("commercial-fit-v4:publisher.co.za"),
+      ),
+    ).toBe(true);
+  });
+
+  it("bridges a strongly relevant second-generation candidate admitted below 50", () => {
+    const current = currentCommercialCandidate();
+    const provider = Object.freeze({
+      ...current.provider,
+      rank: 0,
+      traffic: 0,
+      backlinkCount: 0,
+      referringDomainCount: 0,
+      spamScore: 29,
+    });
+    const staticAssessment = Object.freeze({
+      ...current.staticAssessment,
+      productRelevance: 0.35,
+      editorialQuality: 0.2,
+      matchedAudiences: Object.freeze([]),
+      matchedPartnershipGoals: Object.freeze([]),
+      monetizationMethods: Object.freeze([]),
+      cooperationPages: Object.freeze([]),
+      outboundLinkDensity: 0.8,
+      technicalAccessibility: 0.8,
+    });
+    const baseline = evaluateCommercialCandidate({
+      business: {
+        ...current.business,
+        projectAuthorityScore: 20,
+      },
+      provider,
+      staticAssessment,
+    });
+    const commercialScore = applyProgressiveCommercialCandidateAdmission(
+      [baseline],
+      { visiblePoolGeneration: 2 },
+    ).scores[0];
+    if (commercialScore === undefined) {
+      throw new Error("Missing progressively admitted commercial score");
+    }
+
+    const candidate = buildStoredCommercialRecommendationEvidenceCandidate({
+      candidate: {
+        ...current,
+        provider,
+        staticAssessment,
+        commercialScore,
+      },
+      sourceReleaseId: "commercial-existing:release-2",
+    });
+
+    expect(commercialScore).toMatchObject({
+      decision: "eligible",
+      admission: {
+        appliedThreshold: 40,
+        fallbackApplied: true,
+      },
+    });
+    expect(commercialScore?.total).toBeGreaterThanOrEqual(40);
+    expect(commercialScore?.total).toBeLessThan(50);
+    expect(evaluateRecommendationCandidate(candidate)).toMatchObject({
+      decision: "ready",
+      hostnameAscii: "publisher.co.za",
+      missingEvidenceKeys: [],
+    });
   });
 
   it("keeps persisted safety uncertainty and hard risk fail closed", () => {
@@ -1272,9 +1093,7 @@ describe("LOCAL-REAL-002 DataForSEO runtime", () => {
     expect(evaluateRecommendationCandidate(unsafe)).toMatchObject({
       decision: "excluded",
       gateDecision: {
-        hitRules: [
-          expect.objectContaining({ ruleId: "unsafe_or_malicious" }),
-        ],
+        hitRules: [expect.objectContaining({ ruleId: "unsafe_or_malicious" })],
       },
     });
   });

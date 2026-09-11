@@ -96,7 +96,11 @@ class LocalCrawlerWorkerLauncher:
                 "TEMPORAL_NAMESPACE": self.settings.temporal_namespace,
                 "CRAWLER_TASK_QUEUE": self.settings.crawler_task_queue,
                 "CRAWLER_WORKER_IDLE_TIMEOUT": (
+                    "0s" if self.settings.crawler_worker_start_on_boot else
                     f"{self.settings.crawler_worker_idle_timeout_seconds:g}s"
+                ),
+                "CRAWLER_PROBE_LISTEN_ADDRESS": (
+                    self.settings.crawler_probe_listen_address
                 ),
                 "S3_REGION": self.settings.s3_region,
                 "S3_BUCKET": self.settings.s3_bucket,

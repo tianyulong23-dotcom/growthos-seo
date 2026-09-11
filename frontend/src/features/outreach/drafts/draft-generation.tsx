@@ -35,6 +35,9 @@ import {
   type ManualContactRole,
 } from "@/features/outreach/drafts/api"
 import { pollDraftJob } from "@/features/outreach/drafts/draft-job-polling"
+import { DiscoveredContactPicker } from "./discovered-contact-picker"
+import { PromotionTargetPicker } from "./promotion-target-picker"
+import { contactRoleLabel } from "@/features/outreach/shared/contact-role-label"
 import type { OpportunityContact } from "@/features/outreach/drafts/types"
 import { isOutreachOffline } from "@/features/outreach/shared/outreach-network-state"
 import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
@@ -164,7 +167,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
   const [manualContactRole, setManualContactRole] =
     React.useState<ManualContactRole>("editorial")
   const [manualReason, setManualReason] = React.useState(
-    "已人工核对该邮箱属于当前机会的 Prospect，并确认可用于本次外联。"
+    "已核对该邮箱属于当前合作网站，并确认可用于本次联系。"
   )
   const [contactReviewReady, setContactReviewReady] = React.useState(false)
   const [contactActionStatus, setContactActionStatus] = React.useState<
@@ -302,7 +305,11 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
         const diagnostic = nextJob.diagnosticCode
           ? `，诊断码：${nextJob.diagnosticCode}`
           : ""
-        setError(`服务端错误分类：${category}${diagnostic}`)
+        setError(nextJob.diagnosticCode === "PROVIDER_MODEL_UNSUPPORTED"
+          ? "当前 AI 服务不支持所选模型。请在 AI 服务配置中更换可用模型后重新生成。"
+          : category === "MISCONFIGURED"
+            ? "AI 服务配置不可用，请检查模型、服务地址和访问权限后重新生成。"
+            : `草稿暂未生成成功，请重试。错误分类：${category}${diagnostic}`)
         setFailureState("error")
       } else {
         setError(null)
@@ -688,12 +695,12 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
           </Button>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h1 className="text-xl font-semibold">生成邮件草稿</h1>
-            <Badge variant="outline">{status}</Badge>
+            <Badge variant="outline">{status === "IDLE" ? "待填写" : status === "CHECKING" ? "检查中" : status === "SUCCEEDED" ? "已生成" : status === "FAILED" ? "生成失败" : status === "REFUSED" ? "暂不可生成" : "生成中"}</Badge>
           </div>
         </div>
       </div>
 
-      <main className="mx-auto grid max-w-3xl gap-5 p-4 sm:p-6 lg:p-8">
+      <main className="mx-auto grid max-w-3xl gap-5 p-4 sm:p-6 lg:p-8 [&_input]:rounded-md [&_textarea]:rounded-md [&_[data-slot=select-trigger]]:rounded-md [&_[data-slot=select-trigger]]:border-border [&_[data-slot=select-trigger]]:bg-background">
         {error && failureState && (
           <OutreachStandardStateView
             state={failureState}
@@ -704,12 +711,9 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
             compact
           />
         )}
-        <section className="grid gap-4 border p-4">
-          <p className="text-sm text-muted-foreground">
-            已从机会详情带入当前机会。草稿会绑定下面选定的正式联系人和当前证据版本。
-          </p>
+        <section className="grid gap-5">
           <div className="grid gap-2 text-sm">
-            <span className="font-medium">已确认联系人</span>
+            <span className="font-medium">收件人</span>
             {contactStatus === "loading" && (
               <span className="text-xs text-muted-foreground">
                 正在读取当前机会的联系人
@@ -719,11 +723,15 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
               <span className="text-xs text-destructive">{contactError}</span>
             )}
             {contactStatus === "ready" && contacts.length === 0 && (
-              <div className="grid gap-3 border p-3">
-                <p className="text-xs text-muted-foreground">
-                  当前机会没有可用的已确认联系人。请录入当前 Prospect
-                  的真实邮箱并完成明确确认；系统不会使用猜测邮箱。
-                </p>
+              <div className="grid gap-3">
+                <DiscoveredContactPicker
+                  key={`${websiteProjectKey}:${opportunityId}`}
+                  projectId={websiteProjectKey}
+                  opportunityId={opportunityId}
+                  onConfirmed={reloadContacts}
+                />
+                <details className="space-y-3 border-t pt-3">
+                <summary className="cursor-pointer text-sm text-muted-foreground">手动添加其他邮箱</summary>
                 <label className="grid gap-1.5">
                   <span className="text-xs font-medium">联系人邮箱</span>
                   <Input
@@ -753,7 +761,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                     disabled={contactActionStatus === "saving"}
                   >
                     <SelectTrigger className="w-full">
-                      <SelectValue />
+                      <SelectValue>{contactRoleLabel(manualContactRole)}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="editorial">编辑</SelectItem>
@@ -803,7 +811,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                       <span className="font-medium">请最终确认联系人</span>
                       <span className="break-all">{manualEmail.trim()}</span>
                       <span className="text-muted-foreground">
-                        {manualContactRole} · 仅用于当前 Opportunity
+                        仅用于当前外链机会
                       </span>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -838,6 +846,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                     {contactActionError}
                   </span>
                 )}
+                </details>
               </div>
             )}
             {contactStatus === "ready" && contacts.length === 1 && (
@@ -846,13 +855,14 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                   {contacts[0].normalizedEmail}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  {contacts[0].contactRole} · 已自动选中
+                  {contactRoleLabel(contacts[0].contactRole)} · 已选中
                 </div>
               </div>
             )}
             {contactStatus === "ready" && contacts.length > 1 && (
               <Select
                 value={selectedContactId}
+                items={contacts.map((contact) => ({ value: contact.id, label: `${contact.normalizedEmail} · ${contactRoleLabel(contact.contactRole)}` }))}
                 onValueChange={(value) => {
                   setSelectedContactId(value)
                   requestKey.current = null
@@ -865,7 +875,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                 <SelectContent>
                   {contacts.map((contact) => (
                     <SelectItem key={contact.id} value={contact.id}>
-                      {contact.normalizedEmail} · {contact.contactRole}
+                      {contact.normalizedEmail} · {contactRoleLabel(contact.contactRole)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -878,6 +888,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                 <span className="text-xs font-medium">合作类型</span>
                 <Select
                   value={draftRequest.cooperationType}
+                  items={cooperationOptions.map(([value, label]) => ({ value, label }))}
                   onValueChange={(value) =>
                     updateDraftRequest(
                       "cooperationType",
@@ -902,6 +913,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                 <span className="text-xs font-medium">链接属性偏好</span>
                 <Select
                   value={draftRequest.linkAttributePreference}
+                  items={linkPreferenceOptions.map(([value, label]) => ({ value, label }))}
                   onValueChange={(value) =>
                     updateDraftRequest(
                       "linkAttributePreference",
@@ -924,40 +936,12 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
               </label>
             </div>
 
-            <label className="grid gap-1.5">
-              <span className="text-xs font-medium">推广目标页</span>
-              {project.targetUrls.length > 0 ? (
-                <Select
-                  value={draftRequest.promotionTargetUrl}
-                  onValueChange={(value) => {
-                    if (value !== null) {
-                      updateDraftRequest("promotionTargetUrl", value)
-                    }
-                  }}
-                  disabled={busy}
-                >
-                  <SelectTrigger className="w-full min-w-0">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {project.targetUrls.map((targetUrl) => (
-                      <SelectItem key={targetUrl} value={targetUrl}>
-                        <span className="block max-w-[32rem] truncate">
-                          {targetUrl}
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : (
-                <Input
-                  value=""
-                  disabled
-                  placeholder="请先在项目设置中添加推广目标页"
-                />
-              )}
-            </label>
+            <PromotionTargetPicker key={project.id} project={project}
+              value={draftRequest.promotionTargetUrl} disabled={busy}
+              onChange={(value) => updateDraftRequest("promotionTargetUrl", value)} />
 
+            <details className="space-y-4 border-t pt-4">
+              <summary className="cursor-pointer text-sm font-medium">更多写作设置</summary>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="grid gap-1.5">
                 <span className="text-xs font-medium">
@@ -994,6 +978,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                 <span className="text-xs font-medium">语气</span>
                 <Select
                   value={draftRequest.tone}
+                  items={toneOptions.map(([value, label]) => ({ value, label }))}
                   onValueChange={(value) =>
                     updateDraftRequest("tone", value as DraftRequest["tone"])
                   }
@@ -1015,6 +1000,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                 <span className="text-xs font-medium">主题风格</span>
                 <Select
                   value={draftRequest.subjectStyle}
+                  items={subjectStyleOptions.map(([value, label]) => ({ value, label }))}
                   onValueChange={(value) =>
                     updateDraftRequest(
                       "subjectStyle",
@@ -1066,6 +1052,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
                 placeholder="可选"
               />
             </label>
+            </details>
           </div>
           <Button
             className="w-fit"
@@ -1087,7 +1074,7 @@ export function DraftGeneration({ project }: { project: OutreachProject }) {
               ? "生成草稿"
               : busy
                 ? "正在等待后端"
-                : "已有 Draft Job"}
+                : "已有生成记录"}
           </Button>
           {(status === "FAILED" || status === "REFUSED") && (
             <Button

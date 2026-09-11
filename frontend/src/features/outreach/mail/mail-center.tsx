@@ -221,8 +221,7 @@ export function MailCenter({
   const [businessConsumersRunning, setBusinessConsumersRunning] = useState<
     boolean | null
   >(null)
-  const syncOperational =
-    businessConsumersRunning === true && gmailSyncReady
+  const syncOperational = businessConsumersRunning === true && gmailSyncReady
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
     null
   )
@@ -854,9 +853,7 @@ export function MailCenter({
                     : "后台 Worker 未运行，立即同步暂不可用"
               }
               variant="ghost"
-              disabled={
-                connectionId === null || syncing || !syncOperational
-              }
+              disabled={connectionId === null || syncing || !syncOperational}
               onClick={() => void syncAndRefresh()}
             >
               <RefreshCw className={syncing ? "animate-spin" : undefined} />
@@ -884,11 +881,23 @@ export function MailCenter({
                       <span className="truncate text-sm font-medium">
                         {item.subject || "（无主题）"}
                       </span>
-                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                      <span
+                        className={`shrink-0 text-[11px] ${
+                          selectedMessageId === item.id
+                            ? "text-foreground"
+                            : "text-muted-foreground"
+                        }`}
+                      >
                         {dateTime(item.receivedAt)}
                       </span>
                     </div>
-                    <div className="mt-1 truncate text-xs text-muted-foreground">
+                    <div
+                      className={`mt-1 truncate text-xs ${
+                        selectedMessageId === item.id
+                          ? "text-foreground"
+                          : "text-muted-foreground"
+                      }`}
+                    >
                       {item.direction === "INBOUND"
                         ? item.fromAddress || "发件人未知"
                         : item.toAddresses.join(", ") || "收件人未知"}
@@ -901,12 +910,12 @@ export function MailCenter({
                         <Badge
                           variant={
                             item.matchStatus === "CANDIDATES_READY"
-                              ? "destructive"
+                              ? "outline"
                               : "secondary"
                           }
                           className={
                             item.matchStatus === "CANDIDATES_READY"
-                              ? "bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-200"
+                              ? "border-destructive/50"
                               : undefined
                           }
                         >
@@ -1005,10 +1014,7 @@ export function MailCenter({
                         选择最符合当前邮件的外链机会并记录确认理由。
                       </p>
                     </div>
-                    <Badge
-                      variant="destructive"
-                      className="bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-200"
-                    >
+                    <Badge variant="outline" className="border-destructive/50">
                       待确认
                     </Badge>
                   </div>
@@ -1041,8 +1047,8 @@ export function MailCenter({
                               </Badge>
                               {candidate.requiresManualConfirmation ? (
                                 <Badge
-                                  variant="destructive"
-                                  className="bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-200"
+                                  variant="outline"
+                                  className="border-destructive/50"
                                 >
                                   需要确认
                                 </Badge>
@@ -1240,7 +1246,10 @@ export function MailCenter({
         </div>
       </div>
 
-      <SendIntentQueue websiteProjectKey={websiteProjectKey} />
+      <SendIntentQueue
+        key={websiteProjectKey}
+        websiteProjectKey={websiteProjectKey}
+      />
     </section>
   )
 }

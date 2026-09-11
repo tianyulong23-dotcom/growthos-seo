@@ -89,6 +89,8 @@ export type ContactEnrichmentJobOptions = Readonly<{
   browserAllowed: boolean;
 }>;
 
+export type ContactEnrichmentSourceSelection = "historical" | "canonical_v2";
+
 const contactRoles = [
   "press",
   "editorial",
@@ -225,6 +227,7 @@ export async function ensureReadyContactEnrichmentJobs(
     actorId: string;
     limit: number;
     options: ContactEnrichmentJobOptions;
+    createNewJobs?: boolean;
   }>,
 ): Promise<number> {
   const exhaustedRecovery = await client.query(
@@ -429,7 +432,7 @@ export async function ensureReadyContactEnrichmentJobs(
     });
     if (inserted) created += 1;
   }
-  if (created >= input.limit) return created;
+  if (created >= input.limit || input.createNewJobs === false) return created;
 
   const source = await client.query(
     `SELECT r.id "recommendationId",r.prospect_id "prospectId",
@@ -590,8 +593,21 @@ export async function queueHistoricalContactEnrichmentJobs(
     actorId: string;
     recommendationIds: readonly string[];
     options: ContactEnrichmentJobOptions;
+    sourceSelection?: ContactEnrichmentSourceSelection;
   }>,
 ): Promise<HistoricalContactEnrichmentQueueSummary> {
+  const sourceSelection = input.sourceSelection ?? "historical";
+  const sourceSelectionPredicate =
+    sourceSelection === "canonical_v2"
+      ? "TRUE /* recommendation-pool-v2-canonical-source */"
+      : `inventory.fit_decision='eligible'
+        AND inventory.fit_score_model_version=
+              'recommendation-commercial-fit.v4'
+        AND (
+          inventory.contact_decision IS DISTINCT FROM 'eligible'
+          OR inventory.contact_reason_code IS DISTINCT FROM 'PUBLIC_EMAIL_FOUND'
+          OR inventory.verified_public_email_count<1
+        )`;
   const recommendationIds = [...new Set(input.recommendationIds)];
   const summary = {
     eligibleRecommendationCount: recommendationIds.length,
@@ -647,14 +663,7 @@ export async function queueHistoricalContactEnrichmentJobs(
       WHERE (recommendation.organization_id,recommendation.workspace_id,
              recommendation.website_project_id)=($1,$2,$3)
         AND recommendation.id=ANY($4::uuid[])
-        AND inventory.fit_decision='eligible'
-        AND inventory.fit_score_model_version=
-              'recommendation-commercial-fit.v4'
-        AND (
-          inventory.contact_decision IS DISTINCT FROM 'eligible'
-          OR inventory.contact_reason_code IS DISTINCT FROM 'PUBLIC_EMAIL_FOUND'
-          OR inventory.verified_public_email_count<1
-        )
+        AND (${sourceSelectionPredicate})
       ORDER BY recommendation.recommendation_context_version_id,
                recommendation.id`,
     [
@@ -746,6 +755,10 @@ export async function queueHistoricalContactEnrichmentJobs(
 
     const status = String(source.jobStatus);
     if (["pending", "running", "retry_scheduled"].includes(status)) {
+      summary.activeJobsPreserved += 1;
+      continue;
+    }
+    if (sourceSelection === "canonical_v2") {
       summary.activeJobsPreserved += 1;
       continue;
     }
@@ -902,11 +915,7 @@ export function createContactEnrichmentCommands(
                 AND batch.status='running'
               ORDER BY batch.started_at DESC,batch.id DESC
               LIMIT 1`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-            ],
+            [scope.organizationId, scope.workspaceId, scope.websiteProjectId],
           )
         : { rows: [] };
       return Object.freeze({
@@ -964,9 +973,7 @@ export function createContactEnrichmentCommands(
         });
       }
       if (
-        !["ready", "shown", "accepted"].includes(
-          String(source.inventoryStatus),
-        )
+        !["ready", "shown", "accepted"].includes(String(source.inventoryStatus))
       ) {
         throw new BacklinkError({
           code: backlinkErrorCodes.conflict,

@@ -1,7 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.api.routes.projects import (
+    resolve_collection_organization,
+    resolve_project_organization,
+)
 from app.modules.settings.schemas import (
     AIProviderSettingsResponse,
     TestAIProviderSettingsRequest,
@@ -21,8 +25,24 @@ from app.modules.settings.service import (
 router = APIRouter(tags=["settings"])
 
 
-def get_ai_settings_service() -> AISettingsService:
-    return build_ai_settings_service()
+async def get_ai_settings_service(request: Request) -> AISettingsService:
+    permission = "projects:read" if request.method == "GET" else "projects:write"
+    project_id = request.path_params.get("project_id")
+    if project_id:
+        organization_id, _ = await resolve_project_organization(
+            request, project_id, required_permission=permission
+        )
+    else:
+        organization_id, _ = await resolve_collection_organization(
+            request, required_permission=permission
+        )
+    service = build_ai_settings_service()
+    if organization_id is not None:
+        # Scope this request without mutating the process-wide cached settings.
+        service.settings = service.settings.model_copy(
+            update={"default_organization_id": organization_id}
+        )
+    return service
 
 
 def handle_settings_error(exc: Exception) -> None:

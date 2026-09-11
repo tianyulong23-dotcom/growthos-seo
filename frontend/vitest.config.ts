@@ -13,7 +13,8 @@ export default defineConfig({
     environment: "jsdom",
     exclude: [
       ...configDefaults.exclude,
-      "src/features/outreach/**/*.test.mjs",
+      "src/**/*.test.mjs",
+      "test/**/*.spec.ts",
     ],
   },
 })

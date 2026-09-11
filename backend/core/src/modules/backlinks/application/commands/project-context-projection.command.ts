@@ -1,20 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
-import type {
-  ProjectContextSnapshotStatus,
-} from "../../db/repositories/project-context-snapshot.repository.js";
-import {
-  createProjectContextSnapshotRepository,
-} from "../../db/repositories/project-context-snapshot.repository.js";
-import {
-  createJobRepository,
-} from "../../db/repositories/job.repository.js";
-import {
-  createOutboxRepository,
-} from "../../db/repositories/outbox.repository.js";
-import {
-  createProjectInputPersistenceTransactionRepository,
-} from "../../db/repositories/project-input-persistence.repository.js";
+import type { ProjectContextSnapshotStatus } from "../../db/repositories/project-context-snapshot.repository.js";
+import { createProjectContextSnapshotRepository } from "../../db/repositories/project-context-snapshot.repository.js";
+import { createProjectInputPersistenceTransactionRepository } from "../../db/repositories/project-input-persistence.repository.js";
 import {
   withBacklinkTenantTransaction,
   type BacklinkTransactionClient,
@@ -24,12 +12,6 @@ import {
   BacklinkError,
   backlinkErrorCodes,
 } from "../../domain/errors/backlink-error.js";
-import {
-  BACKLINK_PROJECT_ANALYSIS_REQUESTED,
-} from "../../workflows/outbox-relay.js";
-import {
-  buildBacklinksWorkflowId,
-} from "../../workflows/namespaces.js";
 import type {
   GenerationInputPins,
   ProjectOutreachProfile,
@@ -107,6 +89,13 @@ const disabledCapabilities: ProjectRuntimeGovernanceCapabilities = {
   dataForSeoEnabled: false,
   browserProviderEnabled: false,
 };
+
+const generationInputPinContractByPoolContract = Object.freeze({
+  "recommendation-pool.v2": "recommendation-pool-admission.v2",
+});
+const allowedGenerationInputPinContracts = new Set<string>(
+  Object.values(generationInputPinContractByPoolContract),
+);
 
 type GovernanceSwitch = Readonly<{
   layer: "project" | "provider";
@@ -309,32 +298,32 @@ async function staleContactEnrichmentJobs(
 }
 
 function conflicts(
-  latest: NonNullable<Awaited<ReturnType<
-    ReturnType<typeof createProjectContextSnapshotRepository>["findLatest"]
-  >>>,
+  latest: NonNullable<
+    Awaited<
+      ReturnType<
+        ReturnType<typeof createProjectContextSnapshotRepository>["findLatest"]
+      >
+    >
+  >,
   input: ProjectContextProjectionInput,
 ): boolean {
-  const sameStrings = (
-    left: readonly string[],
-    right: readonly string[],
-  ) => (
-    left.length === right.length
-    && left.every((value, index) => value === right[index])
-  );
+  const sameStrings = (left: readonly string[], right: readonly string[]) =>
+    left.length === right.length &&
+    left.every((value, index) => value === right[index]);
   return (
-    latest.snapshotId !== input.snapshotId
-    || latest.projectStatus !== input.projectStatus
-    || latest.canonicalDomain !== input.canonicalDomain
-    || latest.locale !== input.locale
-    || latest.countryCode !== input.countryCode
-    || latest.targetMarket !== input.targetMarket
-    || latest.profileVersionId !== input.profileVersionId
-    || latest.promotionTargetVersionId !== input.promotionTargetVersionId
-    || !sameStrings(latest.products, input.products)
-    || !sameStrings(latest.keywords, input.keywords)
-    || !sameStrings(latest.targetUrls, input.targetUrls)
-    || !sameStrings(latest.targetAudiences, input.targetAudiences)
-    || !sameStrings(latest.partnershipGoals, input.partnershipGoals)
+    latest.snapshotId !== input.snapshotId ||
+    latest.projectStatus !== input.projectStatus ||
+    latest.canonicalDomain !== input.canonicalDomain ||
+    latest.locale !== input.locale ||
+    latest.countryCode !== input.countryCode ||
+    latest.targetMarket !== input.targetMarket ||
+    latest.profileVersionId !== input.profileVersionId ||
+    latest.promotionTargetVersionId !== input.promotionTargetVersionId ||
+    !sameStrings(latest.products, input.products) ||
+    !sameStrings(latest.keywords, input.keywords) ||
+    !sameStrings(latest.targetUrls, input.targetUrls) ||
+    !sameStrings(latest.targetAudiences, input.targetAudiences) ||
+    !sameStrings(latest.partnershipGoals, input.partnershipGoals)
   );
 }
 
@@ -350,8 +339,8 @@ function sameStringList(
   right: readonly string[],
 ): boolean {
   return (
-    left.length === right.length
-    && left.every((value, index) => value === right[index])
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
   );
 }
 
@@ -371,41 +360,39 @@ function assertProjectionInputBinding(
   const evidenceIdsAreUnique =
     new Set(sharedEvidenceIds).size === sharedEvidenceIds.length;
   if (
-    profileEnvelope.immutableFingerprint !== profile.immutableFingerprint
-    || profile.organizationId !== input.organizationId
-    || profile.websiteProjectId !== input.websiteProjectId
-    || profile.profileVersionId !== input.profileVersionId
-    || profile.promotionTargetVersionId !== input.promotionTargetVersionId
-    || profile.market !== input.targetMarket
-    || profile.location !== input.countryCode
-    || profile.language !== input.locale
-    || !sameStringList(profile.productsAndServices, input.products)
-    || !sameStringList(profile.keywordsAndTopics, input.keywords)
-    || !sameStringList(profile.targetUrls, input.targetUrls)
-    || !sameStringList(profile.targetAudiences, input.targetAudiences)
-    || !sameStringList(profile.partnershipGoals, input.partnershipGoals)
+    profileEnvelope.immutableFingerprint !== profile.immutableFingerprint ||
+    profile.organizationId !== input.organizationId ||
+    profile.websiteProjectId !== input.websiteProjectId ||
+    profile.profileVersionId !== input.profileVersionId ||
+    profile.promotionTargetVersionId !== input.promotionTargetVersionId ||
+    profile.market !== input.targetMarket ||
+    profile.location !== input.countryCode ||
+    profile.language !== input.locale ||
+    !sameStringList(profile.productsAndServices, input.products) ||
+    !sameStringList(profile.keywordsAndTopics, input.keywords) ||
+    !sameStringList(profile.targetUrls, input.targetUrls) ||
+    !sameStringList(profile.targetAudiences, input.targetAudiences) ||
+    !sameStringList(profile.partnershipGoals, input.partnershipGoals)
   ) {
     throw conflict(
       "The projected outreach profile is bound to different project facts.",
     );
   }
   if (
-    pinEnvelope.outreachProfileRecordId !== profileEnvelope.recordId
-    || pins.organizationId !== input.organizationId
-    || pins.websiteProjectId !== input.websiteProjectId
-    || pins.projectContextVersion !== input.snapshotVersion
-    || pins.siteProfileVersionId !== input.profileVersionId
-    || pins.outreachProfileVersionId !== input.profileVersionId
-    || pins.promotionTargetVersionId !== input.promotionTargetVersionId
-    || pins.market !== input.targetMarket
-    || pins.qualificationContractVersion
-      !== "recommendation-qualification.v1"
-    || !evidenceIdsAreUnique
-    || !sameStringList(pins.sharedEvidenceSnapshotIds, sharedEvidenceIds)
-    || !sameStringList(
-      pins.keywordEvidenceSnapshotIds,
-      keywordEvidenceIds,
-    )
+    pinEnvelope.outreachProfileRecordId !== profileEnvelope.recordId ||
+    pins.organizationId !== input.organizationId ||
+    pins.websiteProjectId !== input.websiteProjectId ||
+    pins.projectContextVersion !== input.snapshotVersion ||
+    pins.siteProfileVersionId !== input.profileVersionId ||
+    pins.outreachProfileVersionId !== input.profileVersionId ||
+    pins.promotionTargetVersionId !== input.promotionTargetVersionId ||
+    pins.market !== input.targetMarket ||
+    !allowedGenerationInputPinContracts.has(
+      pins.qualificationContractVersion,
+    ) ||
+    !evidenceIdsAreUnique ||
+    !sameStringList(pins.sharedEvidenceSnapshotIds, sharedEvidenceIds) ||
+    !sameStringList(pins.keywordEvidenceSnapshotIds, keywordEvidenceIds)
   ) {
     throw conflict(
       "The generation input pin is bound to different project facts.",
@@ -414,11 +401,11 @@ function assertProjectionInputBinding(
   for (const evidence of input.sharedSeoEvidence) {
     const snapshot = evidence.snapshot;
     if (
-      snapshot.organizationId !== input.organizationId
-      || snapshot.websiteProjectId !== input.websiteProjectId
-      || snapshot.market !== input.targetMarket
-      || snapshot.location !== input.countryCode
-      || snapshot.language !== input.locale
+      snapshot.organizationId !== input.organizationId ||
+      snapshot.websiteProjectId !== input.websiteProjectId ||
+      snapshot.market !== input.targetMarket ||
+      snapshot.location !== input.countryCode ||
+      snapshot.language !== input.locale
     ) {
       throw conflict(
         "Shared SEO evidence is bound to a different project or market.",
@@ -435,31 +422,25 @@ function assertProjectionInputBinding(
     input.keywords.length > 0
       ? undefined
       : input.sharedSeoEvidence.find(
-        (item) => item.snapshot.sourceModule === "content",
-      );
+          (item) => item.snapshot.sourceModule === "content",
+        );
   const isReady = (
     evidence: ProjectContextProjectionInput["sharedSeoEvidence"][number],
   ) => evidence.snapshot.status === "ready";
   if (
-    input.products.length === 0
-    || requiredProfileEvidence === undefined
-    || (input.keywords.length === 0 && input.targetUrls.length === 0)
-    || (
-      input.keywords.length === 0
-      && (
-        requiredPromotionEvidence === undefined
-        || !isReady(requiredPromotionEvidence)
-      )
-    )
+    input.products.length === 0 ||
+    requiredProfileEvidence === undefined ||
+    (input.keywords.length === 0 && input.targetUrls.length === 0) ||
+    (input.keywords.length === 0 &&
+      (requiredPromotionEvidence === undefined ||
+        !isReady(requiredPromotionEvidence)))
   ) {
     throw conflict(
       "The Website Project does not contain the minimum sufficient discovery evidence.",
     );
   }
   if (!isReady(requiredProfileEvidence)) {
-    throw conflict(
-      "The Website Project site profile evidence is unavailable.",
-    );
+    throw conflict("The Website Project site profile evidence is unavailable.");
   }
 }
 
@@ -470,8 +451,7 @@ async function persistProjectionInput(
   if (!input.inputComplete) {
     return;
   }
-  const repository =
-    createProjectInputPersistenceTransactionRepository(client);
+  const repository = createProjectInputPersistenceTransactionRepository(client);
   const outreachProfileRecordId = await repository.saveOutreachProfile({
     recordId: input.outreachProfile.recordId,
     workspaceId: input.workspaceId,
@@ -517,145 +497,29 @@ async function persistProjectionInput(
   });
 }
 
-async function ensureRecommendationDemandPolicy(
+async function initializeRecommendationPoolV2(
   client: BacklinkTransactionClient,
   input: ProjectContextProjectionInput,
 ): Promise<void> {
-  if (!input.inputComplete || input.projectStatus !== "ACTIVE") {
-    return;
-  }
-  const lifecycleEventId = randomUUID();
-  const auditEventId = randomUUID();
-  const idempotencyKey = [
-    "recommendation-demand",
-    input.websiteProjectId,
-    input.profileVersionId,
-    input.promotionTargetVersionId,
-    input.generationInputPins.immutableFingerprint,
-  ].join(":");
-  const integrityHash = createHash("sha256")
-    .update(JSON.stringify({
-      action: "recommendation.demand.ready",
-      idempotencyKey,
-      projectContextVersionId: input.snapshotId,
-    }))
-    .digest("hex");
+  if (!input.inputComplete || input.projectStatus !== "ACTIVE") return;
+  // Existing migration state and immutable historical lineage are never replaced.
   await client.query(
-    `WITH current_policy AS MATERIALIZED (
-       SELECT policy.*
-       FROM backlink_commercial_inventory_policies AS policy
-       WHERE (
-         policy.organization_id,policy.workspace_id,
-         policy.website_project_id,policy.project_context_version_id
-       )=($1,$2,$3,$4)
-       FOR UPDATE
-     ),
-     inserted_policy AS (
-       INSERT INTO backlink_commercial_inventory_policies (
-         organization_id,workspace_id,website_project_id,
-         project_context_version_id,visible_pool_state,refill_state,
-         termination_reason,pause_reason,next_refill_at,updated_by
+    `INSERT INTO backlinks.backlink_recommendation_pool_project_contracts (
+       id,organization_id,workspace_id,website_project_id,
+       pool_contract_version,migration_state,created_by,updated_by
+     ) SELECT $1,$2,$3,$4,'recommendation-pool.v2','V2_READY',$5,$5
+       WHERE NOT EXISTS (
+         SELECT 1 FROM backlinks.backlink_recommendation_generation_contracts
+          WHERE organization_id=$2 AND workspace_id=$3 AND website_project_id=$4
        )
-       SELECT
-         $1,$2,$3,$4,'idle','idle',NULL,NULL,NULL,$5
-       WHERE NOT EXISTS (SELECT 1 FROM current_policy)
-       ON CONFLICT (
-         organization_id,workspace_id,website_project_id,
-         project_context_version_id
-       ) DO NOTHING
-       RETURNING project_context_version_id,
-                 version "policyVersion",
-                 'created'::text "policyAction"
-     ),
-     restored_policy AS (
-       UPDATE backlink_commercial_inventory_policies AS policy
-       SET visible_pool_state='idle',
-           refill_state='idle',
-           termination_reason=NULL,
-           pause_reason=NULL,
-           next_refill_at=NULL,
-           updated_at=now(),
-           updated_by=$5,
-           version=policy.version+1
-       FROM current_policy
-       WHERE (
-         policy.organization_id,policy.workspace_id,
-         policy.website_project_id,policy.project_context_version_id
-       )=($1,$2,$3,$4)
-         AND current_policy.refill_state='paused'
-         AND current_policy.pause_reason='awaiting_authorization'
-       RETURNING policy.project_context_version_id,
-                 policy.version "policyVersion",
-                 'authorization_gate_removed'::text "policyAction"
-     ),
-     policy AS (
-       SELECT * FROM inserted_policy
-       UNION ALL
-       SELECT * FROM restored_policy
-     ),
-     lifecycle AS (
-       INSERT INTO backlink_lifecycle_events (
-         id,organization_id,workspace_id,website_project_id,job_id,
-         aggregate_type,aggregate_id,sequence,aggregate_version,event_type,
-         actor_type,actor_id,before_state,after_state,reason,correlation_id,
-         causation_id,idempotency_key,event_schema_version
-       )
-       SELECT
-         $6,$1,$2,$3,NULL,'commercial_inventory_policy',$4,
-         policy."policyVersion",policy."policyVersion",
-         'recommendation.demand.ready','system',$5,NULL,
-         jsonb_build_object(
-           'status','ready',
-           'projectContextVersionId',$4::text,
-           'snapshotVersion',$7::integer,
-           'profileVersionId',$8::text,
-           'promotionTargetVersionId',$9::text,
-           'evidenceFingerprint',$10::text,
-           'policyAction',policy."policyAction"
-         ),
-         'Website Project evidence is ready for configured discovery sources.',
-         $11,NULL,$12||':'||policy."policyAction",1
-       FROM policy
-       ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
-       RETURNING id
-     )
-     INSERT INTO backlink_audit_events (
-       id,organization_id,workspace_id,website_project_id,job_id,
-       lifecycle_event_id,actor_id,actor_kind,action,target_type,target_id,
-       outcome,reason,before_redacted,after_redacted,request_id,
-       correlation_id,previous_integrity_hash,integrity_hash,
-       event_schema_version
-     )
-     SELECT
-       $13,$1,$2,$3,NULL,lifecycle.id,$5,'system',
-       'recommendation.demand.ready',
-       'commercial_inventory_policy',$4,'success',
-       'Website Project evidence is ready for configured discovery sources.',
-       NULL,
-       jsonb_build_object(
-         'status','ready',
-         'projectContextVersionId',$4::text,
-         'snapshotVersion',$7::integer,
-         'policyAction',policy."policyAction"
-       ),
-       $12,$11,NULL,$14,1
-     FROM lifecycle
-     JOIN policy ON true`,
+     ON CONFLICT (organization_id,workspace_id,website_project_id)
+     DO NOTHING`,
     [
+      randomUUID(),
       input.organizationId,
       input.workspaceId,
       input.websiteProjectId,
-      input.snapshotId,
       input.actorId,
-      lifecycleEventId,
-      input.snapshotVersion,
-      input.profileVersionId,
-      input.promotionTargetVersionId,
-      input.generationInputPins.immutableFingerprint,
-      input.correlationId,
-      idempotencyKey,
-      auditEventId,
-      integrityHash,
     ],
   );
 }
@@ -678,19 +542,18 @@ export function createProjectContextProjectionCommand(
         if (latest !== null && latest.snapshotVersion > input.snapshotVersion) {
           throw conflict("The Website Project context projection is stale.");
         }
-        if (latest !== null && latest.snapshotVersion === input.snapshotVersion) {
+        if (
+          latest !== null &&
+          latest.snapshotVersion === input.snapshotVersion
+        ) {
           if (conflicts(latest, input)) {
             throw conflict(
               "The Website Project context version is bound to different facts.",
             );
           }
-          await initializeProjectRuntimeGovernance(
-            client,
-            input,
-            capabilities,
-          );
+          await initializeProjectRuntimeGovernance(client, input, capabilities);
           await persistProjectionInput(client, input);
-          await ensureRecommendationDemandPolicy(client, input);
+          await initializeRecommendationPoolV2(client, input);
           return {
             state: "replayed",
             snapshotVersion: input.snapshotVersion,
@@ -719,64 +582,17 @@ export function createProjectContextProjectionCommand(
           actorId: input.actorId,
         });
         await persistProjectionInput(client, input);
-        await initializeProjectRuntimeGovernance(
-          client,
-          input,
-          capabilities,
-        );
-        await ensureRecommendationDemandPolicy(client, input);
+        await initializeProjectRuntimeGovernance(client, input, capabilities);
+        await initializeRecommendationPoolV2(client, input);
         await staleContactEnrichmentJobs(client, input);
 
-        if (!input.inputComplete || input.projectStatus !== "ACTIVE") {
-          return {
-            state: "projected",
-            snapshotVersion: input.snapshotVersion,
-            inputRequired: !input.inputComplete,
-            jobScheduled: false,
-            jobId: null,
-          };
-        }
-
-        const workflowId = buildBacklinksWorkflowId({
-          organizationId: input.organizationId,
-          workspaceId: input.workspaceId,
-          websiteProjectId: input.websiteProjectId,
-          workflow: "project-analysis",
-          instanceId: input.jobId,
-        });
-        const jobCreated = await createJobRepository(client).create({
-          ...scope,
-          actorId: input.actorId,
-          jobId: input.jobId,
-          jobType: "project-analysis",
-          sourceObjectType: "project-context-snapshot",
-          sourceObjectId: input.snapshotId,
-          workflowId,
-          correlationId: input.correlationId,
-        });
-        await createOutboxRepository(client).append({
-          ...scope,
-          actorId: input.actorId,
-          eventId: input.outboxEventId,
-          eventType: BACKLINK_PROJECT_ANALYSIS_REQUESTED,
-          aggregateId: input.snapshotId,
-          aggregateVersion: input.snapshotVersion,
-          idempotencyKey:
-            `project-analysis:${input.websiteProjectId}:${input.snapshotVersion}`,
-          payload: {
-            ...scope,
-            jobId: input.jobId,
-            workflowId,
-            snapshotVersion: input.snapshotVersion,
-          },
-          payloadSchemaVersion: 1,
-        });
+        // V2 inputs are ready atomically; generation starts only on an explicit command.
         return {
           state: "projected",
           snapshotVersion: input.snapshotVersion,
-          inputRequired: false,
-          jobScheduled: jobCreated,
-          jobId: input.jobId,
+          inputRequired: !input.inputComplete,
+          jobScheduled: false,
+          jobId: null,
         };
       });
     },

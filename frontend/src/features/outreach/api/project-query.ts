@@ -34,6 +34,7 @@ export function createProjectQueryKey(
 
 export class ProjectQueryClient {
   private readonly entries = new Map<string, QueryEntry>()
+  private readonly activeScopes = new Map<string, ProjectQueryPart>()
   private activeProjectKey: string | null = null
 
   activateProject(websiteProjectKey: string) {
@@ -44,6 +45,25 @@ export class ProjectQueryClient {
         entry.controller?.abort()
         entry.controller = null
         entry.promise = null
+      }
+    }
+  }
+
+  activateScope(
+    prefix: readonly ProjectQueryPart[],
+    activeScope: ProjectQueryPart
+  ) {
+    const serializedPrefix = JSON.stringify(prefix)
+    if (this.activeScopes.get(serializedPrefix) === activeScope) return
+
+    this.activeScopes.set(serializedPrefix, activeScope)
+    for (const [serialized, entry] of this.entries) {
+      if (
+        isPrefix(entry.key, prefix) &&
+        entry.key[prefix.length] !== activeScope
+      ) {
+        entry.controller?.abort()
+        this.entries.delete(serialized)
       }
     }
   }

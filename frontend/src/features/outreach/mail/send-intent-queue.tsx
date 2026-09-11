@@ -138,13 +138,6 @@ export function SendIntentQueue({
     [items, selectedIntentId]
   )
 
-  useEffect(() => {
-    activeProjectRef.current = websiteProjectKey
-    setSelectedIntentId(null)
-    setDetail(null)
-    setDetailState("empty")
-  }, [websiteProjectKey])
-
   const applyFirstPage = (
     response: Awaited<ReturnType<typeof listSendIntents>>
   ) => {
@@ -170,7 +163,6 @@ export function SendIntentQueue({
 
   useEffect(() => {
     let active = true
-    setListState("loading")
     void backlinksProjectQueries
       .fetch(listKey, (signal) =>
         listSendIntents(
@@ -359,10 +351,11 @@ export function SendIntentQueue({
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1">
                     <Badge
-                      variant={
+                      variant="outline"
+                      className={
                         item.queueKind === "RECONCILIATION_REQUIRED"
-                          ? "destructive"
-                          : "outline"
+                          ? "border-destructive/50"
+                          : undefined
                       }
                     >
                       {item.queueKind ? queueLabels[item.queueKind] : "已结束"}
@@ -407,10 +400,11 @@ export function SendIntentQueue({
                     </span>
                     {detail.queueKind ? (
                       <Badge
-                        variant={
+                        variant="outline"
+                        className={
                           detail.queueKind === "RECONCILIATION_REQUIRED"
-                            ? "destructive"
-                            : "outline"
+                            ? "border-destructive/50"
+                            : undefined
                         }
                       >
                         {queueLabels[detail.queueKind]}

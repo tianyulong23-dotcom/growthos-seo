@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ type BrowserFetcher struct {
 type browserSession struct {
 	browser  *rod.Browser
 	launcher *launcher.Launcher
+	cancel   context.CancelFunc
 }
 
 func NewBrowserFetcher(config Config) *BrowserFetcher {
@@ -212,10 +214,9 @@ func (f *BrowserFetcher) safeRequestRouter(
 		}
 		if request.Request.IsNavigation() {
 			if err := validateContextScope(ctx, target); err != nil {
-				select {
-				case blocked <- fmt.Errorf("blocked browser navigation %s: %w", target.Redacted(), err):
-				default:
-				}
+				// Block out-of-scope documents, including optional child frames.
+				// A blocked main navigation fails Navigate; Fetch also validates
+				// the final top-level URL before returning any public HTML.
 				request.Response.Fail(proto.NetworkErrorReasonBlockedByClient)
 				return
 			}
@@ -249,6 +250,11 @@ func (f *BrowserFetcher) getBrowser(ctx context.Context, proxyURL string) (*rod.
 	}
 
 	browserLauncher := launcher.New().Context(ctx).HeadlessNew(true)
+	// Windows service shutdown already terminates the owned process tree.
+	// Avoid the separate leakless executable blocked by Windows security.
+	if runtime.GOOS == "windows" {
+		browserLauncher = browserLauncher.Leakless(false)
+	}
 	if f.config.BrowserExecutable != "" {
 		browserLauncher = browserLauncher.Bin(f.config.BrowserExecutable)
 	}
@@ -259,8 +265,12 @@ func (f *BrowserFetcher) getBrowser(ctx context.Context, proxyURL string) (*rod.
 	if err != nil {
 		return nil, err
 	}
-	browser := rod.New().ControlURL(controlURL).Context(ctx)
+	// The shared CDP connection outlives individual HTTP render requests.
+	// Fetch attaches the request context to each page instead.
+	sessionContext, cancel := context.WithCancel(context.Background())
+	browser := rod.New().ControlURL(controlURL).Context(sessionContext)
 	if err := browser.Connect(); err != nil {
+		cancel()
 		browserLauncher.Cleanup()
 		return nil, err
 	}
@@ -268,6 +278,7 @@ func (f *BrowserFetcher) getBrowser(ctx context.Context, proxyURL string) (*rod.
 	f.sessions[proxyURL] = browserSession{
 		browser:  browser,
 		launcher: browserLauncher,
+		cancel:   cancel,
 	}
 	return browser, nil
 }
@@ -280,6 +291,7 @@ func (f *BrowserFetcher) Close() error {
 		if err := session.browser.Close(); err != nil && closeErr == nil {
 			closeErr = err
 		}
+		session.cancel()
 		session.launcher.Cleanup()
 		delete(f.sessions, proxyURL)
 	}

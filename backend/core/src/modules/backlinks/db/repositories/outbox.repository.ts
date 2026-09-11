@@ -1,4 +1,5 @@
 import { BacklinkError, backlinkErrorCodes } from "../../domain/errors/backlink-error.js";
+import { recommendationRefillRequestedEventType } from "../../domain/recommendations/recommendation-pool-contract-guard.js";
 import {
   withBacklinkTenantTransaction,
   type BacklinkTenantContext,
@@ -44,6 +45,134 @@ export type MarkOutboxInput =
       retryAt: Date }>;
 const conflict = () => new BacklinkError({ code: backlinkErrorCodes.conflict,
   message: "Outbox deduplication key is bound to a different event." });
+const claimRecommendationRefillSql = `
+  WITH claimable AS (
+    SELECT event.id
+      FROM backlink_outbox_events event
+      JOIN backlink_jobs AS job
+        ON (
+          job.organization_id,
+          job.workspace_id,
+          job.website_project_id,
+          job.id
+        ) = (
+          event.organization_id,
+          event.workspace_id,
+          event.website_project_id,
+          event.aggregate_id
+        )
+       AND job.job_type = 'recommendation_refill'
+       AND job.source_object_type = 'recommendation_context'
+       AND job.source_object_id::text =
+         event.payload->>'recommendationContextVersionId'
+       AND job.workflow_id = event.idempotency_key
+       AND job.workflow_id = event.payload->>'workflowId'
+      JOIN backlink_recommendation_refills AS refill
+        ON (
+          refill.organization_id,
+          refill.workspace_id,
+          refill.website_project_id,
+          refill.job_id
+        ) = (
+          job.organization_id,
+          job.workspace_id,
+          job.website_project_id,
+          job.id
+        )
+       AND refill.recommendation_context_version_id::text =
+         event.payload->>'recommendationContextVersionId'
+       AND refill.visible_pool_generation::text =
+         event.payload->>'visiblePoolGeneration'
+       AND refill.refill_window_key = event.payload->>'refillWindowKey'
+       AND refill.low_watermark::text = event.payload->>'lowWatermark'
+       AND refill.high_watermark::text = event.payload->>'highWatermark'
+      JOIN backlink_recommendation_generation_contracts AS generation
+        ON (
+          generation.organization_id,
+          generation.workspace_id,
+          generation.website_project_id,
+          generation.recommendation_context_version_id,
+          generation.visible_pool_generation
+        ) = (
+          refill.organization_id,
+          refill.workspace_id,
+          refill.website_project_id,
+          refill.recommendation_context_version_id,
+          refill.visible_pool_generation
+        )
+       AND generation.pool_contract_version = 'recommendation-pool.v1'
+      JOIN backlink_recommendation_pool_project_contracts AS project_contract
+        ON (
+          project_contract.organization_id,
+          project_contract.workspace_id,
+          project_contract.website_project_id
+        ) = (
+          event.organization_id,
+          event.workspace_id,
+          event.website_project_id
+        )
+       AND project_contract.pool_contract_version = 'recommendation-pool.v1'
+       AND project_contract.migration_state='V1_ACTIVE'
+     WHERE event.event_type = $3
+       AND event.payload_schema_version = 1
+       AND jsonb_typeof(event.payload) = 'object'
+       AND event.payload->>'contractVersion' = $3
+       AND event.payload->>'organizationId' =
+             event.organization_id::text
+       AND event.payload->>'workspaceId' = event.workspace_id::text
+       AND event.payload->>'websiteProjectId' =
+             event.website_project_id::text
+       AND event.payload->>'jobId' = event.aggregate_id::text
+       AND jsonb_typeof(event.payload->'visiblePoolGeneration') = 'number'
+       AND event.payload->>'visiblePoolGeneration' ~ '^[1-9][0-9]*$'
+       AND jsonb_typeof(event.payload->'lowWatermark') = 'number'
+       AND event.payload->>'lowWatermark' ~ '^(0|[1-9][0-9]*)$'
+       AND jsonb_typeof(event.payload->'highWatermark') = 'number'
+       AND event.payload->>'highWatermark' ~ '^[1-9][0-9]*$'
+       AND length(btrim(event.payload->>'recommendationContextVersionId')) > 0
+       AND length(btrim(event.payload->>'workflowId')) > 0
+       AND length(btrim(event.payload->>'correlationId')) > 0
+       AND length(btrim(event.payload->>'actorId')) > 0
+       AND length(btrim(event.payload->>'refillWindowKey')) > 0
+       AND (
+             (
+               event.status IN ('pending', 'failed')
+               AND event.available_at <= now()
+             )
+             OR (
+               $4::timestamptz IS NOT NULL
+               AND event.status = 'processing'
+               AND event.claimed_at <= $4
+             )
+           )
+       AND ($5::uuid IS NULL OR event.id = $5::uuid)
+       AND NOT EXISTS (
+         SELECT 1
+           FROM backlink_recommendation_pool_v2_cutover_control AS control
+          WHERE control.control_key = 'GLOBAL'
+            AND control.state='V1_WRITES_FROZEN'
+       )
+     ORDER BY event.available_at, event.created_at, event.id
+     FOR UPDATE OF event SKIP LOCKED
+     LIMIT $1
+  )
+  UPDATE backlink_outbox_events AS event
+     SET status = 'processing', claimed_at = now(), claimed_by = $2,
+         attempt_count = event.attempt_count + 1, updated_at = now(),
+         updated_by = $2
+    FROM claimable
+   WHERE event.id = claimable.id
+  RETURNING event.id AS "eventId",
+            event.organization_id AS "organizationId",
+            event.workspace_id AS "workspaceId",
+            event.website_project_id AS "websiteProjectId",
+            event.event_type AS "eventType",
+            event.aggregate_id AS "aggregateId",
+            event.aggregate_version AS "aggregateVersion",
+            event.idempotency_key AS "idempotencyKey", event.payload,
+            event.payload_schema_version AS "payloadSchemaVersion",
+            event.status, event.available_at AS "availableAt",
+            event.attempt_count AS "attemptCount"`;
 
 export function createOutboxRepository(client: OutboxQueryClient) {
   return {
@@ -97,6 +226,16 @@ export function createOutboxRepository(client: OutboxQueryClient) {
       readonly ClaimedOutboxEvent[]
     > {
       if (!Number.isInteger(input.limit) || input.limit < 1) return [];
+      if (input.eventType === recommendationRefillRequestedEventType) {
+        const result = await client.query(claimRecommendationRefillSql, [
+          input.limit,
+          input.workerId,
+          input.eventType,
+          input.staleClaimBefore ?? null,
+          input.eventId ?? null,
+        ]);
+        return result.rows as readonly ClaimedOutboxEvent[];
+      }
       const result = await client.query(
         `WITH claimable AS (
            SELECT id FROM backlink_outbox_events
@@ -107,6 +246,7 @@ export function createOutboxRepository(client: OutboxQueryClient) {
                   )
               AND ($3::text IS NULL OR event_type = $3)
               AND ($5::uuid IS NULL OR id = $5::uuid)
+              AND event_type<>$6
             ORDER BY available_at, created_at, id
             FOR UPDATE SKIP LOCKED
             LIMIT $1
@@ -134,6 +274,7 @@ export function createOutboxRepository(client: OutboxQueryClient) {
           input.eventType ?? null,
           input.staleClaimBefore ?? null,
           input.eventId ?? null,
+          recommendationRefillRequestedEventType,
         ],
       );
       return result.rows as readonly ClaimedOutboxEvent[];
@@ -171,6 +312,28 @@ export function createOutboxRelayRepository(client: OutboxQueryClient) {
       if (!Number.isInteger(input.limit) || input.limit < 1) return [];
       if (input.eventId !== undefined) {
         throw new Error("BACKLINK_OUTBOX_EXACT_CLAIM_UNSUPPORTED");
+      }
+      if (input.eventType === recommendationRefillRequestedEventType) {
+        const result = await client.query(
+          `SELECT event_id AS "eventId",
+                  organization_id AS "organizationId",
+                  workspace_id AS "workspaceId",
+                  website_project_id AS "websiteProjectId",
+                  event_type AS "eventType",
+                  aggregate_id AS "aggregateId",
+                  aggregate_version AS "aggregateVersion",
+                  idempotency_key AS "idempotencyKey",
+                  payload,
+                  payload_schema_version AS "payloadSchemaVersion",
+                  status,
+                  available_at AS "availableAt",
+                  attempt_count AS "attemptCount"
+             FROM backlink_claim_recommendation_refill_outbox_events(
+               $1, $2, $3, NULL, NULL, NULL, NULL
+             )`,
+          [input.workerId, input.limit, input.staleClaimBefore ?? null],
+        );
+        return result.rows as readonly ClaimedOutboxEvent[];
       }
       const result = await client.query(
         `SELECT event_id AS "eventId",

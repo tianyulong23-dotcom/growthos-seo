@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
-import { evaluateCommercialCandidate } from "../../domain/recommendations/commercial-candidate-evaluation.js";
 import {
-  commercialFitBaselineAdmissionThreshold,
+  applyProgressiveCommercialCandidateAdmission,
+  evaluateCommercialCandidate,
+} from "../../domain/recommendations/commercial-candidate-evaluation.js";
+import {
   commercialFitWeights,
   commercialRecommendationFitModelVersion,
   commercialRecommendationFitRuleVersion,
@@ -134,6 +136,7 @@ export function evaluateStoredCurrentCommercialCandidate(
     refillTier: unknown;
     locale: unknown;
     countryCode: unknown;
+    visiblePoolGeneration: number;
   }>,
 ): Readonly<{
   staticAssessment: CommercialStaticAssessment;
@@ -154,7 +157,7 @@ export function evaluateStoredCurrentCommercialCandidate(
   const previousScore = commercialScoreSchema.parse(input.commercialScore);
   const previousHitGates = new Set(previousGate.hitGates);
   const refillTier = String(input.refillTier);
-  const score = evaluateCommercialCandidate({
+  const baselineScore = evaluateCommercialCandidate({
     business: {
       selfOrRelatedDomain: previousHitGates.has("self_or_related_domain"),
       existingBacklinkOrOpportunity: previousHitGates.has(
@@ -194,6 +197,13 @@ export function evaluateStoredCurrentCommercialCandidate(
     },
     staticAssessment: assessment,
   });
+  const score = applyProgressiveCommercialCandidateAdmission(
+    [baselineScore],
+    { visiblePoolGeneration: input.visiblePoolGeneration },
+  ).scores[0];
+  if (score === undefined) {
+    throw new Error("COMMERCIAL_REASSESSMENT_SCORE_MISSING");
+  }
   return Object.freeze({
     staticAssessment: assessment,
     score,
@@ -350,8 +360,6 @@ export async function reassessCurrentCommercialCandidates(
             candidate.score_model_version=$5
             AND (
               candidate.commercial_score->>'ruleVersion' IS DISTINCT FROM $6
-              OR candidate.commercial_score#>>'{admission,appliedThreshold}'
-                   IS DISTINCT FROM $8
               OR (
                 candidate.commercial_score->>'decision'='eligible'
                 AND (
@@ -444,7 +452,6 @@ export async function reassessCurrentCommercialCandidates(
       commercialRecommendationFitModelVersion,
       commercialRecommendationFitRuleVersion,
       input.visiblePoolGeneration,
-      String(commercialFitBaselineAdmissionThreshold),
     ],
   );
 
@@ -457,6 +464,7 @@ export async function reassessCurrentCommercialCandidates(
       refillTier: row.refillTier,
       locale: row.locale,
       countryCode: row.countryCode,
+      visiblePoolGeneration: input.visiblePoolGeneration,
     });
     const assessment = evaluated.staticAssessment;
     const score = evaluated.score;
@@ -480,8 +488,6 @@ export async function reassessCurrentCommercialCandidates(
             AND (
               candidate.commercial_score->>'ruleVersion'
                 IS DISTINCT FROM $12
-              OR candidate.commercial_score#>>'{admission,appliedThreshold}'
-                   IS DISTINCT FROM $14
               OR candidate.gate_decision IS DISTINCT FROM $6::jsonb
               OR candidate.commercial_score IS DISTINCT FROM $7::jsonb
               OR (
@@ -507,7 +513,6 @@ export async function reassessCurrentCommercialCandidates(
           commercialRecommendationFitModelVersion,
           commercialRecommendationFitRuleVersion,
           input.visiblePoolGeneration,
-          String(commercialFitBaselineAdmissionThreshold),
         ],
       )
       : await client.query(

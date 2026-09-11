@@ -9,16 +9,9 @@ import {
   containsInternalDraftMetadataMarker,
   type ApprovedDraftEvidence,
 } from "../../domain/drafts/evidence-policy.js";
-import {
-  resolveDraftPromotionTarget,
-} from "../../domain/drafts/promotion-target.js";
-import type {
-  AiDraftInput,
-  AiDraftResult,
-} from "../../ports/ai-draft.port.js";
-import {
-  buildDraftPrompt,
-} from "../services/draft-prompt-builder.js";
+import { resolveDraftPromotionTarget } from "../../domain/drafts/promotion-target.js";
+import type { AiDraftInput, AiDraftResult } from "../../ports/ai-draft.port.js";
+import { buildDraftPrompt } from "../services/draft-prompt-builder.js";
 import {
   draftRequestSchema,
   type DraftRequest,
@@ -42,12 +35,7 @@ export type DraftGenerationQueryClient = Readonly<{
 }>;
 
 export type DraftGenerationJobStatus =
-  | "QUEUED"
-  | "RUNNING"
-  | "RETRY_SCHEDULED"
-  | "SUCCEEDED"
-  | "FAILED"
-  | "REFUSED";
+  "QUEUED" | "RUNNING" | "RETRY_SCHEDULED" | "SUCCEEDED" | "FAILED" | "REFUSED";
 
 export type DraftGenerationReadiness =
   | "QUEUED"
@@ -118,10 +106,7 @@ export type DraftSnapshot = Readonly<{
     bodyText: string;
     bodyDocument: unknown | null;
     source: "MODEL" | "TEMPLATE_FALLBACK" | "MANUAL" | "RESTORED";
-    readiness:
-      | "AI_DRAFT_READY"
-      | "BASIC_DRAFT_READY"
-      | "EDITED_DRAFT_READY";
+    readiness: "AI_DRAFT_READY" | "BASIC_DRAFT_READY" | "EDITED_DRAFT_READY";
     fallbackReason: string | null;
     createdAt: string;
   }> | null;
@@ -129,40 +114,43 @@ export type DraftSnapshot = Readonly<{
   freshness?: DraftFreshness;
 }>;
 
-export type CreateDraftGenerationJobInput = Scope & Readonly<{
-  opportunityId: string;
-  contactId: string;
-  contactVersion: number;
-  evidenceSnapshotId: string;
-  requestSnapshotId: string;
-  draftId: string;
-  runId: string;
-  logicalDraftKey: string;
-  idempotencyKey: string;
-  requestHash: string;
-  promptVersion: string;
-  outputSchemaVersion: string;
-  generationMode: DraftGenerationMode;
-  actorId: string;
-  recordedAt: Date;
-}>;
+export type CreateDraftGenerationJobInput = Scope &
+  Readonly<{
+    opportunityId: string;
+    contactId: string;
+    contactVersion: number;
+    evidenceSnapshotId: string;
+    requestSnapshotId: string;
+    draftId: string;
+    runId: string;
+    logicalDraftKey: string;
+    idempotencyKey: string;
+    requestHash: string;
+    promptVersion: string;
+    outputSchemaVersion: string;
+    generationMode: DraftGenerationMode;
+    actorId: string;
+    recordedAt: Date;
+  }>;
 
-export type PrepareDraftEvidenceSnapshotInput = Scope & Readonly<{
-  opportunityId: string;
-  contactId: string;
-  contactVersion: number;
-  snapshotId: string;
-  requestSnapshotId: string;
-  request: DraftRequest;
-  actorId: string;
-  recordedAt: Date;
-}>;
+export type PrepareDraftEvidenceSnapshotInput = Scope &
+  Readonly<{
+    opportunityId: string;
+    contactId: string;
+    contactVersion: number;
+    snapshotId: string;
+    requestSnapshotId: string;
+    request: DraftRequest;
+    actorId: string;
+    recordedAt: Date;
+  }>;
 
-type JobMutation = Scope & Readonly<{
-  runId: string;
-  actorId: string;
-  recordedAt: Date;
-}>;
+type JobMutation = Scope &
+  Readonly<{
+    runId: string;
+    actorId: string;
+    recordedAt: Date;
+  }>;
 
 export type DraftGenerationMode = "MODEL" | "MANUAL";
 
@@ -173,52 +161,69 @@ export type DraftPromptContext = Readonly<{
 }>;
 
 export type DraftGenerationRepository = Readonly<{
-  prepareEvidenceSnapshot(
-    input: PrepareDraftEvidenceSnapshotInput,
-  ): Promise<Readonly<{
-    snapshotId: string;
-    requestSnapshotId: string;
-    replayed: boolean;
-  }>>;
-  createJob(
-    input: CreateDraftGenerationJobInput,
-  ): Promise<DraftGenerationJob>;
+  prepareEvidenceSnapshot(input: PrepareDraftEvidenceSnapshotInput): Promise<
+    Readonly<{
+      snapshotId: string;
+      requestSnapshotId: string;
+      replayed: boolean;
+    }>
+  >;
+  createJob(input: CreateDraftGenerationJobInput): Promise<DraftGenerationJob>;
   claimJob(input: JobMutation): Promise<DraftGenerationJob>;
   loadPromptContext(input: JobMutation): Promise<DraftPromptContext>;
-  completeJob(input: JobMutation & Readonly<{
-    versionId: string;
-    result: AiDraftResult;
-    source: "MODEL" | "TEMPLATE_FALLBACK";
-    fallbackReason: string | null;
-  }>): Promise<Readonly<{
-    versionId: string;
-    draftVersion: number;
-    adoptedAsCurrent: boolean;
-  }>>;
-  failJob(input: JobMutation & Readonly<{
-    errorClass: string;
-    errorCode: string;
-    diagnosticCode: string | null;
-    refused: boolean;
-  }>): Promise<void>;
-  scheduleRetry(input: JobMutation & Readonly<{
-    errorClass: string;
-    errorCode: string;
-  }>): Promise<void>;
-  getJob(input: Scope & Readonly<{ runId: string }>): Promise<DraftGenerationJob>;
-  findLatestJob(input: Scope & Readonly<{
-    opportunityId: string;
-    logicalDraftKey: string;
-  }>): Promise<DraftGenerationJob | null>;
-  getDraft(input: Scope & Readonly<{ draftId: string }>): Promise<DraftSnapshot>;
+  completeJob(
+    input: JobMutation &
+      Readonly<{
+        versionId: string;
+        result: AiDraftResult;
+        source: "MODEL" | "TEMPLATE_FALLBACK";
+        fallbackReason: string | null;
+      }>,
+  ): Promise<
+    Readonly<{
+      versionId: string;
+      draftVersion: number;
+      adoptedAsCurrent: boolean;
+    }>
+  >;
+  failJob(
+    input: JobMutation &
+      Readonly<{
+        errorClass: string;
+        errorCode: string;
+        diagnosticCode: string | null;
+        refused: boolean;
+      }>,
+  ): Promise<void>;
+  scheduleRetry(
+    input: JobMutation &
+      Readonly<{
+        errorClass: string;
+        errorCode: string;
+      }>,
+  ): Promise<void>;
+  getJob(
+    input: Scope & Readonly<{ runId: string }>,
+  ): Promise<DraftGenerationJob>;
+  findLatestJob(
+    input: Scope &
+      Readonly<{
+        opportunityId: string;
+        logicalDraftKey: string;
+      }>,
+  ): Promise<DraftGenerationJob | null>;
+  getDraft(
+    input: Scope & Readonly<{ draftId: string }>,
+  ): Promise<DraftSnapshot>;
 }>;
 
-type DraftEditingMutation = Scope & Readonly<{
-  draftId: string;
-  expectedVersion: number;
-  actorId: string;
-  recordedAt: Date;
-}>;
+type DraftEditingMutation = Scope &
+  Readonly<{
+    draftId: string;
+    expectedVersion: number;
+    actorId: string;
+    recordedAt: Date;
+  }>;
 
 type DraftEditingCompleted = Readonly<{
   state: "completed";
@@ -235,12 +240,13 @@ type DraftEditingFailure =
 
 export type DraftEditingRepository = Readonly<{
   saveManualVersion(
-    input: DraftEditingMutation & Readonly<{
-      versionId: string;
-      subjectText: string;
-      bodyText: string;
-      bodyDocument: unknown;
-    }>,
+    input: DraftEditingMutation &
+      Readonly<{
+        versionId: string;
+        subjectText: string;
+        bodyText: string;
+        bodyDocument: unknown;
+      }>,
   ): Promise<DraftEditingCompleted | DraftEditingFailure>;
   approve(
     input: DraftEditingMutation,
@@ -262,21 +268,19 @@ const nonBlank = (value: unknown, fallback: string): string => {
   return normalized === "" ? fallback : normalized;
 };
 
-const asIsoString = (value: unknown): string => value instanceof Date
-  ? value.toISOString()
-  : String(value);
+const asIsoString = (value: unknown): string =>
+  value instanceof Date ? value.toISOString() : String(value);
 
 const readStringList = (value: unknown): readonly string[] =>
   Array.isArray(value)
     ? value.flatMap((item) =>
-        typeof item === "string" && item.trim() !== ""
-          ? [item.trim()]
-          : [])
+        typeof item === "string" && item.trim() !== "" ? [item.trim()] : [],
+      )
     : [];
 
 const readRecord = (value: unknown): Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : {};
 
 const nullableString = (value: unknown): string | null =>
@@ -292,9 +296,7 @@ const nullableNumber = (value: unknown): number | null => {
 
 const summarizeStructuredValue = (value: unknown): string => {
   if (value === null || value === undefined) return "not recorded";
-  const serialized = typeof value === "string"
-    ? value
-    : JSON.stringify(value);
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
   return serialized.length <= 1_500
     ? serialized
     : `${serialized.slice(0, 1_497)}...`;
@@ -320,9 +322,9 @@ const projectMarketingContext = (
   const products = readStringList(row.products);
   const keywords = readStringList(row.keywords);
   if (
-    canonicalDomain === ""
-    || products.length === 0
-    || keywords.length === 0
+    canonicalDomain === "" ||
+    products.length === 0 ||
+    keywords.length === 0
   ) {
     throw new Error("DRAFT_PROJECT_CONTEXT_INCOMPLETE");
   }
@@ -351,43 +353,52 @@ const projectMarketingContext = (
   };
 };
 
-const recommendationReason = (row: Record<string, unknown>): string => [
-  row.recommendationScore === null
-    || row.recommendationScore === undefined
-    ? "Current Opportunity selected from the recommendation inventory"
-    : `Recommendation score ${Number(row.recommendationScore)}`,
-  `components ${summarizeStructuredValue(row.recommendationComponents)}`,
-  `evidence ${summarizeStructuredValue(row.recommendationEvidence)}`,
-].join("; ");
+const recommendationReason = (row: Record<string, unknown>): string =>
+  [
+    row.recommendationScore === null || row.recommendationScore === undefined
+      ? "Current Opportunity selected from the recommendation inventory"
+      : `Recommendation score ${Number(row.recommendationScore)}`,
+    `components ${summarizeStructuredValue(row.recommendationComponents)}`,
+    `evidence ${summarizeStructuredValue(row.recommendationEvidence)}`,
+  ].join("; ");
 
-const targetPublicContent = (row: Record<string, unknown>): string => [
-  `source ${nonBlank(row.publicSourceUrl, "not recorded")}`,
-  `observed content ${
-    replaceForbiddenValue(row.publicEvidenceSnippet, row.normalizedEmail)
-  }`,
-  `extraction ${nonBlank(row.publicExtractionMethod, "not recorded")}`,
-  `confidence ${Number(row.publicEvidenceConfidence ?? 0)}`,
-].join("; ");
+const targetPublicContent = (row: Record<string, unknown>): string =>
+  [
+    `source ${nonBlank(row.publicSourceUrl, "not recorded")}`,
+    `observed content ${replaceForbiddenValue(
+      row.publicEvidenceSnippet,
+      row.normalizedEmail,
+    )}`,
+    `extraction ${nonBlank(row.publicExtractionMethod, "not recorded")}`,
+    `confidence ${Number(row.publicEvidenceConfidence ?? 0)}`,
+  ].join("; ");
 
-const evidenceItem = (input: Readonly<{
-  id: string;
-  sourceKind: DraftEvidence["sourceKind"];
-  value: string;
-  observedAt: string;
-  dataVersion: string;
-}>): DraftEvidence => createDraftEvidence({
-  ...input,
-  status: "ACTIVE",
-  visibility: "VISIBLE",
-  confidence: 1,
-  contentHash: createHash("sha256").update(JSON.stringify({
-    id: input.id,
-    sourceKind: input.sourceKind,
-    value: input.value,
-    observedAt: input.observedAt,
-    dataVersion: input.dataVersion,
-  })).digest("hex"),
-});
+const evidenceItem = (
+  input: Readonly<{
+    id: string;
+    sourceKind: DraftEvidence["sourceKind"];
+    value: string;
+    observedAt: string;
+    dataVersion: string;
+  }>,
+): DraftEvidence =>
+  createDraftEvidence({
+    ...input,
+    status: "ACTIVE",
+    visibility: "VISIBLE",
+    confidence: 1,
+    contentHash: createHash("sha256")
+      .update(
+        JSON.stringify({
+          id: input.id,
+          sourceKind: input.sourceKind,
+          value: input.value,
+          observedAt: input.observedAt,
+          dataVersion: input.dataVersion,
+        }),
+      )
+      .digest("hex"),
+  });
 
 const asEvidence = (
   value: unknown,
@@ -398,10 +409,11 @@ const asEvidence = (
     throw new Error("Evidence Snapshot contains an invalid Evidence item.");
   }
   const item = value as Record<string, unknown>;
-  const contentHash = typeof item.contentHash === "string"
-    && /^[a-f0-9]{64}$/u.test(item.contentHash)
-    ? item.contentHash
-    : createHash("sha256").update(JSON.stringify(item)).digest("hex");
+  const contentHash =
+    typeof item.contentHash === "string" &&
+    /^[a-f0-9]{64}$/u.test(item.contentHash)
+      ? item.contentHash
+      : createHash("sha256").update(JSON.stringify(item)).digest("hex");
   return createDraftEvidence({
     id: nonBlank(item.id, `evidence:${index + 1}`),
     status: item.status as DraftEvidence["status"],
@@ -421,71 +433,71 @@ const asJob = (
 ): DraftGenerationJob => {
   if (row === undefined) throw new Error(message);
   const status = row.status as DraftGenerationJobStatus;
-  const generator = row.generator === "AI"
-      || row.generator === "TEMPLATE_FALLBACK"
-    ? row.generator
-    : null;
-  const lastErrorCategory = row.lastErrorCategory === null
-      || row.lastErrorCategory === undefined
-    ? null
-    : String(row.lastErrorCategory);
-  const readiness: DraftGenerationReadiness = status === "QUEUED"
-    ? "QUEUED"
-    : status === "RUNNING"
-      ? "GENERATING"
-      : status === "RETRY_SCHEDULED"
-        ? "RETRYING"
-        : status === "SUCCEEDED"
-          ? generator === "TEMPLATE_FALLBACK"
-            ? "BASIC_DRAFT_READY"
-            : "AI_DRAFT_READY"
-          : status === "REFUSED"
-            || lastErrorCategory === "POLICY_VIOLATION"
-            || lastErrorCategory === "REFUSED"
-            ? "POLICY_BLOCKED"
-            : lastErrorCategory === "BUDGET_EXCEEDED"
-              ? "BUDGET_BLOCKED"
-              : "FAILED";
+  const generator =
+    row.generator === "AI" || row.generator === "TEMPLATE_FALLBACK"
+      ? row.generator
+      : null;
+  const lastErrorCategory =
+    row.lastErrorCategory === null || row.lastErrorCategory === undefined
+      ? null
+      : String(row.lastErrorCategory);
+  const readiness: DraftGenerationReadiness =
+    status === "QUEUED"
+      ? "QUEUED"
+      : status === "RUNNING"
+        ? "GENERATING"
+        : status === "RETRY_SCHEDULED"
+          ? "RETRYING"
+          : status === "SUCCEEDED"
+            ? generator === "TEMPLATE_FALLBACK"
+              ? "BASIC_DRAFT_READY"
+              : "AI_DRAFT_READY"
+            : status === "REFUSED" ||
+                lastErrorCategory === "POLICY_VIOLATION" ||
+                lastErrorCategory === "REFUSED"
+              ? "POLICY_BLOCKED"
+              : lastErrorCategory === "BUDGET_EXCEEDED"
+                ? "BUDGET_BLOCKED"
+                : "FAILED";
   return {
     ...(row as DraftGenerationJob),
     status,
-    request: row.request === null || row.request === undefined
-      ? null
-      : draftRequestSchema.parse(row.request),
+    request:
+      row.request === null || row.request === undefined
+        ? null
+        : draftRequestSchema.parse(row.request),
     generator,
     lastErrorCategory,
     diagnosticCode: nullableString(row.diagnosticCode),
     readiness,
-    fallbackReason: row.fallbackReason === null
-        || row.fallbackReason === undefined
-      ? null
-      : String(row.fallbackReason),
+    fallbackReason:
+      row.fallbackReason === null || row.fallbackReason === undefined
+        ? null
+        : String(row.fallbackReason),
   };
 };
 
-const asDraft = (
-  row: Record<string, unknown> | undefined,
-): DraftSnapshot => {
+const asDraft = (row: Record<string, unknown> | undefined): DraftSnapshot => {
   if (row === undefined) throw new Error("Draft was not found.");
   const currentVersionId = row.currentVersionId;
   const snapshotContext = readRecord(row.snapshotContextData);
   const snapshotProject = readRecord(snapshotContext.project);
   const snapshotOpportunity = readRecord(snapshotContext.opportunity);
-  const requestPayload = row.requestPayload === null
-      || row.requestPayload === undefined
-    ? null
-    : draftRequestSchema.parse(row.requestPayload);
+  const requestPayload =
+    row.requestPayload === null || row.requestPayload === undefined
+      ? null
+      : draftRequestSchema.parse(row.requestPayload);
   const inputSnapshot: DraftInputSnapshot | null =
-    currentVersionId === null
-      || row.evidenceSnapshotId === null
-      || row.evidenceSnapshotId === undefined
-      || row.requestSnapshotId === null
-      || row.requestSnapshotId === undefined
-      || requestPayload === null
-      || row.evidenceSnapshotHash === null
-      || row.evidenceSnapshotHash === undefined
-      || row.requestHash === null
-      || row.requestHash === undefined
+    currentVersionId === null ||
+    row.evidenceSnapshotId === null ||
+    row.evidenceSnapshotId === undefined ||
+    row.requestSnapshotId === null ||
+    row.requestSnapshotId === undefined ||
+    requestPayload === null ||
+    row.evidenceSnapshotHash === null ||
+    row.evidenceSnapshotHash === undefined ||
+    row.requestHash === null ||
+    row.requestHash === undefined
       ? null
       : {
           evidenceSnapshotId: String(row.evidenceSnapshotId),
@@ -496,15 +508,11 @@ const asDraft = (
           recommendationId: nullableString(
             snapshotOpportunity.recommendationId,
           ),
-          profileVersionId: nullableString(
-            snapshotProject.profileVersionId,
-          ),
+          profileVersionId: nullableString(snapshotProject.profileVersionId),
           promotionTargetVersionId: nullableString(
             snapshotProject.promotionTargetVersionId,
           ),
-          opportunityVersion: nullableNumber(
-            snapshotOpportunity.version,
-          ),
+          opportunityVersion: nullableNumber(snapshotOpportunity.version),
           contactId: String(row.snapshotContactId),
           contactVersion: Number(row.snapshotContactVersion),
           createdAt: asIsoString(row.evidenceSnapshotCreatedAt),
@@ -529,38 +537,40 @@ const asDraft = (
     draftId: String(row.draftId),
     opportunityId: String(row.opportunityId),
     contactId: row.contactId === null ? null : String(row.contactId),
-    contactVersion: row.contactVersion === null
-      ? null
-      : Number(row.contactVersion),
+    contactVersion:
+      row.contactVersion === null ? null : Number(row.contactVersion),
     status: row.status as DraftSnapshot["status"],
     draftVersion: Number(row.draftVersion),
-    approvedVersionId: row.approvedVersionId === null
-      ? null
-      : String(row.approvedVersionId),
-    currentVersion: currentVersionId === null
-      ? null
-      : {
-          id: String(currentVersionId),
-          versionNo: Number(row.currentVersionNo),
-          subjectText: String(row.subjectText),
-          bodyText: String(row.bodyText),
-          bodyDocument: row.bodyDocument ?? null,
-          source: row.source as NonNullable<
-            DraftSnapshot["currentVersion"]
-          >["source"],
-          readiness: row.source === "MODEL"
-            ? "AI_DRAFT_READY"
-            : row.source === "TEMPLATE_FALLBACK"
-              ? "BASIC_DRAFT_READY"
-              : "EDITED_DRAFT_READY",
-          fallbackReason: row.currentVersionFallbackReason === null
-              || row.currentVersionFallbackReason === undefined
-            ? null
-            : String(row.currentVersionFallbackReason),
-          createdAt: row.currentVersionCreatedAt instanceof Date
-            ? row.currentVersionCreatedAt.toISOString()
-            : String(row.currentVersionCreatedAt),
-        },
+    approvedVersionId:
+      row.approvedVersionId === null ? null : String(row.approvedVersionId),
+    currentVersion:
+      currentVersionId === null
+        ? null
+        : {
+            id: String(currentVersionId),
+            versionNo: Number(row.currentVersionNo),
+            subjectText: String(row.subjectText),
+            bodyText: String(row.bodyText),
+            bodyDocument: row.bodyDocument ?? null,
+            source: row.source as NonNullable<
+              DraftSnapshot["currentVersion"]
+            >["source"],
+            readiness:
+              row.source === "MODEL"
+                ? "AI_DRAFT_READY"
+                : row.source === "TEMPLATE_FALLBACK"
+                  ? "BASIC_DRAFT_READY"
+                  : "EDITED_DRAFT_READY",
+            fallbackReason:
+              row.currentVersionFallbackReason === null ||
+              row.currentVersionFallbackReason === undefined
+                ? null
+                : String(row.currentVersionFallbackReason),
+            createdAt:
+              row.currentVersionCreatedAt instanceof Date
+                ? row.currentVersionCreatedAt.toISOString()
+                : String(row.currentVersionCreatedAt),
+          },
     inputSnapshot,
     freshness,
   };
@@ -572,7 +582,8 @@ export function createDraftGenerationRepository(
   const getJob = async (
     input: Scope & Readonly<{ runId: string }>,
   ): Promise<DraftGenerationJob> => {
-    const result = await client.query(`
+    const result = await client.query(
+      `
       SELECT r.id AS "runId", r.draft_id AS "draftId", r.status, false started,
         r.opportunity_id AS "opportunityId",
         r.contact_id AS "contactId",
@@ -618,13 +629,16 @@ export function createDraftGenerationRepository(
         (r.organization_id,r.workspace_id,r.website_project_id,r.id)
       WHERE (r.organization_id,r.workspace_id,r.website_project_id,r.id)=
         ($1,$2,$3,$4)
-    `, [...scopeValues(input), input.runId]);
+    `,
+      [...scopeValues(input), input.runId],
+    );
     return asJob(result.rows[0], "Draft generation Job was not found.");
   };
 
   return {
     async prepareEvidenceSnapshot(input) {
-      const source = await client.query(`
+      const source = await client.query(
+        `
         SELECT
           p.canonical_domain AS "canonicalDomain",
           p.locale,
@@ -662,6 +676,22 @@ export function createDraftGenerationRepository(
           public_contact.confidence AS "publicEvidenceConfidence",
           public_contact.observed_at AS "publicEvidenceObservedAt",
           public_contact.parser_version AS "publicParserVersion",
+          recommendation_selection.after_state->>'poolContractVersion'
+            AS "poolContractVersion",
+          recommendation_selection.after_state->>'recommendationFeedItemId'
+            AS "recommendationFeedItemId",
+          recommendation_selection.after_state->>'generationContractId'
+            AS "generationContractId",
+          recommendation_selection.after_state->>'inputPinId' AS "inputPinId",
+          recommendation_selection.after_state->>'immutableFingerprint'
+            AS "immutableFingerprint",
+          recommendation_selection.after_state->>'selectedTargetUrl'
+            AS "selectedTargetUrl",
+          recommendation_selection.after_state->>'recommendationMarkerVersion'
+            AS "recommendationMarkerVersion",
+          recommendation_selection.after_state->>'selectionPolicyVersion'
+            AS "selectionPolicyVersion",
+          recommendation_selection.created_at AS "recommendationSelectedAt",
           c.updated_at AS "contactUpdatedAt"
         FROM backlink_opportunities o
         JOIN backlink_contacts c ON
@@ -738,14 +768,32 @@ export function createDraftGenerationRepository(
           ORDER BY e.confidence DESC,e.observed_at DESC,e.id DESC
           LIMIT 1
         ) public_contact ON true
+        LEFT JOIN LATERAL (
+          SELECT event.after_state,event.created_at
+          FROM backlink_lifecycle_events event
+          WHERE (
+            event.organization_id,event.workspace_id,event.website_project_id,
+            event.aggregate_id
+          )=(
+            o.organization_id,o.workspace_id,o.website_project_id,o.id
+          )
+            AND event.aggregate_type='opportunity'
+            AND event.event_type='opportunity.created'
+            AND event.after_state->>'poolContractVersion'=
+              'recommendation-pool.v2'
+          ORDER BY event.sequence DESC,event.id DESC
+          LIMIT 1
+        ) recommendation_selection ON true
         WHERE (o.organization_id,o.workspace_id,o.website_project_id,o.id)=
           ($1,$2,$3,$4)
-      `, [
-        ...scopeValues(input),
-        input.opportunityId,
-        input.contactId,
-        input.contactVersion,
-      ]);
+      `,
+        [
+          ...scopeValues(input),
+          input.opportunityId,
+          input.contactId,
+          input.contactVersion,
+        ],
+      );
       const row = source.rows[0];
       if (row === undefined) {
         throw new Error("Draft Contact is unavailable or version is stale.");
@@ -765,7 +813,8 @@ export function createDraftGenerationRepository(
       const requestHash = createHash("sha256")
         .update(JSON.stringify(input.request))
         .digest("hex");
-      const requestStored = await client.query(`
+      const requestStored = await client.query(
+        `
         WITH inserted AS (
           INSERT INTO backlink_draft_request_snapshots (
             id,organization_id,workspace_id,website_project_id,opportunity_id,
@@ -791,22 +840,40 @@ export function createDraftGenerationRepository(
         )=($1,$2,$3,$4,$6,$7,$9)
           AND NOT EXISTS (SELECT 1 FROM inserted)
         LIMIT 1
-      `, [
-        ...scopeValues(input),
-        input.opportunityId,
-        input.requestSnapshotId,
-        input.contactId,
-        input.contactVersion,
-        JSON.stringify(input.request),
-        requestHash,
-        input.recordedAt,
-        input.actorId,
-      ]);
+      `,
+        [
+          ...scopeValues(input),
+          input.opportunityId,
+          input.requestSnapshotId,
+          input.contactId,
+          input.contactVersion,
+          JSON.stringify(input.request),
+          requestHash,
+          input.recordedAt,
+          input.actorId,
+        ],
+      );
       const requestRow = requestStored.rows[0];
       if (requestRow === undefined) {
         throw new Error("Draft Request Snapshot could not be persisted.");
       }
       const requestObservedAt = asIsoString(requestRow.createdAt);
+      const isRecommendationPoolV2 =
+        row.poolContractVersion === "recommendation-pool.v2";
+      const recommendationSelection = isRecommendationPoolV2
+        ? {
+            contractVersion: String(row.poolContractVersion),
+            recommendationFeedItemId: String(row.recommendationFeedItemId),
+            generationContractId: String(row.generationContractId),
+            inputPinId: String(row.inputPinId),
+            immutableFingerprint: String(row.immutableFingerprint),
+            selectedTargetUrl: String(row.selectedTargetUrl),
+            recommendationMarkerVersion: String(
+              row.recommendationMarkerVersion,
+            ),
+            selectionPolicyVersion: String(row.selectionPolicyVersion),
+          }
+        : null;
       const evidence = [
         evidenceItem({
           id: "profile:current",
@@ -826,8 +893,7 @@ export function createDraftGenerationRepository(
           sourceKind: "PROMOTION_TARGET",
           value: `Promotion target ${marketing.targetUrl}`,
           observedAt: projectObservedAt,
-          dataVersion:
-            `promotion-target:${String(row.promotionTargetVersionId)}`,
+          dataVersion: `promotion-target:${String(row.promotionTargetVersionId)}`,
         }),
         evidenceItem({
           id: "opportunity:current",
@@ -835,34 +901,56 @@ export function createDraftGenerationRepository(
           value: [
             `Target host ${String(row.targetHost)}`,
             `cooperation ${String(row.cooperationType)}`,
-            recommendationReason(row),
+            isRecommendationPoolV2
+              ? "Selected from an entitled recommendation release"
+              : recommendationReason(row),
           ].join("; "),
           observedAt: opportunityObservedAt,
           dataVersion: `opportunity:v${Number(row.opportunityVersion)}`,
         }),
-        evidenceItem({
-          id: "target-context:current",
-          sourceKind: "ASSESSMENT",
-          value: [
-            `topic and audience ${
-              summarizeStructuredValue(row.recommendationComponents)
-            }`,
-            `candidate pages ${
-              summarizeStructuredValue(row.recommendationEvidence)
-            }`,
-            `commercial assessment ${
-              summarizeStructuredValue(row.commercialScore)
-            }`,
-            `commercial gate ${
-              summarizeStructuredValue(row.commercialGateDecision)
-            }`,
-            `provider facts ${
-              summarizeStructuredValue(row.commercialStaticAssessment)
-            }`,
-          ].join("; "),
-          observedAt: opportunityObservedAt,
-          dataVersion: "target-context.v1",
-        }),
+        ...(recommendationSelection === null
+          ? [
+              evidenceItem({
+                id: "target-context:current",
+                sourceKind: "ASSESSMENT",
+                value: [
+                  `topic and audience ${summarizeStructuredValue(
+                    row.recommendationComponents,
+                  )}`,
+                  `candidate pages ${summarizeStructuredValue(
+                    row.recommendationEvidence,
+                  )}`,
+                  `commercial assessment ${summarizeStructuredValue(
+                    row.commercialScore,
+                  )}`,
+                  `commercial gate ${summarizeStructuredValue(
+                    row.commercialGateDecision,
+                  )}`,
+                  `provider facts ${summarizeStructuredValue(
+                    row.commercialStaticAssessment,
+                  )}`,
+                ].join("; "),
+                observedAt: opportunityObservedAt,
+                dataVersion: "target-context.v1",
+              }),
+            ]
+          : [
+              evidenceItem({
+                id: "recommendation-selection:v2",
+                sourceKind: "OPPORTUNITY",
+                value: [
+                  `Feed item ${recommendationSelection.recommendationFeedItemId}`,
+                  `target ${recommendationSelection.selectedTargetUrl}`,
+                  `selection fingerprint ${
+                    recommendationSelection.immutableFingerprint
+                  }`,
+                ].join("; "),
+                observedAt: asIsoString(row.recommendationSelectedAt),
+                dataVersion:
+                  `${recommendationSelection.recommendationMarkerVersion}:` +
+                  recommendationSelection.selectionPolicyVersion,
+              }),
+            ]),
         evidenceItem({
           id: "contact:confirmed",
           sourceKind: "CONTACT",
@@ -871,27 +959,23 @@ export function createDraftGenerationRepository(
             `purpose ${nonBlank(row.contactPurpose, "unknown")}`,
             `purpose confidence ${Number(row.purposeConfidence ?? 0)}`,
             `contact confidence ${Number(row.contactConfidence ?? 0)}`,
-            `domain relation ${
-              nonBlank(row.contactDomainRelation, "unknown")
-            }`,
-            `purpose evidence ${
-              summarizeStructuredValue(row.purposeEvidence)
-            }`,
+            `domain relation ${nonBlank(row.contactDomainRelation, "unknown")}`,
+            `purpose evidence ${summarizeStructuredValue(row.purposeEvidence)}`,
           ].join("; "),
           observedAt: contactObservedAt,
           dataVersion: `contact:v${input.contactVersion}`,
         }),
-        ...(row.publicSourceUrl === null
-          || row.publicSourceUrl === undefined
+        ...(row.publicSourceUrl === null || row.publicSourceUrl === undefined
           ? []
-          : [evidenceItem({
-              id: "target-public-content:contact",
-              sourceKind: "ASSESSMENT",
-              value: targetPublicContent(row),
-              observedAt: asIsoString(row.publicEvidenceObservedAt),
-              dataVersion:
-                `contact-public:${nonBlank(row.publicParserVersion, "v1")}`,
-            })]),
+          : [
+              evidenceItem({
+                id: "target-public-content:contact",
+                sourceKind: "ASSESSMENT",
+                value: targetPublicContent(row),
+                observedAt: asIsoString(row.publicEvidenceObservedAt),
+                dataVersion: `contact-public:${nonBlank(row.publicParserVersion, "v1")}`,
+              }),
+            ]),
         evidenceItem({
           id: "user-input:request",
           sourceKind: "USER_INPUT",
@@ -933,15 +1017,20 @@ export function createDraftGenerationRepository(
           version: Number(row.opportunityVersion),
           targetHost: String(row.targetHost),
           cooperationType: String(row.cooperationType),
-          recommendationReason: recommendationReason(row),
+          recommendationReason: isRecommendationPoolV2
+            ? "Selected from an entitled recommendation release"
+            : recommendationReason(row),
           targetPublicContent: targetPublicContent(row),
-          targetContext: {
-            sourceTypes: row.commercialSourceTypes ?? [],
-            staticAssessment: row.commercialStaticAssessment ?? {},
-            gateDecision: row.commercialGateDecision ?? {},
-            commercialScore: row.commercialScore ?? {},
-            providerCollectedAt: row.providerCollectedAt ?? null,
-          },
+          targetContext:
+            recommendationSelection === null
+              ? {
+                  sourceTypes: row.commercialSourceTypes ?? [],
+                  staticAssessment: row.commercialStaticAssessment ?? {},
+                  gateDecision: row.commercialGateDecision ?? {},
+                  commercialScore: row.commercialScore ?? {},
+                  providerCollectedAt: row.providerCollectedAt ?? null,
+                }
+              : { recommendationPoolV2: recommendationSelection },
         },
         contact: {
           id: input.contactId,
@@ -952,9 +1041,7 @@ export function createDraftGenerationRepository(
           purposeEvidence: [
             `confidence ${Number(row.purposeConfidence ?? 0)}`,
             `contact confidence ${Number(row.contactConfidence ?? 0)}`,
-            `domain relation ${
-              nonBlank(row.contactDomainRelation, "unknown")
-            }`,
+            `domain relation ${nonBlank(row.contactDomainRelation, "unknown")}`,
             summarizeStructuredValue(row.purposeEvidence),
           ].join("; "),
         },
@@ -964,13 +1051,16 @@ export function createDraftGenerationRepository(
         ],
       };
       const snapshotHash = createHash("sha256")
-        .update(JSON.stringify({
-          evidence,
-          contextData,
-          requestSnapshotId: String(requestRow.snapshotId),
-        }))
+        .update(
+          JSON.stringify({
+            evidence,
+            contextData,
+            requestSnapshotId: String(requestRow.snapshotId),
+          }),
+        )
         .digest("hex");
-      const stored = await client.query(`
+      const stored = await client.query(
+        `
         WITH inserted AS (
           INSERT INTO backlink_evidence_snapshots (
             id,organization_id,workspace_id,website_project_id,opportunity_id,
@@ -993,16 +1083,18 @@ export function createDraftGenerationRepository(
         )=($1,$2,$3,$4,$8)
           AND NOT EXISTS (SELECT 1 FROM inserted)
         LIMIT 1
-      `, [
-        ...scopeValues(input),
-        input.opportunityId,
-        input.snapshotId,
-        JSON.stringify(evidence),
-        JSON.stringify(contextData),
-        snapshotHash,
-        input.recordedAt,
-        input.actorId,
-      ]);
+      `,
+        [
+          ...scopeValues(input),
+          input.opportunityId,
+          input.snapshotId,
+          JSON.stringify(evidence),
+          JSON.stringify(contextData),
+          snapshotHash,
+          input.recordedAt,
+          input.actorId,
+        ],
+      );
       const storedRow = stored.rows[0];
       if (storedRow === undefined) {
         throw new Error("Draft Evidence Snapshot could not be persisted.");
@@ -1015,7 +1107,8 @@ export function createDraftGenerationRepository(
     },
 
     async createJob(input) {
-      await client.query(`
+      await client.query(
+        `
         WITH eligible_contact AS (
           SELECT c.id,c.version
           FROM backlink_opportunities o
@@ -1063,29 +1156,32 @@ export function createDraftGenerationRepository(
           RETURNING id
         )
         SELECT id FROM inserted_run
-      `, [
-        ...scopeValues(input),
-        input.opportunityId,
-        input.draftId,
-        input.logicalDraftKey,
-        input.runId,
-        input.evidenceSnapshotId,
-        input.idempotencyKey,
-        input.requestHash,
-        input.promptVersion,
-        input.actorId,
-        input.recordedAt,
-        input.outputSchemaVersion,
-        input.contactId,
-        input.contactVersion,
-        JSON.stringify({
-          generationMode: input.generationMode,
-          requiresUserConfirmation: true,
-          canAutoSend: false,
-        }),
-        input.requestSnapshotId,
-      ]);
-      const result = await client.query(`
+      `,
+        [
+          ...scopeValues(input),
+          input.opportunityId,
+          input.draftId,
+          input.logicalDraftKey,
+          input.runId,
+          input.evidenceSnapshotId,
+          input.idempotencyKey,
+          input.requestHash,
+          input.promptVersion,
+          input.actorId,
+          input.recordedAt,
+          input.outputSchemaVersion,
+          input.contactId,
+          input.contactVersion,
+          JSON.stringify({
+            generationMode: input.generationMode,
+            requiresUserConfirmation: true,
+            canAutoSend: false,
+          }),
+          input.requestSnapshotId,
+        ],
+      );
+      const result = await client.query(
+        `
         SELECT r.id AS "runId",r.draft_id AS "draftId",r.status,false started,
           r.opportunity_id AS "opportunityId",
           r.contact_id AS "contactId",
@@ -1133,10 +1229,9 @@ export function createDraftGenerationRepository(
           (r.organization_id,r.workspace_id,r.website_project_id,r.id)
         WHERE (r.organization_id,r.workspace_id,r.website_project_id,
                r.idempotency_key)=($1,$2,$3,$4)
-      `, [
-        ...scopeValues(input),
-        input.idempotencyKey,
-      ]);
+      `,
+        [...scopeValues(input), input.idempotencyKey],
+      );
       const row = result.rows[0];
       if (row === undefined) {
         throw new Error("Draft Contact is unavailable or version is stale.");
@@ -1148,7 +1243,8 @@ export function createDraftGenerationRepository(
     },
 
     async claimJob(input) {
-      const result = await client.query(`
+      const result = await client.query(
+        `
         WITH timing AS MATERIALIZED (
           SELECT clock_timestamp() AS started_at
         ), started AS (
@@ -1220,16 +1316,15 @@ export function createDraftGenerationRepository(
           (r.organization_id,r.workspace_id,r.website_project_id,r.id)
         WHERE (r.organization_id,r.workspace_id,r.website_project_id,r.id)=
           ($1,$2,$3,$4)
-      `, [
-        ...scopeValues(input),
-        input.runId,
-        input.actorId,
-      ]);
+      `,
+        [...scopeValues(input), input.runId, input.actorId],
+      );
       return asJob(result.rows[0], "Draft generation Job was not found.");
     },
 
     async loadPromptContext(input) {
-      const result = await client.query(`
+      const result = await client.query(
+        `
         SELECT
           r.opportunity_id AS "opportunityId",
           r.evidence_snapshot_id AS "evidenceSnapshotId",
@@ -1255,12 +1350,12 @@ export function createDraftGenerationRepository(
         WHERE (r.organization_id,r.workspace_id,r.website_project_id,r.id)=
           ($1,$2,$3,$4)
           AND r.status='RUNNING'
-      `, [...scopeValues(input), input.runId]);
+      `,
+        [...scopeValues(input), input.runId],
+      );
       const row = result.rows[0];
       if (row === undefined) {
-        throw new Error(
-          "Draft generation context is unavailable.",
-        );
+        throw new Error("Draft generation context is unavailable.");
       }
       const observedAt = asIsoString(row.evidenceCreatedAt);
       const evidenceItems = Array.isArray(row.evidenceItems)
@@ -1272,16 +1367,21 @@ export function createDraftGenerationRepository(
         websiteProjectId: input.websiteProjectId,
         opportunityId: String(row.opportunityId),
       };
-      const approvedEvidence = approveDraftEvidence({
-        ...scope,
-        id: String(row.evidenceSnapshotId),
-        evidence: evidenceItems.map((item, index) => asEvidence(item, index, {
-          observedAt,
-          dataVersion: `evidence-snapshot.v${
-            Number(row.evidenceSchemaVersion)
-          }`,
-        })),
-      }, scope);
+      const approvedEvidence = approveDraftEvidence(
+        {
+          ...scope,
+          id: String(row.evidenceSnapshotId),
+          evidence: evidenceItems.map((item, index) =>
+            asEvidence(item, index, {
+              observedAt,
+              dataVersion: `evidence-snapshot.v${Number(
+                row.evidenceSchemaVersion,
+              )}`,
+            }),
+          ),
+        },
+        scope,
+      );
       const contextData = readRecord(row.contextData);
       const project = readRecord(contextData.project);
       const opportunity = readRecord(contextData.opportunity);
@@ -1309,9 +1409,9 @@ export function createDraftGenerationRepository(
             keywords: readStringList(project.keywords),
           },
           promotionTarget: {
-            label: `Promotion target ${
-              String(project.promotionTargetVersionId)
-            }`,
+            label: `Promotion target ${String(
+              project.promotionTargetVersionId,
+            )}`,
             url: request.promotionTargetUrl,
           },
           opportunity: {
@@ -1348,16 +1448,17 @@ export function createDraftGenerationRepository(
     },
 
     async completeJob(input) {
-      const evidenceIds = [...new Set(
-        input.result.output.factsUsed.flatMap(
-          (claim) => claim.evidenceIds,
+      const evidenceIds = [
+        ...new Set(
+          input.result.output.factsUsed.flatMap((claim) => claim.evidenceIds),
         ),
-      )].sort();
+      ].sort();
       const structuredOutput = {
         ...input.result.output,
         evidenceRefs: evidenceIds,
       };
-      const result = await client.query(`
+      const result = await client.query(
+        `
         WITH timing AS MATERIALIZED (
           SELECT clock_timestamp() AS finished_at
         ), target AS (
@@ -1442,34 +1543,36 @@ export function createDraftGenerationRepository(
         SELECT i.id AS "versionId",d.version AS "draftVersion",
           d.adopted AS "adoptedAsCurrent"
         FROM inserted i JOIN updated_draft d ON true
-      `, [
-        ...scopeValues(input),
-        input.runId,
-        input.versionId,
-        input.result.output.subject,
-        input.result.output.bodyText,
-        JSON.stringify(structuredOutput),
-        JSON.stringify(evidenceIds),
-        input.result.model.modelId,
-        input.result.model.modelVersion,
-        input.result.model.providerRef,
-        input.result.usage.inputTokens,
-        input.result.usage.outputTokens,
-        input.result.latencyMs,
-        input.actorId,
-        input.recordedAt,
-        input.result.repairCount,
-        input.source,
-        input.result.estimatedCostUsd,
-        JSON.stringify({
-          passed: true,
-          generationMode: input.source,
-          generator: input.source === "MODEL" ? "AI" : "TEMPLATE_FALLBACK",
-          requiresUserConfirmation: true,
-          canAutoSend: false,
-          fallbackReason: input.fallbackReason,
-        }),
-      ]);
+      `,
+        [
+          ...scopeValues(input),
+          input.runId,
+          input.versionId,
+          input.result.output.subject,
+          input.result.output.bodyText,
+          JSON.stringify(structuredOutput),
+          JSON.stringify(evidenceIds),
+          input.result.model.modelId,
+          input.result.model.modelVersion,
+          input.result.model.providerRef,
+          input.result.usage.inputTokens,
+          input.result.usage.outputTokens,
+          input.result.latencyMs,
+          input.actorId,
+          input.recordedAt,
+          input.result.repairCount,
+          input.source,
+          input.result.estimatedCostUsd,
+          JSON.stringify({
+            passed: true,
+            generationMode: input.source,
+            generator: input.source === "MODEL" ? "AI" : "TEMPLATE_FALLBACK",
+            requiresUserConfirmation: true,
+            canAutoSend: false,
+            fallbackReason: input.fallbackReason,
+          }),
+        ],
+      );
       const row = result.rows[0] as
         | {
             versionId: string;
@@ -1484,7 +1587,8 @@ export function createDraftGenerationRepository(
     },
 
     async failJob(input) {
-      await client.query(`
+      await client.query(
+        `
         WITH timing AS MATERIALIZED (
           SELECT clock_timestamp() AS finished_at
         )
@@ -1503,37 +1607,43 @@ export function createDraftGenerationRepository(
         FROM timing
         WHERE (organization_id,workspace_id,website_project_id,id)=
           ($1,$2,$3,$4) AND status='RUNNING'
-      `, [
-        ...scopeValues(input),
-        input.runId,
-        input.actorId,
-        input.refused ? "REFUSED" : "FAILED",
-        input.errorClass,
-        input.errorCode,
-        input.diagnosticCode,
-      ]);
+      `,
+        [
+          ...scopeValues(input),
+          input.runId,
+          input.actorId,
+          input.refused ? "REFUSED" : "FAILED",
+          input.errorClass,
+          input.errorCode,
+          input.diagnosticCode,
+        ],
+      );
     },
 
     async scheduleRetry(input) {
-      await client.query(`
+      await client.query(
+        `
         UPDATE backlink_model_runs
         SET status='RETRY_SCHEDULED',error_class=$6,error_code=$7,
           updated_at=$5,updated_by=$8
         WHERE (organization_id,workspace_id,website_project_id,id)=
           ($1,$2,$3,$4) AND status='RUNNING' AND attempt_count < 2
-      `, [
-        ...scopeValues(input),
-        input.runId,
-        input.recordedAt,
-        input.errorClass,
-        input.errorCode,
-        input.actorId,
-      ]);
+      `,
+        [
+          ...scopeValues(input),
+          input.runId,
+          input.recordedAt,
+          input.errorClass,
+          input.errorCode,
+          input.actorId,
+        ],
+      );
     },
 
     getJob,
     async findLatestJob(input) {
-      const result = await client.query(`
+      const result = await client.query(
+        `
         SELECT r.id AS "runId",r.draft_id AS "draftId",r.status,false started,
           r.opportunity_id AS "opportunityId",
           r.contact_id AS "contactId",
@@ -1582,18 +1692,17 @@ export function createDraftGenerationRepository(
                d.opportunity_id,d.logical_draft_key)=($1,$2,$3,$4,$5)
         ORDER BY r.created_at DESC,r.id DESC
         LIMIT 1
-      `, [
-        ...scopeValues(input),
-        input.opportunityId,
-        input.logicalDraftKey,
-      ]);
+      `,
+        [...scopeValues(input), input.opportunityId, input.logicalDraftKey],
+      );
       const row = result.rows[0];
       return row === undefined
         ? null
         : asJob(row, "Draft generation Job was not found.");
     },
     async getDraft(input) {
-      const result = await client.query(`
+      const result = await client.query(
+        `
         SELECT d.id AS "draftId",d.opportunity_id AS "opportunityId",
           d.contact_id AS "contactId",d.contact_version AS "contactVersion",
           d.status,d.version AS "draftVersion",
@@ -1671,7 +1780,9 @@ export function createDraftGenerationRepository(
         ) current_context ON true
         WHERE (d.organization_id,d.workspace_id,d.website_project_id,d.id)=
           ($1,$2,$3,$4)
-      `, [...scopeValues(input), input.draftId]);
+      `,
+        [...scopeValues(input), input.draftId],
+      );
       return asDraft(result.rows[0]);
     },
   };
@@ -1685,12 +1796,15 @@ export function createDraftEditingRepository(
   const failure = async (
     input: DraftEditingMutation,
   ): Promise<DraftEditingFailure> => {
-    const result = await client.query(`
+    const result = await client.query(
+      `
       SELECT version
       FROM backlink_email_drafts
       WHERE (organization_id,workspace_id,website_project_id,id)=
         ($1,$2,$3,$4)
-    `, [...scopeValues(input), input.draftId]);
+    `,
+      [...scopeValues(input), input.draftId],
+    );
     const row = result.rows[0];
     return row === undefined
       ? { state: "not_found" }
@@ -1702,7 +1816,8 @@ export function createDraftEditingRepository(
 
   return {
     async saveManualVersion(input) {
-      const result = await client.query(`
+      const result = await client.query(
+        `
         WITH target AS (
           SELECT d.*,v.evidence_snapshot_id,v.structured_output,
             v.request_snapshot_id,v.evidence_ids,v.output_schema_version
@@ -1755,28 +1870,29 @@ export function createDraftEditingRepository(
         SELECT id AS "draftId",current_version_id AS "versionId",
           version AS "draftVersion",status
         FROM updated
-      `, [
-        ...scopeValues(input),
-        input.draftId,
-        input.expectedVersion,
-        input.versionId,
-        input.subjectText,
-        input.bodyText,
-        input.actorId,
-        input.recordedAt,
-        JSON.stringify(input.bodyDocument),
-      ]);
-      const row = result.rows[0] as Omit<
-        DraftEditingCompleted,
-        "state"
-      > | undefined;
+      `,
+        [
+          ...scopeValues(input),
+          input.draftId,
+          input.expectedVersion,
+          input.versionId,
+          input.subjectText,
+          input.bodyText,
+          input.actorId,
+          input.recordedAt,
+          JSON.stringify(input.bodyDocument),
+        ],
+      );
+      const row = result.rows[0] as
+        Omit<DraftEditingCompleted, "state"> | undefined;
       return row === undefined
         ? failure(input)
         : { state: "completed", ...row };
     },
 
     async approve(input) {
-      const currentContent = await client.query(`
+      const currentContent = await client.query(
+        `
         SELECT v.subject_text AS "subjectText",v.body_text AS "bodyText"
         FROM backlink_email_drafts d
         JOIN backlink_draft_versions v ON
@@ -1787,36 +1903,41 @@ export function createDraftEditingRepository(
         WHERE (d.organization_id,d.workspace_id,d.website_project_id,d.id)=
           ($1,$2,$3,$4)
           AND d.version=$5
-      `, [
-        ...scopeValues(input),
-        input.draftId,
-        input.expectedVersion,
-      ]);
-      const currentContentRow = currentContent.rows[0] as Readonly<{
-        subjectText: string;
-        bodyText: string;
-      }> | undefined;
+      `,
+        [...scopeValues(input), input.draftId, input.expectedVersion],
+      );
+      const currentContentRow = currentContent.rows[0] as
+        | Readonly<{
+            subjectText: string;
+            bodyText: string;
+          }>
+        | undefined;
       if (currentContentRow === undefined) return failure(input);
       if (
-        containsInternalDraftMetadataMarker(currentContentRow.subjectText)
-        || containsInternalDraftMetadataMarker(currentContentRow.bodyText)
+        containsInternalDraftMetadataMarker(currentContentRow.subjectText) ||
+        containsInternalDraftMetadataMarker(currentContentRow.bodyText)
       ) {
         return { state: "invalid_content" };
       }
 
       const lifecycleEventId = newId();
       const auditEventId = newId();
-      const integrityHash = createHash("sha256").update(JSON.stringify({
-        organizationId: input.organizationId,
-        workspaceId: input.workspaceId,
-        websiteProjectId: input.websiteProjectId,
-        draftId: input.draftId,
-        expectedVersion: input.expectedVersion,
-        actorId: input.actorId,
-        recordedAt: input.recordedAt.toISOString(),
-        contractVersion: draftApprovalFactContractVersion,
-      })).digest("hex");
-      const result = await client.query(`
+      const integrityHash = createHash("sha256")
+        .update(
+          JSON.stringify({
+            organizationId: input.organizationId,
+            workspaceId: input.workspaceId,
+            websiteProjectId: input.websiteProjectId,
+            draftId: input.draftId,
+            expectedVersion: input.expectedVersion,
+            actorId: input.actorId,
+            recordedAt: input.recordedAt.toISOString(),
+            contractVersion: draftApprovalFactContractVersion,
+          }),
+        )
+        .digest("hex");
+      const result = await client.query(
+        `
         WITH target AS (
           SELECT d.id,d.status AS previous_status,
             d.version AS previous_aggregate_version,d.current_version_id
@@ -1913,21 +2034,21 @@ export function createDraftEditingRepository(
         SELECT c.id AS "draftId",c.current_version_id AS "versionId",
           c.version AS "draftVersion",c.status
         FROM changed c CROSS JOIN lifecycle CROSS JOIN audit
-      `, [
-        ...scopeValues(input),
-        input.draftId,
-        input.expectedVersion,
-        input.actorId,
-        input.recordedAt,
-        lifecycleEventId,
-        auditEventId,
-        draftApprovalFactContractVersion,
-        integrityHash,
-      ]);
-      const row = result.rows[0] as Omit<
-        DraftEditingCompleted,
-        "state"
-      > | undefined;
+      `,
+        [
+          ...scopeValues(input),
+          input.draftId,
+          input.expectedVersion,
+          input.actorId,
+          input.recordedAt,
+          lifecycleEventId,
+          auditEventId,
+          draftApprovalFactContractVersion,
+          integrityHash,
+        ],
+      );
+      const row = result.rows[0] as
+        Omit<DraftEditingCompleted, "state"> | undefined;
       return row === undefined
         ? failure(input)
         : { state: "completed", ...row };

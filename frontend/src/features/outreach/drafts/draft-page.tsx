@@ -50,6 +50,7 @@ import { isSendReadinessSnapshotUsable } from "@/features/outreach/drafts/send-r
 import { toOutreachProject } from "@/features/outreach/project"
 import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
 import { useProjects } from "@/features/projects/project-context"
+import type { Project } from "@/features/projects/types"
 import type {
   DraftDocument,
   DraftSnapshot,
@@ -401,6 +402,7 @@ function DraftEditorPage({
   const [sendHistoryStatus, setSendHistoryStatus] = React.useState<
     "idle" | "ready" | "error"
   >("idle")
+  const [sendHistoryRefresh, setSendHistoryRefresh] = React.useState(0)
   const [resubmissionArmed, setResubmissionArmed] = React.useState(false)
   const [sendStatusError, setSendStatusError] = React.useState<string | null>(
     null
@@ -529,6 +531,7 @@ function DraftEditorPage({
       setSendIntent(null)
       setSendIntentView(null)
       setSendHistoryStatus("idle")
+      setSendHistoryRefresh((value) => value + 1)
       setResubmissionArmed(false)
       setSendStatusError(null)
       setSendIntentUnknown(false)
@@ -571,13 +574,19 @@ function DraftEditorPage({
   const gmailReady =
     gmailConnection.status === "ready" &&
     gmailConnection.readiness?.connection.ready === true
+  const recipientId = recipient?.id ?? null
+  const recipientVersion = recipient?.version ?? null
+  const gmailConnectionId = gmailConnection.connection?.connectionId ?? null
   const sendConfirmationKey =
-    snapshot?.approvedVersionId && recipient && gmailConnection.connection
+    snapshot?.approvedVersionId &&
+    recipientId &&
+    recipientVersion !== null &&
+    gmailConnectionId
       ? JSON.stringify([
           snapshot.approvedVersionId,
-          recipient.id,
-          recipient.version,
-          gmailConnection.connection.connectionId,
+          recipientId,
+          recipientVersion,
+          gmailConnectionId,
         ])
       : null
   const sendPreflightReady =
@@ -621,7 +630,14 @@ function DraftEditorPage({
     )
 
     return () => controller.abort()
-  }, [draftId, projectId, resubmissionArmed, sendIntent, snapshotDraftVersion])
+  }, [
+    draftId,
+    projectId,
+    resubmissionArmed,
+    sendHistoryRefresh,
+    sendIntent,
+    snapshotDraftVersion,
+  ])
 
   React.useEffect(() => {
     const controller = new AbortController()
@@ -634,7 +650,8 @@ function DraftEditorPage({
         !approvedVersionMatchesCurrent ||
         basicDraftNeedsEdit ||
         !draftFresh ||
-        !recipient
+        !recipientId ||
+        recipientVersion === null
       ) {
         pendingSendConfirmationKey.current = null
         setSendPreflight(null)
@@ -644,7 +661,7 @@ function DraftEditorPage({
         return
       }
 
-      if (!gmailConnection.connection) {
+      if (!gmailConnectionId) {
         pendingSendConfirmationKey.current = null
         setSendPreflight(null)
         setSendPreflightStatus("error")
@@ -666,9 +683,9 @@ function DraftEditorPage({
         draftId,
         {
           approvedDraftVersionId: snapshot.approvedVersionId,
-          contactId: recipient.id,
-          contactVersion: recipient.version,
-          gmailConnectionId: gmailConnection.connection.connectionId,
+          contactId: recipientId,
+          contactVersion: recipientVersion,
+          gmailConnectionId,
           messagePurpose: "INITIAL_OUTREACH",
           followUpIndex: 0,
         },
@@ -708,9 +725,10 @@ function DraftEditorPage({
     draftId,
     basicDraftNeedsEdit,
     draftFresh,
-    gmailConnection.connection,
+    gmailConnectionId,
     projectId,
-    recipient,
+    recipientId,
+    recipientVersion,
     sendConfirmationKey,
     sendHistoryStatus,
     sendRecordPresent,
@@ -882,8 +900,7 @@ function DraftEditorPage({
   const persistedSendStatus =
     sendIntentView?.status ?? sendIntent?.status ?? null
   const persistedSendErrorCode = sendIntentView?.attempt?.errorCode ?? null
-  const persistedSendRetryScheduled =
-    persistedSendStatus === "FAILED_RETRYABLE"
+  const persistedSendRetryScheduled = persistedSendStatus === "FAILED_RETRYABLE"
   const persistedSendPresentation =
     persistedSendStatus === null
       ? null
@@ -1014,7 +1031,7 @@ function DraftEditorPage({
             <span>{error}</span>
           </div>
         )}
-        {notice && (
+        {notice && !sendRecordPresent && (
           <div
             role="status"
             className="mb-4 flex items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm"
@@ -1266,10 +1283,10 @@ function DraftEditorPage({
                       {sendPreflight?.gmail.primaryEmail ??
                         gmailConnection.connection?.primaryEmail ??
                         "未选择账号"}
+                      <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                        {gmailReady ? "Gmail 已连接" : "Gmail 尚未就绪"}
+                      </span>
                     </dd>
-                    <span className="mt-1 block text-xs text-muted-foreground">
-                      {gmailReady ? "Gmail 已连接" : "Gmail 尚未就绪"}
-                    </span>
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">收件人</dt>
@@ -1474,14 +1491,86 @@ function DraftEditorPage({
   )
 }
 
+export function FreshDraftGeneration({ projectId }: { projectId: string }) {
+  const { refreshProject } = useProjects()
+  const [refreshAttempt, setRefreshAttempt] = React.useState(0)
+  const requestKey = `${projectId}:${refreshAttempt}`
+  const [result, setResult] = React.useState<
+    | {
+        requestKey: string
+        state: "ready"
+        project: Project
+      }
+    | {
+        requestKey: string
+        state: "error"
+        project: null
+      }
+    | null
+  >(null)
+
+  React.useEffect(() => {
+    let active = true
+
+    void refreshProject(projectId)
+      .then((refreshedProject) => {
+        if (!active) return
+        setResult({
+          requestKey,
+          state: "ready",
+          project: refreshedProject,
+        })
+      })
+      .catch(() => {
+        if (!active) return
+        setResult({
+          requestKey,
+          state: "error",
+          project: null,
+        })
+      })
+
+    return () => {
+      active = false
+    }
+  }, [projectId, refreshProject, requestKey])
+
+  const currentResult = result?.requestKey === requestKey ? result : null
+
+  if (currentResult?.state === "error") {
+    return (
+      <OutreachStandardStateView
+        state="error"
+        title="项目推广资料读取失败"
+        description="无法读取当前项目的最新推广目标，请重试。"
+        onRetry={() => setRefreshAttempt((attempt) => attempt + 1)}
+      />
+    )
+  }
+
+  if (
+    currentResult?.state !== "ready" ||
+    currentResult.project.id !== projectId
+  ) {
+    return (
+      <OutreachStandardStateView
+        state="loading"
+        title="正在读取项目推广资料"
+        description="正在同步当前项目的目标页和推广主题。"
+      />
+    )
+  }
+
+  return <DraftGeneration project={toOutreachProject(currentResult.project)} />
+}
+
 export function DraftPage() {
   const { getProject } = useProjects()
   const { projectId = "", draftId } = useParams<{
     projectId: string
     draftId: string
   }>()
-  const project = getProject(projectId)
-  if (!projectId || project.id !== projectId) {
+  if (!projectId) {
     return (
       <OutreachStandardStateView
         state="forbidden"
@@ -1494,7 +1583,17 @@ export function DraftPage() {
     return <div className="p-6 text-sm text-destructive">草稿 ID 缺失。</div>
   }
   if (draftId === "new") {
-    return <DraftGeneration project={toOutreachProject(project)} />
+    return <FreshDraftGeneration projectId={projectId} />
+  }
+  const project = getProject(projectId)
+  if (project.id !== projectId) {
+    return (
+      <OutreachStandardStateView
+        state="forbidden"
+        title="当前项目不可用"
+        description="草稿页面只会读取 URL 中指定的已有项目。"
+      />
+    )
   }
   return <DraftEditorPage projectId={projectId} draftId={draftId} />
 }

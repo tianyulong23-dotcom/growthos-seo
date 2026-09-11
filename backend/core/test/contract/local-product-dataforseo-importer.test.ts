@@ -102,7 +102,16 @@ describe("LOCAL_PRODUCT DataForSEO credential importer", () => {
       ...["backlinks-api.env", "backlinks-worker.env"].map((name) =>
         writeFile(
           join(runtimeRoot, name),
-          "BACKLINKS_RUNTIME_MODE=LOCAL_PRODUCT\nDATAFORSEO_ENABLED=false\n",
+          [
+            "BACKLINKS_RUNTIME_MODE=LOCAL_PRODUCT",
+            "DATAFORSEO_ENABLED=false",
+            "OUTBOUND_PROXY_MODE=explicit",
+            "HTTP_PROXY=http://127.0.0.1:33210",
+            "HTTPS_PROXY=http://127.0.0.1:33210",
+            "NO_PROXY=localhost,127.0.0.1",
+            "NODE_USE_ENV_PROXY=1",
+            "",
+          ].join("\n"),
           "utf8",
         )),
     ]);
@@ -145,6 +154,9 @@ describe("LOCAL_PRODUCT DataForSEO credential importer", () => {
     expect(workerEnvironment).toContain("DATAFORSEO_ENABLED=false");
     expect(workerEnvironment).not.toContain(
       "DATAFORSEO_DISCOVERY_TARGETS_JSON",
+    );
+    expect(workerEnvironment).not.toMatch(
+      /^(?:OUTBOUND_PROXY_MODE|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|NODE_USE_ENV_PROXY)=/mu,
     );
     const allFiles = await readTree(root);
     expect(allFiles).not.toContain(login);

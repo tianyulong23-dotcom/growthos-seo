@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { archiveDataForSeoFetch } from "../../../provider-archive/capture-fetch.js";
 
 import {
   DataForSeoRuntimeError,
@@ -215,7 +216,9 @@ export function createOfficialDataForSeoProfileRuntime(options: Readonly<{
       return endpoint;
     }
   }));
-  const fetchImplementation = options.fetchImplementation ?? globalThis.fetch;
+  const fetchImplementation = archiveDataForSeoFetch(
+    options.fetchImplementation ?? globalThis.fetch, "backlinks-profile",
+  );
 
   const call = async (
     endpoint: string,

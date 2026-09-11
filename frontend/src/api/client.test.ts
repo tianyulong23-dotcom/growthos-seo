@@ -20,6 +20,22 @@ describe("apiRequest", () => {
     ).resolves.toBeUndefined()
   })
 
+  it("returns successful non-JSON responses as text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("domain,category\npublisher.example,Editorial\n", {
+          status: 200,
+          headers: { "content-type": "text/csv; charset=utf-8" },
+        })
+      )
+    )
+
+    await expect(
+      apiRequest<string>("/recommendation-feed/export")
+    ).resolves.toBe("domain,category\npublisher.example,Editorial\n")
+  })
+
   it("resolves platform-relative asset URLs against the API origin", () => {
     expect(resolveApiUrl("/api/v1/projects/project-1/favicon?v=run-1")).toBe(
       "/api/v1/projects/project-1/favicon?v=run-1"
@@ -72,8 +88,7 @@ describe("apiRequest", () => {
             title: "Send readiness changed",
             status: 409,
             code: "SEND_READINESS_STALE",
-            message:
-              "The confirmed send readiness conditions changed.",
+            message: "The confirmed send readiness conditions changed.",
             retryable: true,
             changedConditions: [
               {

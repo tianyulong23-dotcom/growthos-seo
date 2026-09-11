@@ -22,7 +22,10 @@ const responseSchema = z.object({
 export interface SharedBrowserWorkerPort {
   render(input: Readonly<{
     url: string;
-    taskType: "contact_enrichment" | "backlink_validation";
+    taskType:
+      | "contact_enrichment"
+      | "backlink_validation"
+      | "seo_assessment";
     requestId: string;
     organizationId: string;
     workspaceId: string;

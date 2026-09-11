@@ -1,6 +1,4 @@
-import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -12,6 +10,7 @@ import {
 } from "../../../src/modules/backlinks/domain/context/index.js";
 import { backlinkErrorCodes } from "../../../src/modules/backlinks/domain/errors/backlink-error.js";
 import type { ResolvedProjectContext } from "../../../src/modules/backlinks/ports/project-context.port.js";
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -26,30 +25,10 @@ type Client = {
   ): Promise<{ rows: Record<string, unknown>[] }>;
 };
 
-type DeploymentManifest = Readonly<{
-  steps: readonly Readonly<{
-    migrationId: string;
-    path: string;
-  }>[];
-}>;
-
 const require = createRequire(import.meta.url);
 const { Client: PgClient } = require("pg") as {
   readonly Client: new (config: unknown) => Client;
 };
-const migration = (name: string) =>
-  new URL(
-    `../../../src/modules/backlinks/db/migrations/${name}`,
-    import.meta.url,
-  );
-const roles = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
-const manifestUrl = new URL(
-  "../../../../database/deployment-manifest.v1.json",
-  import.meta.url,
-);
 const id = (value: number) =>
   `01900000-0000-7000-8000-${String(value).padStart(12, "0")}`;
 const organizationId = id(1);
@@ -94,38 +73,7 @@ describe("LP-FINAL Opportunity manual Contact command", () => {
     await harness.migrate();
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
-    await client.query(await readFile(roles, "utf8"));
-    await client.query(`
-      SET ROLE growthos_platform_owner;
-      SET search_path = platform, pg_catalog;
-      CREATE FUNCTION backlink_list_active_website_projects(text, text)
-      RETURNS TABLE (website_project_id text, context_version integer)
-      LANGUAGE sql STABLE SECURITY DEFINER
-      SET search_path = platform, pg_catalog
-      AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
-      REVOKE ALL
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        FROM PUBLIC;
-      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
-      GRANT EXECUTE
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        TO growthos_backlinks_owner;
-      RESET ROLE;
-      RESET search_path;
-    `);
-
-    const manifest = JSON.parse(
-      await readFile(manifestUrl, "utf8"),
-    ) as DeploymentManifest;
-    for (const step of manifest.steps.filter(
-      ({ migrationId }) =>
-        migrationId.startsWith("backlinks-") &&
-        migrationId !== "backlinks-0001",
-    )) {
-      await client.query(
-        await readFile(migration(basename(step.path)), "utf8"),
-      );
-    }
+    await installBacklinksManifestAfterFoundation(client, "0092");
 
     await client.query("SET search_path = backlinks, pg_catalog");
     await client.query(

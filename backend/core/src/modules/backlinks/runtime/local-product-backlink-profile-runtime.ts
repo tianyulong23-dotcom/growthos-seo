@@ -26,6 +26,7 @@ import {
   type BacklinkTransactionClient,
 } from "../db/tenant-transaction.js";
 import { secretKinds } from "../ports/secret-store.port.js";
+import { checkProviderExecutionCeiling } from "../db/repositories/provider-budget.repository.js";
 import {
   localProductDataForSeoAvailabilityDecision,
   type LocalProductDataForSeoConfiguration,
@@ -187,6 +188,14 @@ async function reserveProviderRequests(
       throw new Error("BACKLINK_PROFILE_SYNC_JOB_NOT_FOUND");
     }
     if (["completed", "partial"].includes(text(job.status))) return null;
+
+    const ceiling = await checkProviderExecutionCeiling(client, {
+      context: scope,
+      provider: "dataforseo",
+      reservationKey: `backlink-profile:${input.profileSyncJobId}:combined`,
+      estimatedCostMicros: configuration.estimatedCostMicros * 2,
+    }, configuration.executionCeiling);
+    if (ceiling === "deny") return null;
 
     const budget = await client.query(`
       SELECT id,limit_micros,spent_micros,reserved_micros

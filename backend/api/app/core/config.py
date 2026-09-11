@@ -118,8 +118,10 @@ class Settings(BaseSettings):
     keyword_operational_cleanup_interval_seconds: int = 3600
     keyword_operational_retention_days: int = 90
     crawler_worker_executable: str | None = None
+    crawler_worker_start_on_boot: bool = False
     crawler_worker_idle_timeout_seconds: float = 120
     crawler_database_url: str | None = None
+    crawler_probe_listen_address: str = "127.0.0.1:7310"
     crawler_browser_cache_dir: str | None = None
     crawler_proxy_url: str | None = None
     crawler_fallback_proxy_url: str | None = None

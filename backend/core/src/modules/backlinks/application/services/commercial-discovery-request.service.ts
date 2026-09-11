@@ -33,6 +33,13 @@ export type CommercialDiscoveryQueryClient = Readonly<{
 export type CommercialDiscoveryRequestResult = Readonly<{
   source: "cache" | "stale-cache" | "single-flight" | "provider";
   artifact: CommercialDiscoveryArtifact;
+  providerTrace?: Readonly<{
+    providerRequestId: string;
+    providerBatchRequestId: string;
+    providerUsageLedgerId: string;
+    providerTaskId: string | null;
+    actualCostMicros: number;
+  }>;
 }>;
 
 class ReconciledProviderRequestWithoutResultError extends Error {
@@ -388,11 +395,14 @@ export class CommercialDiscoveryRequestService {
     });
     const freshUntil = new Date(completedAt.getTime() + 7 * 86_400_000);
     const staleUntil = new Date(completedAt.getTime() + 30 * 86_400_000);
-    const payloadHash = hashPayload(artifact);
+    const payloadHash = hashPayload(input.response);
     const budgets = createProviderBudgetRepository(
       this.dependencies.client,
       this.dependencies.now,
     );
+    let providerTrace:
+      | NonNullable<CommercialDiscoveryRequestResult["providerTrace"]>
+      | undefined;
 
     await this.dependencies.client.query("BEGIN");
     try {
@@ -480,6 +490,50 @@ export class CommercialDiscoveryRequestService {
         settledAt: completedAt,
         expectedRequestStatus: input.expectedStatus,
       });
+      const trace = await this.dependencies.client.query(
+        `SELECT request.id::text AS "providerRequestId",
+                batch.id::text AS "providerBatchRequestId",
+                usage.id::text AS "providerUsageLedgerId",
+                batch.provider_task_id AS "providerTaskId",
+                COALESCE(
+                  usage.actual_cost_micros,
+                  batch.actual_cost_micros,
+                  0
+                )::integer AS "actualCostMicros"
+           FROM provider_batch_requests AS batch
+           JOIN backlink_provider_requests AS request
+             ON (request.organization_id,request.workspace_id,
+                 request.website_project_id,request.id)=
+                (batch.organization_id,batch.workspace_id,
+                 batch.website_project_id,batch.id)
+           JOIN backlink_provider_usage_ledger AS usage
+             ON (usage.organization_id,usage.workspace_id,
+                 usage.website_project_id,usage.provider_request_id)=
+                (batch.organization_id,batch.workspace_id,
+                 batch.website_project_id,batch.id)
+            AND usage.provider='dataforseo'
+            AND usage.reservation_key=batch.budget_reservation_id
+          WHERE batch.id=$1::uuid
+            AND batch.status='succeeded'
+            AND request.status='succeeded'
+            AND usage.status='settled'
+          LIMIT 1`,
+        [input.batchRequestId],
+      );
+      const traceRow = trace.rows[0];
+      if (traceRow === undefined) {
+        throw new Error("DATAFORSEO_PROVIDER_TRACE_MISSING");
+      }
+      providerTrace = Object.freeze({
+        providerRequestId: String(traceRow.providerRequestId),
+        providerBatchRequestId: String(traceRow.providerBatchRequestId),
+        providerUsageLedgerId: String(traceRow.providerUsageLedgerId),
+        providerTaskId:
+          typeof traceRow.providerTaskId === "string"
+            ? traceRow.providerTaskId
+            : null,
+        actualCostMicros: Number(traceRow.actualCostMicros),
+      });
       const completedLease = await this.dependencies.client.query(
         `UPDATE provider_fetch_leases
             SET status='completed',heartbeat_at=$3,
@@ -504,7 +558,102 @@ export class CommercialDiscoveryRequestService {
       await this.dependencies.client.query("ROLLBACK");
       throw error;
     }
-    return Object.freeze({ source: "provider", artifact });
+    if (providerTrace === undefined) {
+      throw new Error("DATAFORSEO_PROVIDER_TRACE_MISSING");
+    }
+    return Object.freeze({ source: "provider", artifact, providerTrace });
+  }
+
+  private async replaySucceededRequest(input: Readonly<{
+    context: ProviderRequestContext;
+    projectContextVersionId: string;
+    call: CommercialDiscoveryCall;
+    requestFingerprint: string;
+  }>): Promise<CommercialDiscoveryRequestResult | null> {
+    const result = await this.dependencies.client.query(
+      `/* RECOMMENDATION_POOL_V2_SUCCEEDED_REQUEST_REPLAY */
+       SELECT artifact.normalized_payload AS "normalizedPayload",
+              request.id::text AS "providerRequestId",
+              batch.id::text AS "providerBatchRequestId",
+              usage.id::text AS "providerUsageLedgerId",
+              batch.provider_task_id AS "providerTaskId",
+              COALESCE(
+                usage.actual_cost_micros,
+                batch.actual_cost_micros,
+                0
+              )::integer AS "actualCostMicros"
+         FROM provider_batch_requests AS batch
+         JOIN backlink_provider_requests AS request
+           ON (request.organization_id,request.workspace_id,
+               request.website_project_id,request.id)=
+              (batch.organization_id,batch.workspace_id,
+               batch.website_project_id,batch.id)
+          AND request.provider='dataforseo'
+          AND request.endpoint=batch.endpoint
+          AND request.request_fingerprint=batch.normalized_request_hash
+          AND request.status='succeeded'
+         JOIN backlink_provider_usage_ledger AS usage
+           ON (usage.organization_id,usage.workspace_id,
+               usage.website_project_id,usage.provider_request_id)=
+              (batch.organization_id,batch.workspace_id,
+               batch.website_project_id,batch.id)
+          AND usage.provider='dataforseo'
+          AND usage.reservation_key=batch.budget_reservation_id
+          AND usage.status='settled'
+         JOIN provider_fetch_leases AS lease
+           ON lease.artifact_fingerprint=batch.normalized_request_hash
+          AND lease.owner_request_id=batch.request_id
+          AND lease.status='completed'
+         JOIN backlink_commercial_discovery_artifacts AS artifact
+           ON (artifact.organization_id,artifact.workspace_id,
+               artifact.website_project_id)=
+              (batch.organization_id,batch.workspace_id,
+               batch.website_project_id)
+          AND artifact.project_context_version_id=$4::uuid
+          AND artifact.provider='dataforseo'
+          AND artifact.endpoint=batch.endpoint
+          AND artifact.request_intent='DISCOVERY'
+          AND artifact.request_fingerprint=batch.normalized_request_hash
+          AND artifact.response_schema_version=batch.response_schema_version
+        WHERE (batch.organization_id,batch.workspace_id,
+               batch.website_project_id)=($1::uuid,$2::uuid,$3::uuid)
+          AND batch.provider='dataforseo'
+          AND batch.request_intent='DISCOVERY'
+          AND batch.normalized_request_hash=$5
+          AND batch.endpoint=$6
+          AND batch.response_schema_version=$7
+          AND batch.request_id=$8
+          AND batch.budget_reservation_id=$9
+          AND batch.status='succeeded'
+        LIMIT 1`,
+      [
+        input.context.organizationId,
+        input.context.workspaceId,
+        input.context.websiteProjectId,
+        input.projectContextVersionId,
+        input.requestFingerprint,
+        input.call.endpoint,
+        input.call.responseSchemaVersion,
+        input.context.requestId,
+        input.context.budgetReservationId,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    return Object.freeze({
+      source: "provider",
+      artifact: artifactFromRow(row),
+      providerTrace: Object.freeze({
+        providerRequestId: String(row.providerRequestId),
+        providerBatchRequestId: String(row.providerBatchRequestId),
+        providerUsageLedgerId: String(row.providerUsageLedgerId),
+        providerTaskId:
+          typeof row.providerTaskId === "string"
+            ? row.providerTaskId
+            : null,
+        actualCostMicros: Number(row.actualCostMicros),
+      }),
+    });
   }
 
   async execute(input: Readonly<{
@@ -516,6 +665,8 @@ export class CommercialDiscoveryRequestService {
     refreshMode: "CACHE_PREFERRED" | "FORCE_LIVE";
     actorId: string;
     recoveryOnly?: boolean;
+    preserveBudgetReservationId?: boolean;
+    allowSucceededRequestReplay?: boolean;
   }>): Promise<CommercialDiscoveryRequestResult> {
     const requestFingerprint = fingerprintCommercialDiscoveryCall(input.call);
     const now = this.dependencies.now();
@@ -549,6 +700,15 @@ export class CommercialDiscoveryRequestService {
           artifact: artifactFromRow(cachedRow),
         });
       }
+    }
+    if (input.allowSucceededRequestReplay === true) {
+      const replay = await this.replaySucceededRequest({
+        context: input.context,
+        projectContextVersionId: input.projectContextVersionId,
+        call: input.call,
+        requestFingerprint,
+      });
+      if (replay !== null) return replay;
     }
 
     const interrupted = await this.transitionInterruptedRequest({
@@ -801,7 +961,9 @@ export class CommercialDiscoveryRequestService {
     const providerRequestContext = Object.freeze({
       ...input.context,
       budgetReservationId:
-        `${input.context.budgetReservationId}:${batchRequestId}`,
+        input.preserveBudgetReservationId === true
+          ? input.context.budgetReservationId
+          : `${input.context.budgetReservationId}:${batchRequestId}`,
     });
     const budgets = createProviderBudgetRepository(
       this.dependencies.client,

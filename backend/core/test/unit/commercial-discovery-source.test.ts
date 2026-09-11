@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertCommercialDiscoveryCallAllowed,
+  commercialDiscoveryArtifactSchema,
   createCommercialCompetitorSeedPlan,
   createCommercialDiscoveryPlan,
   extractCommercialCompetitorSeeds,
@@ -22,6 +23,66 @@ const allowed = [
 ] as const;
 
 describe("commercial DataForSEO discovery sources", () => {
+  it("retains provider metrics and the raw response across normalization and serialization", () => {
+    const response = {
+      tasks: [{
+        id: "offline-metrics",
+        result: [{ items: [
+          { domain: "example.com", rank: 40, backlinks_spam_score: 0, etv: 120 },
+          { domain: "example.com", rank: 60 },
+          { domain: "example.com", backlinks_spam_score: 17, etv: 200 },
+        ] }],
+      }],
+    };
+    const artifact = normalizeCommercialDiscoveryResponse({
+      call: {
+        endpoint: "/v3/backlinks/referring_domains/live",
+        intent: "DISCOVERY",
+        sourceType: "USER_REFERRING_DOMAINS",
+        request: { target: "owner.com" },
+        responseSchemaVersion: "test.v1",
+        estimatedCostMicros: 1000,
+      },
+      collectedAt: "2026-09-08T00:00:00.000Z",
+      response,
+    });
+    expect(artifact.candidates[0]).toMatchObject({
+      rank: 60, traffic: 200, spamScore: 17,
+    });
+    const restored = commercialDiscoveryArtifactSchema.parse(
+      JSON.parse(JSON.stringify(artifact)),
+    );
+    expect(restored.rawResponse).toEqual(response);
+    expect(restored.candidates).toEqual(artifact.candidates);
+    const { rawResponse: _raw, ...legacy } = artifact;
+    expect(_raw).toEqual(response);
+    expect(commercialDiscoveryArtifactSchema.parse(legacy).candidates)
+      .toEqual(artifact.candidates);
+  });
+
+  it.each(["backlinks_spam_score", "backlink_spam_score", "spam_score"])(
+    "retains zero from %s without treating a SERP position as authority rank",
+    (field) => {
+      const artifact = normalizeCommercialDiscoveryResponse({
+        call: {
+          endpoint: "/v3/serp/google/organic/task_post",
+          intent: "DISCOVERY",
+          sourceType: "BLUEPRINT_SERP_STANDARD_QUEUE",
+          request: { keyword: "example" },
+          responseSchemaVersion: "test.v1",
+          estimatedCostMicros: 1000,
+        },
+        collectedAt: "2026-09-08T00:00:00.000Z",
+        response: { tasks: [{ result: [{ items: [{
+          domain: "example.com", rank_absolute: 1, [field]: 0, etv: 0,
+        }] }] }] },
+      });
+      expect(artifact.candidates[0]).toMatchObject({
+        rank: null, traffic: 0, spamScore: 0,
+      });
+    },
+  );
+
   it("uses discovered competitors only as seeds for page-level backlink discovery", () => {
     const seedPlan = createCommercialCompetitorSeedPlan({
       userDomain: "owner.com",
@@ -133,6 +194,31 @@ describe("commercial DataForSEO discovery sources", () => {
       "BLUEPRINT_SERP_STANDARD_QUEUE",
       "VERIFIED_COMPETITOR_REFERRING_DOMAINS",
     ]);
+  });
+
+  it("keeps the full bounded semantic candidate space for native V2 filtering", () => {
+    const searchQueries = Array.from(
+      { length: 25 },
+      (_, index) => `streaming publication query ${index + 1}`,
+    );
+    const plan = createCommercialDiscoveryPlan({
+      searchQueries,
+      verifiedCompetitorDomains: [],
+      userDomain: "owner.com",
+      locationCode: "2840",
+      languageCode: "en",
+      endpointAllowlist: allowed,
+      estimatedCostMicros: 1_000,
+      remainingBudgetMicros: 25_000,
+    });
+
+    expect(plan).toHaveLength(25);
+    expect(plan.every(({ sourceType }) =>
+      sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE"
+    )).toBe(true);
+    expect(plan.at(-1)?.request).toMatchObject({
+      keyword: "streaming publication query 25",
+    });
   });
 
   it("keeps semantic SERP in the first paid candidate slot", () => {
@@ -287,6 +373,29 @@ describe("commercial DataForSEO discovery sources", () => {
         ),
       }),
     ).toThrow("DATAFORSEO_COMMERCIAL_ENDPOINT_NOT_ALLOWED");
+  });
+
+  it("requires live observed links to the requested competitor and retains supplied metrics", () => {
+    const artifact = normalizeCommercialDiscoveryResponse({
+      call: {
+        endpoint: "/v3/backlinks/backlinks/live", intent: "DISCOVERY",
+        sourceType: "VERIFIED_COMPETITOR_REFERRING_DOMAINS",
+        request: { target: "competitor.com", backlinks_status_type: "live" },
+        responseSchemaVersion: "test.v1", estimatedCostMicros: 1_000,
+      },
+      collectedAt: "2026-09-09T00:00:00.000Z",
+      response: { tasks: [{ result: [{ items: [
+        { url_from: "https://publisher.com/review", url_to: "https://competitor.com/product",
+          domain_from_rank: 72, backlink_spam_score: 0, organic_etv: 1234 },
+        { url_from: "https://wrong.com/review", url_to: "https://other.com/product" },
+        { url_from: "https://lost.com/review", url_to: "https://competitor.com/", is_lost: true },
+        { domain_from: "missing.com" },
+      ] }] }] },
+    });
+    expect(artifact.candidates).toHaveLength(1);
+    expect(artifact.candidates[0]).toMatchObject({
+      canonicalDomain: "publisher.com", rank: 72, spamScore: 0, traffic: 1234,
+    });
   });
 
   it("normalizes page-level backlink evidence from the second hop", () => {

@@ -415,6 +415,7 @@ function mapGSCOAuthSettings(
 export async function getGSCOAuthSettings(
   _projectId: string
 ): Promise<GSCOAuthSettings> {
+  void _projectId
   return mapGSCOAuthSettings(
     await apiRequest<GSCOAuthSettingsResponse>(
       "/api/v1/platform/settings/gsc-oauth"
@@ -426,6 +427,7 @@ export async function updateGSCOAuthSettings(
   _projectId: string,
   input: GSCOAuthSettingsInput
 ): Promise<GSCOAuthSettings> {
+  void _projectId
   return mapGSCOAuthSettings(
     await apiRequest<GSCOAuthSettingsResponse>(
       "/api/v1/platform/settings/gsc-oauth",

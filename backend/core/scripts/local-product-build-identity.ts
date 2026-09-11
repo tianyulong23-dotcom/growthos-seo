@@ -29,6 +29,8 @@ const sourceFileNames = [
   "package-lock.json",
   "tsconfig.json",
   "scripts/local-product-build-identity.ts",
+  "resources/resource-library/bundled/manifest.json",
+  "resources/resource-library/bundled/publishers.sqlite",
 ];
 
 function listFiles(root: string, directory: string): string[] {

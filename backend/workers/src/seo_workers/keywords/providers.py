@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 import httpx
 import pycountry
+from growthos_provider_archive import begin_capture
 
 from seo_workers.keywords.domain import (
     RawKeyword,
@@ -1455,6 +1456,13 @@ class JsonHttpClient:
     ) -> tuple[dict[str, Any] | list[Any], httpx.Response]:
         retries = self.max_retries if max_retries is None else max_retries
         for attempt in range(retries + 1):
+            capture = (
+                await asyncio.to_thread(
+                    begin_capture, "keywords", url, method,
+                    json.dumps(json_body) if json_body is not None else None,
+                )
+                if url.startswith(f"{DataForSEOClient.BASE_URL}/") else None
+            )
             try:
                 response = await self.client.request(
                     method,
@@ -1466,6 +1474,8 @@ class JsonHttpClient:
                     auth=auth,
                 )
             except (httpx.ConnectTimeout, httpx.ConnectError, httpx.PoolTimeout) as exc:
+                if capture:
+                    await asyncio.to_thread(capture.finish, b"", None)
                 if attempt >= retries:
                     raise ProviderError(
                         "network_error",
@@ -1475,6 +1485,8 @@ class JsonHttpClient:
                 await asyncio.sleep(0.4 * (2**attempt))
                 continue
             except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if capture:
+                    await asyncio.to_thread(capture.finish, b"", None)
                 if paid_request or attempt >= retries:
                     raise ProviderError(
                         "network_error",
@@ -1486,6 +1498,8 @@ class JsonHttpClient:
                     ) from exc
                 await asyncio.sleep(0.4 * (2**attempt))
                 continue
+            if capture:
+                await asyncio.to_thread(capture.finish, response.content, response.status_code)
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt < retries:
                     retry_after = parse_retry_after(response.headers.get("retry-after"))

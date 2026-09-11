@@ -26,6 +26,20 @@ async function expectInsideViewport(page: Page, locator: Locator) {
 }
 
 async function expectNoSeriousA11yViolations(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          document
+            .getAnimations()
+            .filter(
+              (animation) =>
+                animation.playState === "running" &&
+                animation.effect?.getComputedTiming().iterations !== Infinity
+            ).length
+      )
+    )
+    .toBe(0)
   const results = await new AxeBuilder({ page }).analyze()
   const severe = results.violations.filter(
     (violation) =>
@@ -60,7 +74,7 @@ test("mobile key pages remain visible without page-level overflow", async ({
 
   await page.getByRole("tab", { name: "外链机会" }).click()
   await page.getByRole("button", { name: "详情" }).click()
-  await page.getByRole("link", { name: "撰写邮件" }).click()
+  await page.getByRole("link", { name: "创建邮件草稿" }).click()
   await expect(page).toHaveURL(
     new RegExp(
       `/projects/${projectKey}/backlinks/drafts/new\\?opportunityId=${opportunityId}$`
@@ -80,9 +94,19 @@ test("mobile key pages remain visible without page-level overflow", async ({
   )
   await page.getByRole("button", { name: "人工批准" }).click()
   await expect(page.getByText("当前草稿版本已人工批准。")).toBeVisible()
-  await page.getByRole("checkbox").check()
-  await page.getByRole("button", { name: "最终确认并发送" }).click()
-  await expect(page.getByText("Gmail Provider 已接受")).toBeVisible()
+  const sendConfirmation = page.getByRole("checkbox", {
+    name: "我已核对发件账号、收件人和已批准版本，并确认立即发送。",
+  })
+  await expect(sendConfirmation).toBeEnabled()
+  await sendConfirmation.click()
+  await expect(sendConfirmation).toBeChecked()
+  const sendButton = page.getByRole("button", {
+    name: "确认并发送",
+    exact: true,
+  })
+  await expect(sendButton).toBeEnabled()
+  await sendButton.click()
+  await expect(page.getByText("邮件发送成功")).toBeVisible()
   await expectNoPageOverflow(page)
   await expectNoSeriousA11yViolations(page)
 
@@ -96,7 +120,7 @@ test("mobile key pages remain visible without page-level overflow", async ({
   await expectNoPageOverflow(page)
   await expectNoSeriousA11yViolations(page)
 
-  await page.goto(`/projects/${projectKey}/performance/links`)
+  await page.goto(`/projects/${projectKey}/backlinks/links`)
   const profileHeading = page.getByRole("heading", {
     name: "Backlink Profile",
   })
@@ -126,40 +150,43 @@ test("mobile key pages remain visible without page-level overflow", async ({
   expect(session.unexpectedNetwork).toEqual([])
 })
 
-test("390px recommendation generation remains readable through server completion", async ({
+test("390px recommendation feed keeps V2 get-more readable without V1 writes", async ({
   page,
 }) => {
   const session = await installOutreachApiFixtures(page, {
-    recommendationMode: "generate",
-    recommendationCompleteAfterReads: 3,
+    recommendationPoolSize: 1,
   })
 
   await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
-  const generate = page.getByRole("button", { name: "生成推荐" })
-  await expect(generate).toBeVisible()
-  await expectInsideViewport(page, generate)
-  await generate.click()
-
-  await expect(page.getByText(/已耗时 2分/)).toBeVisible()
-  await expectNoPageOverflow(page)
-  await expectNoSeriousA11yViolations(page)
+  const getMore = page.getByRole("button", { name: "获取更多" })
+  await expect(getMore).toBeVisible()
+  await expectInsideViewport(page, getMore)
   await expect(
     page.getByRole("link", {
       name: "publisher.example.test",
       exact: true,
     })
+  ).toBeVisible()
+  await expectNoPageOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  await getMore.click()
+  await expect(
+    page.getByRole("link", {
+      name: "publisher-v2-b2-01.example.test",
+      exact: true,
+    })
   ).toBeVisible({ timeout: 10_000 })
-  await expect(page.getByText("产品：E2E product")).toBeVisible()
-  await expect(page.getByText("查看公开证据 · visible_text")).toBeVisible()
   await expectNoPageOverflow(page)
   await expectNoSeriousA11yViolations(page)
 
   expect(
     session.capturedRequests.filter(
       (request) =>
-        request.method === "POST" &&
-        request.pathname.endsWith("/recommendation-refill-jobs")
+        request.pathname.endsWith("/backlinks/recommendations") ||
+        request.pathname.includes("/recommendation-inventory") ||
+        request.pathname.includes("/recommendation-refill-jobs") ||
+        request.pathname.includes("/recommendation-pools/")
     )
-  ).toHaveLength(1)
+  ).toHaveLength(0)
   expect(session.unexpectedNetwork).toEqual([])
 })

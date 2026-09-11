@@ -82,9 +82,23 @@ test("LOCAL-PRODUCT-026 keeps Send disabled until typed server preflight passes"
   assert.match(page, /pendingSendConfirmationKey/)
   assert.match(page, /onCheckedChange=\{updateSendConfirmation\}/)
   assert.match(page, /isSendReadinessSnapshotUsable/)
+  assert.match(page, /const recipientId = recipient\?\.id \?\? null/)
+  assert.match(
+    page,
+    /const gmailConnectionId = gmailConnection\.connection\?\.connectionId \?\? null/
+  )
+  assert.doesNotMatch(
+    page,
+    /\[\s*approvedVersionMatchesCurrent,[\s\S]*gmailConnection\.connection,[\s\S]*recipient,[\s\S]*sendConfirmationKey/
+  )
   assert.match(api, /query: \{ draftId, limit: 1 \}/)
   assert.match(page, /listDraftSendIntents/)
   assert.match(page, /sendHistoryStatus === "ready"/)
+  assert.match(page, /setSendHistoryRefresh\(\(value\) => value \+ 1\)/)
+  assert.match(
+    page,
+    /\[\s*draftId,[\s\S]*sendHistoryRefresh,[\s\S]*snapshotDraftVersion,[\s\S]*\]/
+  )
   assert.match(page, /sendIntentView\?\.diagnostics\.resubmittable/)
   assert.match(page, /GMAIL_SEND_TOKEN_REFRESH_FAILED/)
   assert.match(page, /GMAIL_SEND_PROVIDER_NETWORK/)
@@ -111,6 +125,7 @@ test("LOCAL-PRODUCT-026 keeps Send disabled until typed server preflight passes"
     /persistedSendStatus === "PROVIDER_ACCEPTED"[\s\S]*\? "sent"/
   )
   assert.match(page, /effectiveDraftStatus === "sent"[\s\S]*邮件已发送/)
+  assert.match(page, /notice && !sendRecordPresent/)
   assert.doesNotMatch(page, /Gmail 已接受邮件/)
   assert.match(page, /发送结果需要核对/)
   assert.match(page, /重新准备发送/)

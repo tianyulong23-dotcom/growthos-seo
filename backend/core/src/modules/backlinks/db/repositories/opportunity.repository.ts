@@ -1,65 +1,141 @@
 export type OpportunityCreation = Readonly<{
-  opportunityId: string; recommendationId: string; cycleId: string;
-  websiteProjectId: string; targetSiteKey: string; targetHostAscii: string;
-  contactCandidateId: string | null; contactReviewRequired: boolean;
-  joinSequence: number; businessStage: "JOINED"; managementStatus: "ACTIVE";
-  outcomeStatus: "OPEN"; fulfillmentStatus: "NOT_EXPECTED"; version: number;
-  lifecycleEventId: string; auditEventId: string;
+  opportunityId: string;
+  recommendationId: string;
+  cycleId: string;
+  websiteProjectId: string;
+  targetSiteKey: string;
+  targetHostAscii: string;
+  contactCandidateId: string | null;
+  contactReviewRequired: boolean;
+  joinSequence: number;
+  businessStage: "JOINED";
+  managementStatus: "ACTIVE";
+  outcomeStatus: "OPEN";
+  fulfillmentStatus: "NOT_EXPECTED";
+  version: number;
+  lifecycleEventId: string;
+  auditEventId: string;
 }>;
 export type OpportunityCreationRow = Readonly<{
-  state: "completed" | "replay" | "not_found" | "version_conflict" |
-    "contact_required" | "duplicate";
-  requestHash: string; responseBody?: OpportunityCreation;
+  state:
+    | "completed"
+    | "replay"
+    | "not_found"
+    | "version_conflict"
+    | "contact_required"
+    | "duplicate";
+  requestHash: string;
+  responseBody?: OpportunityCreation;
 }>;
+export type {
+  RecommendationFeedOpportunityCreation,
+  RecommendationFeedOpportunityCreationRow,
+  RecommendationFeedOpportunityCreateInput,
+  RecommendationFeedOpportunityRepository,
+} from "./opportunity-recommendation-v2.repository.js";
+import {
+  createOpportunityFromRecommendationFeedItem,
+  type RecommendationFeedOpportunityRepository,
+} from "./opportunity-recommendation-v2.repository.js";
 export type OpportunityTransition = Readonly<{
-  opportunityId: string; businessStage: OpportunityBusinessStage;
+  opportunityId: string;
+  businessStage: OpportunityBusinessStage;
   managementStatus: OpportunityManagementStatus;
   outcomeStatus: OpportunityOutcomeStatus;
-  fulfillmentStatus: OpportunityFulfillmentStatus; version: number;
-  lifecycleEventId: string; auditEventId: string;
+  fulfillmentStatus: OpportunityFulfillmentStatus;
+  version: number;
+  lifecycleEventId: string;
+  auditEventId: string;
 }>;
 export type OpportunityTransitionRow = Readonly<{
-  state: "completed" | "replay" | "not_found" |
-    "version_conflict" | "invalid_transition";
-  requestHash: string; responseBody?: OpportunityTransition; currentStage?: string;
+  state:
+    | "completed"
+    | "replay"
+    | "not_found"
+    | "version_conflict"
+    | "invalid_transition";
+  requestHash: string;
+  responseBody?: OpportunityTransition;
+  currentStage?: string;
 }>;
 export type OpportunityManagementPatch = OpportunityTransition;
 export type OpportunityManagementPatchRow = Readonly<{
-  state: "completed" | "replay" | "not_found" | "version_conflict" | "unchanged";
-  requestHash: string; responseBody?: OpportunityManagementPatch;
+  state:
+    "completed" | "replay" | "not_found" | "version_conflict" | "unchanged";
+  requestHash: string;
+  responseBody?: OpportunityManagementPatch;
 }>;
 type CreateInput = Readonly<{
-  organizationId: string; workspaceId: string; websiteProjectId: string;
-  actorId: string; recommendationId: string; contactCandidateId: string | null;
+  organizationId: string;
+  workspaceId: string;
+  websiteProjectId: string;
+  actorId: string;
+  recommendationId: string;
+  contactCandidateId: string | null;
   expectedVersion: number;
-  idempotencyKey: string; requestHash: string; requestId: string;
-  idempotencyRecordId: string; opportunityId: string; cycleId: string;
-  lifecycleEventId: string; auditEventId: string; contactId: string;
+  idempotencyKey: string;
+  requestHash: string;
+  requestId: string;
+  idempotencyRecordId: string;
+  opportunityId: string;
+  cycleId: string;
+  lifecycleEventId: string;
+  auditEventId: string;
+  contactId: string;
 }>;
 type TransitionInput = Readonly<{
-  organizationId: string; workspaceId: string; websiteProjectId: string;
-  actorId: string; opportunityId: string; expectedVersion: number;
+  organizationId: string;
+  workspaceId: string;
+  websiteProjectId: string;
+  actorId: string;
+  opportunityId: string;
+  expectedVersion: number;
   toBusinessStage: OpportunityBusinessStage;
-  allowedFromStages: readonly OpportunityBusinessStage[]; reason: string;
-  idempotencyKey: string; requestHash: string; requestId: string;
-  idempotencyRecordId: string; lifecycleEventId: string; auditEventId: string;
+  allowedFromStages: readonly OpportunityBusinessStage[];
+  reason: string;
+  idempotencyKey: string;
+  requestHash: string;
+  requestId: string;
+  idempotencyRecordId: string;
+  lifecycleEventId: string;
+  auditEventId: string;
 }>;
 type ManagementPatchInput = Readonly<{
-  organizationId: string; workspaceId: string; websiteProjectId: string;
-  actorId: string; opportunityId: string; expectedVersion: number;
-  managementStatus: OpportunityManagementStatus; reason: string;
-  idempotencyKey: string; requestHash: string; requestId: string;
-  idempotencyRecordId: string; lifecycleEventId: string; auditEventId: string;
+  organizationId: string;
+  workspaceId: string;
+  websiteProjectId: string;
+  actorId: string;
+  opportunityId: string;
+  expectedVersion: number;
+  managementStatus: OpportunityManagementStatus;
+  reason: string;
+  idempotencyKey: string;
+  requestHash: string;
+  requestId: string;
+  idempotencyRecordId: string;
+  lifecycleEventId: string;
+  auditEventId: string;
 }>;
-type Client = Readonly<{ query(text: string, values?: readonly unknown[]):
-  Promise<Readonly<{ rows: readonly Record<string, unknown>[] }>> }>;
+type Client = Readonly<{
+  query(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<Readonly<{ rows: readonly Record<string, unknown>[] }>>;
+}>;
 export type OpportunityRepository = Readonly<{
   createFromRecommendation(input: CreateInput): Promise<OpportunityCreationRow>;
-  transitionBusinessStage(input: TransitionInput): Promise<OpportunityTransitionRow>;
-  patchManagement(input: ManagementPatchInput): Promise<OpportunityManagementPatchRow>;
-}>;
+  transitionBusinessStage(
+    input: TransitionInput,
+  ): Promise<OpportunityTransitionRow>;
+  patchManagement(
+    input: ManagementPatchInput,
+  ): Promise<OpportunityManagementPatchRow>;
+}> &
+  RecommendationFeedOpportunityRepository;
 
-export function createOpportunityRepository(client: Client): OpportunityRepository {
+export function createOpportunityRepository(
+  client: Client,
+): OpportunityRepository {
   return Object.freeze({
     async createFromRecommendation(input) {
       const sql = `WITH guard AS (
@@ -468,13 +544,29 @@ SELECT CASE
        $9,NULL::jsonb
  WHERE NOT EXISTS (SELECT 1 FROM completed)
    AND NOT EXISTS (SELECT 1 FROM prior)`;
-      const values = [input.organizationId, input.workspaceId, input.websiteProjectId,
-        input.actorId, input.recommendationId, input.contactCandidateId,
-        input.expectedVersion, input.idempotencyKey, input.requestHash,
-        input.idempotencyRecordId, input.opportunityId, input.cycleId,
-        input.lifecycleEventId, input.auditEventId, input.requestId,
-        input.contactId];
-      return (await client.query(sql, values)).rows[0] as OpportunityCreationRow;
+      const values = [
+        input.organizationId,
+        input.workspaceId,
+        input.websiteProjectId,
+        input.actorId,
+        input.recommendationId,
+        input.contactCandidateId,
+        input.expectedVersion,
+        input.idempotencyKey,
+        input.requestHash,
+        input.idempotencyRecordId,
+        input.opportunityId,
+        input.cycleId,
+        input.lifecycleEventId,
+        input.auditEventId,
+        input.requestId,
+        input.contactId,
+      ];
+      return (await client.query(sql, values))
+        .rows[0] as OpportunityCreationRow;
+    },
+    async createFromRecommendationFeedItem(input) {
+      return createOpportunityFromRecommendationFeedItem(client, input);
     },
     async transitionBusinessStage(input) {
       const sql = `WITH guard AS (SELECT
@@ -488,12 +580,25 @@ completed AS (INSERT INTO backlink_idempotency_records (id,organization_id,works
 SELECT 'completed' state,* ,NULL::text "currentStage" FROM completed UNION ALL
 SELECT 'replay',"requestHash","responseBody",NULL::text FROM prior UNION ALL
 SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM present) THEN 'not_found' WHEN (SELECT version FROM present)<>$6 THEN 'version_conflict' ELSE 'invalid_transition' END,$10,NULL::jsonb,(SELECT business_stage FROM present) WHERE NOT EXISTS (SELECT 1 FROM completed) AND NOT EXISTS (SELECT 1 FROM prior)`;
-      const values = [input.organizationId, input.workspaceId, input.websiteProjectId,
-        input.actorId, input.opportunityId, input.expectedVersion,
-        input.toBusinessStage, input.allowedFromStages, input.reason, input.requestHash,
-        input.idempotencyKey, input.idempotencyRecordId, input.lifecycleEventId,
-        input.auditEventId, input.requestId];
-      return (await client.query(sql, values)).rows[0] as OpportunityTransitionRow;
+      const values = [
+        input.organizationId,
+        input.workspaceId,
+        input.websiteProjectId,
+        input.actorId,
+        input.opportunityId,
+        input.expectedVersion,
+        input.toBusinessStage,
+        input.allowedFromStages,
+        input.reason,
+        input.requestHash,
+        input.idempotencyKey,
+        input.idempotencyRecordId,
+        input.lifecycleEventId,
+        input.auditEventId,
+        input.requestId,
+      ];
+      return (await client.query(sql, values))
+        .rows[0] as OpportunityTransitionRow;
     },
     async patchManagement(input) {
       const sql = `WITH guard AS (SELECT
@@ -507,15 +612,30 @@ completed AS (INSERT INTO backlink_idempotency_records (id,organization_id,works
 SELECT 'completed' state,* FROM completed UNION ALL
 SELECT 'replay',"requestHash","responseBody" FROM prior UNION ALL
 SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM present) THEN 'not_found' WHEN (SELECT version FROM present)<>$6 THEN 'version_conflict' ELSE 'unchanged' END,$9,NULL::jsonb WHERE NOT EXISTS (SELECT 1 FROM completed) AND NOT EXISTS (SELECT 1 FROM prior)`;
-      const values = [input.organizationId, input.workspaceId, input.websiteProjectId,
-        input.actorId, input.opportunityId, input.expectedVersion,
-        input.managementStatus, input.reason, input.requestHash, input.idempotencyKey,
-        input.idempotencyRecordId, input.lifecycleEventId, input.auditEventId,
-        input.requestId];
-      return (await client.query(sql, values)).rows[0] as OpportunityManagementPatchRow;
+      const values = [
+        input.organizationId,
+        input.workspaceId,
+        input.websiteProjectId,
+        input.actorId,
+        input.opportunityId,
+        input.expectedVersion,
+        input.managementStatus,
+        input.reason,
+        input.requestHash,
+        input.idempotencyKey,
+        input.idempotencyRecordId,
+        input.lifecycleEventId,
+        input.auditEventId,
+        input.requestId,
+      ];
+      return (await client.query(sql, values))
+        .rows[0] as OpportunityManagementPatchRow;
     },
   });
 }
-import type { OpportunityBusinessStage, OpportunityFulfillmentStatus,
-  OpportunityManagementStatus, OpportunityOutcomeStatus
+import type {
+  OpportunityBusinessStage,
+  OpportunityFulfillmentStatus,
+  OpportunityManagementStatus,
+  OpportunityOutcomeStatus,
 } from "../../domain/opportunities/opportunity-state.js";

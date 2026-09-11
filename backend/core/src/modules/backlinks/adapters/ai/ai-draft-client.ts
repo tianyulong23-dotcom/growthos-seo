@@ -38,6 +38,8 @@ type SafeLogEvent = Readonly<{
   latencyMs?: number;
   errorCode?: string;
   diagnosticCode?: string;
+  inputTokens?: number;
+  outputTokens?: number;
 }>;
 
 const fail = (code: "UNAVAILABLE" | "MISCONFIGURED", message: string) =>
@@ -99,6 +101,13 @@ export function createAiDraftClient(options: Readonly<{
         const result = await options.transport.generate({
           draft,
           ...transportConfig,
+        });
+        options.logger?.({
+          event: "backlinks.ai_draft.usage",
+          modelId: config.modelId,
+          providerRef: config.providerRef,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
         });
         if (
           !Number.isInteger(result.usage.inputTokens)

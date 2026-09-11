@@ -8,6 +8,10 @@ const safelyReplaceableFailureCodes = new Set([
   "GMAIL_SEND_TOKEN_REFRESH_FAILED",
 ]);
 
+const safelyReplaceableNoAttemptFailureCodes = new Set([
+  "GMAIL_SEND_RESERVATION_EXPIRED",
+]);
+
 export type FailedSendIntentReplacementEvidence = Readonly<{
   intentStatus: unknown;
   attemptStatus: unknown;
@@ -20,12 +24,20 @@ export function canReplaceFailedSendIntent(
   evidence: FailedSendIntentReplacementEvidence,
 ): boolean {
   return evidence.intentStatus === "FAILED_FINAL"
-    && (
-      evidence.attemptStatus === "FAILED_RETRYABLE"
-      || evidence.attemptStatus === "FAILED_FINAL"
-    )
     && evidence.providerMessageId === null
     && evidence.providerThreadId === null
     && typeof evidence.errorCode === "string"
-    && safelyReplaceableFailureCodes.has(evidence.errorCode);
+    && (
+      (
+        (
+          evidence.attemptStatus === "FAILED_RETRYABLE"
+          || evidence.attemptStatus === "FAILED_FINAL"
+        )
+        && safelyReplaceableFailureCodes.has(evidence.errorCode)
+      )
+      || (
+        evidence.attemptStatus === null
+        && safelyReplaceableNoAttemptFailureCodes.has(evidence.errorCode)
+      )
+    );
 }

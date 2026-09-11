@@ -95,12 +95,7 @@ export function useArticleReliableSave(input: {
     () => sequenceStorageKey(projectId, articleId, clientId),
     [articleId, clientId, projectId]
   )
-  const sequenceKeyRef = React.useRef("")
-  const sequenceRef = React.useRef(0)
-  if (sequenceKeyRef.current !== sequenceKey) {
-    sequenceKeyRef.current = sequenceKey
-    sequenceRef.current = loadClientSequence(sequenceKey)
-  }
+  const sequenceRef = React.useRef(loadClientSequence(sequenceKey))
   const snapshotRef = React.useRef<Snapshot | null>(null)
   const requestGenerationRef = React.useRef(0)
   const activeRequestRef = React.useRef<AbortController | null>(null)
@@ -115,10 +110,17 @@ export function useArticleReliableSave(input: {
     (retryAttempt?: number, sequenceResyncAttempt?: number) => Promise<boolean>
   >(async () => false)
 
-  const clearTimer = React.useCallback((ref: React.RefObject<number | null>) => {
-    if (ref.current !== null) window.clearTimeout(ref.current)
-    ref.current = null
-  }, [])
+  React.useEffect(() => {
+    sequenceRef.current = loadClientSequence(sequenceKey)
+  }, [sequenceKey])
+
+  const clearTimer = React.useCallback(
+    (ref: React.RefObject<number | null>) => {
+      if (ref.current !== null) window.clearTimeout(ref.current)
+      ref.current = null
+    },
+    []
+  )
 
   React.useEffect(() => {
     onLockLostRef.current = onLockLost
@@ -158,12 +160,7 @@ export function useArticleReliableSave(input: {
   const flushAutosave = React.useCallback(
     async (retryAttempt = 0, sequenceResyncAttempt = 0): Promise<boolean> => {
       const snapshot = snapshotRef.current
-      if (
-        !enabled ||
-        !lockCredential ||
-        unauthorizedRef.current ||
-        !snapshot
-      )
+      if (!enabled || !lockCredential || unauthorizedRef.current || !snapshot)
         return false
       if (snapshot.hash === baselineHash) return true
       clearTimer(serverTimerRef)
@@ -252,7 +249,10 @@ export function useArticleReliableSave(input: {
           return false
         }
         if (error instanceof ApiError && error.status === 409) {
-          dispatch({ type: "conflict", error: "服务器版本已变化，请先处理恢复或冲突。" })
+          dispatch({
+            type: "conflict",
+            error: "服务器版本已变化，请先处理恢复或冲突。",
+          })
           return false
         }
         const retryable =
@@ -263,7 +263,8 @@ export function useArticleReliableSave(input: {
           snapshotRef.current?.hash === snapshot.hash
         ) {
           retryTimerRef.current = window.setTimeout(
-            () => void flushRef.current(retryAttempt + 1, sequenceResyncAttempt),
+            () =>
+              void flushRef.current(retryAttempt + 1, sequenceResyncAttempt),
             RETRY_DELAYS_MS[retryAttempt]
           )
         } else {
@@ -358,7 +359,8 @@ export function useArticleReliableSave(input: {
       clearTimer(retryTimerRef)
       protectLocallyRef.current()
       activeRequestRef.current?.abort()
-    }, [clearTimer]
+    },
+    [clearTimer]
   )
 
   const invalidateRequests = React.useCallback(() => {

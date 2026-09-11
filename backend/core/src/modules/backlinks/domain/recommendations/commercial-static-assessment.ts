@@ -14,6 +14,7 @@ const maxRedirects = 4;
 const maxSecondaryPages = 4;
 const maxFetchAttempts = 2;
 const retryableHttpStatuses = new Set([408, 425, 500, 502, 503, 504]);
+const explicitTermSeparator = /[,，;；\r\n]+/u;
 export type CommercialStaticAssessment = Readonly<{
   canonicalDomain: string;
   decision: "ready" | "insufficient_data" | "manual_review";
@@ -73,7 +74,9 @@ function sameDomainUrl(value: string, canonicalDomain: string): string | null {
 }
 
 function normalizeTerms(values: readonly string[]): readonly string[] {
-  return unique(values.map((value) =>
+  return unique(values.flatMap((value) =>
+    value.split(explicitTermSeparator)
+  ).map((value) =>
     value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
   ).filter(Boolean));
 }
@@ -192,6 +195,7 @@ export async function assessCommercialCandidateSite(input: Readonly<{
     partnershipGoals: readonly string[];
   }>;
   safeFetch: Pick<SafeFetchPort, "fetch">;
+  browserFetch?: Pick<SafeFetchPort, "fetch">;
   pageParser: CommercialPageParserPort;
   now?: () => string;
 }>): Promise<CommercialStaticAssessment> {
@@ -201,6 +205,7 @@ export async function assessCommercialCandidateSite(input: Readonly<{
   const pages: CommercialPageFacts[] = [];
   const failedUrls: string[] = [];
   const attemptedUrls: string[] = [];
+  const browserEvidenceUrls = new Set<string>();
   let successfulDiscoveryEvidence = false;
   let degradedDecision: "insufficient_data" | "manual_review" | null = null;
 
@@ -219,6 +224,33 @@ export async function assessCommercialCandidateSite(input: Readonly<{
           maxRedirects,
         });
         if (result.status === 403 || result.status === 429) {
+          if (input.browserFetch !== undefined) {
+            try {
+              const browserResult = await input.browserFetch.fetch({
+                url,
+                purpose: "seo-assessment",
+                workspaceId: input.workspaceId,
+                websiteProjectId: input.websiteProjectId,
+                maxBytes: maxPageBytes,
+                maxRedirects,
+              });
+              if (
+                browserResult.status >= 200 &&
+                browserResult.status < 400
+              ) {
+                const parsed = input.pageParser.parse({
+                  body: browserResult.body,
+                  finalUrl: browserResult.finalUrl,
+                  fetchedAt: browserResult.fetchedAt,
+                  canonicalDomain,
+                });
+                browserEvidenceUrls.add(parsed.url);
+                return parsed;
+              }
+            } catch {
+              // Preserve the original 403/429 as the assessment decision.
+            }
+          }
           failedUrls.push(url);
           degradedDecision = "manual_review";
           return null;
@@ -390,7 +422,9 @@ export async function assessCommercialCandidateSite(input: Readonly<{
     ?? input.now?.()
     ?? new Date().toISOString();
   const evidenceRefs = Object.freeze(evidenceUrls.map(
-    (url) => `safefetch:${canonicalDomain}:${collectedAt}:${url}`,
+    (url) =>
+      `${browserEvidenceUrls.has(url) ? "browser" : "safefetch"}:`
+      + `${canonicalDomain}:${collectedAt}:${url}`,
   ));
   const unsafeOrMalicious = [
     "credential theft",

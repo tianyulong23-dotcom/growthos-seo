@@ -71,17 +71,39 @@ const oauthRecoveryActions = new Set<GmailReadinessRecoveryAction>([
   "GRANT_GMAIL_SYNC_SCOPE",
 ])
 
+const mailCenterIgnoredBlockerCodes = new Set<GmailReadinessBlockerCode>([
+  "SEND_CONTEXT_REQUIRED",
+  "APPROVED_SEND_SNAPSHOT_MISSING",
+])
+
 export function GmailReadinessBlockers({
   controller,
   className,
+  scope = "all",
 }: {
   controller: GmailConnectionController
   className?: string
+  scope?: "all" | "mail-center"
 }) {
   const readiness = controller.readiness
-  if (readiness === null || readiness.blockers.length === 0) return null
+  if (readiness === null) return null
 
-  const primary = readiness.primaryBlocker
+  const blockers =
+    scope === "mail-center"
+      ? readiness.blockers.filter(
+          (item) => !mailCenterIgnoredBlockerCodes.has(item.code)
+        )
+      : readiness.blockers
+  if (blockers.length === 0) return null
+
+  const primary =
+    blockers.find(
+      (item) =>
+        item.code === readiness.primaryBlocker?.code &&
+        item.capability === readiness.primaryBlocker.capability
+    ) ??
+    blockers[0] ??
+    null
   const canStartOAuth =
     primary !== null && oauthRecoveryActions.has(primary.recoveryAction)
   const canRefresh =
@@ -127,10 +149,10 @@ export function GmailReadinessBlockers({
       <details className="group mt-2 text-xs">
         <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md px-2 py-1.5 text-muted-foreground hover:bg-muted/50 hover:text-foreground">
           <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
-          查看 {readiness.blockers.length} 项技术详情
+          查看 {blockers.length} 项技术详情
         </summary>
         <div className="mt-1 divide-y rounded-md border bg-background px-3">
-          {readiness.blockers.map((item, index) => (
+          {blockers.map((item, index) => (
             <div
               key={`${item.capability}:${item.code}:${index}`}
               className="grid gap-2 py-2.5 sm:grid-cols-[4rem_minmax(0,1fr)_auto]"

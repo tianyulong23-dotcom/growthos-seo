@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { reassessCurrentCommercialCandidates } from "../../src/modules/backlinks/application/services/current-commercial-candidate-reassessment.service.js";
+import {
+  evaluateStoredCurrentCommercialCandidate,
+  reassessCurrentCommercialCandidates,
+} from "../../src/modules/backlinks/application/services/current-commercial-candidate-reassessment.service.js";
 import {
   commercialFitBaselineAdmissionThreshold,
   commercialRecommendationFitModelVersion,
@@ -103,7 +106,7 @@ describe("current commercial candidate reassessment", () => {
     expect(queries).toHaveLength(2);
     expect(queries[0]?.text).toContain("candidate.recommendation_id IS NULL");
     expect(queries[0]?.values[5]).toBe(
-      "recommendation-commercial-fit-rules.v4.2",
+      commercialRecommendationFitRuleVersion,
     );
     const updatedScore = JSON.parse(String(queries[1]?.values[6]));
     expect(updatedScore).toMatchObject({
@@ -237,7 +240,7 @@ describe("current commercial candidate reassessment", () => {
     );
   });
 
-  it("reassesses a current-rule candidate when its admission threshold is stale", async () => {
+  it("reassesses a stale-rule candidate without forcing every generation back to the baseline threshold", async () => {
     const queries: Readonly<{
       text: string;
       values: readonly unknown[];
@@ -258,7 +261,7 @@ describe("current commercial candidate reassessment", () => {
             },
             commercialScore: {
               decision: "ineligible",
-              ruleVersion: commercialRecommendationFitRuleVersion,
+              ruleVersion: "recommendation-commercial-fit-rules.v4.2",
               admission: {
                 baselineThreshold: 55,
                 appliedThreshold: 55,
@@ -306,7 +309,7 @@ describe("current commercial candidate reassessment", () => {
 
     expect(result).toEqual({ reassessedCount: 1 });
     expect(queries).toHaveLength(2);
-    expect(queries[0]?.text).toContain(
+    expect(queries[0]?.text).not.toContain(
       "candidate.commercial_score#>>'{admission,appliedThreshold}'",
     );
     expect(queries[0]?.text).toContain(
@@ -314,15 +317,11 @@ describe("current commercial candidate reassessment", () => {
     );
     expect(queries[0]?.text).toContain("jsonb_array_elements_text");
     expect(queries[0]?.text).toContain("evidence.value LIKE 'gate.%'");
-    expect(queries[0]?.values[7]).toBe(
-      String(commercialFitBaselineAdmissionThreshold),
-    );
-    expect(queries[1]?.text).toContain(
+    expect(queries[0]?.values).toHaveLength(7);
+    expect(queries[1]?.text).not.toContain(
       "candidate.commercial_score#>>'{admission,appliedThreshold}'",
     );
-    expect(queries[1]?.values[13]).toBe(
-      String(commercialFitBaselineAdmissionThreshold),
-    );
+    expect(queries[1]?.values).toHaveLength(13);
     const updatedScore = JSON.parse(String(queries[1]?.values[6]));
     expect(updatedScore).toMatchObject({
       decision: "eligible",
@@ -331,6 +330,64 @@ describe("current commercial candidate reassessment", () => {
         appliedThreshold: commercialFitBaselineAdmissionThreshold,
       },
       ruleVersion: commercialRecommendationFitRuleVersion,
+    });
+  });
+
+  it("preserves a strongly relevant second-generation candidate below 50 during reassessment", () => {
+    const evaluated = evaluateStoredCurrentCommercialCandidate({
+      staticAssessment: {
+        ...staticAssessment,
+        productRelevance: 0.45,
+        editorialQuality: 0.2,
+        matchedAudiences: [],
+        matchedPartnershipGoals: [],
+        monetizationMethods: [],
+        cooperationPages: [],
+        outboundLinkDensity: 0.8,
+        technicalAccessibility: 0.8,
+      },
+      gateDecision: {
+        decision: "ineligible",
+        hitGates: [],
+        missingEvidence: [],
+      },
+      commercialScore: {
+        decision: "ineligible",
+        ruleVersion: "recommendation-commercial-fit-rules.v4.2",
+        details: {
+          authority: { projectAuthority: 20 },
+          market: { candidateCountry: null },
+          dataForSeo: {
+            rank: 0,
+            traffic: 0,
+            backlinks: 0,
+            referringDomains: 0,
+            spamScore: 50,
+            evidenceRefs: [],
+            collectedAt: "2026-08-12T03:40:00.000Z",
+          },
+        },
+      },
+      refillTier: "exact_product_target_market",
+      locale: "en",
+      countryCode: "ZA",
+      visiblePoolGeneration: 2,
+    });
+
+    expect(evaluated.score.total).toBeGreaterThanOrEqual(40);
+    expect(evaluated.score.total).toBeLessThan(50);
+    expect(evaluated.score).toMatchObject({
+      decision: "eligible",
+      admission: {
+        baselineThreshold: 50,
+        appliedThreshold: 40,
+        fallbackApplied: true,
+      },
+      details: {
+        market: {
+          tier: "target_market",
+        },
+      },
     });
   });
 

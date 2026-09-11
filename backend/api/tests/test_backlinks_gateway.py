@@ -173,7 +173,7 @@ def runtime_api_routes(router: object) -> list[APIRoute]:
     return routes
 
 
-def test_registers_exactly_seventy_seven_private_runtime_routes() -> None:
+def test_registers_exactly_eighty_three_private_runtime_routes() -> None:
     gateway = BacklinksGateway(
         base_url="http://backlinks.internal",
         signing_key=SIGNING_KEY,
@@ -189,10 +189,43 @@ def test_registers_exactly_seventy_seven_private_runtime_routes() -> None:
         if isinstance(route, APIRoute) and "/backlinks/" in route.path
     ]
 
-    assert len(runtime_routes) == 77
-    assert len({(tuple(sorted(route.methods)), route.path) for route in runtime_routes}) == 77
+    assert len(runtime_routes) == 83
+    assert len({(tuple(sorted(route.methods)), route.path) for route in runtime_routes}) == 83
+    assert any(
+        route.path.endswith("/recommendation-feed/observations")
+        and route.methods == {"POST"}
+        for route in runtime_routes
+    )
     assert all(route.include_in_schema is False for route in runtime_routes)
     assert all("/backlinks/" not in path for path in app.openapi()["paths"])
+
+
+def test_retired_v1_recommendation_writes_never_reach_private_runtime() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200)
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    for suffix in (
+        "recommendations/example/reject",
+        "recommendation-refill-jobs",
+        "recommendation-refill-jobs/example/cancel",
+        "recommendation-refill-jobs/example/close-duplicate",
+        "recommendation-pools/1/archive",
+    ):
+        response = request_app(
+            gateway, StaticResolver(RESOLVED), method="POST",
+            path=f"/api/v1/projects/project-key/backlinks/{suffix}",
+            headers={"idempotency-key": "retired-v1"},
+        )
+        assert response.status_code == 404
+    assert calls == []
 
 
 def test_forwards_current_pool_contact_enrichment_batch() -> None:
@@ -1312,6 +1345,93 @@ def test_preserves_public_assessment_availability_contract() -> None:
     assert '"value":0' not in response.text
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    (
+        ("GET", "/api/v1/projects/project-key/backlinks/recommendation-feed"),
+        (
+            "POST",
+            "/api/v1/projects/project-key/backlinks/recommendation-feed/export",
+        ),
+        (
+            "POST",
+            (
+                "/api/v1/projects/project-key/backlinks/"
+                "recommendation-user-release/publish-initial"
+            ),
+        ),
+        (
+            "GET",
+            (
+                "/api/v1/projects/project-key/backlinks/"
+                "recommendation-user-release/status"
+            ),
+        ),
+        (
+            "POST",
+            (
+                "/api/v1/projects/project-key/backlinks/"
+                "recommendation-user-release/get-more"
+            ),
+        ),
+        (
+            "POST",
+            (
+                "/api/v1/projects/project-key/backlinks/"
+                "recommendation-user-release/items/item-1/archive"
+            ),
+        ),
+        (
+            "POST",
+            (
+                "/api/v1/projects/project-key/backlinks/"
+                "recommendation-user-release/items/item-1/unarchive"
+            ),
+        ),
+        (
+            "POST",
+            "/api/v1/projects/project-key/backlinks/recommendation-seeds/generate",
+        ),
+        (
+            "POST",
+            "/api/v1/projects/project-key/backlinks/recommendation-seeds/launch",
+        ),
+        (
+            "POST",
+            "/api/v1/projects/project-key/backlinks/recommendation-seeds/validate",
+        ),
+    ),
+)
+def test_forwards_v2_recommendation_pool_routes(method: str, path: str) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Response:
+        calls.append(request)
+        return Response(200, json={"forwarded": True})
+
+    gateway = BacklinksGateway(
+        base_url="http://backlinks.internal",
+        signing_key=SIGNING_KEY,
+        client=AsyncClient(transport=MockTransport(handler)),
+    )
+    response = request_app(
+        gateway,
+        StaticResolver(RESOLVED),
+        method=method,
+        path=path,
+        headers={"content-type": "application/json"},
+        content=b"{}" if method == "POST" else None,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"forwarded": True}
+    assert len(calls) == 1
+    assert calls[0].method == method
+    assert calls[0].url.path == path
+    if method == "POST":
+        assert calls[0].content == b"{}"
+
+
 def test_rejects_untrusted_or_cross_project_context_before_forwarding() -> None:
     calls = 0
 
@@ -1386,8 +1506,8 @@ def test_forwards_idempotent_command_once_and_never_retries_transport_failure() 
         )
 
     path = (
-        "/api/v1/projects/project-key/backlinks/recommendations/"
-        "018f0000-0000-7000-8000-000000000002/reject"
+        "/api/v1/projects/project-key/backlinks/recommendation-user-release/items/"
+        "018f0000-0000-7000-8000-000000000002/archive"
     )
     body = json.dumps(
         {
@@ -1546,12 +1666,8 @@ def test_forwards_idempotent_command_once_and_never_retries_transport_failure() 
         },
         content=cancel_refill_body,
     )
-    assert cancel_refill.status_code == 200
-    assert len(calls) == 6
-    assert calls[5].headers["idempotency-key"] == (
-        "cancel-read-side-effect-once"
-    )
-    assert calls[5].content == cancel_refill_body
+    assert cancel_refill.status_code == 404
+    assert len(calls) == 5
 
     close_duplicate_path = (
         "/api/v1/projects/project-key/backlinks/recommendation-refill-jobs/"
@@ -1575,10 +1691,8 @@ def test_forwards_idempotent_command_once_and_never_retries_transport_failure() 
         },
         content=close_duplicate_body,
     )
-    assert close_duplicate.status_code == 200
-    assert len(calls) == 7
-    assert calls[6].headers["idempotency-key"] == "close-duplicate-once"
-    assert calls[6].content == close_duplicate_body
+    assert close_duplicate.status_code == 404
+    assert len(calls) == 5
 
     failure_calls = 0
 
@@ -1642,11 +1756,7 @@ def test_forwards_idempotent_command_once_and_never_retries_transport_failure() 
     assert missing_placement_key.json()["code"] == "PLATFORM_IDEMPOTENCY_REQUIRED"
     assert missing_reverify_key.status_code == 400
     assert missing_reverify_key.json()["code"] == "PLATFORM_IDEMPOTENCY_REQUIRED"
-    assert missing_close_duplicate_key.status_code == 400
-    assert (
-        missing_close_duplicate_key.json()["code"]
-        == "PLATFORM_IDEMPOTENCY_REQUIRED"
-    )
+    assert missing_close_duplicate_key.status_code == 404
     assert unavailable.status_code == 503
     assert unavailable.headers["content-type"].startswith("application/problem+json")
     assert unavailable.json() == {

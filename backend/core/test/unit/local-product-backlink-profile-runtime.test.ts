@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { checkProviderExecutionCeiling } from "../../src/modules/backlinks/db/repositories/provider-budget.repository.js";
 
 import type {
   BacklinkTenantPool,
@@ -28,6 +30,28 @@ const configurationEnvironment = {
 } as const;
 
 describe("local product backlink profile runtime", () => {
+  it("checks the combined profile estimate under the shared execution lock", async () => {
+    const query = vi.fn(async (sql: string) => ({
+      rows: sql.includes("exposureMicros")
+        ? [{ exposureMicros: 60000, alreadyReserved: false }] : [],
+    }));
+    await expect(checkProviderExecutionCeiling({ query }, {
+      context: { organizationId: "org", workspaceId: "workspace", websiteProjectId: "project" },
+      provider: "dataforseo",
+      reservationKey: "backlink-profile:job:combined",
+      estimatedCostMicros: 50000,
+    }, { startedAt: "2026-09-08T02:00:00Z", limitMicros: 100000 },
+    () => new Date("2026-09-08T03:00:00Z"))).resolves.toBe("deny");
+    expect(query.mock.calls[0]?.[0]).toContain("pg_advisory_xact_lock");
+    const source = await readFile(new URL(
+      "../../src/modules/backlinks/runtime/local-product-backlink-profile-runtime.ts",
+      import.meta.url,
+    ), "utf8");
+    expect(source).toContain("estimatedCostMicros: configuration.estimatedCostMicros * 2");
+    expect(source.indexOf("const ceiling = await checkProviderExecutionCeiling"))
+      .toBeLessThan(source.indexOf("const budget = await client.query"));
+    expect(source).toContain('if (ceiling === "deny") return null');
+  });
   it("persists external unavailability before credentials or paid work", async () => {
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }));
     const release = vi.fn();

@@ -2,6 +2,7 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH="/opt/provider-archive" \
     PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
@@ -17,6 +18,7 @@ RUN python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
+COPY --from=provider_archive / /opt/provider-archive/
 
 EXPOSE 8000
 

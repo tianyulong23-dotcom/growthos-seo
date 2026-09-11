@@ -1044,13 +1044,38 @@ describe("PB-C1 Gmail authorization PostgreSQL repositories", () => {
       },
     });
 
-    await expect(repository.markReauthRequired({
+    const recovered = await repository.replaceTokenReference({
       organizationId,
       workspaceId,
       websiteProjectId: projectAId,
       connectionId: connectionAId,
       actorId: "user-pb-c1",
       expectedVersion: refreshFailure?.version ?? 0,
+      tokenSecretReference: {
+        provider: "integration-secret-store",
+        secretKind: secretKinds.gmailTokenSet,
+        externalSecretId: connectionAId,
+        externalSecretVersion: "2",
+      },
+      tokenExpiresAt: "2026-08-10T13:00:00.000Z",
+      grantedScopes: gmailOAuthScopes,
+    });
+    expect(recovered).toMatchObject({
+      view: {
+        connectionId: connectionAId,
+        connectionStatus: "CONNECTED",
+        sendAvailability: "AVAILABLE",
+        recentErrorCategory: null,
+      },
+    });
+
+    await expect(repository.markReauthRequired({
+      organizationId,
+      workspaceId,
+      websiteProjectId: projectAId,
+      connectionId: connectionAId,
+      actorId: "user-pb-c1",
+      expectedVersion: recovered?.version ?? 0,
       reason: "GOOGLE_AUTH_EXPIRED",
     })).resolves.toMatchObject({
       view: {

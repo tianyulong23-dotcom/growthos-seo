@@ -1,6 +1,4 @@
-const apiBaseUrl = (
-  import.meta.env.VITE_API_BASE_URL ?? ""
-).replace(/\/+$/, "")
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "")
 
 const validationLocationPrefixes = new Set([
   "body",
@@ -213,6 +211,15 @@ export async function apiRequest<T>(
 
   if (response.status === 204) {
     return undefined as T
+  }
+
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? ""
+  if (
+    contentType &&
+    !contentType.includes("application/json") &&
+    !contentType.includes("+json")
+  ) {
+    return (await response.text()) as T
   }
 
   return (await response.json()) as T

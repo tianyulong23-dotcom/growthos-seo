@@ -98,6 +98,10 @@ export type ProgressiveCommercialCandidateAdmission = Readonly<{
   admission: CommercialFitAdmission;
 }>;
 
+export type ProgressiveCommercialCandidateAdmissionOptions = Readonly<{
+  visiblePoolGeneration?: number;
+}>;
+
 function clamp(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
@@ -253,20 +257,40 @@ export function applyCommercialCandidateAdmissionThreshold(
 
 export function applyProgressiveCommercialCandidateAdmission(
   scores: readonly CommercialCandidateFitDecision[],
+  options: ProgressiveCommercialCandidateAdmissionOptions = {},
 ): ProgressiveCommercialCandidateAdmission {
   const appliedThreshold =
-    resolveProgressiveCommercialFitAdmissionThreshold(scores);
+    resolveProgressiveCommercialFitAdmissionThreshold(scores, options);
   return Object.freeze({
     scores: Object.freeze(
-      scores.map((score) =>
-        applyCommercialCandidateAdmissionThreshold(score, appliedThreshold),
-      ),
+      scores.map((score) => {
+        const hasExplicitSemanticMatch = [
+          score.details.matchedProducts,
+          score.details.matchedTopics,
+          score.details.matchedKeywords,
+          score.details.matchedTargetPages,
+        ].some((values) => values.length > 0);
+        const candidateThreshold =
+          appliedThreshold < commercialFitBaselineAdmissionThreshold &&
+            score.hitGates.length === 0 &&
+            score.details.market.tier === "target_market" &&
+            hasExplicitSemanticMatch &&
+            score.total !== null &&
+            score.total < commercialFitBaselineAdmissionThreshold
+            ? appliedThreshold
+            : commercialFitBaselineAdmissionThreshold;
+        return applyCommercialCandidateAdmissionThreshold(
+          score,
+          candidateThreshold,
+        );
+      }),
     ),
     admission: Object.freeze({
       policyVersion: commercialFitProgressiveAdmissionPolicyVersion,
       baselineThreshold: commercialFitBaselineAdmissionThreshold,
       appliedThreshold,
-      fallbackApplied: false as const,
+      fallbackApplied:
+        appliedThreshold < commercialFitBaselineAdmissionThreshold,
     }),
   });
 }

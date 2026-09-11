@@ -354,6 +354,13 @@ describe("corrected recommendation compatibility repository", () => {
       ),
     ).toBe(true);
     expect(
+      fake.queries.some((sql) =>
+        sql.includes(
+          "INSERT INTO backlinks.backlink_recommendation_generation_contracts",
+        )
+      ),
+    ).toBe(false);
+    expect(
       fake.queries
         .filter((sql) =>
           sql.includes(

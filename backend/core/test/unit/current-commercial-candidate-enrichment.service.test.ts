@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { prepareCurrentCommercialCandidateEnrichment } from "../../src/modules/backlinks/application/services/current-commercial-candidate-enrichment.service.js";
+import {
+  carryForwardPublishableV2CommercialCandidates,
+  prepareCurrentCommercialCandidateEnrichment,
+} from "../../src/modules/backlinks/application/services/current-commercial-candidate-enrichment.service.js";
 import { evaluateCommercialCandidate } from "../../src/modules/backlinks/domain/recommendations/commercial-candidate-evaluation.js";
 
 const staticAssessment = {
@@ -109,6 +112,103 @@ const input = {
 } as const;
 
 describe("current commercial candidate enrichment preparation", () => {
+  it("carries only unpublished threshold-qualified V2 candidates into the target generation", async () => {
+    const queries: Array<Readonly<{
+      text: string;
+      values: readonly unknown[];
+    }>> = [];
+    const result = await carryForwardPublishableV2CommercialCandidates(
+      {
+        query: async (text, values = []) => {
+          queries.push({ text, values });
+          return {
+            rows: [
+              { candidateId: "00000000-0000-4000-8000-000000000001" },
+              { candidateId: "00000000-0000-4000-8000-000000000002" },
+            ],
+          };
+        },
+      },
+      {
+        organizationId: "00000000-0000-4000-8000-000000000011",
+        workspaceId: "00000000-0000-4000-8000-000000000012",
+        websiteProjectId: "00000000-0000-4000-8000-000000000013",
+        projectContextVersionId:
+          "00000000-0000-4000-8000-000000000014",
+        generationContractId: "00000000-0000-4000-8000-000000000015",
+        visiblePoolGeneration: 12,
+        actorId: "test:v2-carry-forward",
+        now: new Date("2026-09-02T18:00:00.000Z"),
+        maximumCandidates: 5,
+      },
+    );
+
+    expect(result).toEqual({ carriedCount: 2 });
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.text).toContain(
+      "generation.pool_contract_version='recommendation-pool.v2'",
+    );
+    expect(queries[0]?.text).toContain(
+      "source_generation.pool_contract_version=",
+    );
+    expect(queries[0]?.text).toContain("'recommendation-pool.v2'");
+    expect(queries[0]?.text).toContain(
+      "source.state IN ('candidate_ready','enrichment_eligible')",
+    );
+    expect(queries[0]?.text).toContain(
+      "source.commercial_score#>'{admission,appliedThreshold}'",
+    );
+    expect(queries[0]?.text).toContain(
+      "assignment.generation_contract_id=$5",
+    );
+    expect(queries[0]?.text).toContain(
+      "promoted.recommendation_id IS NOT NULL",
+    );
+    expect(queries[0]?.values[5]).toBe(12);
+    expect(queries[0]?.values[7]).toBe(5);
+    expect(queries[0]?.values[11]).toBe(
+      "recommendation-pool-v2-candidate-carry-forward.v1",
+    );
+  });
+
+  it("reads an older source batch only with explicit V2 carry-forward lineage", async () => {
+    const queries: Array<Readonly<{
+      text: string;
+      values: readonly unknown[];
+    }>> = [];
+    const generationContractId =
+      "00000000-0000-4000-8000-000000000015";
+
+    await prepareCurrentCommercialCandidateEnrichment(
+      {
+        query: async (text, values = []) => {
+          queries.push({ text, values });
+          return { rows: [] };
+        },
+      },
+      {
+        ...input,
+        generationContractId,
+        apply: false,
+      },
+    );
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.text).toContain(
+      "#>>'{carryForward,contractVersion}'=$10",
+    );
+    expect(queries[0]?.text).toContain(
+      "#>>'{carryForward,targetGenerationContractId}'=",
+    );
+    expect(queries[0]?.text).toContain(
+      "target_generation.pool_contract_version=",
+    );
+    expect(queries[0]?.text).toContain(
+      "assignment.generation_contract_id=$9",
+    );
+    expect(queries[0]?.values[8]).toBe(generationContractId);
+  });
+
   it("keeps already-publishable candidates out of paid enrichment", async () => {
     const nearThreshold = row(
       "00000000-0000-4000-8000-000000000001",
@@ -173,6 +273,63 @@ describe("current commercial candidate enrichment preparation", () => {
     expect(result.preparedCount).toBe(1);
     expect(writes).toHaveLength(1);
     expect(writes[0]?.[4]).toBe(nearThreshold.candidateId);
+  });
+
+  it("keeps progressively admitted candidates publishable", async () => {
+    const progressiveBase = row(
+      "00000000-0000-4000-8000-000000000003",
+      "progressive-publisher.example",
+    );
+    const progressive = {
+      ...progressiveBase,
+      commercialScore: {
+        ...progressiveBase.commercialScore,
+        decision: "eligible",
+        total: 41.46,
+        hitGates: [],
+        missingEvidence: [],
+        admission: {
+          ...progressiveBase.commercialScore.admission,
+          appliedThreshold: 40,
+          fallbackApplied: true,
+        },
+      },
+      gateDecision: {
+        decision: "eligible",
+        hitGates: [],
+        missingEvidence: [],
+      },
+      state: "enrichment_eligible",
+    };
+    const writes: unknown[][] = [];
+
+    const result = await prepareCurrentCommercialCandidateEnrichment(
+      {
+        query: async (text, values = []) => {
+          if (text.includes("SELECT candidate.id")) {
+            return { rows: [progressive] };
+          }
+          writes.push([...values]);
+          return { rows: [] };
+        },
+      },
+      {
+        ...input,
+        visiblePoolGeneration: 8,
+        maximumCandidates: 25,
+        apply: true,
+      },
+    );
+
+    expect(result.publishableCandidates).toEqual([
+      expect.objectContaining({
+        candidateId: progressive.candidateId,
+        hostnameAscii: "progressive-publisher.example",
+      }),
+    ]);
+    expect(result.candidates).toEqual([]);
+    expect(result.preparedCount).toBe(0);
+    expect(writes).toHaveLength(0);
   });
 
   it("dry-runs a bounded near-threshold selection without reviving hard exclusions", async () => {

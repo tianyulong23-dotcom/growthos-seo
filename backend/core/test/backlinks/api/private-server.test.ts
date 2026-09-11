@@ -39,15 +39,17 @@ const gmailReadiness = {
     state: "WAITING_FOR_ACCEPTED_SEND" as const,
     ready: true,
   },
-  blockers: [{
-    code: "SEND_CONTEXT_REQUIRED" as const,
-    capability: "SEND" as const,
-    owner: "USER" as const,
-    retrySafe: true,
-    recoveryAction: "OPEN_APPROVED_DRAFT" as const,
-    detail:
-      "Open an approved draft and recipient to evaluate send-specific readiness.",
-  }],
+  blockers: [
+    {
+      code: "SEND_CONTEXT_REQUIRED" as const,
+      capability: "SEND" as const,
+      owner: "USER" as const,
+      retrySafe: true,
+      recoveryAction: "OPEN_APPROVED_DRAFT" as const,
+      detail:
+        "Open an approved draft and recipient to evaluate send-specific readiness.",
+    },
+  ],
   primaryBlocker: {
     code: "SEND_CONTEXT_REQUIRED" as const,
     capability: "SEND" as const,
@@ -101,8 +103,7 @@ function createDependencies() {
           targetIdentityKind: "registrable_domain" as const,
           targetIdentityRuleVersion: "tldts-v1",
           targetIdentityOverrideReason: null,
-          sourceContactCandidateId:
-            "018f0000-0000-7000-8000-000000000006",
+          sourceContactCandidateId: "018f0000-0000-7000-8000-000000000006",
           contactEmail: "editorial@publisher.test",
           contactReviewRequired: false,
           hasDownstreamFacts: false,
@@ -167,10 +168,12 @@ function createDependencies() {
             bodyText: "Draft body",
             bodyDocument: {
               type: "doc" as const,
-              content: [{
-                type: "paragraph" as const,
-                content: [{ type: "text" as const, text: "Draft body" }],
-              }],
+              content: [
+                {
+                  type: "paragraph" as const,
+                  content: [{ type: "text" as const, text: "Draft body" }],
+                },
+              ],
             },
             source: "MODEL" as const,
             createdAt: "2026-07-27T05:00:00.000Z",
@@ -221,6 +224,21 @@ function createDependencies() {
         }),
       },
     }),
+    recommendationFeedRepository: {
+      list: async () => ({
+        items: [],
+        binding: {
+          recommendationContextVersionId:
+            "018f0000-0000-7000-8000-000000000301",
+          visiblePoolGeneration: 1,
+          generationContractId: "018f0000-0000-7000-8000-000000000302",
+          inputPinId: "018f0000-0000-7000-8000-000000000303",
+        },
+        totalCount: 0,
+        nextPosition: null,
+      }),
+      exportItems: async () => [],
+    },
     contactCommands: {
       listCandidates: async () => [],
       listOpportunityContacts: async () => ({
@@ -249,26 +267,37 @@ function createDependencies() {
         cycleId: "018f0000-0000-7000-8000-000000000005",
         contactCandidateId: "018f0000-0000-7000-8000-000000000006",
         contactReviewRequired: false,
-        joinSequence: 1, businessStage: "JOINED" as const,
-        managementStatus: "ACTIVE" as const, outcomeStatus: "OPEN" as const,
-        fulfillmentStatus: "NOT_EXPECTED" as const, version: 1,
+        joinSequence: 1,
+        businessStage: "JOINED" as const,
+        managementStatus: "ACTIVE" as const,
+        outcomeStatus: "OPEN" as const,
+        fulfillmentStatus: "NOT_EXPECTED" as const,
+        version: 1,
         lifecycleEventId: "lifecycle-create-private-api",
-        auditEventId: "audit-create-private-api", replayed: false,
+        auditEventId: "audit-create-private-api",
+        replayed: false,
       }),
       transitionBusinessStage: async () => ({
         opportunityId: "018f0000-0000-7000-8000-000000000004",
         businessStage: "CONTACT_PREPARING",
-        managementStatus: "ACTIVE", outcomeStatus: "OPEN",
-        fulfillmentStatus: "NOT_EXPECTED", version: 2,
+        managementStatus: "ACTIVE",
+        outcomeStatus: "OPEN",
+        fulfillmentStatus: "NOT_EXPECTED",
+        version: 2,
         lifecycleEventId: "lifecycle-transition-private-api",
-        auditEventId: "audit-transition-private-api", replayed: false,
+        auditEventId: "audit-transition-private-api",
+        replayed: false,
       }),
       patchManagement: async () => ({
         opportunityId: "018f0000-0000-7000-8000-000000000004",
-        businessStage: "CONTACT_PREPARING", managementStatus: "PAUSED",
-        outcomeStatus: "OPEN", fulfillmentStatus: "NOT_EXPECTED", version: 3,
+        businessStage: "CONTACT_PREPARING",
+        managementStatus: "PAUSED",
+        outcomeStatus: "OPEN",
+        fulfillmentStatus: "NOT_EXPECTED",
+        version: 3,
         lifecycleEventId: "lifecycle-management-private-api",
-        auditEventId: "audit-management-private-api", replayed: false,
+        auditEventId: "audit-management-private-api",
+        replayed: false,
       }),
     },
     placementCandidateCommand: {
@@ -320,53 +349,6 @@ function createDependencies() {
         lifecycleEventId: "018f0000-0000-7000-8000-000000000153",
         auditEventId: "018f0000-0000-7000-8000-000000000154",
         countsTowardKpi: false as const,
-      }),
-    },
-    recommendationCommands: {
-      reject: async () => ({
-        recommendationId: "018f0000-0000-7000-8000-000000000003",
-        status: "rejected" as const,
-        version: 2,
-        lifecycleEventId: "lifecycle-reject-private-api",
-        auditEventId: "audit-reject-private-api",
-        replayed: false,
-      }),
-      requestRefill: async () => ({
-        operationId: "018f0000-0000-7000-8000-000000000155",
-        jobId: "job-private-api",
-        workflowId: "workflow-private-api",
-        status: "queued" as const,
-        version: 1,
-        lifecycleEventId: "lifecycle-refill-private-api",
-        auditEventId: "audit-refill-private-api",
-        replayed: false,
-      }),
-      cancelQueuedRefill: async () => ({
-        jobId: "018f0000-0000-7000-8000-000000000156",
-        refillId: "018f0000-0000-7000-8000-000000000157",
-        outboxEventId: "018f0000-0000-7000-8000-000000000158",
-        recommendationContextVersionId:
-          "018f0000-0000-7000-8000-000000000159",
-        visiblePoolGeneration: 1,
-        status: "cancelled" as const,
-        outboxStatus: "published" as const,
-        dispatchDisposition: "cancelled_before_dispatch" as const,
-        policyState: "idle" as const,
-        reasonCode: "read_side_effect_cleanup" as const,
-        version: 2,
-        lifecycleEventId: "lifecycle-refill-cancel-private-api",
-        auditEventId: "audit-refill-cancel-private-api",
-        replayed: false,
-      }),
-      closeDuplicateRefill: async () => ({
-        duplicateJobId: "018f0000-0000-7000-8000-000000000160",
-        canonicalJobId: "018f0000-0000-7000-8000-000000000161",
-        status: "cancelled" as const,
-        reasonCode: "duplicate_recovery_owner" as const,
-        version: 2,
-        lifecycleEventId: "lifecycle-refill-close-private-api",
-        auditEventId: "audit-refill-close-private-api",
-        replayed: false,
       }),
     },
     metricDashboardQuery: {
@@ -509,8 +491,7 @@ function createDependencies() {
         sendIntentId: "018f0000-0000-7000-8000-000000000114",
         sendSnapshotId: "018f0000-0000-7000-8000-000000000115",
         draftId: "018f0000-0000-7000-8000-000000000011",
-        approvedDraftVersionId:
-          "018f0000-0000-7000-8000-000000000012",
+        approvedDraftVersionId: "018f0000-0000-7000-8000-000000000012",
         contactId: "018f0000-0000-7000-8000-000000000013",
         contactVersion: 1,
         status: "READY" as const,
@@ -586,10 +567,10 @@ describe("private Backlinks API bootstrap", () => {
     const operationIds = Object.values(app.swagger().paths)
       .flatMap((pathItem) => Object.values(pathItem ?? {}))
       .flatMap((operation) =>
-        typeof operation === "object"
-        && operation !== null
-        && "operationId" in operation
-        && typeof operation.operationId === "string"
+        typeof operation === "object" &&
+        operation !== null &&
+        "operationId" in operation &&
+        typeof operation.operationId === "string"
           ? [operation.operationId]
           : [],
       );
@@ -599,9 +580,26 @@ describe("private Backlinks API bootstrap", () => {
       headers: { origin: "https://browser.example" },
     });
 
-    expect(operationIds).toHaveLength(78);
-    expect(new Set(operationIds).size).toBe(78);
+    expect(operationIds).toHaveLength(76);
+    expect(new Set(operationIds).size).toBe(76);
+    expect(operationIds).toContain("backlinksObserveRecommendationFeedV2");
+    for (const path of [
+      "recommendations/018f0000-0000-7000-8000-000000000003/reject",
+      "recommendation-refill-jobs",
+      "recommendation-refill-jobs/018f0000-0000-7000-8000-000000000003/cancel",
+      "recommendation-refill-jobs/018f0000-0000-7000-8000-000000000003/close-duplicate",
+      "recommendation-pools/1/archive",
+    ]) {
+      const retired = await app.inject({
+        method: "POST",
+        url: `/api/v1/projects/example/backlinks/${path}`,
+        payload: {},
+      });
+      expect(retired.statusCode, path).toBe(404);
+    }
     expect(operationIds).toContain("backlinksPrivateHealthV1");
+    expect(operationIds).toContain("backlinksListRecommendationFeedV2");
+    expect(operationIds).toContain("backlinksExportRecommendationFeedV2");
     expect(operationIds).toContain("backlinksPreflightSendIntentV1");
     expect(operationIds).toContain("backlinksListSendIntentsV1");
     expect(operationIds).toContain("backlinksRetryUnpublishedContactsV1");
@@ -616,16 +614,14 @@ describe("private Backlinks API bootstrap", () => {
     expect(operationIds).toContain("backlinksApproveDraftV1");
     expect(operationIds).toContain("backlinksCreateSendIntentV1");
     expect(operationIds).toContain("backlinksCreateOpportunityV1");
-    expect(operationIds).toContain(
-      "backlinksCreateManualContactCandidateV1",
-    );
+    expect(operationIds).toContain("backlinksCreateManualContactCandidateV1");
     expect(operationIds).toContain("backlinksStartContactEnrichmentV1");
     expect(operationIds).toContain("backlinksGetContactEnrichmentJobV1");
     expect(operationIds).toContain("backlinksRetryContactEnrichmentV1");
-    expect(operationIds).toContain(
+    expect(operationIds).not.toContain(
       "backlinksCancelQueuedRecommendationRefillV1",
     );
-    expect(operationIds).toContain(
+    expect(operationIds).not.toContain(
       "backlinksCloseDuplicateRecommendationRefillV1",
     );
     expect(operationIds).toContain("backlinksAddPublicContactCandidateV1");
@@ -649,9 +645,7 @@ describe("private Backlinks API bootstrap", () => {
     expect(operationIds).toContain("backlinksListPublishedReportsV1");
     expect(operationIds).toContain("backlinksRequestReportExportV1");
     expect(operationIds).toContain("backlinksGetReportExportV1");
-    expect(operationIds).toContain(
-      "backlinksAuthorizeReportExportDownloadV1",
-    );
+    expect(operationIds).toContain("backlinksAuthorizeReportExportDownloadV1");
     expect(operationIds).toContain("backlinksGetSettingsGovernanceV1");
     expect(operationIds).toContain("backlinksUpdateSettingsV1");
     expect(operationIds).toContain("backlinksUpdateKillSwitchV1");
@@ -712,14 +706,15 @@ describe("private Backlinks API bootstrap", () => {
       headers: { authorization: "Bearer provider-oidc" },
       payload: {
         message: {
-          data: Buffer.from(JSON.stringify({
-            emailAddress: "owner@example.test",
-            historyId: "99141",
-          })).toString("base64"),
+          data: Buffer.from(
+            JSON.stringify({
+              emailAddress: "owner@example.test",
+              historyId: "99141",
+            }),
+          ).toString("base64"),
           messageId: "1410000000001",
         },
-        subscription:
-          "projects/growthos/subscriptions/backlinks-gmail-push",
+        subscription: "projects/growthos/subscriptions/backlinks-gmail-push",
       },
     });
 

@@ -98,6 +98,8 @@ services:
   api:
     build:
       context: ../../backend/api
+      additional_contexts:
+        provider_archive: ../../backend/provider_archive
     env_file:
       - ../../backend/api/.env
     environment:
@@ -143,6 +145,8 @@ services:
   agent-worker:
     build:
       context: ../../backend/api
+      additional_contexts:
+        provider_archive: ../../backend/provider_archive
     env_file:
       - ../../backend/api/.env
     environment:
@@ -172,6 +176,8 @@ services:
   content-worker:
     build:
       context: ../../backend/api
+      additional_contexts:
+        provider_archive: ../../backend/provider_archive
     env_file:
       - ../../backend/api/.env
     environment:
@@ -253,6 +259,8 @@ services:
   keyword-worker:
     build:
       context: ../../backend/workers
+      additional_contexts:
+        provider_archive: ../../backend/provider_archive
     env_file:
       - ../../backend/api/.env
     environment:

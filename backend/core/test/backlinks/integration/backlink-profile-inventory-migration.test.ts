@@ -1,12 +1,8 @@
-import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import {
-  createInventoryMonitorRepository,
-} from "../../../src/modules/backlinks/application/repositories/inventory-monitor.repository.js";
+import { createInventoryMonitorRepository } from "../../../src/modules/backlinks/application/repositories/inventory-monitor.repository.js";
 import {
   createBacklinkProfileService,
   createBacklinkProfileStore,
@@ -16,6 +12,11 @@ import {
   createProjectContext,
   createTenantContext,
 } from "../../../src/modules/backlinks/domain/context/index.js";
+import {
+  withBacklinkTenantTransaction,
+  type BacklinkTenantPool,
+} from "../../../src/modules/backlinks/db/tenant-transaction.js";
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -29,68 +30,32 @@ type Client = {
     values?: readonly unknown[],
   ): Promise<{ rows: Record<string, unknown>[] }>;
 };
-type DeploymentManifest = Readonly<{
-  steps: readonly Readonly<{ migrationId: string; path: string }>[];
-}>;
-
+type Pool = BacklinkTenantPool & Readonly<{ end(): Promise<void> }>;
 const require = createRequire(import.meta.url);
-const { Client: PgClient } = require("pg") as {
+const { Client: PgClient, Pool: PgPool } = require("pg") as {
   readonly Client: new (config: unknown) => Client;
+  readonly Pool: new (config: unknown) => Pool;
 };
-const rolesUrl = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
-const manifestUrl = new URL(
-  "../../../../database/deployment-manifest.v1.json",
-  import.meta.url,
-);
-const migrationUrl = (path: string) => new URL(
-  `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
-  import.meta.url,
-);
 
 describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
   let harness: BacklinksPostgresHarness;
   let client: Client;
+  let pool: Pool;
 
   beforeAll(async () => {
     harness = await startBacklinksPostgresHarness();
     await harness.migrate();
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
-    await client.query(await readFile(rolesUrl, "utf8"));
-    await client.query(`
-      SET ROLE growthos_platform_owner;
-      SET search_path = platform, pg_catalog;
-      CREATE FUNCTION backlink_list_active_website_projects(text, text)
-      RETURNS TABLE (website_project_id text, context_version integer)
-      LANGUAGE sql STABLE SECURITY DEFINER
-      SET search_path = platform, pg_catalog
-      AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
-      REVOKE ALL
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        FROM PUBLIC;
-      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
-      GRANT EXECUTE
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        TO growthos_backlinks_owner;
-      RESET ROLE;
-      RESET search_path;
-    `);
-    const manifest = JSON.parse(
-      await readFile(manifestUrl, "utf8"),
-    ) as DeploymentManifest;
-    for (const step of manifest.steps.filter(
-      ({ migrationId }) =>
-        migrationId.startsWith("backlinks-")
-        && migrationId !== "backlinks-0001",
-    )) {
-      await client.query(await readFile(migrationUrl(step.path), "utf8"));
-    }
+    await installBacklinksManifestAfterFoundation(client);
+    pool = new PgPool({
+      connectionString: harness.connectionString,
+      max: 4,
+    });
   }, 120_000);
 
   afterAll(async () => {
+    await pool?.end();
     await client?.end();
     await harness?.stop();
   });
@@ -105,23 +70,31 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
       "backlink_profile_sync_cursors",
       "backlink_profile_sync_jobs",
     ];
-    expect((await client.query(
-      `SELECT relname,relrowsecurity,relforcerowsecurity
+    expect(
+      (
+        await client.query(
+          `SELECT relname,relrowsecurity,relforcerowsecurity
          FROM pg_class
         WHERE relnamespace='backlinks'::regnamespace
           AND relname=ANY($1::text[])
         ORDER BY relname`,
-      [names],
-    )).rows).toEqual(names.map((relname) => ({
-      relname,
-      relrowsecurity: true,
-      relforcerowsecurity: true,
-    })));
+          [names],
+        )
+      ).rows,
+    ).toEqual(
+      names.map((relname) => ({
+        relname,
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+      })),
+    );
   });
 
   it("keeps provider total and inventory coverage separate", async () => {
-    expect((await client.query(
-      `SELECT column_name AS "columnName"
+    expect(
+      (
+        await client.query(
+          `SELECT column_name AS "columnName"
          FROM information_schema.columns
         WHERE table_schema='backlinks'
           AND table_name='backlink_profile_snapshots'
@@ -130,7 +103,9 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
             'unavailable_metrics'
           )
         ORDER BY column_name`,
-    )).rows).toEqual([
+        )
+      ).rows,
+    ).toEqual([
       { columnName: "inventory_coverage" },
       { columnName: "inventory_pulled_count" },
       { columnName: "total_backlinks" },
@@ -145,9 +120,11 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         WHERE conrelid='backlinks.backlink_inventory_items'::regclass
           AND conname='backlink_inventory_item_provider_identity_uq'`,
     );
-    expect(constraints.rows).toEqual([{
-      conname: "backlink_inventory_item_provider_identity_uq",
-    }]);
+    expect(constraints.rows).toEqual([
+      {
+        conname: "backlink_inventory_item_provider_identity_uq",
+      },
+    ]);
   });
 
   it("creates forced-RLS monitoring entities with immutable direct evidence", async () => {
@@ -157,26 +134,36 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
       "backlink_inventory_monitor_requests",
       "backlink_inventory_monitor_runs",
     ];
-    expect((await client.query(
-      `SELECT relname,relrowsecurity,relforcerowsecurity
+    expect(
+      (
+        await client.query(
+          `SELECT relname,relrowsecurity,relforcerowsecurity
          FROM pg_class
         WHERE relnamespace='backlinks'::regnamespace
           AND relname=ANY($1::text[])
         ORDER BY relname`,
-      [names],
-    )).rows).toEqual(names.map((relname) => ({
-      relname,
-      relrowsecurity: true,
-      relforcerowsecurity: true,
-    })));
+          [names],
+        )
+      ).rows,
+    ).toEqual(
+      names.map((relname) => ({
+        relname,
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+      })),
+    );
 
-    expect((await client.query(
-      `SELECT tgname
+    expect(
+      (
+        await client.query(
+          `SELECT tgname
          FROM pg_trigger
         WHERE tgrelid='backlinks.backlink_inventory_monitor_observations'::regclass
           AND NOT tgisinternal
         ORDER BY tgname`,
-    )).rows).toContainEqual({
+        )
+      ).rows,
+    ).toContainEqual({
       tgname: "backlink_inventory_monitor_observation_immutable",
     });
   });
@@ -247,8 +234,10 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         );
     `);
 
-    expect((await client.query(
-      `SELECT
+    expect(
+      (
+        await client.query(
+          `SELECT
          inventory.provider_identity AS "providerIdentity",
          inventory.provider_status AS "providerStatus",
          inventory.direct_validation_status AS "directStatus",
@@ -267,7 +256,9 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
        WHERE inventory.organization_id=
          '51000000-0000-4000-8000-000000000010'
        ORDER BY inventory.provider_identity`,
-    )).rows).toEqual([
+        )
+      ).rows,
+    ).toEqual([
       {
         providerIdentity: "cross-project-copy",
         providerStatus: "live",
@@ -368,13 +359,18 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
     });
     expect(pinned.nextCheckAt).not.toBeNull();
     expect(Number.isNaN(Date.parse(String(pinned.nextCheckAt)))).toBe(false);
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(`
       SELECT pinned
         FROM backlinks.backlink_inventory_items
        WHERE id='51000000-0000-4000-8000-000000000002'
-    `)).rows).toEqual([{ pinned: true }]);
+    `)
+      ).rows,
+    ).toEqual([{ pinned: true }]);
 
-    await expect(client.query(`
+    await expect(
+      client.query(`
       INSERT INTO backlinks.backlink_inventory_items (
         id, organization_id, workspace_id, website_project_id,
         source_type, provider, provider_identity,
@@ -392,7 +388,8 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         'tail.example.test', 'unknown',
         'migration-test', 'migration-test'
       );
-    `)).rejects.toMatchObject({
+    `),
+    ).rejects.toMatchObject({
       code: "23505",
       constraint: "backlink_inventory_item_canonical_urls_uq",
     });
@@ -406,7 +403,8 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
     const runId = "52000000-0000-4000-8000-000000000050";
 
     await client.query("SET search_path = backlinks, pg_catalog");
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO backlink_project_context_snapshots (
         id, organization_id, workspace_id, website_project_id,
         snapshot_version, project_status, canonical_domain, locale,
@@ -419,8 +417,11 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         '["https://owner.example.test/target"]'::jsonb,
         'profile-v1', 'promotion-target-v1', 'migration-test'
       );
-    `, [organizationId, workspaceId, websiteProjectId]);
-    await client.query(`
+    `,
+      [organizationId, workspaceId, websiteProjectId],
+    );
+    await client.query(
+      `
       INSERT INTO backlink_inventory_items (
         id, organization_id, workspace_id, website_project_id,
         source_type, provider, provider_identity,
@@ -434,100 +435,165 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         'source.example.test', 'unknown', true,
         'migration-test', 'migration-test'
       );
-    `, [organizationId, workspaceId, websiteProjectId, inventoryItemId]);
-    await client.query(`
+    `,
+      [organizationId, workspaceId, websiteProjectId, inventoryItemId],
+    );
+    await client.query(
+      `
       UPDATE backlink_inventory_monitor_policies
          SET next_check_at='2026-08-07T00:00:00.000907Z'
        WHERE organization_id=$1 AND workspace_id=$2
          AND website_project_id=$3 AND inventory_item_id=$4
-    `, [organizationId, workspaceId, websiteProjectId, inventoryItemId]);
+    `,
+      [organizationId, workspaceId, websiteProjectId, inventoryItemId],
+    );
 
-    const policy = (await client.query(`
+    const policy = (
+      await client.query(
+        `
       SELECT id, next_check_at AS "nextCheckAt"
         FROM backlink_inventory_monitor_policies
        WHERE organization_id=$1 AND workspace_id=$2
          AND website_project_id=$3 AND inventory_item_id=$4
-    `, [organizationId, workspaceId, websiteProjectId, inventoryItemId]))
-      .rows[0];
+    `,
+        [organizationId, workspaceId, websiteProjectId, inventoryItemId],
+      )
+    ).rows[0];
     expect(policy).toBeDefined();
 
-    const repository = createInventoryMonitorRepository(client);
-    const prepared = await repository.prepare({
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      placementId: inventoryItemId,
-      monitorPolicyId: String(policy?.id),
-      policyVersion: "inventory-monitoring-v1",
-      scheduledFor: new Date("2026-08-07T00:00:00.000Z"),
-      runId,
-      workerId: "migration-test",
-      now: new Date("2026-08-07T00:00:00.000Z"),
-    });
+    const prepared = await withBacklinkTenantTransaction(
+      pool,
+      { organizationId, workspaceId, websiteProjectId },
+      async (transaction) => {
+        await transaction.query(
+          "SET LOCAL search_path = backlinks, pg_catalog",
+        );
+        expect(
+          (
+            await transaction.query(
+              `SELECT
+             backlink_phase9_job_is_v1(
+               jsonb_build_object(
+                 'organization_id', $1::text,
+                 'workspace_id', $2::text,
+                 'website_project_id', $3::text,
+                 'job_type', 'backlink_inventory_monitor',
+                 'source_object_type', 'backlink_inventory_item',
+                 'source_object_id', $4::text
+               )
+             ) AS "isV1",
+             EXISTS (
+               SELECT 1
+                 FROM backlink_inventory_items item
+                WHERE item.organization_id=$1::uuid
+                  AND item.workspace_id=$2::uuid
+                  AND item.website_project_id=$3::uuid
+                  AND item.id=$4::uuid
+             ) AS "inventoryExists"`,
+              [organizationId, workspaceId, websiteProjectId, inventoryItemId],
+            )
+          ).rows,
+        ).toEqual([{ isV1: false, inventoryExists: true }]);
+
+        return createInventoryMonitorRepository(transaction).prepare({
+          organizationId,
+          workspaceId,
+          websiteProjectId,
+          placementId: inventoryItemId,
+          monitorPolicyId: String(policy?.id),
+          policyVersion: "inventory-monitoring-v1",
+          scheduledFor: new Date("2026-08-07T00:00:00.000Z"),
+          runId,
+          workerId: "migration-test",
+          now: new Date("2026-08-07T00:00:00.000Z"),
+        });
+      },
+    );
 
     expect(prepared.state).toBe("ready");
     if (prepared.state !== "ready") {
       throw new Error("Expected the Inventory Monitor Run to be ready.");
     }
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(
+          `
       SELECT run.status, job.correlation_id AS "correlationId"
         FROM backlink_inventory_monitor_runs run
         JOIN backlink_jobs job ON job.id=run.backlink_job_id
        WHERE run.id=$1
-    `, [runId])).rows).toEqual([{
-      status: "RUNNING",
-      correlationId: runId,
-    }]);
+    `,
+          [runId],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        status: "RUNNING",
+        correlationId: runId,
+      },
+    ]);
 
-    const completed = await repository.complete({
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      placementId: inventoryItemId,
-      monitorPolicyId: String(policy?.id),
-      policyVersion: "inventory-monitoring-v1",
-      scheduledFor: prepared.execution.scheduledFor,
-      runId,
-      expectedAttemptCount: prepared.execution.attemptCount,
-      observationId: "52000000-0000-4000-8000-000000000060",
-      expectedPlacementVersion: prepared.execution.placementVersion,
-      expectedHealthStatus: prepared.execution.healthStatus,
-      statusDecision: {
-        policyVersion: "placement-monitoring-status.v1",
-        nextHealthStatus: "active",
-        confirmationType: null,
-        matchingEvidenceCount: 0,
-        requiredConfirmationCount: null,
-        reasonCode: "PLACEMENT_PRESENT",
-        shouldRecheckSoon: false,
+    const completed = await withBacklinkTenantTransaction(
+      pool,
+      { organizationId, workspaceId, websiteProjectId },
+      async (transaction) => {
+        await transaction.query(
+          "SET LOCAL search_path = backlinks, pg_catalog",
+        );
+        return createInventoryMonitorRepository(transaction).complete({
+          organizationId,
+          workspaceId,
+          websiteProjectId,
+          placementId: inventoryItemId,
+          monitorPolicyId: String(policy?.id),
+          policyVersion: "inventory-monitoring-v1",
+          scheduledFor: prepared.execution.scheduledFor,
+          runId,
+          expectedAttemptCount: prepared.execution.attemptCount,
+          observationId: "52000000-0000-4000-8000-000000000060",
+          expectedPlacementVersion: prepared.execution.placementVersion,
+          expectedHealthStatus: prepared.execution.healthStatus,
+          statusDecision: {
+            policyVersion: "placement-monitoring-status.v1",
+            nextHealthStatus: "active",
+            confirmationType: null,
+            matchingEvidenceCount: 0,
+            requiredConfirmationCount: null,
+            reasonCode: "PLACEMENT_PRESENT",
+            shouldRecheckSoon: false,
+          },
+          decisionFactId: "52000000-0000-4000-8000-000000000070",
+          lossConfirmationCount: 2,
+          changeConfirmationCount: 2,
+          recoveryProjection: null,
+          observation: {
+            result: "present",
+            failureCode: null,
+            retryable: false,
+            evidenceSnapshot: { result: "present", targetFound: true },
+            evidenceSnapshotHash: "a".repeat(64),
+            evidenceFingerprint: "b".repeat(64),
+            evidenceContractVersion: "placement.monitor-observation.v1",
+            evidenceSchemaVersion: 1,
+            observedAt: new Date("2026-08-07T00:00:01.000Z"),
+          },
+          terminalStatus: "SUCCEEDED",
+          nextCheckAt: new Date("2026-08-08T00:00:00.000Z"),
+          workerId: "migration-test",
+          completedAt: new Date("2026-08-07T00:00:02.000Z"),
+        });
       },
-      decisionFactId: "52000000-0000-4000-8000-000000000070",
-      lossConfirmationCount: 2,
-      changeConfirmationCount: 2,
-      recoveryProjection: null,
-      observation: {
-        result: "present",
-        failureCode: null,
-        retryable: false,
-        evidenceSnapshot: { result: "present", targetFound: true },
-        evidenceSnapshotHash: "a".repeat(64),
-        evidenceFingerprint: "b".repeat(64),
-        evidenceContractVersion: "placement.monitor-observation.v1",
-        evidenceSchemaVersion: 1,
-        observedAt: new Date("2026-08-07T00:00:01.000Z"),
-      },
-      terminalStatus: "SUCCEEDED",
-      nextCheckAt: new Date("2026-08-08T00:00:00.000Z"),
-      workerId: "migration-test",
-      completedAt: new Date("2026-08-07T00:00:02.000Z"),
-    });
+    );
 
     expect(completed).toMatchObject({
       runId,
       status: "SUCCEEDED",
       observationResult: "present",
     });
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(
+          `
       SELECT run.status, observation.result,
              policy.next_check_at AS "nextCheckAt"
         FROM backlink_inventory_monitor_runs run
@@ -536,11 +602,17 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         JOIN backlink_inventory_monitor_policies policy
           ON policy.id=run.monitor_policy_id
        WHERE run.id=$1
-    `, [runId])).rows).toEqual([{
-      status: "SUCCEEDED",
-      result: "present",
-      nextCheckAt: new Date("2026-08-08T00:00:00.000Z"),
-    }]);
+    `,
+          [runId],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        status: "SUCCEEDED",
+        result: "present",
+        nextCheckAt: new Date("2026-08-08T00:00:00.000Z"),
+      },
+    ]);
   });
 
   it("lists inventory through the real policy join", async () => {
@@ -549,7 +621,8 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
     const websiteProjectId = "53000000-0000-4000-8000-000000000030";
     const inventoryItemId = "53000000-0000-4000-8000-000000000040";
 
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO backlinks.backlink_inventory_items (
         id, organization_id, workspace_id, website_project_id,
         source_type, provider, provider_identity,
@@ -563,14 +636,75 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         'list.example.test', 'unknown', true,
         'migration-test', 'migration-test'
       );
-    `, [organizationId, workspaceId, websiteProjectId, inventoryItemId]);
+    `,
+      [organizationId, workspaceId, websiteProjectId, inventoryItemId],
+    );
 
     const store = createBacklinkProfileStore(client, {
       providerEnabled: false,
       providerAvailable: false,
       estimatedCostMicros: 0,
     });
-    const page = await store.listInventory({
+    const page = await store.listInventory(
+      {
+        actor: createActorContext({
+          userId: "migration-test",
+          sessionId: "migration-test",
+          roles: ["member"],
+        }),
+        tenant: createTenantContext({ organizationId, workspaceId }),
+        project: createProjectContext({
+          websiteProjectId,
+          canonicalDomain: "owner.example.test",
+          locale: "en-US",
+          countryCode: "US",
+          profileVersionId: "profile-v1",
+          promotionTargetVersionId: "promotion-v1",
+        }),
+      },
+      {
+        page: 1,
+        pageSize: 25,
+        sort: "last_seen_desc",
+      },
+    );
+
+    expect(page).toMatchObject({
+      totalCount: 1,
+      totalPages: 1,
+      items: [
+        {
+          inventoryItemId,
+          sourceUrl: "https://list.example.test/post",
+          targetUrl: "https://owner.example.test/target",
+          tier: "A",
+          monitoringStatus: "enabled",
+        },
+      ],
+    });
+  });
+
+  it("lists the latest project inventory by category without cross-project leakage", async () => {
+    const organizationId = "54000000-0000-4000-8000-000000000010";
+    const workspaceId = "54000000-0000-4000-8000-000000000020";
+    const projectAId = "54000000-0000-4000-8000-000000000030";
+    const projectBId = "54000000-0000-4000-8000-000000000031";
+    const oldSnapshotAId = "54000000-0000-4000-8000-000000000041";
+    const latestSnapshotAId = "54000000-0000-4000-8000-000000000042";
+    const latestSnapshotBId = "54000000-0000-4000-8000-000000000043";
+    const itemIds = {
+      sharedNew: "54000000-0000-4000-8000-000000000051",
+      sharedLost: "54000000-0000-4000-8000-000000000052",
+      oldOnly: "54000000-0000-4000-8000-000000000053",
+      currentObserved: "54000000-0000-4000-8000-000000000054",
+      projectBNew: "54000000-0000-4000-8000-000000000055",
+    } as const;
+    const store = createBacklinkProfileStore(client, {
+      providerEnabled: false,
+      providerAvailable: true,
+      estimatedCostMicros: 0,
+    });
+    const context = (websiteProjectId: string, canonicalDomain: string) => ({
       actor: createActorContext({
         userId: "migration-test",
         sessionId: "migration-test",
@@ -579,28 +713,287 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
       tenant: createTenantContext({ organizationId, workspaceId }),
       project: createProjectContext({
         websiteProjectId,
-        canonicalDomain: "owner.example.test",
+        canonicalDomain,
         locale: "en-US",
         countryCode: "US",
         profileVersionId: "profile-v1",
         promotionTargetVersionId: "promotion-v1",
       }),
-    }, {
-      page: 1,
-      pageSize: 25,
-      sort: "last_seen_desc",
+    });
+    const contextA = context(projectAId, "project-a.example.test");
+    const contextB = context(projectBId, "project-b.example.test");
+    const jobA = await store.createSyncJob(contextA, {
+      idempotencyKey: "inventory-view-project-a",
+    });
+    const jobB = await store.createSyncJob(contextB, {
+      idempotencyKey: "inventory-view-project-b",
     });
 
-    expect(page).toMatchObject({
+    const insertSnapshot = async (
+      websiteProjectId: string,
+      profileSyncJobId: string,
+      snapshotId: string,
+      observedAt: string,
+    ) => {
+      await client.query(
+        `
+        INSERT INTO backlinks.backlink_profile_snapshots (
+          id,organization_id,workspace_id,website_project_id,
+          profile_sync_job_id,provider,endpoints,provider_task_ids,
+          observed_at,fresh_until,freshness,completeness,
+          total_backlinks,referring_domains,new_backlinks,lost_backlinks,
+          inventory_pulled_count,inventory_coverage,distributions,
+          unavailable_metrics,cost_micros,schema_version,next_sync_at,created_by
+        ) VALUES (
+          $4,$1,$2,$3,$5,'user_import','[]'::jsonb,'[]'::jsonb,
+          $6::timestamptz,$6::timestamptz + interval '7 days','fresh','full',
+          4,3,1,1,4,1,'{}'::jsonb,'[]'::jsonb,0,
+          'backlink-profile.v1',$6::timestamptz + interval '7 days',
+          'migration-test'
+        )
+      `,
+        [
+          organizationId,
+          workspaceId,
+          websiteProjectId,
+          snapshotId,
+          profileSyncJobId,
+          observedAt,
+        ],
+      );
+    };
+    await insertSnapshot(
+      projectAId,
+      jobA.jobId,
+      oldSnapshotAId,
+      "2026-08-06T00:00:00.000Z",
+    );
+    await insertSnapshot(
+      projectAId,
+      jobA.jobId,
+      latestSnapshotAId,
+      "2026-08-07T00:00:00.000Z",
+    );
+    await insertSnapshot(
+      projectBId,
+      jobB.jobId,
+      latestSnapshotBId,
+      "2026-08-08T00:00:00.000Z",
+    );
+
+    const insertInventory = async (
+      input: Readonly<{
+        websiteProjectId: string;
+        inventoryItemId: string;
+        snapshotId: string;
+        identity: string;
+        sourceUrl: string;
+        targetUrl: string;
+        sourceDomain: string;
+        providerStatus: "live" | "lost";
+        lastSeenAt: string;
+      }>,
+    ) => {
+      await client.query(
+        `
+        INSERT INTO backlinks.backlink_inventory_items (
+          id,organization_id,workspace_id,website_project_id,
+          latest_snapshot_id,source_type,provider,provider_identity,
+          normalized_source_url,normalized_target_url,source_domain,
+          anchor_text,provider_status,first_seen_at,last_seen_at,
+          managed,created_by,updated_by
+        ) VALUES (
+          $4,$1,$2,$3,$5,'DATAFORSEO','dataforseo',$6,
+          $7,$8,$9,'inventory view regression',$10,
+          $11::timestamptz,$11::timestamptz,false,
+          'migration-test','migration-test'
+        )
+      `,
+        [
+          organizationId,
+          workspaceId,
+          input.websiteProjectId,
+          input.inventoryItemId,
+          input.snapshotId,
+          input.identity,
+          input.sourceUrl,
+          input.targetUrl,
+          input.sourceDomain,
+          input.providerStatus,
+          input.lastSeenAt,
+        ],
+      );
+    };
+    await insertInventory({
+      websiteProjectId: projectAId,
+      inventoryItemId: itemIds.sharedNew,
+      snapshotId: latestSnapshotAId,
+      identity: "project-a-shared-new",
+      sourceUrl: "https://shared.example.test/new",
+      targetUrl: "https://project-a.example.test/target",
+      sourceDomain: "shared.example.test",
+      providerStatus: "live",
+      lastSeenAt: "2026-08-07T00:00:04.000Z",
+    });
+    await insertInventory({
+      websiteProjectId: projectAId,
+      inventoryItemId: itemIds.sharedLost,
+      snapshotId: latestSnapshotAId,
+      identity: "project-a-shared-lost",
+      sourceUrl: "https://shared.example.test/lost",
+      targetUrl: "https://project-a.example.test/target",
+      sourceDomain: "shared.example.test",
+      providerStatus: "lost",
+      lastSeenAt: "2026-08-07T00:00:03.000Z",
+    });
+    await insertInventory({
+      websiteProjectId: projectAId,
+      inventoryItemId: itemIds.oldOnly,
+      snapshotId: oldSnapshotAId,
+      identity: "project-a-old-only",
+      sourceUrl: "https://old-only.example.test/article",
+      targetUrl: "https://project-a.example.test/target",
+      sourceDomain: "old-only.example.test",
+      providerStatus: "live",
+      lastSeenAt: "2026-08-07T00:00:02.000Z",
+    });
+    await insertInventory({
+      websiteProjectId: projectAId,
+      inventoryItemId: itemIds.currentObserved,
+      snapshotId: latestSnapshotAId,
+      identity: "project-a-current-observed",
+      sourceUrl: "https://current.example.test/article",
+      targetUrl: "https://project-a.example.test/target",
+      sourceDomain: "current.example.test",
+      providerStatus: "live",
+      lastSeenAt: "2026-08-07T00:00:01.000Z",
+    });
+    await insertInventory({
+      websiteProjectId: projectBId,
+      inventoryItemId: itemIds.projectBNew,
+      snapshotId: latestSnapshotBId,
+      identity: "project-b-new",
+      sourceUrl: "https://project-b-source.example.test/article",
+      targetUrl: "https://project-b.example.test/target",
+      sourceDomain: "project-b-source.example.test",
+      providerStatus: "live",
+      lastSeenAt: "2026-08-08T00:00:01.000Z",
+    });
+
+    const insertObservation = async (
+      input: Readonly<{
+        websiteProjectId: string;
+        observationId: string;
+        inventoryItemId: string;
+        snapshotId: string;
+        observationType: "observed" | "new" | "lost";
+        providerStatus: "live" | "lost";
+        pageIdentity: string;
+        observedAt: string;
+      }>,
+    ) => {
+      await client.query(
+        `
+        INSERT INTO backlinks.backlink_inventory_observations (
+          id,organization_id,workspace_id,website_project_id,
+          inventory_item_id,snapshot_id,observation_type,page_identity,
+          provider_status,observed_at,evidence,created_by
+        ) VALUES (
+          $4,$1,$2,$3,$5,$6,$7,$8,$9,$10::timestamptz,
+          '{}'::jsonb,'migration-test'
+        )
+      `,
+        [
+          organizationId,
+          workspaceId,
+          input.websiteProjectId,
+          input.observationId,
+          input.inventoryItemId,
+          input.snapshotId,
+          input.observationType,
+          input.pageIdentity,
+          input.providerStatus,
+          input.observedAt,
+        ],
+      );
+    };
+    await insertObservation({
+      websiteProjectId: projectAId,
+      observationId: "54000000-0000-4000-8000-000000000061",
+      inventoryItemId: itemIds.sharedNew,
+      snapshotId: latestSnapshotAId,
+      observationType: "new",
+      providerStatus: "live",
+      pageIdentity: "latest-a:new",
+      observedAt: "2026-08-07T00:00:04.000Z",
+    });
+    await insertObservation({
+      websiteProjectId: projectAId,
+      observationId: "54000000-0000-4000-8000-000000000062",
+      inventoryItemId: itemIds.sharedLost,
+      snapshotId: latestSnapshotAId,
+      observationType: "lost",
+      providerStatus: "lost",
+      pageIdentity: "latest-a:lost",
+      observedAt: "2026-08-07T00:00:03.000Z",
+    });
+    await insertObservation({
+      websiteProjectId: projectAId,
+      observationId: "54000000-0000-4000-8000-000000000063",
+      inventoryItemId: itemIds.oldOnly,
+      snapshotId: oldSnapshotAId,
+      observationType: "new",
+      providerStatus: "live",
+      pageIdentity: "old-a:new",
+      observedAt: "2026-08-06T00:00:02.000Z",
+    });
+    await insertObservation({
+      websiteProjectId: projectAId,
+      observationId: "54000000-0000-4000-8000-000000000064",
+      inventoryItemId: itemIds.currentObserved,
+      snapshotId: latestSnapshotAId,
+      observationType: "observed",
+      providerStatus: "live",
+      pageIdentity: "latest-a:observed",
+      observedAt: "2026-08-07T00:00:01.000Z",
+    });
+    await insertObservation({
+      websiteProjectId: projectBId,
+      observationId: "54000000-0000-4000-8000-000000000065",
+      inventoryItemId: itemIds.projectBNew,
+      snapshotId: latestSnapshotBId,
+      observationType: "new",
+      providerStatus: "live",
+      pageIdentity: "latest-b:new",
+      observedAt: "2026-08-08T00:00:01.000Z",
+    });
+
+    const list = (view: "all" | "referring_domains" | "new" | "lost") =>
+      store.listInventory(contextA, {
+        page: 1,
+        pageSize: 25,
+        view,
+        sort: "last_seen_desc",
+      });
+
+    await expect(list("all")).resolves.toMatchObject({
+      totalCount: 4,
+    });
+    const referringDomains = await list("referring_domains");
+    expect(referringDomains.totalCount).toBe(3);
+    expect(referringDomains.items.map((item) => item.sourceDomain)).toEqual([
+      "shared.example.test",
+      "old-only.example.test",
+      "current.example.test",
+    ]);
+    expect(referringDomains.items[0]?.inventoryItemId).toBe(itemIds.sharedNew);
+    await expect(list("new")).resolves.toMatchObject({
       totalCount: 1,
-      totalPages: 1,
-      items: [{
-        inventoryItemId,
-        sourceUrl: "https://list.example.test/post",
-        targetUrl: "https://owner.example.test/target",
-        tier: "A",
-        monitoringStatus: "enabled",
-      }],
+      items: [{ inventoryItemId: itemIds.sharedNew }],
+    });
+    await expect(list("lost")).resolves.toMatchObject({
+      totalCount: 1,
+      items: [{ inventoryItemId: itemIds.sharedLost }],
     });
   });
 
@@ -650,12 +1043,14 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
       estimatedCostMicros: 55_200,
       now: () => new Date("2026-08-07T23:59:59.000Z"),
     });
-    await expect(beforeDue.createSyncJob(context, {
-      idempotencyKey,
-      syncMode: "page",
-      triggerSource: "continuation",
-      requestedCursor: "cursor-v1",
-    })).resolves.toMatchObject({
+    await expect(
+      beforeDue.createSyncJob(context, {
+        idempotencyKey,
+        syncMode: "page",
+        triggerSource: "continuation",
+        requestedCursor: "cursor-v1",
+      }),
+    ).resolves.toMatchObject({
       jobId: waiting.jobId,
       status: "waiting_provider",
       replayed: true,
@@ -691,7 +1086,10 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
       status: "queued",
       replayed: true,
     });
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(
+          `
       SELECT profile.status,profile.next_sync_at AS "nextSyncAt",
              profile.version,job.status AS "jobStatus",
              job.step,job.retry_count AS "retryCount"
@@ -704,19 +1102,20 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
        WHERE profile.organization_id=$1 AND profile.workspace_id=$2
          AND profile.website_project_id=$3
          AND profile.idempotency_key=$4
-    `, [
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      idempotencyKey,
-    ])).rows).toEqual([{
-      status: "queued",
-      nextSyncAt: null,
-      version: 2,
-      jobStatus: "queued",
-      step: "scheduled",
-      retryCount: 1,
-    }]);
+    `,
+          [organizationId, workspaceId, websiteProjectId, idempotencyKey],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        status: "queued",
+        nextSyncAt: null,
+        version: 2,
+        jobStatus: "queued",
+        step: "scheduled",
+        retryCount: 1,
+      },
+    ]);
   });
 
   it("persists an idempotent immediate check request as the writer role", async () => {
@@ -741,7 +1140,8 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
       }),
     };
 
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO backlinks.backlink_inventory_items (
         id, organization_id, workspace_id, website_project_id,
         source_type, provider, provider_identity,
@@ -755,7 +1155,9 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         'check.example.test', 'unknown', true,
         'migration-test', 'migration-test'
       );
-    `, [organizationId, workspaceId, websiteProjectId, inventoryItemId]);
+    `,
+      [organizationId, workspaceId, websiteProjectId, inventoryItemId],
+    );
 
     await client.query("BEGIN");
     try {
@@ -812,13 +1214,19 @@ describe("LOCAL-PRODUCT-020 backlink profile inventory migration", () => {
         replayed: true,
       });
       expect(started).toEqual([first.monitorInput]);
-      expect((await client.query(`
+      expect(
+        (
+          await client.query(
+            `
         SELECT count(*)::integer count
           FROM backlink_inventory_monitor_requests
          WHERE organization_id=$1 AND workspace_id=$2
            AND website_project_id=$3 AND inventory_item_id=$4
-      `, [organizationId, workspaceId, websiteProjectId, inventoryItemId]))
-        .rows).toEqual([{ count: 1 }]);
+      `,
+            [organizationId, workspaceId, websiteProjectId, inventoryItemId],
+          )
+        ).rows,
+      ).toEqual([{ count: 1 }]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");

@@ -109,12 +109,17 @@ export function approveDraft(
 
 export function listContactCandidates(
   websiteProjectKey: string,
-  prospectId: string
+  prospectId: string,
+  signal?: AbortSignal
 ) {
-  return requestBacklinks("backlinksListContactCandidatesV1", {
-    path: { websiteProjectKey },
-    query: { prospectId, limit: 25 },
-  })
+  return requestBacklinks(
+    "backlinksListContactCandidatesV1",
+    {
+      path: { websiteProjectKey },
+      query: { prospectId, limit: 25 },
+    },
+    signal ? { signal } : undefined
+  )
 }
 
 export function listOpportunityContacts(

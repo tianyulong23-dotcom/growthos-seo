@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { archiveDataForSeoFetch } from "../../../provider-archive/capture-fetch.js";
 
 import type {
   BacklinkSnapshotRequest,
@@ -88,6 +89,7 @@ function buildRequest(
 export function createOfficialDataForSeoRuntimeFactory(
   fetchImplementation: FetchImplementation = globalThis.fetch,
 ): DataForSeoClientRuntimeFactory {
+  fetchImplementation = archiveDataForSeoFetch(fetchImplementation, "backlinks-snapshot");
   return ({ credentials, timeoutMs }) => ({
     async fetchBacklinkSnapshot(request) {
       const controller = new AbortController();

@@ -59,6 +59,18 @@ function typeName(value) {
   return /^[A-Za-z_$]/.test(cleaned) ? cleaned : `Schema_${cleaned}`
 }
 
+function closedObjectPropertyNames(schema) {
+  const resolved = schema?.$ref ? resolveRef(schema.$ref) : schema
+  if (
+    !resolved ||
+    resolved.additionalProperties !== false ||
+    (resolved.type !== "object" && !resolved.properties)
+  ) {
+    return null
+  }
+  return new Set(Object.keys(resolved.properties ?? {}))
+}
+
 function schemaType(schema, seen = new Set()) {
   if (!schema) return "unknown"
   const withNullable = (value) =>
@@ -76,6 +88,27 @@ function schemaType(schema, seen = new Set()) {
   }
   if (schema.oneOf || schema.anyOf) {
     const options = schema.oneOf ?? schema.anyOf
+    const optionPropertyNames = options.map(closedObjectPropertyNames)
+    if (optionPropertyNames.every((names) => names !== null)) {
+      const allPropertyNames = new Set(
+        optionPropertyNames.flatMap((names) => [...names])
+      )
+      return withNullable(
+        options
+          .map((item, index) => {
+            const ownPropertyNames = optionPropertyNames[index]
+            const excludedProperties = [...allPropertyNames].filter(
+              (name) => !ownPropertyNames.has(name)
+            )
+            const baseType = schemaType(item, seen)
+            if (excludedProperties.length === 0) return baseType
+            return `(${baseType} & {\n${excludedProperties
+              .map((name) => `    ${JSON.stringify(name)}?: never`)
+              .join("\n")}\n  })`
+          })
+          .join(" | ")
+      )
+    }
     return withNullable(
       options.map((item) => schemaType(item, seen)).join(" | ")
     )
@@ -184,9 +217,7 @@ const operations = Object.entries(document.paths ?? {}).flatMap(
           ((operation["x-growthos-module"] === requestedModule &&
             (moduleConfiguration.operations === null ||
               moduleConfiguration.operations.has(operation.operationId))) ||
-            moduleConfiguration.additionalOperations.has(
-              operation.operationId
-            ))
+            moduleConfiguration.additionalOperations.has(operation.operationId))
       )
       .map(([method, operation]) => ({ method, path, pathItem, operation }))
 )

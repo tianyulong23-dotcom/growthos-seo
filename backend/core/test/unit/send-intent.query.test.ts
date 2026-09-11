@@ -406,6 +406,53 @@ describe("Send Intent query", () => {
     });
   });
 
+  it("allows a new preflight after an unused send reservation expires", async () => {
+    const queryClient = vi.fn(async () => ({
+      rows: [{
+        ...immutableEnvelopeRow,
+        sendIntentId: "018f0000-0000-7000-8000-000000000120",
+        draftId: "018f0000-0000-7000-8000-000000000320",
+        status: "FAILED_FINAL",
+        version: 2,
+        requestedSendAt: new Date("2026-09-10T02:09:22.000Z"),
+        updatedAt: new Date("2026-09-10T02:19:22.000Z"),
+        attemptId: null,
+        attemptNo: null,
+        attemptStatus: null,
+        rfcMessageId: null,
+        providerMessageId: null,
+        providerThreadId: null,
+        errorCode: "GMAIL_SEND_RESERVATION_EXPIRED",
+        startedAt: null,
+        completedAt: null,
+        retryEligibleAt: null,
+      }],
+    }));
+    const query = createSendIntentQuery(
+      { query: queryClient },
+      {
+        buildIdentity: "build-expired-reservation-recovery",
+        workerMode: async () => "normal",
+      },
+    );
+
+    const result = await query.getSendIntent(
+      context,
+      "018f0000-0000-7000-8000-000000000120",
+    );
+
+    expect(queryClient.mock.calls[0]?.[0]).toContain(
+      "reservation.release_reason",
+    );
+    expect(result.diagnostics).toMatchObject({
+      operationCheckpoint: "FAILED_FINAL",
+      retryable: false,
+      resubmittable: true,
+      costUncertainty: "NONE",
+      primaryNextAction: "RECHECK_BEFORE_RESUBMIT",
+    });
+  });
+
   it("can restore the latest persisted Send Intent for one draft", async () => {
     const queryClient = vi.fn(async () => ({ rows: [] }));
     const query = createSendIntentQuery({ query: queryClient });

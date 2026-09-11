@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 type probeFetcherFunc func(context.Context, string) (Resource, error)
@@ -106,6 +107,66 @@ func TestProbeServiceHealth(t *testing.T) {
 	service.ServeHTTP(response, request)
 
 	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProbeServiceRendersSharedBrowserWorkerContract(t *testing.T) {
+	requestedAt := "2026-09-02T12:00:00Z"
+	service := &ProbeService{
+		renderFetcher: probeFetcherFunc(func(_ context.Context, rawURL string) (Resource, error) {
+			return Resource{
+				URL:         rawURL,
+				FinalURL:    "https://www.publisher.com/reviews",
+				StatusCode:  http.StatusOK,
+				ContentType: "text/html; charset=utf-8",
+				Body: []byte("<html lang=\"en\"><head><title>Publisher reviews</title></head>" +
+					"<body><main>Independent streaming reviews.</main></body></html>"),
+				Rendered:  true,
+				FetchedAt: time.Date(2026, 9, 2, 12, 0, 1, 0, time.UTC),
+			}, nil
+		}),
+	}
+	body := bytes.NewBufferString(`{
+		"version":"crawler.evidence.request.v1",
+		"requestId":"request-1",
+		"taskType":"seo_assessment",
+		"tenant":{"organizationId":"organization-1","workspaceId":"workspace-1"},
+		"project":{"websiteProjectId":"project-1"},
+		"target":{"urls":["https://publisher.com/reviews"]},
+		"requestedBy":{"moduleId":"backlinks","actorId":"actor-1"},
+		"requestedAt":"` + requestedAt + `"
+	}`)
+	request := httptest.NewRequest(http.MethodPost, "/render", body)
+	response := httptest.NewRecorder()
+
+	service.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload RenderResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.FinalURL != "https://www.publisher.com/reviews" ||
+		payload.Evidence.Version != "crawler.evidence.v1" ||
+		payload.Evidence.Outcome != "completed" ||
+		len(payload.Evidence.Pages) != 1 ||
+		!payload.Evidence.Pages[0].Rendered ||
+		payload.Evidence.Pages[0].RenderMode != "browser" {
+		t.Fatalf("unexpected render response: %#v", payload)
+	}
+}
+
+func TestProbeServiceRenderFailsClosedWithoutBrowser(t *testing.T) {
+	service := &ProbeService{}
+	request := httptest.NewRequest(http.MethodPost, "/render", bytes.NewBufferString(`{}`))
+	response := httptest.NewRecorder()
+
+	service.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }

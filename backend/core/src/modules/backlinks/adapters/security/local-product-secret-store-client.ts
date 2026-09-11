@@ -48,6 +48,7 @@ const secretKindPathPrefixes = Object.freeze({
   GMAIL_CANARY_RECIPIENT: ["gmail/"],
   AI_PROVIDER_CREDENTIAL: ["ai/"],
   DATAFORSEO_CREDENTIAL: ["dataforseo/"],
+  AHREFS_CREDENTIAL: ["ahrefs/"],
 } satisfies Record<SecretKind, readonly string[]>);
 
 const versionSchema = z.string().regex(/^v[1-9][0-9]*$/u);
@@ -104,6 +105,8 @@ export const localProductAiProviderCredentialReference =
   "secret://growthos/local-product/ai/provider-credential/v1";
 export const localProductDataForSeoCredentialReference =
   "secret://growthos/local-product/dataforseo/provider-credential/v1";
+export const localProductAhrefsCredentialReference =
+  "secret://growthos/local-product/ahrefs/provider-credential/v1";
 
 export function parseLocalProductSecretReference(
   value: string,

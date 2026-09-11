@@ -1,9 +1,8 @@
-import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -18,29 +17,10 @@ type Client = {
   ): Promise<{ rows: Record<string, unknown>[] }>;
 };
 type PgError = Error & { readonly code?: string };
-type DeploymentManifest = Readonly<{
-  steps: readonly Readonly<{
-    migrationId: string;
-    path: string;
-  }>[];
-}>;
-
 const require = createRequire(import.meta.url);
 const { Client: PgClient } = require("pg") as {
   readonly Client: new (config: unknown) => Client;
 };
-const rolesUrl = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
-const manifestUrl = new URL(
-  "../../../../database/deployment-manifest.v1.json",
-  import.meta.url,
-);
-const migrationUrl = (path: string) => new URL(
-  `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
-  import.meta.url,
-);
 const id = (value: number) =>
   `01900000-0000-7000-8000-${String(value).padStart(12, "0")}`;
 const organizationId = id(1);
@@ -64,50 +44,7 @@ describe("LOCAL-PRODUCT-019 Gmail send and reply loop migration", () => {
     await harness.migrate();
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
-    await client.query(await readFile(rolesUrl, "utf8"));
-    await client.query(`
-      SET ROLE growthos_platform_owner;
-      SET search_path = platform, pg_catalog;
-      CREATE FUNCTION backlink_list_active_website_projects(
-        p_organization_id text,
-        p_workspace_id text
-      )
-      RETURNS TABLE (
-        website_project_id text,
-        context_version integer
-      )
-      LANGUAGE sql
-      STABLE
-      SECURITY DEFINER
-      SET search_path = platform, pg_catalog
-      AS $function$
-        SELECT NULL::text, NULL::integer
-         WHERE p_organization_id IS NULL
-           AND p_workspace_id IS NULL;
-      $function$;
-      REVOKE ALL
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        FROM PUBLIC;
-      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
-      GRANT EXECUTE
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        TO growthos_backlinks_owner;
-      RESET ROLE;
-      RESET search_path;
-    `);
-
-    const manifest = JSON.parse(
-      await readFile(manifestUrl, "utf8"),
-    ) as DeploymentManifest;
-    for (const step of manifest.steps.filter(
-      ({ migrationId }) =>
-        migrationId.startsWith("backlinks-")
-        && migrationId !== "backlinks-0001",
-    )) {
-      await client.query(
-        await readFile(migrationUrl(step.path), "utf8"),
-      );
-    }
+    await installBacklinksManifestAfterFoundation(client);
 
     await client.query("SET search_path = backlinks, pg_catalog");
     await client.query(
@@ -158,8 +95,10 @@ describe("LOCAL-PRODUCT-019 Gmail send and reply loop migration", () => {
   });
 
   it("adds approval evidence columns and the lifecycle fact foreign key", async () => {
-    expect((await client.query(
-      `SELECT column_name AS "columnName"
+    expect(
+      (
+        await client.query(
+          `SELECT column_name AS "columnName"
          FROM information_schema.columns
         WHERE table_schema='backlinks'
           AND table_name='backlink_send_snapshots'
@@ -167,13 +106,17 @@ describe("LOCAL-PRODUCT-019 Gmail send and reply loop migration", () => {
             'approval_fact_id','approval_actor_id','approval_recorded_at'
           )
         ORDER BY column_name`,
-    )).rows).toEqual([
+        )
+      ).rows,
+    ).toEqual([
       { columnName: "approval_actor_id" },
       { columnName: "approval_fact_id" },
       { columnName: "approval_recorded_at" },
     ]);
-    expect((await client.query(
-      `SELECT conname
+    expect(
+      (
+        await client.query(
+          `SELECT conname
          FROM pg_constraint
         WHERE connamespace='backlinks'::regnamespace
           AND conrelid='backlinks.backlink_send_snapshots'::regclass
@@ -182,7 +125,9 @@ describe("LOCAL-PRODUCT-019 Gmail send and reply loop migration", () => {
             'backlink_send_snapshot_approval_fact_fk'
           )
         ORDER BY conname`,
-    )).rows).toEqual([
+        )
+      ).rows,
+    ).toEqual([
       { conname: "backlink_send_snapshot_approval_fact_fk" },
       { conname: "backlink_send_snapshot_approval_values_check" },
     ]);
@@ -196,22 +141,35 @@ describe("LOCAL-PRODUCT-019 Gmail send and reply loop migration", () => {
        ) VALUES
          ($1,$2,$3,$4,'test','test'),
          ($5,$2,$6,$4,'test','test')`,
-      [id(20), organizationId, workspaceA, gmailConnectionId, id(21), workspaceB],
+      [
+        id(20),
+        organizationId,
+        workspaceA,
+        gmailConnectionId,
+        id(21),
+        workspaceB,
+      ],
     );
-    await expectCode(client.query(
-      `INSERT INTO backlink_gmail_connection_sync_cursors (
+    await expectCode(
+      client.query(
+        `INSERT INTO backlink_gmail_connection_sync_cursors (
          id,organization_id,workspace_id,gmail_connection_id,
          created_by,updated_by
        ) VALUES ($1,$2,$3,$4,'test','test')`,
-      [id(22), organizationId, workspaceA, gmailConnectionId],
-    ), "23505");
-    await expectCode(client.query(
-      `INSERT INTO backlink_gmail_connection_sync_cursors (
+        [id(22), organizationId, workspaceA, gmailConnectionId],
+      ),
+      "23505",
+    );
+    await expectCode(
+      client.query(
+        `INSERT INTO backlink_gmail_connection_sync_cursors (
          id,organization_id,workspace_id,gmail_connection_id,
          created_by,updated_by
        ) VALUES ($1,$2,$3,$4,'test','test')`,
-      [id(23), organizationId, workspaceA, id(99)],
-    ), "23503");
+        [id(23), organizationId, workspaceA, id(99)],
+      ),
+      "23503",
+    );
   });
 
   it("isolates connection cursors by organization and workspace RLS", async () => {
@@ -222,10 +180,14 @@ describe("LOCAL-PRODUCT-019 Gmail send and reply loop migration", () => {
                 set_config('app.current_workspace_id',$2,false)`,
         [organizationId, workspaceA],
       );
-      expect((await client.query(
-        `SELECT workspace_id AS "workspaceId"
+      expect(
+        (
+          await client.query(
+            `SELECT workspace_id AS "workspaceId"
            FROM backlinks.backlink_gmail_connection_sync_cursors`,
-      )).rows).toEqual([{ workspaceId: workspaceA }]);
+          )
+        ).rows,
+      ).toEqual([{ workspaceId: workspaceA }]);
     } finally {
       await client.query("RESET ROLE");
     }

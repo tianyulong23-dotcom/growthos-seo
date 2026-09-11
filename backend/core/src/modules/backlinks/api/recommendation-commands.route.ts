@@ -58,6 +58,7 @@ const archivePoolResponse = z.object({
   archivedGeneration: z.number().int().positive(),
   nextGeneration: z.number().int().positive(),
   archivedCount: z.number().int().nonnegative(),
+  preparedCandidateCount: z.number().int().nonnegative(),
   state: z.literal("awaiting_refresh"),
   ...auditFields,
 }).strict();

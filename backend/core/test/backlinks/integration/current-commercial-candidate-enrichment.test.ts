@@ -1,15 +1,6 @@
-import { readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { prepareCurrentCommercialCandidateEnrichment } from "../../../src/modules/backlinks/application/services/current-commercial-candidate-enrichment.service.js";
 import { reassessCurrentCommercialCandidates } from "../../../src/modules/backlinks/application/services/current-commercial-candidate-reassessment.service.js";
@@ -18,6 +9,7 @@ import {
   withBacklinkTenantTransaction,
   type BacklinkTenantPool,
 } from "../../../src/modules/backlinks/db/tenant-transaction.js";
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -41,15 +33,6 @@ const { Client, Pool } = require("pg") as {
   readonly Client: new (config: unknown) => RuntimeClient;
   readonly Pool: new (config: unknown) => RuntimePool;
 };
-const migrationDirectory = new URL(
-  "../../../src/modules/backlinks/db/migrations/",
-  import.meta.url,
-);
-const rolesMigration = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
-
 const id = (value: number) =>
   `018f2000-0000-7000-8000-${value.toString().padStart(12, "0")}`;
 
@@ -145,24 +128,7 @@ const manualScore = {
 } as const;
 
 async function migrateBacklinks(client: RuntimeClient): Promise<void> {
-  const migrationNames = (await readdir(fileURLToPath(migrationDirectory)))
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const name of migrationNames.filter(
-    (item) => item >= "0002_" && item < "0005_",
-  )) {
-    await client.query(
-      await readFile(new URL(name, migrationDirectory), "utf8"),
-    );
-  }
-  await client.query(await readFile(rolesMigration, "utf8"));
-  for (const name of migrationNames.filter(
-    (item) => item >= "0005_" && !item.startsWith("0044_"),
-  )) {
-    await client.query(
-      await readFile(new URL(name, migrationDirectory), "utf8"),
-    );
-  }
+  await installBacklinksManifestAfterFoundation(client, "0092");
 }
 
 async function seedCurrentGeneration(client: RuntimeClient): Promise<void> {
@@ -357,23 +323,18 @@ async function seedCurrentGeneration(client: RuntimeClient): Promise<void> {
 }
 
 function prepare(apply: boolean, overrides: Record<string, unknown> = {}) {
-  return withBacklinkTenantTransaction(
-    pool,
-    scope,
-    (transaction) => prepareCurrentCommercialCandidateEnrichment(
-      transaction,
-      {
-        ...scope,
-        projectContextVersionId: contextVersionId,
-        visiblePoolGeneration: 1,
-        actorId: "stage2d-test",
-        now,
-        generationInputFingerprint,
-        maximumCandidates: 25,
-        apply,
-        ...overrides,
-      },
-    ),
+  return withBacklinkTenantTransaction(pool, scope, (transaction) =>
+    prepareCurrentCommercialCandidateEnrichment(transaction, {
+      ...scope,
+      projectContextVersionId: contextVersionId,
+      visiblePoolGeneration: 1,
+      actorId: "stage2d-test",
+      now,
+      generationInputFingerprint,
+      maximumCandidates: 25,
+      apply,
+      ...overrides,
+    }),
   );
 }
 
@@ -419,14 +380,15 @@ describe("current generation commercial candidate enrichment", () => {
     const results = await Promise.all([prepare(true), prepare(true)]);
 
     expect(results.map(({ preparedCount }) => preparedCount).sort()).toEqual([
-      0,
-      1,
+      0, 1,
     ]);
-    const rows = (await client.query(
-      `SELECT canonical_domain AS domain,state,version
+    const rows = (
+      await client.query(
+        `SELECT canonical_domain AS domain,state,version
          FROM backlinks.backlink_commercial_candidates
         ORDER BY canonical_domain`,
-    )).rows;
+      )
+    ).rows;
     expect(rows).toEqual([
       { domain: "manual.example", state: "manual_review", version: 1 },
       { domain: "publisher.example", state: "enrichment_eligible", version: 2 },
@@ -437,25 +399,31 @@ describe("current generation commercial candidate enrichment", () => {
   it("replays without writes and fails closed on generation or pin mismatch", async () => {
     await expect(prepare(true)).resolves.toMatchObject({ preparedCount: 1 });
     await expect(prepare(true)).resolves.toMatchObject({ preparedCount: 0 });
-    await expect(prepare(true, {
-      visiblePoolGeneration: 2,
-    })).resolves.toMatchObject({
+    await expect(
+      prepare(true, {
+        visiblePoolGeneration: 2,
+      }),
+    ).resolves.toMatchObject({
       candidates: [],
       preparedCount: 0,
     });
-    await expect(prepare(true, {
-      generationInputFingerprint: "wrong-generation-fingerprint",
-    })).resolves.toMatchObject({
+    await expect(
+      prepare(true, {
+        generationInputFingerprint: "wrong-generation-fingerprint",
+      }),
+    ).resolves.toMatchObject({
       candidates: [],
       preparedCount: 0,
     });
 
-    const state = (await client.query(
-      `SELECT state,version
+    const state = (
+      await client.query(
+        `SELECT state,version
          FROM backlinks.backlink_commercial_candidates
         WHERE id=$1`,
-      [candidateId],
-    )).rows[0];
+        [candidateId],
+      )
+    ).rows[0];
     expect(state).toEqual({ state: "enrichment_eligible", version: 2 });
   });
 
@@ -481,12 +449,14 @@ describe("current generation commercial candidate enrichment", () => {
       candidates: [],
       preparedCount: 0,
     });
-    const state = (await client.query(
-      `SELECT state,version
+    const state = (
+      await client.query(
+        `SELECT state,version
          FROM backlinks.backlink_commercial_candidates
         WHERE id=$1`,
-      [candidateId],
-    )).rows[0];
+        [candidateId],
+      )
+    ).rows[0];
     expect(state).toEqual({ state: "insufficient_data", version: 1 });
   });
 
@@ -546,30 +516,29 @@ describe("current generation commercial candidate enrichment", () => {
     );
 
     const reassess = () =>
-      withBacklinkTenantTransaction(
-        pool,
-        scope,
-        (transaction) =>
-          reassessCurrentCommercialCandidates(transaction, {
-            ...scope,
-            projectContextVersionId: contextVersionId,
-            visiblePoolGeneration: 1,
-            actorId: "stage2r-threshold-reassessment",
-            now,
-          }),
+      withBacklinkTenantTransaction(pool, scope, (transaction) =>
+        reassessCurrentCommercialCandidates(transaction, {
+          ...scope,
+          projectContextVersionId: contextVersionId,
+          visiblePoolGeneration: 1,
+          actorId: "stage2r-threshold-reassessment",
+          now,
+        }),
       );
 
     await expect(reassess()).resolves.toEqual({ reassessedCount: 1 });
     await expect(reassess()).resolves.toEqual({ reassessedCount: 0 });
 
-    const state = (await client.query(
-      `SELECT state,version,
+    const state = (
+      await client.query(
+        `SELECT state,version,
               commercial_score->>'decision' AS decision,
               commercial_score#>>'{admission,appliedThreshold}' AS threshold
          FROM backlinks.backlink_commercial_candidates
         WHERE id=$1`,
-      [candidateId],
-    )).rows[0];
+        [candidateId],
+      )
+    ).rows[0];
     expect(state).toEqual({
       state: "candidate_ready",
       version: 2,

@@ -194,15 +194,13 @@ describe("BusinessProfileForm", () => {
       />
     )
 
-    expect(
-      screen.getByText("AI 已生成可用资料，建议检查后再使用。")
-    ).toBeTruthy()
+    expect(screen.getByText("已生成部分资料，请检查并补充。")).toBeTruthy()
     expect(
       screen.getByText("AI 整理失败，已使用规则生成业务资料：模型请求超时")
     ).toBeTruthy()
   })
 
-  it("replaces form values when a newer recognition run finishes", async () => {
+  it("fills untouched fields without replacing local edits when recognition finishes", async () => {
     const rerunningProject = {
       ...project,
       understandingRunId: "understanding-2",
@@ -242,8 +240,36 @@ describe("BusinessProfileForm", () => {
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("Updated Example")).toBeTruthy()
-      expect(screen.getByDisplayValue("Updated summary")).toBeTruthy()
+      expect(screen.getByDisplayValue("Unsaved local edit")).toBeTruthy()
       expect(screen.getByDisplayValue("Updated analytics")).toBeTruthy()
     })
+  })
+
+  it("preserves deliberately cleared fields but resets edits when switching projects", () => {
+    const { rerender } = render(
+      <BusinessProfileForm project={project} onSave={vi.fn()} />
+    )
+    fireEvent.change(screen.getByLabelText("公司简介"), {
+      target: { value: "" },
+    })
+    const refreshed = {
+      ...project,
+      understandingRunId: "new-run",
+      siteProfile: {
+        ...project.siteProfile!,
+        businessSummary: "New AI summary",
+      },
+    }
+    rerender(<BusinessProfileForm project={refreshed} onSave={vi.fn()} />)
+    expect(
+      (screen.getByLabelText("公司简介") as HTMLTextAreaElement).value
+    ).toBe("")
+    rerender(
+      <BusinessProfileForm
+        project={{ ...refreshed, id: "different-project" }}
+        onSave={vi.fn()}
+      />
+    )
+    expect(screen.getByDisplayValue("New AI summary")).toBeTruthy()
   })
 })

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 
@@ -16,12 +17,9 @@ import {
   createProjectContext,
   createTenantContext,
 } from "../../../src/modules/backlinks/domain/context/index.js";
-import {
-  CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-} from "../../../src/modules/backlinks/ports/recommendation-contract.port.js";
-import {
-  commercialQualificationRuleVersion,
-} from "../../../src/modules/backlinks/domain/recommendations/commercial-qualification-v4.js";
+import { CORRECTED_QUALIFICATION_CONTRACT_VERSION } from "../../../src/modules/backlinks/ports/recommendation-contract.port.js";
+import { commercialQualificationRuleVersion } from "../../../src/modules/backlinks/domain/recommendations/commercial-qualification-v4.js";
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -128,7 +126,9 @@ async function applyMigrations(
   }
 }
 
-async function seedProjectInputsAndLegacyV3(client: RuntimeClient): Promise<void> {
+async function seedProjectInputsAndLegacyV3(
+  client: RuntimeClient,
+): Promise<void> {
   await client.query(
     `INSERT INTO backlinks.backlink_outreach_profile_versions (
        id, organization_id, workspace_id, website_project_id,
@@ -354,32 +354,30 @@ async function seedHistoricalDiscoveryLineage(
 const fitScore = (
   total: number,
   scoreModelVersion:
-    | "recommendation-commercial-fit.v3"
-    | "recommendation-commercial-fit.v4",
+    "recommendation-commercial-fit.v3" | "recommendation-commercial-fit.v4",
   ruleVersion: string,
-) => JSON.stringify({
-  decision: "eligible",
-  total,
-  scoreModelVersion,
-  ruleVersion,
-  details: {
-    matchTier: total >= 75 ? "high_fit" : "qualified_fit",
-    reasonCodes: ["QUALIFIED"],
-    market: {
-      targetCountry: "US",
-      candidateCountry: "US",
-      targetLanguage: "en",
-      candidateLanguage: "en",
-      tier: "target_market",
-      reasonCode: "TARGET_MARKET",
+) =>
+  JSON.stringify({
+    decision: "eligible",
+    total,
+    scoreModelVersion,
+    ruleVersion,
+    details: {
+      matchTier: total >= 75 ? "high_fit" : "qualified_fit",
+      reasonCodes: ["QUALIFIED"],
+      market: {
+        targetCountry: "US",
+        candidateCountry: "US",
+        targetLanguage: "en",
+        candidateLanguage: "en",
+        tier: "target_market",
+        reasonCode: "TARGET_MARKET",
+      },
     },
-  },
-  components: [],
-});
+    components: [],
+  });
 
-async function seedLegacyVisibleFallback(
-  client: RuntimeClient,
-): Promise<void> {
+async function seedLegacyVisibleFallback(client: RuntimeClient): Promise<void> {
   await client.query(
     `INSERT INTO backlinks.backlink_project_context_snapshots (
        id, organization_id, workspace_id, website_project_id,
@@ -394,12 +392,7 @@ async function seedLegacyVisibleFallback(
        'US', '["site owners"]'::jsonb, '["editorial mention"]'::jsonb,
        'legacy-fallback-test'
      )`,
-    [
-      fallbackContextVersionId,
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-    ],
+    [fallbackContextVersionId, organizationId, workspaceId, websiteProjectId],
   );
   await client.query(
     `INSERT INTO backlinks.backlink_outreach_profile_versions (
@@ -485,12 +478,7 @@ async function seedLegacyVisibleFallback(
        project_context_version_id, visible_pool_generation,
        visible_pool_state, updated_by
      ) VALUES ($1, $2, $3, $4, 1, 'building', 'legacy-fallback-test')`,
-    [
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      fallbackContextVersionId,
-    ],
+    [organizationId, workspaceId, websiteProjectId, fallbackContextVersionId],
   );
   await client.query(
     `INSERT INTO backlinks.backlink_prospects (
@@ -685,11 +673,7 @@ async function seedLegacyVisibleFallback(
       fallbackLegacyRecommendationId,
       fallbackLegacyProspectId,
       fallbackContextVersionId,
-      fitScore(
-        71,
-        "recommendation-commercial-fit.v3",
-        "legacy-rules-v3",
-      ),
+      fitScore(71, "recommendation-commercial-fit.v3", "legacy-rules-v3"),
     ],
   );
 }
@@ -820,9 +804,7 @@ describe("Phase 2 recommendation contract compatibility", () => {
     names = await migrationNames();
     await applyMigrations(
       admin,
-      names.filter(
-        (name) => !name.startsWith("0001_") && name <= "0061_zzzz",
-      ),
+      names.filter((name) => !name.startsWith("0001_") && name <= "0061_zzzz"),
     );
     await seedProjectInputsAndLegacyV3(admin);
     const before = await admin.query(visibleCountSql, [
@@ -895,15 +877,16 @@ describe("Phase 2 recommendation contract compatibility", () => {
   it("reads the exact immutable input pin through the tenant projection", async () => {
     const repository = createProjectInputPersistenceRepository(pool);
 
-    await expect(repository.readGenerationInputBinding({
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      inputPinId,
-      qualificationContractVersion:
-        CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-      market: "US",
-    })).resolves.toMatchObject({
+    await expect(
+      repository.readGenerationInputBinding({
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        inputPinId,
+        qualificationContractVersion: CORRECTED_QUALIFICATION_CONTRACT_VERSION,
+        market: "US",
+      }),
+    ).resolves.toMatchObject({
       inputPinId,
       pins: {
         projectContextVersion: 1,
@@ -911,8 +894,7 @@ describe("Phase 2 recommendation contract compatibility", () => {
         outreachProfileVersionId: "profile-v1",
         promotionTargetVersionId: "promotion-v1",
         sharedEvidenceSnapshotIds: [],
-        qualificationContractVersion:
-          CORRECTED_QUALIFICATION_CONTRACT_VERSION,
+        qualificationContractVersion: CORRECTED_QUALIFICATION_CONTRACT_VERSION,
       },
       outreachProfile: {
         profileVersionId: "profile-v1",
@@ -926,13 +908,15 @@ describe("Phase 2 recommendation contract compatibility", () => {
 
   it("upgrades 0061 data, preserves V3 reads, and round-trips corrected facts", async () => {
     const repository = createRecommendationContractRepository(pool);
-    await expect(repository.readRecommendation({
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      recommendationContextVersionId,
-      recommendationId: legacyRecommendationId,
-    })).resolves.toMatchObject({
+    await expect(
+      repository.readRecommendation({
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        recommendationContextVersionId,
+        recommendationId: legacyRecommendationId,
+      }),
+    ).resolves.toMatchObject({
       contractKind: "legacy-v3",
       canonicalDomain: "legacy.test",
       totalScore: 71,
@@ -1030,13 +1014,15 @@ describe("Phase 2 recommendation contract compatibility", () => {
       createdBy: "phase-2-integration",
     });
 
-    await expect(repository.readRecommendation({
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      recommendationContextVersionId,
-      recommendationId: correctedRecommendationId,
-    })).resolves.toMatchObject({
+    await expect(
+      repository.readRecommendation({
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        recommendationContextVersionId,
+        recommendationId: correctedRecommendationId,
+      }),
+    ).resolves.toMatchObject({
       contractKind: "corrected-v1",
       canonicalDomain: "corrected.test",
       totalScore: 84,
@@ -1079,39 +1065,43 @@ describe("Phase 2 recommendation contract compatibility", () => {
 
   it("rejects delayed old-Worker writes at repository and database boundaries", async () => {
     const repository = createRecommendationContractRepository(pool);
-    await expect(repository.createCorrectedGeneration({
-      organizationId,
-      workspaceId,
-      websiteProjectId,
-      recommendationContextVersionId,
-      generationContractId: id(40),
-      inputPinId,
-      visiblePoolGeneration: 3,
-      metricScope: "TARGET_MARKET",
-      market: "US",
-      location: "United States",
-      language: "en",
-      trafficLocationCode: 2840,
-      trafficLanguageCode: "en",
-      requestFingerprints: {},
-      workerContractVersion: "recommendation-qualification.v0",
-      operation: {
-        factId: id(41),
-        operationId: "generation-3",
-        state: "requested",
-        attempt: 1,
-        reasonCode: "DELAYED_WORKER",
-        evidence: {},
-        observedAt: new Date("2026-08-15T08:02:00.000Z"),
-      },
-      createdBy: "phase-2-integration",
-    })).rejects.toThrow(/does not match/u);
+    await expect(
+      repository.createCorrectedGeneration({
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        recommendationContextVersionId,
+        generationContractId: id(40),
+        inputPinId,
+        visiblePoolGeneration: 3,
+        metricScope: "TARGET_MARKET",
+        market: "US",
+        location: "United States",
+        language: "en",
+        trafficLocationCode: 2840,
+        trafficLanguageCode: "en",
+        requestFingerprints: {},
+        workerContractVersion: "recommendation-qualification.v0",
+        operation: {
+          factId: id(41),
+          operationId: "generation-3",
+          state: "requested",
+          attempt: 1,
+          reasonCode: "DELAYED_WORKER",
+          evidence: {},
+          observedAt: new Date("2026-08-15T08:02:00.000Z"),
+        },
+        createdBy: "phase-2-integration",
+      }),
+    ).rejects.toThrow(/does not match/u);
 
-    await expect(withBacklinkTenantTransaction(
-      pool,
-      { organizationId, workspaceId, websiteProjectId },
-      (client) => client.query(
-        `INSERT INTO backlinks.backlink_generation_operation_facts (
+    await expect(
+      withBacklinkTenantTransaction(
+        pool,
+        { organizationId, workspaceId, websiteProjectId },
+        (client) =>
+          client.query(
+            `INSERT INTO backlinks.backlink_generation_operation_facts (
            id, organization_id, workspace_id, website_project_id,
            generation_contract_id, recommendation_context_version_id,
            operation_id, operation_state, attempt, reason_code,
@@ -1122,17 +1112,18 @@ describe("Phase 2 recommendation contract compatibility", () => {
            'DELAYED_WORKER', $7, 'recommendation-qualification.v0',
            '{}'::jsonb, now(), 'phase-2-integration'
          )`,
-        [
-          id(42),
-          organizationId,
-          workspaceId,
-          websiteProjectId,
-          generationContractId,
-          recommendationContextVersionId,
-          CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-        ],
+            [
+              id(42),
+              organizationId,
+              workspaceId,
+              websiteProjectId,
+              generationContractId,
+              recommendationContextVersionId,
+              CORRECTED_QUALIFICATION_CONTRACT_VERSION,
+            ],
+          ),
       ),
-    )).rejects.toThrow(/Worker contract version does not match/u);
+    ).rejects.toThrow(/Worker contract version does not match/u);
   });
 
   it("reapplies the V4 publication contract with one legacy guard", async () => {
@@ -1174,35 +1165,43 @@ describe("Phase 2 recommendation contract compatibility", () => {
       }),
     };
 
-    await expect(query.listRecommendations(context, { limit: 25 })).resolves
-      .toMatchObject({
-        presentationState: "legacy_stale",
-        items: [{
+    await expect(
+      query.listRecommendations(context, { limit: 25 }),
+    ).resolves.toMatchObject({
+      presentationState: "legacy_stale",
+      items: [
+        {
           id: fallbackLegacyRecommendationId,
           hostname: "legacy-visible.test",
           presentationState: "legacy_stale",
           scoreModelVersion: "recommendation-commercial-fit.v3",
           canCreateOpportunity: false,
-        }],
-      });
+        },
+      ],
+    });
 
-    await expect(admin.query(
-      `UPDATE backlinks.backlink_recommendation_inventory
+    await expect(
+      admin.query(
+        `UPDATE backlinks.backlink_recommendation_inventory
           SET updated_by='legacy-mutation'
         WHERE id=$1`,
-      [fallbackLegacyInventoryId],
-    )).rejects.toThrow(/Legacy V3 recommendation publications are read-only/u);
+        [fallbackLegacyInventoryId],
+      ),
+    ).rejects.toThrow(/Legacy V3 recommendation publications are read-only/u);
 
     await seedInvalidV4Publication(admin);
-    await expect(query.listRecommendations(context, { limit: 25 })).resolves
-      .toMatchObject({
-        presentationState: "legacy_stale",
-        items: [{
+    await expect(
+      query.listRecommendations(context, { limit: 25 }),
+    ).resolves.toMatchObject({
+      presentationState: "legacy_stale",
+      items: [
+        {
           id: fallbackLegacyRecommendationId,
           hostname: "legacy-visible.test",
           presentationState: "legacy_stale",
-        }],
-      });
+        },
+      ],
+    });
 
     const repository = createRecommendationContractRepository(pool);
     await repository.createCorrectedGeneration({
@@ -1294,17 +1293,20 @@ describe("Phase 2 recommendation contract compatibility", () => {
       createdBy: "legacy-fallback-test",
     });
 
-    await expect(query.listRecommendations(context, { limit: 25 })).resolves
-      .toMatchObject({
-        presentationState: "current",
-        items: [{
+    await expect(
+      query.listRecommendations(context, { limit: 25 }),
+    ).resolves.toMatchObject({
+      presentationState: "current",
+      items: [
+        {
           id: fallbackV4RecommendationId,
           hostname: "current-visible.test",
           presentationState: "current",
           scoreModelVersion: "recommendation-commercial-fit.v4",
           canCreateOpportunity: true,
-        }],
-      });
+        },
+      ],
+    });
     const legacy = await admin.query(
       `SELECT publication_status AS "publicationStatus",
               fit_score_model_version AS "scoreModelVersion"
@@ -1312,10 +1314,12 @@ describe("Phase 2 recommendation contract compatibility", () => {
         WHERE id=$1`,
       [fallbackLegacyInventoryId],
     );
-    expect(legacy.rows).toEqual([{
-      publicationStatus: "PUBLISHED",
-      scoreModelVersion: "recommendation-commercial-fit.v3",
-    }]);
+    expect(legacy.rows).toEqual([
+      {
+        publicationStatus: "PUBLISHED",
+        scoreModelVersion: "recommendation-commercial-fit.v3",
+      },
+    ]);
 
     await admin.query(
       `UPDATE backlinks.backlink_commercial_candidates
@@ -1347,8 +1351,7 @@ describe("Phase 2 recommendation contract compatibility", () => {
     );
     expect(
       afterWithdrawal.items.filter(
-        (item) =>
-          item.scoreModelVersion === "recommendation-commercial-fit.v4",
+        (item) => item.scoreModelVersion === "recommendation-commercial-fit.v4",
       ),
     ).toEqual([]);
     expect(inventory.visibleMatchCount).toBe(0);
@@ -1356,17 +1359,15 @@ describe("Phase 2 recommendation contract compatibility", () => {
   });
 
   it("supports a clean PostgreSQL 18 install through 0066", async () => {
-    const cleanDatabase = "backlinks_clean_install";
-    await admin.query(`CREATE DATABASE ${cleanDatabase}`);
+    const cleanDatabase = `backlinks_clean_install_${randomBytes(6).toString("hex")}`;
+    await admin.query(`CREATE DATABASE "${cleanDatabase}"`);
     const cleanUrl = new URL(harness.connectionString);
     cleanUrl.pathname = `/${cleanDatabase}`;
     const clean = new PgClient({ connectionString: cleanUrl.toString() });
-    await clean.connect();
     try {
+      await clean.connect();
       await clean.query(await readFile(migrationUrl(names[0] ?? ""), "utf8"));
-      await clean.query(await readFile(rolesUrl, "utf8"));
-      await clean.query(platformProjectFunction);
-      await applyMigrations(clean, names.slice(1));
+      await installBacklinksManifestAfterFoundation(clean, "0066");
       const result = await clean.query(
         `SELECT to_regclass(
            'backlinks.backlink_recommendation_generation_contracts'
@@ -1377,11 +1378,13 @@ describe("Phase 2 recommendation contract compatibility", () => {
       );
       expect(result.rows[0]).toEqual({
         generation: "backlinks.backlink_recommendation_generation_contracts",
-        cooperation:
-          "backlinks.backlink_recommendation_cooperation_path_facts",
+        cooperation: "backlinks.backlink_recommendation_cooperation_path_facts",
       });
     } finally {
-      await clean.end();
+      await clean.end().catch(() => undefined);
+      await admin.query(
+        `DROP DATABASE IF EXISTS "${cleanDatabase}" WITH (FORCE)`,
+      );
     }
   }, 120_000);
 });

@@ -13,6 +13,7 @@ const POSTGRES_IMAGE =
 const POSTGRES_PORT = 5432;
 const DATABASE_NAME = "backlinks_test";
 const DATABASE_USER = "backlinks_test";
+const EXTERNAL_ADMIN_URL_ENV = "BACKLINKS_TEST_POSTGRES_ADMIN_URL";
 const MIGRATION_URL = new URL(
   "../../../../src/modules/backlinks/db/migrations/0001_backlink_foundation.sql",
   import.meta.url,
@@ -36,7 +37,72 @@ export type BacklinksPostgresHarness = {
   stop(): Promise<void>;
 };
 
+async function migrateDatabase(connectionString: string): Promise<void> {
+  const migration = await readFile(MIGRATION_URL, "utf8");
+  const client = new Client({
+    connectionString,
+    connectionTimeoutMillis: 5_000,
+  });
+  await client.connect();
+  try {
+    await client.query(migration);
+  } finally {
+    await client.end();
+  }
+}
+
+async function startExternalPostgresHarness(
+  adminConnectionString: string,
+): Promise<BacklinksPostgresHarness> {
+  const databaseName = `backlinks_test_${randomBytes(8).toString("hex")}`;
+  const admin = new Client({
+    connectionString: adminConnectionString,
+    connectionTimeoutMillis: 5_000,
+  });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE "${databaseName}"`);
+  } finally {
+    await admin.end();
+  }
+
+  const connectionUrl = new URL(adminConnectionString);
+  connectionUrl.pathname = `/${databaseName}`;
+  let stopped = false;
+
+  return {
+    image: "external-postgresql",
+    connectionString: connectionUrl.toString(),
+    async migrate() {
+      await migrateDatabase(connectionUrl.toString());
+    },
+    async stop() {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      const cleanup = new Client({
+        connectionString: adminConnectionString,
+        connectionTimeoutMillis: 5_000,
+      });
+      await cleanup.connect();
+      try {
+        await cleanup.query(
+          `DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`,
+        );
+      } finally {
+        await cleanup.end();
+      }
+    },
+  };
+}
+
 export async function startBacklinksPostgresHarness(): Promise<BacklinksPostgresHarness> {
+  const externalAdminUrl = process.env[EXTERNAL_ADMIN_URL_ENV]?.trim();
+  if (externalAdminUrl) {
+    return startExternalPostgresHarness(externalAdminUrl);
+  }
+
   const password = randomBytes(24).toString("base64url");
   let container: StartedTestContainer | undefined;
 
@@ -49,10 +115,7 @@ export async function startBacklinksPostgresHarness(): Promise<BacklinksPostgres
       })
       .withExposedPorts(POSTGRES_PORT)
       .withWaitStrategy(
-        Wait.forLogMessage(
-          /database system is ready to accept connections/,
-          2,
-        ),
+        Wait.forLogMessage(/database system is ready to accept connections/, 2),
       )
       .withStartupTimeout(90_000)
       .start();
@@ -69,17 +132,7 @@ export async function startBacklinksPostgresHarness(): Promise<BacklinksPostgres
       image: POSTGRES_IMAGE,
       connectionString: connectionUrl.toString(),
       async migrate() {
-        const migration = await readFile(MIGRATION_URL, "utf8");
-        const client = new Client({
-          connectionString: connectionUrl.toString(),
-          connectionTimeoutMillis: 5_000,
-        });
-        await client.connect();
-        try {
-          await client.query(migration);
-        } finally {
-          await client.end();
-        }
+        await migrateDatabase(connectionUrl.toString());
       },
       async stop() {
         if (stopped) {

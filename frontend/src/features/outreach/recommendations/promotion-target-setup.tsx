@@ -16,7 +16,8 @@ import type {
   PromotionTargetVersion,
 } from "@/features/projects/types"
 
-import { getRecommendationInventory } from "./api"
+import { getRecommendationFeedStatus } from "./recommendation-feed-api"
+import { normalizeRecommendationTermList } from "./recommendation-term-list"
 
 const FORM_ACTIONS = new Set([
   "PUBLISH_PROMOTION_TARGET",
@@ -50,7 +51,9 @@ export function RecommendationProjectGate({
   const navigate = useNavigate()
   const [readiness, setReadiness] =
     React.useState<ProjectOutreachReadinessState | null>(null)
-  const [readinessError, setReadinessError] = React.useState<string | null>(null)
+  const [readinessError, setReadinessError] = React.useState<string | null>(
+    null
+  )
   const [topics, setTopics] = React.useState(
     project.suggestedTopics.slice(0, 5).join("\n")
   )
@@ -73,6 +76,11 @@ export function RecommendationProjectGate({
 
     getProjectOutreachReadiness(project.id, controller.signal)
       .then((result) => {
+        if (controller.signal.aborted) return
+        if (result.websiteProjectId !== project.id) {
+          setReadinessError("项目状态不匹配，请重新读取。")
+          return
+        }
         setReadiness(result)
         setReadinessError(null)
       })
@@ -93,7 +101,7 @@ export function RecommendationProjectGate({
       2_000
     )
     return () => window.clearTimeout(timer)
-  }, [readiness?.fingerprint, readiness?.status])
+  }, [readiness?.fingerprint, readiness?.status, reloadVersion])
 
   React.useEffect(() => {
     if (readiness?.status !== "READY") return
@@ -107,7 +115,7 @@ export function RecommendationProjectGate({
       setCoreStatus(attempt === 0 ? "checking" : "syncing")
       setCoreError(null)
       try {
-        await getRecommendationInventory(project.id, controller.signal)
+        await getRecommendationFeedStatus(project.id, controller.signal)
         if (!cancelled) setCoreStatus("ready")
       } catch (error) {
         if (cancelled || controller.signal.aborted) return
@@ -125,7 +133,7 @@ export function RecommendationProjectGate({
         setCoreStatus("error")
         setCoreError(
           error instanceof ApiError && error.status === 404
-            ? "推广目标已保存，但后台 Dispatcher 尚未把当前项目接入推荐服务。请确认 API、Worker 和 Dispatcher 正常后重试。"
+            ? "推广目标已保存，但项目同步尚未完成。请稍后重新检查，无需重复保存。"
             : errorMessage(error)
         )
       }
@@ -141,7 +149,7 @@ export function RecommendationProjectGate({
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const confirmedTopics = lines(topics)
+    const confirmedTopics = normalizeRecommendationTermList([topics])
     const confirmedTargetUrls = lines(targetUrls)
     if (!confirmedTopics.length && !confirmedTargetUrls.length) {
       setFormError("请至少填写一个推广主题或一个推广目标页。")
@@ -191,7 +199,9 @@ export function RecommendationProjectGate({
       <GateState
         busy
         title={
-          confirmedTarget ? "推广目标已保存，正在接通推荐池" : "正在检查项目资料"
+          confirmedTarget
+            ? "推广目标已保存，正在接通推荐池"
+            : "正在检查项目资料"
         }
         description="正在读取当前项目的正式推广目标和后台接入状态。"
       />
@@ -208,7 +218,7 @@ export function RecommendationProjectGate({
           <div className="mb-6">
             <h2 className="text-base font-semibold">设置本次外链推广目标</h2>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              确认需要推广的主题和站内页面。保存后，系统会自动接通推荐发现和联系方式后处理。
+              确认本次推广的主题与页面后，即可进入推荐池。
             </p>
           </div>
 
@@ -224,7 +234,7 @@ export function RecommendationProjectGate({
                 disabled={submitting}
               />
               <p className="text-xs text-muted-foreground">
-                每行一个。已从项目资料带出候选内容，请确认或修改。
+                每行一个，也支持使用逗号或分号分隔。已从项目资料带出候选内容，请确认或修改。
               </p>
             </div>
 
@@ -242,7 +252,8 @@ export function RecommendationProjectGate({
                 aria-invalid={Boolean(formError) || undefined}
               />
               <p className="text-xs text-muted-foreground">
-                每行一个，必须属于 {project.domain} 或其子域名。建议主题和目标页都填写。
+                每行一个，必须属于 {project.domain}{" "}
+                或其子域名。建议主题和目标页都填写。
               </p>
             </div>
 
@@ -263,10 +274,10 @@ export function RecommendationProjectGate({
                 ) : (
                   <ArrowRight />
                 )}
-                保存并生成推荐
+                确认并进入推荐池
               </Button>
               <span className="text-xs text-muted-foreground">
-                保存不会自动发送 Gmail 邮件。
+                确认不会自动采集网站或发送邮件。
               </span>
             </div>
           </form>
@@ -286,12 +297,20 @@ export function RecommendationProjectGate({
   }
 
   if (readiness.status !== "READY") {
+    if (readiness.primaryRecoveryAction === "RESTORE_PROJECT") {
+      return (
+        <GateState
+          title="项目已归档"
+          description="请先在项目列表中恢复此项目，再使用推荐池。"
+        />
+      )
+    }
     return (
       <GateState
         title="当前项目资料还不能启动推荐"
-        description={`仍需处理：${readiness.inputRequired.join("、") || "项目资料不完整"}`}
+        description="请先补全并确认业务资料，以及网站的国家和语言。"
         actionLabel="前往项目资料"
-        onAction={() => navigate(`/projects/${project.id}/settings/profile`)}
+        onAction={() => navigate(`/projects/${project.id}/settings/business`)}
       />
     )
   }
@@ -301,7 +320,7 @@ export function RecommendationProjectGate({
       <GateState
         busy
         title="正在接通推荐池"
-        description="推广目标已就绪，后台正在同步项目并创建受预算控制的推荐任务。"
+        description="推广目标已就绪，正在同步项目资料。"
       />
     )
   }
@@ -326,7 +345,7 @@ export function RecommendationProjectGate({
       <GateState
         busy
         title="正在检查推荐后台"
-        description="正在确认当前项目已进入 Backlinks Core。"
+        description="正在确认项目同步状态。"
       />
     )
   }

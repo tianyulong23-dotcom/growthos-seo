@@ -16,7 +16,8 @@ $deploymentManifestFile = Join-Path $root `
     "backend\database\deployment-manifest.v1.json"
 $localProjectTenantReconciliationFile = Join-Path $root `
     "backend\database\operations\reconcile_local_project_tenants.sql"
-$backlinksMigrationsDir = Join-Path $coreDir "src\modules\backlinks\db\migrations"
+$backlinksDeploymentManifestRenderer = Join-Path $coreDir `
+    "scripts\render-backlinks-deployment-manifest.mjs"
 $crawlerExe = Join-Path $root "storage\runtime\crawler-worker-docker.exe"
 $crawlerBuildMetadataFile = Join-Path $root `
     "storage\runtime\crawler-worker-docker.build.json"
@@ -80,6 +81,130 @@ function Add-NoProxyHost {
         $hosts += $HostName
     }
     return $hosts -join ","
+}
+
+function ConvertTo-NormalizedProxyUrl {
+    param([string]$ProxyValue)
+
+    if (-not $ProxyValue) {
+        return ""
+    }
+    $candidate = $ProxyValue.Trim()
+    if ($candidate -notmatch "^[A-Za-z][A-Za-z0-9+.-]*://") {
+        $candidate = "http://$candidate"
+    }
+    try {
+        $uri = [System.Uri]::new($candidate)
+    }
+    catch {
+        throw "OUTBOUND_PROXY_URL_INVALID:$ProxyValue"
+    }
+    if (-not $uri.Host -or $uri.Port -le 0) {
+        throw "OUTBOUND_PROXY_URL_INVALID:$ProxyValue"
+    }
+    return $uri.AbsoluteUri.TrimEnd("/")
+}
+
+function Get-WindowsSystemProxyUrl {
+    param([ValidateSet("http", "https")][string]$Scheme)
+
+    if ($env:OS -ne "Windows_NT") {
+        return ""
+    }
+    try {
+        $settings = Get-ItemProperty `
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    }
+    catch {
+        return ""
+    }
+    if ([int]$settings.ProxyEnable -ne 1) {
+        return ""
+    }
+    $proxyServer = ([string]$settings.ProxyServer).Trim()
+    if (-not $proxyServer) {
+        return ""
+    }
+
+    $byScheme = @{}
+    $fallback = ""
+    foreach ($entry in $proxyServer -split ";") {
+        $value = $entry.Trim()
+        if (-not $value) {
+            continue
+        }
+        if ($value -match "^(?<scheme>[^=]+)=(?<proxy>.+)$") {
+            $byScheme[$Matches.scheme.Trim().ToLowerInvariant()] = (
+                $Matches.proxy.Trim()
+            )
+        }
+        elseif (-not $fallback) {
+            $fallback = $value
+        }
+    }
+
+    $selected = if ($byScheme.ContainsKey($Scheme)) {
+        [string]$byScheme[$Scheme]
+    }
+    elseif ($Scheme -eq "https" -and $byScheme.ContainsKey("http")) {
+        [string]$byScheme["http"]
+    }
+    else {
+        $fallback
+    }
+    return ConvertTo-NormalizedProxyUrl $selected
+}
+
+function Resolve-OutboundProxyUrl {
+    param(
+        [ValidateSet("explicit", "system")][string]$Mode,
+        [string]$ConfiguredProxy,
+        [ValidateSet("http", "https")][string]$Scheme
+    )
+
+    if ($Mode -eq "system") {
+        return Get-WindowsSystemProxyUrl -Scheme $Scheme
+    }
+    return ConvertTo-NormalizedProxyUrl $ConfiguredProxy
+}
+
+function Assert-OutboundProxyEndpointReachable {
+    param(
+        [string[]]$ProxyUrls,
+        [int]$TimeoutMilliseconds = 2000
+    )
+
+    $checked = @{}
+    foreach ($proxyUrl in $ProxyUrls) {
+        if (-not $proxyUrl) {
+            continue
+        }
+        $uri = [System.Uri]::new($proxyUrl)
+        $endpointKey = "$($uri.Host):$($uri.Port)"
+        if ($checked.ContainsKey($endpointKey)) {
+            continue
+        }
+        $checked[$endpointKey] = $true
+        $client = [System.Net.Sockets.TcpClient]::new()
+        try {
+            $connection = $client.ConnectAsync($uri.Host, $uri.Port)
+            if (
+                -not $connection.Wait($TimeoutMilliseconds) -or
+                -not $client.Connected
+            ) {
+                throw "proxy connection timeout"
+            }
+        }
+        catch {
+            throw (
+                "OUTBOUND_PROXY_UNREACHABLE:" +
+                "$($uri.Scheme)://$($uri.Host):$($uri.Port)"
+            )
+        }
+        finally {
+            $client.Dispose()
+        }
+    }
 }
 
 if (-not $ComposeProjectName) {
@@ -791,8 +916,20 @@ if ($googleOauthEnabled -eq "true") {
     $backlinksOauthFrontendOrigin = Get-RequiredSetting `
         "BACKLINKS_OAUTH_FRONTEND_ORIGIN"
 }
+$outboundProxyMode = Get-LocalSetting "OUTBOUND_PROXY_MODE" "explicit"
+if ($outboundProxyMode -notin @("explicit", "system")) {
+    throw "OUTBOUND_PROXY_MODE_INVALID"
+}
 $outboundHttpProxy = Get-LocalSetting "HTTP_PROXY"
 $outboundHttpsProxy = Get-LocalSetting "HTTPS_PROXY"
+$outboundHttpProxy = Resolve-OutboundProxyUrl `
+    -Mode $outboundProxyMode `
+    -ConfiguredProxy $outboundHttpProxy `
+    -Scheme "http"
+$outboundHttpsProxy = Resolve-OutboundProxyUrl `
+    -Mode $outboundProxyMode `
+    -ConfiguredProxy $outboundHttpsProxy `
+    -Scheme "https"
 $outboundNoProxy = Get-LocalSetting "NO_PROXY"
 $nodeUseEnvProxy = Get-LocalSetting "NODE_USE_ENV_PROXY"
 $backlinksRequestTimeoutSeconds = Get-LocalSetting `
@@ -819,6 +956,12 @@ if ($outboundHttpProxy -or $outboundHttpsProxy) {
         "127.0.0.1" -notin $noProxyHosts
     ) {
         throw "OUTBOUND_PROXY_LOCAL_BYPASS_REQUIRED"
+    }
+    if ($nodeUseEnvProxy -eq "1") {
+        Assert-OutboundProxyEndpointReachable @(
+            $outboundHttpProxy,
+            $outboundHttpsProxy
+        )
     }
 }
 $dataForSeoDefaultAvailability = if ($growthosRuntimeMode -eq "PRODUCT") {
@@ -973,6 +1116,18 @@ $backlinksApiPort = Get-PortSetting "BACKLINKS_API_HOST_PORT" 7301
 $backlinksWorkerHealthPort = Get-PortSetting `
     "BACKLINKS_WORKER_HEALTH_PORT" `
     7302
+$browserWorkerEndpoint = Get-RequiredSetting "BROWSER_WORKER_ENDPOINT"
+$browserWorkerUri = [Uri]::new($browserWorkerEndpoint)
+if (
+    $browserWorkerUri.Scheme -ne "http" -or
+    $browserWorkerUri.Host -notin @("localhost", "127.0.0.1", "::1") -or
+    $browserWorkerUri.Port -le 0
+) {
+    throw "BACKLINKS_BROWSER_WORKER_ENDPOINT_INVALID"
+}
+$crawlerProbeListenAddress = (
+    "$($browserWorkerUri.Host):$($browserWorkerUri.Port)"
+)
 
 if ($googleOauthEnabled -eq "true") {
     $expectedGoogleOauthRedirectUri = (
@@ -992,6 +1147,7 @@ if ($googleOauthEnabled -eq "true") {
         throw "GMAIL_OAUTH_FRONTEND_ORIGIN_LOCAL_RUNTIME_MISMATCH"
     }
 }
+$env:BACKLINKS_OAUTH_CALLBACK_URL = $googleOauthRedirectUri
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     throw "Docker is not available. Start Docker Desktop first."
@@ -1023,6 +1179,9 @@ try {
     Stop-RecordedProcesses
     Assert-PortAvailable "Backlinks Core API" $backlinksApiPort
     Assert-PortAvailable "Backlinks Core Worker" $backlinksWorkerHealthPort
+    if ($browserProviderEnabled -eq "true") {
+        Assert-PortAvailable "Crawler Browser Worker" $browserWorkerUri.Port
+    }
     Assert-PortAvailable "Platform API" $platformPort
     Assert-PortAvailable "Frontend" $frontendPort
 
@@ -1103,9 +1262,69 @@ try {
     }
 
     $backlinksHead = Invoke-PostgresScalar @"
-SELECT CASE
-  WHEN to_regclass('backlinks.backlink_generation_input_pins') IS NULL
-    THEN 'missing'
+  SELECT CASE
+    WHEN to_regclass('backlinks.backlink_generation_input_pins') IS NULL
+      THEN 'missing'
+    WHEN EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'backlinks'
+        AND table_name = 'backlink_recommendation_release_batch_items'
+        AND column_name = 'resource_library_snapshot'
+    )
+      THEN '0100'
+    WHEN to_regclass('backlinks.backlink_project_domain_ratings') IS NOT NULL
+      THEN '0099'
+    WHEN (
+      SELECT count(*) = 2
+        FROM pg_catalog.pg_policies
+       WHERE schemaname = 'backlinks'
+         AND policyname IN (
+           'backlink_contact_recovery_candidate_read_policy',
+           'backlink_contact_recovery_evidence_read_policy'
+         )
+         AND cmd = 'SELECT'
+         AND roles = ARRAY['growthos_backlinks_owner']::name[]
+         AND qual = 'true'
+    )
+      THEN '0095'
+    WHEN (
+      SELECT count(*) = 3
+        FROM pg_catalog.pg_policies
+       WHERE schemaname = 'backlinks'
+         AND policyname IN (
+           'backlink_contact_recovery_job_read_policy',
+           'backlink_contact_recovery_inventory_read_policy',
+           'backlink_contact_recovery_recommendation_read_policy'
+         )
+         AND cmd = 'SELECT'
+         AND roles = ARRAY['growthos_backlinks_owner']::name[]
+         AND qual = 'true'
+    )
+      THEN '0094'
+    WHEN to_regprocedure(
+      'backlinks.backlink_pool_v2_candidate_fact_reconciliation_verify()'
+    ) IS NOT NULL
+      THEN '0093'
+    WHEN to_regclass(
+      'backlinks.backlink_recommendation_pool_v2_timing_events'
+    ) IS NOT NULL
+    THEN '0092'
+  WHEN to_regclass(
+    'backlinks.backlink_recommendation_generation_candidates'
+  ) IS NOT NULL
+    THEN '0091'
+  WHEN to_regprocedure(
+    'backlinks.backlink_recommendation_pool_v2_generation_rotation_verify()'
+  ) IS NOT NULL
+    THEN '0090'
+  WHEN to_regprocedure(
+    'backlinks.backlink_recommendation_pool_v2_cross_generation_blueprint_verify()'
+  ) IS NOT NULL
+    THEN '0089'
+  WHEN to_regprocedure(
+    'backlinks.backlink_recommendation_pool_v2_evidence_replay_verify()'
+  ) IS NOT NULL
+    THEN '0088'
   WHEN to_regclass(
     'backlinks.backlink_send_intent_active_logical_message_uq'
   ) IS NOT NULL
@@ -1386,24 +1605,21 @@ END;
     }
     if ($null -ne $backlinksMigrationStart) {
         Write-Host "Applying Backlinks migrations from $backlinksMigrationStart through $backlinksTargetHead..."
-        Get-ChildItem -LiteralPath $backlinksMigrationsDir -Filter "*.sql" |
-            Sort-Object Name |
-            Where-Object {
-                [string]::CompareOrdinal(
-                    $_.Name,
-                    "$backlinksMigrationStart`_"
-                ) -ge 0 -and
-                [string]::CompareOrdinal(
-                    $_.Name,
-                    "$backlinksTargetHead`_zzzz"
-                ) -le 0
-            } |
-            ForEach-Object {
-                Write-Host "Applying $($_.Name)"
-                Invoke-PostgresSql (
-                    Get-Content -LiteralPath $_.FullName -Raw
-                )
-            }
+        $renderedMigrationJson = (
+            & node $backlinksDeploymentManifestRenderer `
+                --start $backlinksMigrationStart `
+                --target $backlinksTargetHead 2>&1
+        ) -join [Environment]::NewLine
+        if ($LASTEXITCODE -ne 0) {
+            throw "BACKLINKS_MANIFEST_RENDER_FAILED: $renderedMigrationJson"
+        }
+        $renderedMigrations = @(
+            $renderedMigrationJson | ConvertFrom-Json
+        )
+        foreach ($migration in $renderedMigrations) {
+            Write-Host "Applying $($migration.fileName)"
+            Invoke-PostgresSql ([string]$migration.sql)
+        }
     }
 
     if ($platformLocalDevelopmentAuthEnabled -eq "true") {
@@ -1513,6 +1729,12 @@ ALTER ROLE growthos_backlinks_local
             "DATAFORSEO_MAX_PAID_CALLS"
         DATAFORSEO_CANDIDATE_LIMIT = Get-RequiredSetting `
             "DATAFORSEO_CANDIDATE_LIMIT"
+        DATAFORSEO_DISCOVERY_CONCURRENCY = Get-LocalSetting `
+            "DATAFORSEO_DISCOVERY_CONCURRENCY" `
+            "2"
+        DATAFORSEO_QUALIFICATION_CONCURRENCY = Get-LocalSetting `
+            "DATAFORSEO_QUALIFICATION_CONCURRENCY" `
+            "2"
         BROWSER_PROVIDER_ENABLED = $browserProviderEnabled
         BROWSER_PROVIDER_EXTERNAL_AVAILABILITY = (
             $browserProviderAvailability
@@ -1520,8 +1742,7 @@ ALTER ROLE growthos_backlinks_local
         BROWSER_PROVIDER_EXTERNAL_UNAVAILABLE_REASON = (
             $browserProviderUnavailableReason
         )
-        BROWSER_WORKER_ENDPOINT = Get-RequiredSetting `
-            "BROWSER_WORKER_ENDPOINT"
+        BROWSER_WORKER_ENDPOINT = $browserWorkerEndpoint
         BROWSER_WORKER_TIMEOUT_MS = Get-LocalSetting `
             "BROWSER_WORKER_TIMEOUT_MS" `
             "20000"
@@ -1546,6 +1767,9 @@ ALTER ROLE growthos_backlinks_local
         PLATFORM_SECRET_STORE_PROVIDER = Get-RequiredSetting `
             "PLATFORM_SECRET_STORE_PROVIDER"
         PLATFORM_SECRET_STORE_ROOT = $secretStoreRoot
+        RESOURCE_LIBRARY_SQLITE_PATH = Get-LocalSetting "RESOURCE_LIBRARY_SQLITE_PATH"
+        RESOURCE_LIBRARY_ENABLED = Get-LocalSetting "RESOURCE_LIBRARY_ENABLED" "true"
+        AHREFS_CREDENTIAL_SECRET_REF = Get-LocalSetting "AHREFS_CREDENTIAL_SECRET_REF"
         LOCALAPPDATA = $localAppData
     }
     foreach ($aiSetting in $aiProviderEnvironment.GetEnumerator()) {
@@ -1604,6 +1828,43 @@ ALTER ROLE growthos_backlinks_local
     }
     Set-ProcessEnvironment $providerEnvironment
     Set-ProcessEnvironment $coreEnvironment
+    $archiveEnvironment = @{
+        PROVIDER_ARCHIVE_ENABLED = Get-LocalSetting "PROVIDER_ARCHIVE_ENABLED" "false"
+        PROVIDER_ARCHIVE_DEPLOYMENT_ID = Get-LocalSetting "PROVIDER_ARCHIVE_DEPLOYMENT_ID"
+        PROVIDER_ARCHIVE_SPOOL_DIR = Get-LocalSetting "PROVIDER_ARCHIVE_SPOOL_DIR"
+        PROVIDER_ARCHIVE_MAX_RESPONSE_BYTES = Get-LocalSetting "PROVIDER_ARCHIVE_MAX_RESPONSE_BYTES" "33554432"
+        PROVIDER_ARCHIVE_MAX_PENDING = Get-LocalSetting "PROVIDER_ARCHIVE_MAX_PENDING" "100000"
+        PROVIDER_ARCHIVE_CENTER_URL = Get-LocalSetting "PROVIDER_ARCHIVE_CENTER_URL"
+        PROVIDER_ARCHIVE_UPLOAD_TOKEN_FILE = Get-LocalSetting "PROVIDER_ARCHIVE_UPLOAD_TOKEN_FILE"
+        PROVIDER_ARCHIVE_UPLOAD_TIMEOUT_MS = Get-LocalSetting "PROVIDER_ARCHIVE_UPLOAD_TIMEOUT_MS" "30000"
+        PROVIDER_ARCHIVE_UPLOAD_BATCH_SIZE = Get-LocalSetting "PROVIDER_ARCHIVE_UPLOAD_BATCH_SIZE" "20"
+        PROVIDER_ARCHIVE_RETRY_BASE_MS = Get-LocalSetting "PROVIDER_ARCHIVE_RETRY_BASE_MS" "5000"
+        PROVIDER_ARCHIVE_RETRY_MAX_MS = Get-LocalSetting "PROVIDER_ARCHIVE_RETRY_MAX_MS" "300000"
+        PROVIDER_ARCHIVE_UPLOAD_INTERVAL_MS = Get-LocalSetting "PROVIDER_ARCHIVE_UPLOAD_INTERVAL_MS" "5000"
+    }
+    Set-ProcessEnvironment $archiveEnvironment
+    $archivePythonPath = Join-Path $root "backend\provider_archive"
+    $pythonPaths = @($archivePythonPath, $env:PYTHONPATH) | Where-Object { $_ }
+    $env:PYTHONPATH = $pythonPaths -join [IO.Path]::PathSeparator
+    if ($archiveEnvironment.PROVIDER_ARCHIVE_ENABLED -eq "true") {
+        $archiveErrorLog = Join-Path $runtimeDir "provider-archive.stderr.log"
+        $archiveProcess = Start-Process `
+            -FilePath (Get-Command node).Source `
+            -ArgumentList @("dist/modules/provider-archive/cli.js", "upload") `
+            -WorkingDirectory $coreDir `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $runtimeDir "provider-archive.stdout.log") `
+            -RedirectStandardError $archiveErrorLog `
+            -PassThru
+        Register-ManagedProcess `
+            -Name "Provider Archive Uploader" `
+            -Process $archiveProcess `
+            -ExpectedCommand "dist/modules/provider-archive/cli.js upload"
+        Assert-ManagedProcessRunning `
+            -Name "Provider Archive Uploader" `
+            -Process $archiveProcess `
+            -StandardErrorPath $archiveErrorLog
+    }
 
     $env:BACKLINKS_API_ENABLED = "true"
     $env:BACKLINKS_WORKER_ENABLED = "false"
@@ -1667,6 +1928,9 @@ ALTER ROLE growthos_backlinks_local
         TEMPORAL_ADDRESS = "127.0.0.1:$temporalPort"
         TEMPORAL_NAMESPACE = "default"
         CRAWLER_WORKER_EXECUTABLE = $crawlerExe
+        CRAWLER_WORKER_START_ON_BOOT = $browserProviderEnabled
+        CRAWLER_WORKER_IDLE_TIMEOUT_SECONDS = "0"
+        CRAWLER_PROBE_LISTEN_ADDRESS = $crawlerProbeListenAddress
         S3_ENDPOINT_URL = "http://127.0.0.1:$minioApiPort"
         S3_REGION = "us-east-1"
         S3_BUCKET = "seo-crawler"
@@ -1698,8 +1962,10 @@ ALTER ROLE growthos_backlinks_local
         LOCAL_PRODUCT_USER_ID = Get-RequiredSetting "LOCAL_PRODUCT_USER_ID"
         DATAFORSEO_LOGIN = ""
         DATAFORSEO_PASSWORD = ""
-        BUSINESS_PROFILE_AI_BASE_URL = ""
-        BUSINESS_PROFILE_AI_API_KEY = ""
+        BUSINESS_PROFILE_AI_BASE_URL = Get-LocalSetting "BUSINESS_PROFILE_AI_BASE_URL"
+        BUSINESS_PROFILE_AI_API_KEY = Get-LocalSetting "BUSINESS_PROFILE_AI_API_KEY"
+        BUSINESS_PROFILE_AI_MODEL = Get-LocalSetting "BUSINESS_PROFILE_AI_MODEL" "gpt-5.4-mini"
+        BUSINESS_PROFILE_AI_MAX_RETRIES = Get-LocalSetting "BUSINESS_PROFILE_AI_MAX_RETRIES" "1"
         ARTICLE_RESEARCH_PROVIDER = ""
         ARTICLE_RESEARCH_API_KEY = ""
         ARTICLE_AI_IMAGE_BASE_URL = ""

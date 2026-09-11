@@ -7,6 +7,7 @@ import {
   parseCommercialRefillWindowKey,
   planCommercialSupplyOperation,
   recordCommercialRefillAttemptOutcome,
+  resolveCommercialRefillRetryDelay,
   type CommercialPaidRefillTier,
   type CommercialRefillAttempt,
   type CommercialSupplyOutcome,
@@ -1316,7 +1317,14 @@ export async function planCommercialSupplyOperationStep(
         status: "wait",
         outcome: plan.outcome,
         reason: plan.reason,
-        retryAfterMs: 60_000,
+        retryAfterMs: resolveCommercialRefillRetryDelay({
+          reason: plan.reason,
+          stableKey: [
+            input.jobId,
+            input.visiblePoolGeneration,
+            plan.reason,
+          ].join(":"),
+        }),
         publishedCount,
       })
     : Object.freeze({

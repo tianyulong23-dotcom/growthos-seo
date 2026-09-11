@@ -191,6 +191,7 @@ function HeaderActions() {
             <Button
               variant="ghost"
               size="icon-sm"
+              className="hidden sm:inline-flex"
               aria-label="任务中心"
               title="任务中心"
             />
@@ -229,7 +230,7 @@ function HeaderActions() {
             <Button
               variant="ghost"
               size="icon-sm"
-              className="relative"
+              className="relative hidden sm:inline-flex"
               aria-label="通知"
               title="通知"
             />
@@ -279,6 +280,7 @@ function HeaderActions() {
       <Button
         variant="ghost"
         size="icon-sm"
+        className="hidden sm:inline-flex"
         onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
         aria-label="切换主题"
         title="切换主题"

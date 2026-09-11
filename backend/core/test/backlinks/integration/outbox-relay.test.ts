@@ -1,5 +1,13 @@
 import { createRequire } from "node:module";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import type { BacklinkProjectAnalysisInput } from "../../../src/modules/backlinks/activities/backlink-project-analysis.activity.js";
 import { createJobRepository } from "../../../src/modules/backlinks/db/repositories/job.repository.js";
@@ -8,27 +16,28 @@ import {
   BACKLINK_PLACEMENT_MONITORING_LIFECYCLE,
   BACKLINK_PLACEMENT_MONITORING_REQUESTED,
   BACKLINK_PROJECT_ANALYSIS_REQUESTED,
-  BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
   createBacklinkOutboxRelay,
   createPlacementMonitoringLifecycleOutboxRelay,
   createPlacementMonitoringRequestedOutboxRelay,
-  createRecommendationRefillOutboxRelay,
   createTemporalBacklinkProjectAnalysisStarter,
-  createTemporalRecommendationRefillConsumer,
 } from "../../../src/modules/backlinks/workflows/outbox-relay.js";
 import {
   backlinksRuntimeContract,
-  buildBacklinksRecoveryTaskQueue,
   buildBacklinksWorkflowId,
 } from "../../../src/modules/backlinks/workflows/namespaces.js";
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
 } from "./harness/postgresql-container.js";
 
 type Client = {
-  connect(): Promise<void>; end(): Promise<void>;
-  query(text: string, values?: readonly unknown[]): Promise<{
+  connect(): Promise<void>;
+  end(): Promise<void>;
+  query(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<{
     rows: Record<string, unknown>[];
   }>;
 };
@@ -53,11 +62,21 @@ describe("BL-AI-040 Outbox Relay", () => {
     await harness.migrate();
     client = new Client({ connectionString: harness.connectionString });
     await client.connect();
+    await installBacklinksManifestAfterFoundation(client);
+    await client.query("SET search_path = backlinks, pg_catalog");
   }, 120_000);
-  beforeEach(() => client.query(
-    `TRUNCATE backlink_audit_events, backlink_lifecycle_events,
-       backlink_outbox_events, backlink_jobs RESTART IDENTITY CASCADE`,
-  ));
+  beforeEach(() =>
+    client.query(
+      `TRUNCATE backlink_recommendation_pool_v2_cutover_control,
+         backlink_recommendation_pool_project_contracts,
+         backlink_recommendation_generation_contracts,
+         backlink_generation_input_pins,
+         backlink_outreach_profile_versions,
+         backlink_recommendation_refills,
+         backlink_audit_events, backlink_lifecycle_events,
+         backlink_outbox_events, backlink_jobs RESTART IDENTITY CASCADE`,
+    ),
+  );
   afterAll(async () => {
     await client?.end();
     await harness?.stop();
@@ -65,7 +84,8 @@ describe("BL-AI-040 Outbox Relay", () => {
 
   async function append(sequence: number) {
     const input: BacklinkProjectAnalysisInput = {
-      ...scope, jobId: id(4, sequence),
+      ...scope,
+      jobId: id(4, sequence),
       workflowId: buildBacklinksWorkflowId({
         organizationId: scope.organizationId,
         workspaceId: scope.workspaceId,
@@ -78,10 +98,15 @@ describe("BL-AI-040 Outbox Relay", () => {
     const repository = createOutboxRepository(client);
     const eventId = id(5, sequence);
     await repository.append({
-      eventId, ...scope, eventType: BACKLINK_PROJECT_ANALYSIS_REQUESTED,
-      aggregateId: input.jobId, aggregateVersion: 1,
-      idempotencyKey: input.workflowId, payload: input,
-      payloadSchemaVersion: 1, actorId: "relay-test",
+      eventId,
+      ...scope,
+      eventType: BACKLINK_PROJECT_ANALYSIS_REQUESTED,
+      aggregateId: input.jobId,
+      aggregateVersion: 1,
+      idempotencyKey: input.workflowId,
+      payload: input,
+      payloadSchemaVersion: 1,
+      actorId: "relay-test",
     });
     return { eventId, input, repository };
   }
@@ -89,24 +114,32 @@ describe("BL-AI-040 Outbox Relay", () => {
   it("reclaims a stale processing event after relay restart", async () => {
     const { eventId, input, repository } = await append(1);
     await repository.claim({
-      workerId: "dead-relay", limit: 1,
+      workerId: "dead-relay",
+      limit: 1,
       eventType: BACKLINK_PROJECT_ANALYSIS_REQUESTED,
     });
     const temporalStart = vi.fn(async () => undefined);
     const relay = createBacklinkOutboxRelay({
       repository,
       workflowStarter: createTemporalBacklinkProjectAnalysisStarter(
-        { start: temporalStart }, backlinksRuntimeContract.taskQueue,
+        { start: temporalStart },
+        backlinksRuntimeContract.taskQueue,
       ),
     });
-    await expect(relay.runOnce({
-      workerId: "restarted-relay", limit: 1,
-      staleClaimBefore: new Date("2999-01-01"),
-    })).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
+    await expect(
+      relay.runOnce({
+        workerId: "restarted-relay",
+        limit: 1,
+        staleClaimBefore: new Date("2999-01-01"),
+      }),
+    ).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
     expect(temporalStart).toHaveBeenCalledWith(
       backlinksRuntimeContract.workflows.projectAnalysis.workflowType,
-      { workflowId: input.workflowId, taskQueue: backlinksRuntimeContract.taskQueue,
-        args: [input] },
+      {
+        workflowId: input.workflowId,
+        taskQueue: backlinksRuntimeContract.taskQueue,
+        args: [input],
+      },
     );
     const stored = await client.query(
       "SELECT status, attempt_count FROM backlink_outbox_events WHERE id=$1",
@@ -131,11 +164,13 @@ describe("BL-AI-040 Outbox Relay", () => {
       ),
     });
 
-    await expect(relay.runOnce({
-      workerId: "replay-relay",
-      limit: 1,
-      staleClaimBefore: new Date(0),
-    })).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
+    await expect(
+      relay.runOnce({
+        workerId: "replay-relay",
+        limit: 1,
+        staleClaimBefore: new Date(0),
+      }),
+    ).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
 
     const stored = await client.query(
       "SELECT status, attempt_count FROM backlink_outbox_events WHERE id=$1",
@@ -189,26 +224,41 @@ describe("BL-AI-040 Outbox Relay", () => {
     const relay = createBacklinkOutboxRelay({
       repository,
       retryAt: () => new Date(0),
-      workflowStarter: { start: async (input) => {
-        creates.push(await jobs.create({
-          ...scope, jobId: delivery++ === 0 ? input.jobId : id(4, 20),
-          jobType: "backlink_project_analysis",
-          sourceObjectType: "website_project",
-          sourceObjectId: input.websiteProjectId, workflowId: input.workflowId,
-          correlationId: eventId, actorId: "relay-test",
-        }));
-        if (failAfterCreate) {
-          failAfterCreate = false;
-          throw new Error("relay crashed after workflow side effect");
-        }
-      } },
+      workflowStarter: {
+        start: async (input) => {
+          creates.push(
+            await jobs.create({
+              ...scope,
+              jobId: delivery++ === 0 ? input.jobId : id(4, 20),
+              jobType: "backlink_project_analysis",
+              sourceObjectType: "website_project",
+              sourceObjectId: input.websiteProjectId,
+              workflowId: input.workflowId,
+              correlationId: eventId,
+              actorId: "relay-test",
+            }),
+          );
+          if (failAfterCreate) {
+            failAfterCreate = false;
+            throw new Error("relay crashed after workflow side effect");
+          }
+        },
+      },
     });
-    await expect(relay.runOnce({
-      workerId: "first", limit: 1, staleClaimBefore: new Date(0),
-    })).resolves.toEqual({ claimed: 1, published: 0, failed: 1 });
-    await expect(relay.runOnce({
-      workerId: "retry", limit: 1, staleClaimBefore: new Date(0),
-    })).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
+    await expect(
+      relay.runOnce({
+        workerId: "first",
+        limit: 1,
+        staleClaimBefore: new Date(0),
+      }),
+    ).resolves.toEqual({ claimed: 1, published: 0, failed: 1 });
+    await expect(
+      relay.runOnce({
+        workerId: "retry",
+        limit: 1,
+        staleClaimBefore: new Date(0),
+      }),
+    ).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
     expect(creates).toEqual([true, false]);
     const stored = await client.query(
       `SELECT count(job.id)::int AS job_count, outbox.status,
@@ -221,213 +271,10 @@ describe("BL-AI-040 Outbox Relay", () => {
       [eventId],
     );
     expect(stored.rows[0]).toEqual({
-      job_count: 1, status: "published", attempt_count: 2,
+      job_count: 1,
+      status: "published",
+      attempt_count: 2,
     });
-  });
-
-  it("relays one recommendation refill request to its existing Temporal workflow", async () => {
-    const repository = createOutboxRepository(client);
-    const recommendationContextVersionId = id(6, 30);
-    const jobId = id(4, 30);
-    const eventId = id(5, 30);
-    const workflowId = buildBacklinksWorkflowId({
-      organizationId: scope.organizationId,
-      workspaceId: scope.workspaceId,
-      websiteProjectId: scope.websiteProjectId,
-      workflow: "recommendation-refill",
-      instanceId: jobId,
-    });
-    const payload = {
-      contractVersion: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
-      ...scope,
-      recommendationContextVersionId,
-      visiblePoolGeneration: 1,
-      jobId,
-      workflowId,
-      correlationId: "request-recommendation-refill-30",
-      actorId: "relay-test",
-      refillWindowKey: "manual-2026-08-04",
-      lowWatermark: 9,
-      highWatermark: 10,
-      supplyMode: "existing_evidence" as const,
-    };
-    await repository.append({
-      eventId,
-      ...scope,
-      eventType: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
-      aggregateId: jobId,
-      aggregateVersion: 1,
-      idempotencyKey: workflowId,
-      payload,
-      payloadSchemaVersion: 1,
-      actorId: "relay-test",
-    });
-    const temporalStart = vi.fn(async () => undefined);
-    const relay = createRecommendationRefillOutboxRelay({
-      repository,
-      consumer: createTemporalRecommendationRefillConsumer(
-        { start: temporalStart },
-        backlinksRuntimeContract.taskQueue,
-      ),
-    });
-
-    await expect(relay.runOnce({
-      workerId: "recommendation-refill-relay",
-      limit: 1,
-      staleClaimBefore: new Date(0),
-    })).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
-    expect(temporalStart).toHaveBeenCalledWith(
-      backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
-      {
-        workflowId,
-        taskQueue: backlinksRuntimeContract.taskQueue,
-        args: [payload],
-      },
-    );
-  });
-
-  it("relays the persisted paid operation authorization to Temporal", async () => {
-    const repository = createOutboxRepository(client);
-    const recommendationContextVersionId = id(6, 32);
-    const jobId = id(4, 32);
-    const eventId = id(5, 32);
-    const workflowId = buildBacklinksWorkflowId({
-      organizationId: scope.organizationId,
-      workspaceId: scope.workspaceId,
-      websiteProjectId: scope.websiteProjectId,
-      workflow: "recommendation-refill",
-      instanceId: jobId,
-    });
-    const payload = {
-      contractVersion: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
-      ...scope,
-      recommendationContextVersionId,
-      visiblePoolGeneration: 1,
-      jobId,
-      workflowId,
-      correlationId: "request-recommendation-refill-32",
-      actorId: "relay-test",
-      refillWindowKey: "manual-2026-08-20",
-      lowWatermark: 0,
-      highWatermark: 10,
-      providerOperationId: `commercial-refill-operation:${jobId}`,
-      providerBudgetAuthorization: {
-        provider: "dataforseo" as const,
-        reasonCode: "user_authorized_persistent_discovery" as const,
-        maxPaidCalls: 3,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "relay-test",
-      },
-    };
-    await repository.append({
-      eventId,
-      ...scope,
-      eventType: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
-      aggregateId: jobId,
-      aggregateVersion: 1,
-      idempotencyKey: workflowId,
-      payload,
-      payloadSchemaVersion: 1,
-      actorId: "relay-test",
-    });
-    const temporalStart = vi.fn(async () => undefined);
-    const relay = createRecommendationRefillOutboxRelay({
-      repository,
-      consumer: createTemporalRecommendationRefillConsumer(
-        { start: temporalStart },
-        backlinksRuntimeContract.taskQueue,
-      ),
-    });
-
-    await expect(relay.runOnce({
-      workerId: "recommendation-refill-relay",
-      limit: 1,
-      staleClaimBefore: new Date(0),
-    })).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
-    expect(temporalStart).toHaveBeenCalledWith(
-      backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
-      {
-        workflowId,
-        taskQueue: backlinksRuntimeContract.taskQueue,
-        args: [payload],
-      },
-    );
-  });
-
-  it("isolates recovery relay dispatch to its exact job and outbox event", async () => {
-    const repository = createOutboxRepository(client);
-    const recommendationContextVersionId = id(6, 31);
-    const jobId = id(4, 31);
-    const unrelatedJobId = id(4, 32);
-    const eventId = id(5, 31);
-    const unrelatedEventId = id(5, 32);
-    const appendRefill = async (
-      refillJobId: string,
-      refillEventId: string,
-    ) => {
-      const workflowId = buildBacklinksWorkflowId({
-        ...scope,
-        workflow: "recommendation-refill",
-        instanceId: refillJobId,
-      });
-      await repository.append({
-        eventId: refillEventId,
-        ...scope,
-        eventType: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
-        aggregateId: refillJobId,
-        aggregateVersion: 1,
-        idempotencyKey: workflowId,
-        payload: {
-          contractVersion: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
-          ...scope,
-          recommendationContextVersionId,
-          visiblePoolGeneration: 1,
-          jobId: refillJobId,
-          workflowId,
-          correlationId: `recovery-${refillJobId}`,
-          actorId: "relay-test",
-          refillWindowKey: `manual-${refillJobId}`,
-          lowWatermark: 9,
-          highWatermark: 10,
-        },
-        payloadSchemaVersion: 1,
-        actorId: "relay-test",
-      });
-      return workflowId;
-    };
-    const workflowId = await appendRefill(jobId, eventId);
-    await appendRefill(unrelatedJobId, unrelatedEventId);
-    const temporalStart = vi.fn(async () => undefined);
-    const taskQueue = buildBacklinksRecoveryTaskQueue(jobId);
-    const relay = createRecommendationRefillOutboxRelay({
-      repository,
-      consumer: createTemporalRecommendationRefillConsumer(
-        { start: temporalStart },
-        taskQueue,
-        { expectedJobId: jobId },
-      ),
-    });
-
-    await expect(relay.runOnce({
-      workerId: "recommendation-refill-recovery",
-      limit: 1,
-      staleClaimBefore: new Date(0),
-      eventId,
-    })).resolves.toEqual({ claimed: 1, published: 1, failed: 0 });
-    expect(temporalStart).toHaveBeenCalledWith(
-      backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
-      {
-        workflowId,
-        taskQueue,
-        args: [expect.objectContaining({ jobId })],
-      },
-    );
-    expect((await client.query(
-      `SELECT id,status FROM backlink_outbox_events ORDER BY id`,
-    )).rows).toEqual([
-      { id: eventId, status: "published" },
-      { id: unrelatedEventId, status: "pending" },
-    ]);
   });
 
   it("relays Placement monitoring request and lifecycle contracts to their owner consumers", async () => {
@@ -524,10 +371,14 @@ describe("BL-AI-040 Outbox Relay", () => {
     };
 
     await expect(requestedRelay.runOnce(runInput)).resolves.toEqual({
-      claimed: 2, published: 2, failed: 0,
+      claimed: 2,
+      published: 2,
+      failed: 0,
     });
     await expect(lifecycleRelay.runOnce(runInput)).resolves.toEqual({
-      claimed: 1, published: 1, failed: 0,
+      claimed: 1,
+      published: 1,
+      failed: 0,
     });
     expect(requested).toHaveBeenNthCalledWith(1, {
       ...scope,

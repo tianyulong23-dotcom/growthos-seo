@@ -1,8 +1,9 @@
 export const commercialRecommendationFitModelVersion =
   "recommendation-commercial-fit.v4";
 export const commercialRecommendationFitRuleVersion =
-  "recommendation-commercial-fit-rules.v4.2";
+  "recommendation-commercial-fit-rules.v4.3";
 export const commercialFitBaselineAdmissionThreshold = 50;
+export const commercialFitSubsequentGenerationAdmissionThreshold = 40;
 export const commercialFitSpamReviewMinimum = 30;
 export const commercialFitSpamHardRejectMinimum = 70;
 export const commercialFitProgressiveAdmissionPolicyVersion =
@@ -70,7 +71,7 @@ export type CommercialFitAdmission = Readonly<{
   policyVersion: typeof commercialFitProgressiveAdmissionPolicyVersion;
   baselineThreshold: typeof commercialFitBaselineAdmissionThreshold;
   appliedThreshold: number;
-  fallbackApplied: false;
+  fallbackApplied: boolean;
 }>;
 
 export type CommercialFitDecision = Readonly<{
@@ -116,30 +117,55 @@ function roundFour(value: number): number {
   return Math.round((value + Number.EPSILON) * 10_000) / 10_000;
 }
 
-function admission(): CommercialFitAdmission {
+function admission(threshold = commercialFitBaselineAdmissionThreshold): CommercialFitAdmission {
   return Object.freeze({
     policyVersion: commercialFitProgressiveAdmissionPolicyVersion,
     baselineThreshold: commercialFitBaselineAdmissionThreshold,
-    appliedThreshold: commercialFitBaselineAdmissionThreshold,
-    fallbackApplied: false,
+    appliedThreshold: threshold,
+    fallbackApplied: threshold < commercialFitBaselineAdmissionThreshold,
   });
 }
 
 export function resolveProgressiveCommercialFitAdmissionThreshold(
   scores: readonly CommercialFitDecision[],
+  options: Readonly<{ visiblePoolGeneration?: number }> = {},
 ): number {
   void scores;
-  return commercialFitBaselineAdmissionThreshold;
+  const visiblePoolGeneration = options.visiblePoolGeneration ?? 1;
+  if (
+    !Number.isInteger(visiblePoolGeneration) ||
+    visiblePoolGeneration < 1
+  ) {
+    throw new TypeError("visiblePoolGeneration must be a positive integer");
+  }
+  return visiblePoolGeneration >= 2
+    ? commercialFitSubsequentGenerationAdmissionThreshold
+    : commercialFitBaselineAdmissionThreshold;
 }
 
 export function applyCommercialFitAdmissionThreshold(
   score: CommercialFitDecision,
   threshold: number,
 ): CommercialFitDecision {
-  if (threshold !== commercialFitBaselineAdmissionThreshold) {
-    throw new TypeError("Commercial fit admission threshold must be 50");
+  if (
+    threshold !== commercialFitBaselineAdmissionThreshold &&
+    threshold !== commercialFitSubsequentGenerationAdmissionThreshold
+  ) {
+    throw new TypeError("Commercial fit admission threshold must be 40 or 50");
   }
-  return Object.freeze({ ...score, admission: admission() });
+  const decision =
+    score.hitGates.length > 0
+      ? "ineligible"
+      : score.decision === "insufficient_data" || score.total === null
+        ? "insufficient_data"
+        : score.total >= threshold
+          ? "eligible"
+          : "ineligible";
+  return Object.freeze({
+    ...score,
+    decision,
+    admission: admission(threshold),
+  });
 }
 
 export function scoreCommercialRecommendationFit(

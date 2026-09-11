@@ -96,6 +96,27 @@ function serializeEnvironmentFile(values: ReadonlyMap<string, string>): string {
     .join("\n")}\n`;
 }
 
+const runtimeOwnedNetworkEnvironmentNames = [
+  "OUTBOUND_PROXY_MODE",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "NODE_USE_ENV_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+] as const;
+
+function removeRuntimeOwnedNetworkEnvironment(
+  environment: Map<string, string>,
+): void {
+  for (const name of runtimeOwnedNetworkEnvironmentNames) {
+    environment.delete(name);
+  }
+}
+
 async function writeTextAtomically(path: string, value: string): Promise<void> {
   const temporaryPath = `${path}.${process.pid}.tmp`;
   await writeFile(
@@ -127,6 +148,7 @@ async function main(): Promise<void> {
   const environments = environmentTexts.map(parseEnvironmentFile);
   const enabledStates: boolean[] = [];
   for (const environment of environments) {
+    removeRuntimeOwnedNetworkEnvironment(environment);
     for (const [name, value] of Object.entries(environmentUpdates)) {
       environment.set(name, value);
     }
