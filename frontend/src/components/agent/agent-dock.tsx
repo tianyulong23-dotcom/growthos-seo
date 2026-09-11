@@ -411,6 +411,7 @@ export function AgentTimelineItem({
     Boolean(actionLabel && (internalTarget || externalTarget))
   const isCompactOnboardingStep =
     isOnboardingEvent &&
+    event.kind !== "message" &&
     event.status !== "failed" &&
     !isBusinessUnderstandingResult &&
     !isBusinessConfirmationPrompt &&
@@ -628,6 +629,10 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
     run?.status === "executing" ||
     run?.status === "verifying"
   const hasPersistedReply = hasVisibleAssistantReply(messages, run?.id)
+  const followVersion = React.useMemo(
+    () => ({ timelineItems, runtime, isThinking }),
+    [timelineItems, runtime, isThinking]
+  )
 
   async function sendMessage() {
     const content = draft.trim()
@@ -785,13 +790,8 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
       </div>
 
       <AgentScrollViewport
-        followVersion={`${timelineItems
-          .map((item) =>
-            item.type === "event"
-              ? `${item.id}:${item.event.updatedAt}:${item.event.status}:${item.event.content?.length ?? 0}`
-              : `${item.id}:${item.message.content.length}:${item.message.streaming === true}`
-          )
-          .join("|")}:${isThinking}:${runtime?.lastEventType ?? ""}`}
+        key={agent.detail?.conversation.id ?? project.id}
+        followVersion={followVersion}
         className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-6 [&>*]:mx-auto [&>*]:w-full [&>*]:max-w-2xl"
       >
         {shouldShowAgentWelcomeFallback(agent.loading, timelineItems) && (

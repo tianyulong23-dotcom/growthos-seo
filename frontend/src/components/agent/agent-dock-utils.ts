@@ -1,3 +1,6 @@
+import remarkParse from "remark-parse"
+import { unified } from "unified"
+
 import type {
   AgentDisplayPart,
   AgentMessage,
@@ -16,11 +19,36 @@ export type ConversationTimelineItem =
   | { type: "message"; id: string; createdAt: string; message: AgentMessage }
   | { type: "event"; id: string; createdAt: string; event: AgentTimelineEvent }
 
+const markdownParser = unified().use(remarkParse)
+const spacingNoise = /^(?:(?:\\)|(?:&#x20;)|(?:&nbsp;)|\s)+$/i
+
 export function cleanAgentMessageContent(content: string) {
-  return content
-    .split("\n")
+  const lines = content.split("\n")
+  if (!lines.some((line) => spacingNoise.test(line.trim()))) return content
+
+  const codeLines = new Set<number>()
+  function protectCode(node: {
+    type: string
+    position?: { start: { line: number }; end: { line: number } }
+    children?: Parameters<typeof protectCode>[0][]
+  }) {
+    if ((node.type === "code" || node.type === "inlineCode") && node.position) {
+      for (
+        let line = node.position.start.line;
+        line <= node.position.end.line;
+        line++
+      ) {
+        codeLines.add(line)
+      }
+    }
+    node.children?.forEach(protectCode)
+  }
+  // Use Markdown positions so fenced, indented and multiline inline code stay literal.
+  protectCode(markdownParser.parse(content))
+  return lines
     .filter(
-      (line) => !/^(?:(?:\\)|(?:&#x20;)|(?:&nbsp;)|\s)+$/i.test(line.trim())
+      (line, index) =>
+        codeLines.has(index + 1) || !spacingNoise.test(line.trim())
     )
     .join("\n")
 }
