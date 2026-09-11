@@ -20,7 +20,6 @@ import {
 import type { CommercialDiscoverySourceType } from "../../domain/recommendations/commercial-discovery-source.js";
 import type { CommercialCandidateFitDecision } from "../../domain/recommendations/commercial-candidate-evaluation.js";
 import {
-  commercialFitBaselineAdmissionThreshold,
   commercialRecommendationFitModelVersion,
   commercialRecommendationFitRuleVersion,
 } from "../../domain/recommendations/commercial-score-v4.js";
@@ -135,6 +134,14 @@ function sameStrings(
     && left.every((value, index) => value === right[index]);
 }
 
+function startsWithStrings(
+  prefix: readonly string[],
+  values: readonly string[],
+): boolean {
+  return prefix.length <= values.length
+    && prefix.every((value, index) => value === values[index]);
+}
+
 function assertQualificationInputBinding(
   input: Readonly<{
     scope: RecommendationContractScope;
@@ -148,7 +155,7 @@ function assertQualificationInputBinding(
     || pins.websiteProjectId !== input.scope.websiteProjectId
     || pins.projectContextVersion !== input.context.snapshotVersion
     || pins.siteProfileVersionId !== input.context.profileVersionId
-    || pins.outreachProfileVersionId !== input.context.profileVersionId
+    || pins.outreachProfileVersionId !== profile.profileVersionId
     || pins.promotionTargetVersionId
       !== input.context.promotionTargetVersionId
     || pins.qualificationContractVersion
@@ -163,7 +170,7 @@ function assertQualificationInputBinding(
     || profile.location !== input.context.countryCode
     || profile.language !== input.context.locale
     || !sameStrings(profile.productsAndServices, input.context.products)
-    || !sameStrings(profile.keywordsAndTopics, input.context.keywords)
+    || !startsWithStrings(profile.keywordsAndTopics, input.context.keywords)
     || !sameStrings(profile.targetUrls, input.context.targetUrls)
     || !sameStrings(profile.targetAudiences, input.context.targetAudiences)
     || !sameStrings(profile.partnershipGoals, input.context.partnershipGoals)
@@ -213,7 +220,7 @@ function assertAlreadyPublishableCandidates(
     || candidate.commercialScore.hitGates.length > 0
     || candidate.commercialScore.total === null
     || candidate.commercialScore.total
-      < commercialFitBaselineAdmissionThreshold
+      < candidate.commercialScore.admission.appliedThreshold
   )) {
     throw new Error(
       "Existing-evidence qualification requires an already publishable candidate.",
@@ -405,6 +412,7 @@ export async function executeCommercialQualificationProduction(
     context: ProjectContext;
     topics: readonly string[];
     candidates: readonly CommercialQualificationProductionCandidate[];
+    generationContractId?: string;
     visiblePoolGeneration: number;
     locationCode: number;
     languageCode: string;
@@ -420,6 +428,7 @@ export async function executeCommercialQualificationProduction(
     createdBy: string;
     observedAt?: Date;
     metricCollectionMode?: CommercialQualificationMetricCollectionMode;
+    metricConcurrency?: number;
   }>,
 ): Promise<CommercialQualificationProductionResult> {
   if (
@@ -452,10 +461,11 @@ export async function executeCommercialQualificationProduction(
     ...input.scope,
     visiblePoolGeneration: input.visiblePoolGeneration,
   };
-  const generationContractId = deterministicUuid(
-    "commercial-qualification-generation",
-    generationIdentity,
-  );
+  const generationContractId = input.generationContractId
+    ?? deterministicUuid(
+      "commercial-qualification-generation",
+      generationIdentity,
+    );
   await input.recommendationRepository.assertCorrectedGenerationAvailable({
     ...input.scope,
     generationContractId,
@@ -475,7 +485,7 @@ export async function executeCommercialQualificationProduction(
             languageCode,
             endpointAllowlist: input.endpointAllowlist,
             chunkSize: 1_000,
-            concurrency: 1,
+            concurrency: input.metricConcurrency ?? 1,
             runtime: input.metricRuntime,
           });
   const state: CommercialQualificationProductionResult["state"] =

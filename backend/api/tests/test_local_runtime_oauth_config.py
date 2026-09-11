@@ -8,6 +8,13 @@ COMPOSE_ENV_EXAMPLE = REPOSITORY_ROOT / "deploy" / "compose" / ".env.example"
 COMPOSE_FILE = REPOSITORY_ROOT / "deploy" / "compose" / "compose.yaml"
 
 
+def test_dev_up_preserves_business_profile_ai_configuration() -> None:
+    startup = DEV_UP.read_text(encoding="utf-8")
+    for name in ("BUSINESS_PROFILE_AI_BASE_URL", "BUSINESS_PROFILE_AI_API_KEY"):
+        assert f'{name} = Get-LocalSetting "{name}"' in startup
+        assert f'{name} = ""' not in startup
+
+
 def test_dev_up_binds_gmail_oauth_callback_to_localhost_platform_and_frontend() -> None:
     startup = DEV_UP.read_text(encoding="utf-8")
 
@@ -80,11 +87,18 @@ def test_dev_up_recognizes_complete_0068_schema_without_replaying_it() -> None:
 def test_dev_up_passes_outbound_proxy_to_core_and_extends_callback_timeout() -> None:
     startup = DEV_UP.read_text(encoding="utf-8")
 
+    assert '$outboundProxyMode = Get-LocalSetting "OUTBOUND_PROXY_MODE" "explicit"' in startup
+    assert "Get-WindowsSystemProxyUrl" in startup
+    assert "Resolve-OutboundProxyUrl" in startup
+    assert "Assert-OutboundProxyEndpointReachable" in startup
+    assert "OUTBOUND_PROXY_MODE_INVALID" in startup
+    assert "OUTBOUND_PROXY_UNREACHABLE" in startup
     assert '$outboundHttpProxy = Get-LocalSetting "HTTP_PROXY"' in startup
     assert '$outboundHttpsProxy = Get-LocalSetting "HTTPS_PROXY"' in startup
     assert '$outboundNoProxy = Get-LocalSetting "NO_PROXY"' in startup
     assert '$nodeUseEnvProxy = Get-LocalSetting "NODE_USE_ENV_PROXY"' in startup
     assert "OUTBOUND_PROXY_LOCAL_BYPASS_REQUIRED" in startup
+    assert "Assert-OutboundProxyEndpointReachable @(" in startup
     assert "$providerEnvironment[$proxySetting.Key] = $proxySetting.Value" in startup
     assert (
         "BACKLINKS_REQUEST_TIMEOUT_SECONDS = (\n"

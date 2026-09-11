@@ -1476,6 +1476,7 @@ def test_business_profile_run_history_is_newest_first_with_attempt_numbers() -> 
     first_run.status = "completed"
     first_run.stage = "completed"
     first_run.started_at = datetime(2026, 7, 23, 8, 0, tzinfo=UTC)
+    first_run.created_at = first_run.started_at
     first_run.finished_at = first_run.started_at + timedelta(seconds=10)
 
     refreshed = asyncio.run(service.refresh_business_profile(created.id))
@@ -1484,6 +1485,7 @@ def test_business_profile_run_history_is_newest_first_with_attempt_numbers() -> 
     second_run.stage = "failed"
     second_run.message = "目标网站拒绝访问"
     second_run.started_at = datetime(2026, 7, 23, 8, 5, tzinfo=UTC)
+    second_run.created_at = second_run.started_at
     second_run.finished_at = second_run.started_at + timedelta(seconds=3)
 
     runs = asyncio.run(service.list_business_profile_runs(created.id))

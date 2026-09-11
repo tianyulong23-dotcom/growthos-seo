@@ -4,9 +4,7 @@ import {
   reconcileRecommendationRefillOrphans,
   type RecommendationRefillWorkflowState,
 } from "../../src/modules/backlinks/application/services/recommendation-refill-reconciliation.service.js";
-import type {
-  RecommendationRefillSupersessionSignal,
-} from "../../src/modules/backlinks/workflows/definitions/backlink-recommendation-refill.orchestration.js";
+import type { RecommendationRefillSupersessionSignal } from "../../src/modules/backlinks/workflows/definitions/backlink-recommendation-refill.orchestration.js";
 import type {
   BacklinkTenantPool,
   BacklinkTransactionQueryResult,
@@ -33,20 +31,22 @@ function queryResult(
   return { rows, rowCount: rows.length };
 }
 
-function createPool(input: Readonly<{
-  workflowIds?: readonly string[];
-  workflowExecutions?: readonly Readonly<{
-    jobId: string;
-    workflowId: string;
-    status: string;
-  }>[];
-  hasLiveJob?: boolean;
-  jobState?: "running" | "failed";
-  hasPendingOutbox?: boolean;
-  hasLiveLease?: boolean;
-  hasProviderSideEffect?: boolean;
-  hasNewerAuthority?: boolean;
-}> = {}): Readonly<{
+function createPool(
+  input: Readonly<{
+    workflowIds?: readonly string[];
+    workflowExecutions?: readonly Readonly<{
+      jobId: string;
+      workflowId: string;
+      status: string;
+    }>[];
+    hasLiveJob?: boolean;
+    jobState?: "running" | "failed";
+    hasPendingOutbox?: boolean;
+    hasLiveLease?: boolean;
+    hasProviderSideEffect?: boolean;
+    hasNewerAuthority?: boolean;
+  }> = {},
+): Readonly<{
   pool: BacklinkTenantPool;
   queries: string[];
   state: {
@@ -64,52 +64,61 @@ function createPool(input: Readonly<{
   const client = {
     async query(text: string): Promise<BacklinkTransactionQueryResult> {
       queries.push(text);
+      if (text.includes("recommendation_pool_contract_guard:project_writes")) {
+        return queryResult([
+          {
+            poolContractVersion: "recommendation-pool.v1",
+            migrationState: "V1_ACTIVE",
+            v1WritesFrozen: false,
+          },
+        ]);
+      }
       if (text.includes("WITH candidate_contexts AS")) {
         return state.running
-          ? queryResult([{
-              websiteProjectId: scope.websiteProjectId,
-              projectContextVersionId: contextId,
-              state: input.jobState ?? "running",
-              workflowExecutions: input.workflowExecutions
-                ?? (input.workflowIds ?? []).map(
-                  (candidateWorkflowId) => ({
+          ? queryResult([
+              {
+                websiteProjectId: scope.websiteProjectId,
+                projectContextVersionId: contextId,
+                state: input.jobState ?? "running",
+                workflowExecutions:
+                  input.workflowExecutions ??
+                  (input.workflowIds ?? []).map((candidateWorkflowId) => ({
                     jobId,
                     workflowId: candidateWorkflowId,
-                    status: input.jobState === "failed"
-                      ? "failed"
-                      : input.hasLiveJob === true
-                      ? "running"
-                      : "failed",
-                  }),
-                ),
-              hasPendingOutbox: input.hasPendingOutbox ?? false,
-              hasLiveLease: input.hasLiveLease ?? false,
-              hasProviderSideEffect: input.hasProviderSideEffect ?? false,
-              currentContextVersionId: contextId,
-              currentSnapshotVersion: 7,
-              currentProfileVersionId: "profile-v3",
-              currentPromotionTargetVersionId: "promotion-v2",
-              currentGenerationInputFingerprint: "generation-v7",
-              latestContextVersionId: input.hasNewerAuthority === true
-                ? latestContextId
-                : contextId,
-              latestSnapshotVersion: input.hasNewerAuthority === true ? 8 : 7,
-              latestProfileVersionId: input.hasNewerAuthority === true
-                ? "profile-v4"
-                : "profile-v3",
-              latestPromotionTargetVersionId: "promotion-v2",
-              latestGenerationInputFingerprint:
-                input.hasNewerAuthority === true
-                  ? "generation-v8"
-                  : "generation-v7",
-            }])
+                    status:
+                      input.jobState === "failed"
+                        ? "failed"
+                        : input.hasLiveJob === true
+                          ? "running"
+                          : "failed",
+                  })),
+                hasPendingOutbox: input.hasPendingOutbox ?? false,
+                hasLiveLease: input.hasLiveLease ?? false,
+                hasProviderSideEffect: input.hasProviderSideEffect ?? false,
+                currentContextVersionId: contextId,
+                currentSnapshotVersion: 7,
+                currentProfileVersionId: "profile-v3",
+                currentPromotionTargetVersionId: "promotion-v2",
+                currentGenerationInputFingerprint: "generation-v7",
+                latestContextVersionId:
+                  input.hasNewerAuthority === true
+                    ? latestContextId
+                    : contextId,
+                latestSnapshotVersion: input.hasNewerAuthority === true ? 8 : 7,
+                latestProfileVersionId:
+                  input.hasNewerAuthority === true
+                    ? "profile-v4"
+                    : "profile-v3",
+                latestPromotionTargetVersionId: "promotion-v2",
+                latestGenerationInputFingerprint:
+                  input.hasNewerAuthority === true
+                    ? "generation-v8"
+                    : "generation-v7",
+              },
+            ])
           : queryResult();
       }
-      if (
-        text.includes(
-          "'recommendation_refill.supersession_requested'",
-        )
-      ) {
+      if (text.includes("'recommendation_refill.supersession_requested'")) {
         const replayed = state.supersessionRequested;
         state.supersessionRequested = true;
         return queryResult([{ status: "requested", replayed }]);
@@ -142,12 +151,14 @@ function probe(
   return {
     inspect: vi.fn(async () => state),
     readSupersession: vi.fn(async () => supersession),
-    signalSuperseded: vi.fn(async (
-      _workflowId: string,
-      signal: RecommendationRefillSupersessionSignal,
-    ) => {
-      supersession = signal;
-    }),
+    signalSuperseded: vi.fn(
+      async (
+        _workflowId: string,
+        signal: RecommendationRefillSupersessionSignal,
+      ) => {
+        supersession = signal;
+      },
+    ),
   };
 }
 
@@ -171,19 +182,21 @@ describe("recommendation refill orphan reconciliation", () => {
       projectCount: 1,
       plannedChangeCount: 1,
       appliedChangeCount: 0,
-      entries: [{
-        reason: "NO_LIVE_JOB_WORKFLOW_OR_LEASE",
-        plannedAction: "RESET_RUNNING_TO_IDLE",
-        applied: false,
-      }],
+      entries: [
+        {
+          reason: "NO_LIVE_JOB_WORKFLOW_OR_LEASE",
+          plannedAction: "RESET_RUNNING_TO_IDLE",
+          applied: false,
+        },
+      ],
     });
     expect(fake.state.running).toBe(true);
-    expect(fake.queries.some((sql) =>
-      sql.includes("pg_advisory_xact_lock")
-    )).toBe(true);
-    expect(fake.queries.some((sql) =>
-      sql.includes("WITH orphan_jobs AS")
-    )).toBe(false);
+    expect(
+      fake.queries.some((sql) => sql.includes("pg_advisory_xact_lock")),
+    ).toBe(true);
+    expect(
+      fake.queries.some((sql) => sql.includes("WITH orphan_jobs AS")),
+    ).toBe(false);
   });
 
   it("applies once and returns zero changes on a repeated apply", async () => {
@@ -218,14 +231,12 @@ describe("recommendation refill orphan reconciliation", () => {
       appliedChangeCount: 0,
     });
     const applySql = fake.queries.filter((sql) =>
-      sql.includes("WITH orphan_jobs AS")
+      sql.includes("WITH orphan_jobs AS"),
     );
     expect(applySql).toHaveLength(1);
     expect(applySql[0]).toContain("provider_fetch_leases");
     expect(applySql[0]).toContain("backlink_outbox_events");
-    expect(applySql[0]).toContain(
-      "backlink_commercial_discovery_batches",
-    );
+    expect(applySql[0]).toContain("backlink_commercial_discovery_batches");
     expect(applySql[0]).toContain("ORPHAN_REFILL_OPERATION");
     expect(applySql[0]).toContain("providerCallOccurred");
   });
@@ -246,15 +257,17 @@ describe("recommendation refill orphan reconciliation", () => {
       projectCount: 0,
       plannedChangeCount: 0,
       appliedChangeCount: 0,
-      entries: [{
-        reason: "LIVE_WORKFLOW",
-        plannedAction: "NO_CHANGE",
-      }],
+      entries: [
+        {
+          reason: "LIVE_WORKFLOW",
+          plannedAction: "NO_CHANGE",
+        },
+      ],
     });
     expect(fake.state.running).toBe(true);
-    expect(fake.queries.some((sql) =>
-      sql.includes("WITH reconciled_policy AS")
-    )).toBe(false);
+    expect(
+      fake.queries.some((sql) => sql.includes("WITH reconciled_policy AS")),
+    ).toBe(false);
     expect(workflowProbe.signalSuperseded).not.toHaveBeenCalled();
   });
 
@@ -307,13 +320,15 @@ describe("recommendation refill orphan reconciliation", () => {
       hasNewerAuthority: true,
     });
 
-    await expect(reconcileRecommendationRefillOrphans({
-      pool: fake.pool,
-      scope,
-      actorId: "local-product-034",
-      mode: "apply",
-      workflowProbe: probe("closed"),
-    })).rejects.toThrow(
+    await expect(
+      reconcileRecommendationRefillOrphans({
+        pool: fake.pool,
+        scope,
+        actorId: "local-product-034",
+        mode: "apply",
+        workflowProbe: probe("closed"),
+      }),
+    ).rejects.toThrow(
       "RECOMMENDATION_REFILL_RECONCILIATION_OPERATION_IDENTITY_REQUIRED",
     );
     expect(fake.state.supersessionRequested).toBe(false);
@@ -342,16 +357,18 @@ describe("recommendation refill orphan reconciliation", () => {
       projectCount: 1,
       plannedChangeCount: 1,
       appliedChangeCount: 1,
-      entries: [{
-        reason: "SUPERSEDED_LIVE_WORKFLOW",
-        plannedAction: "SIGNAL_SUPERSEDE",
-        applied: true,
-      }],
+      entries: [
+        {
+          reason: "SUPERSEDED_LIVE_WORKFLOW",
+          plannedAction: "SIGNAL_SUPERSEDE",
+          applied: true,
+        },
+      ],
     });
     expect(workflowProbe.signalSuperseded).toHaveBeenCalledOnce();
     expect(fake.state.supersessionRequested).toBe(true);
     const requestIndex = fake.queries.findIndex((sql) =>
-      sql.includes("'recommendation_refill.supersession_requested'")
+      sql.includes("'recommendation_refill.supersession_requested'"),
     );
     expect(requestIndex).toBeGreaterThanOrEqual(0);
     expect(workflowProbe.signalSuperseded).toHaveBeenCalledWith(
@@ -408,11 +425,13 @@ describe("recommendation refill orphan reconciliation", () => {
       projectCount: 0,
       plannedChangeCount: 0,
       appliedChangeCount: 0,
-      entries: [{
-        reason: "SUPERSEDED_LIVE_WORKFLOW_SIGNALLED",
-        plannedAction: "AWAIT_SUPERSEDED_TERMINAL",
-        applied: false,
-      }],
+      entries: [
+        {
+          reason: "SUPERSEDED_LIVE_WORKFLOW_SIGNALLED",
+          plannedAction: "AWAIT_SUPERSEDED_TERMINAL",
+          applied: false,
+        },
+      ],
     });
     expect(workflowProbe.signalSuperseded).toHaveBeenCalledOnce();
   });
@@ -445,8 +464,7 @@ describe("recommendation refill orphan reconciliation", () => {
       actorId: "local-product-034",
       correlationId: "wrong",
       requestId: "wrong",
-      idempotencyKey:
-        `recommendation-refill.supersede:${jobId}:${latestContextId}`,
+      idempotencyKey: `recommendation-refill.supersede:${jobId}:${latestContextId}`,
       lifecycleEventId: "70000000-0000-4000-8000-000000000034",
       auditEventId: "80000000-0000-4000-8000-000000000034",
     };
@@ -496,15 +514,17 @@ describe("recommendation refill orphan reconciliation", () => {
     expect(result).toMatchObject({
       plannedChangeCount: 1,
       appliedChangeCount: 1,
-      entries: [{
-        reason: "NO_LIVE_JOB_WORKFLOW_OR_LEASE",
-        plannedAction: "RESET_RUNNING_TO_IDLE",
-        applied: true,
-      }],
+      entries: [
+        {
+          reason: "NO_LIVE_JOB_WORKFLOW_OR_LEASE",
+          plannedAction: "RESET_RUNNING_TO_IDLE",
+          applied: true,
+        },
+      ],
     });
     expect(fake.state.running).toBe(false);
     const appliedSql = fake.queries.find((sql) =>
-      sql.includes("WITH orphan_jobs AS")
+      sql.includes("WITH orphan_jobs AS"),
     );
     expect(appliedSql).not.toContain("'commercial-refill:'");
     expect(appliedSql).toContain("batch.refill_job_id");
@@ -562,61 +582,61 @@ describe("recommendation refill orphan reconciliation", () => {
     ["PENDING_WORKFLOW_START", { hasPendingOutbox: true }],
     ["LIVE_PROVIDER_LEASE", { hasLiveLease: true }],
     ["PROVIDER_SIDE_EFFECT", { hasProviderSideEffect: true }],
-  ] as const)("does not compensate a failed state blocked by %s", async (
-    reason,
-    blockers,
-  ) => {
-    const fake = createPool({
-      workflowIds: [workflowId],
-      jobState: "failed",
-      hasNewerAuthority: true,
-      ...blockers,
-    });
+  ] as const)(
+    "does not compensate a failed state blocked by %s",
+    async (reason, blockers) => {
+      const fake = createPool({
+        workflowIds: [workflowId],
+        jobState: "failed",
+        hasNewerAuthority: true,
+        ...blockers,
+      });
 
-    const result = await reconcileRecommendationRefillOrphans({
-      pool: fake.pool,
-      scope,
-      actorId: "local-product-034",
-      mode: "apply",
-      operation,
-      workflowProbe: probe("closed"),
-    });
+      const result = await reconcileRecommendationRefillOrphans({
+        pool: fake.pool,
+        scope,
+        actorId: "local-product-034",
+        mode: "apply",
+        operation,
+        workflowProbe: probe("closed"),
+      });
 
-    expect(result.entries[0]).toMatchObject({
-      reason,
-      plannedAction: "NO_CHANGE",
-      applied: false,
-    });
-    expect(fake.state.supersessionRequested).toBe(false);
-    expect(fake.state.compensated).toBe(false);
-  });
+      expect(result.entries[0]).toMatchObject({
+        reason,
+        plannedAction: "NO_CHANGE",
+        applied: false,
+      });
+      expect(fake.state.supersessionRequested).toBe(false);
+      expect(fake.state.compensated).toBe(false);
+    },
+  );
 
   it.each([
     ["PENDING_WORKFLOW_START", { hasPendingOutbox: true }],
     ["LIVE_PROVIDER_LEASE", { hasLiveLease: true }],
     ["PROVIDER_SIDE_EFFECT", { hasProviderSideEffect: true }],
-  ] as const)("does not change a state blocked by %s", async (
-    reason,
-    blockers,
-  ) => {
-    const fake = createPool(blockers);
+  ] as const)(
+    "does not change a state blocked by %s",
+    async (reason, blockers) => {
+      const fake = createPool(blockers);
 
-    const result = await reconcileRecommendationRefillOrphans({
-      pool: fake.pool,
-      scope,
-      actorId: "local-product-034",
-      mode: "apply",
-      workflowProbe: probe("missing"),
-    });
+      const result = await reconcileRecommendationRefillOrphans({
+        pool: fake.pool,
+        scope,
+        actorId: "local-product-034",
+        mode: "apply",
+        workflowProbe: probe("missing"),
+      });
 
-    expect(result.entries[0]).toMatchObject({
-      reason,
-      plannedAction: "NO_CHANGE",
-      applied: false,
-    });
-    expect(fake.state.running).toBe(true);
-    expect(fake.queries.some((sql) =>
-      sql.includes("WITH orphan_jobs AS")
-    )).toBe(false);
-  });
+      expect(result.entries[0]).toMatchObject({
+        reason,
+        plannedAction: "NO_CHANGE",
+        applied: false,
+      });
+      expect(fake.state.running).toBe(true);
+      expect(
+        fake.queries.some((sql) => sql.includes("WITH orphan_jobs AS")),
+      ).toBe(false);
+    },
+  );
 });

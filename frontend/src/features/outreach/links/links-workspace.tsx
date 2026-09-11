@@ -1361,7 +1361,7 @@ export function LinksWorkspace({
     }
   }, [client, deepLinkOpportunityId, websiteProjectKey])
 
-  const resetDetailResources = () => {
+  const resetDetailResources = useCallback(() => {
     eventsRequest.current += 1
     evidenceRequest.current += 1
     backlinksProjectQueries.invalidate([
@@ -1380,7 +1380,7 @@ export function LinksWorkspace({
     setEvidenceState("idle")
     setCommandState("idle")
     setReverifyResult(null)
-  }
+  }, [websiteProjectKey])
 
   const loadPage = useCallback(
     async (force = false) => {
@@ -1423,61 +1423,60 @@ export function LinksWorkspace({
     }
   }, [listKey, loadPage])
 
-  const loadPlacementEvents = async (
-    placementId: string,
-    cursor?: string,
-    append = false
-  ) => {
-    const request = ++eventsRequest.current
-    const eventsKey = createProjectQueryKey(
-      websiteProjectKey,
-      "link-events",
-      placementId,
-      eventPageSize,
-      cursor ?? null
-    )
-    if (!append) {
-      backlinksProjectQueries.invalidate([
-        "backlinks",
+  const loadPlacementEvents = useCallback(
+    async (placementId: string, cursor?: string, append = false) => {
+      const request = ++eventsRequest.current
+      const eventsKey = createProjectQueryKey(
         websiteProjectKey,
         "link-events",
-      ])
-    }
-    setEventsState("loading")
-    if (!append) setEvents(null)
-    try {
-      const response = await backlinksProjectQueries.fetch(
-        eventsKey,
-        (signal) =>
-          client.listPlacementEvents(
-            websiteProjectKey,
-            placementId,
-            {
-              limit: eventPageSize,
-              cursor,
-            },
-            signal
-          )
+        placementId,
+        eventPageSize,
+        cursor ?? null
       )
-      if (request !== eventsRequest.current) return
-      setEvents((current) =>
-        append && current
-          ? {
-              items: [...current.items, ...response.items],
-              hasMore: response.hasMore,
-              nextCursor: response.nextCursor,
-              meta: response.meta,
-            }
-          : response
-      )
-      setEventsState("ready")
-    } catch (error) {
-      if (request !== eventsRequest.current) return
-      if (error instanceof DOMException && error.name === "AbortError") return
+      if (!append) {
+        backlinksProjectQueries.invalidate([
+          "backlinks",
+          websiteProjectKey,
+          "link-events",
+        ])
+      }
+      setEventsState("loading")
       if (!append) setEvents(null)
-      setEventsState(resourceErrorState(error))
-    }
-  }
+      try {
+        const response = await backlinksProjectQueries.fetch(
+          eventsKey,
+          (signal) =>
+            client.listPlacementEvents(
+              websiteProjectKey,
+              placementId,
+              {
+                limit: eventPageSize,
+                cursor,
+              },
+              signal
+            )
+        )
+        if (request !== eventsRequest.current) return
+        setEvents((current) =>
+          append && current
+            ? {
+                items: [...current.items, ...response.items],
+                hasMore: response.hasMore,
+                nextCursor: response.nextCursor,
+                meta: response.meta,
+              }
+            : response
+        )
+        setEventsState("ready")
+      } catch (error) {
+        if (request !== eventsRequest.current) return
+        if (error instanceof DOMException && error.name === "AbortError") return
+        if (!append) setEvents(null)
+        setEventsState(resourceErrorState(error))
+      }
+    },
+    [client, websiteProjectKey]
+  )
 
   const openDetail = async (item: LinkListItem) => {
     const request = ++detailRequest.current
@@ -1529,7 +1528,7 @@ export function LinksWorkspace({
     }
   }
 
-  const loadDeepLinkedPlacement = async () => {
+  const loadDeepLinkedPlacement = useCallback(async () => {
     if (deepLinkPlacementId === "") return
     const request = ++deepLinkPlacementRequest.current
     const detailKey = createProjectQueryKey(
@@ -1565,15 +1564,20 @@ export function LinksWorkspace({
       setDetail(null)
       setDetailState(detailErrorState(error))
     }
-  }
+  }, [
+    client,
+    deepLinkPlacementId,
+    loadPlacementEvents,
+    resetDetailResources,
+    websiteProjectKey,
+  ])
 
   useEffect(() => {
-    if (deepLinkPlacementId === "") return
     queueMicrotask(() => void loadDeepLinkedPlacement())
     return () => {
       deepLinkPlacementRequest.current += 1
     }
-  }, [client, deepLinkPlacementId, websiteProjectKey])
+  }, [loadDeepLinkedPlacement])
 
   const readEvidence = async (evidenceId: string) => {
     const request = ++evidenceRequest.current

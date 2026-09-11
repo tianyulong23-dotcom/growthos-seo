@@ -6,6 +6,8 @@ type RecommendationInventoryResponse =
   BacklinksResponse<"backlinksGetRecommendationInventoryV1">
 type RecommendationListItem =
   BacklinksResponse<"backlinksListRecommendationsV1">["items"][number]
+type RecommendationFeedItem =
+  BacklinksResponse<"backlinksListRecommendationFeedV2">["items"][number]
 
 export const outreachFixture = {
   projectKey: "e2e-project",
@@ -168,6 +170,7 @@ const recommendationListItem: RecommendationListItem = {
       backlinks: 4_200,
       referringDomains: 780,
       spamScore: 4,
+      backlinkPageEvidence: [],
       evidenceRefs: ["dataforseo:publisher.example.test"],
       collectedAt: now,
     },
@@ -357,12 +360,15 @@ const profileInventory = Array.from({ length: 42 }, (_, index) => {
   const sourceType = itemNumber % 9 === 0 ? "USER_IMPORTED" : "DATAFORSEO"
   const providerStatus =
     itemNumber % 7 === 0 ? "lost" : itemNumber % 11 === 0 ? "unknown" : "live"
+  const sourceNumber = itemNumber === 42 ? 1 : itemNumber
   return {
     inventoryItemId: `inventory-e2e-${itemNumber}`,
     sourceType,
     provider: sourceType === "DATAFORSEO" ? "dataforseo" : "user_import",
-    sourceDomain: `source-${itemNumber}.publisher.example.test`,
-    sourceUrl: `https://source-${itemNumber}.publisher.example.test/article`,
+    sourceDomain: `source-${sourceNumber}.publisher.example.test`,
+    sourceUrl: `https://source-${sourceNumber}.publisher.example.test/${
+      itemNumber === 42 ? "article-duplicate" : "article"
+    }`,
     targetUrl: "https://owner.example.test/guide",
     anchorText: itemNumber % 3 === 0 ? "owner guide" : `anchor ${itemNumber}`,
     relAttributes: itemNumber % 4 === 0 ? ["nofollow"] : ["dofollow"],
@@ -422,6 +428,7 @@ const profileInventory = Array.from({ length: 42 }, (_, index) => {
 export type CapturedRequest = {
   method: string
   pathname: string
+  search: string
   body: unknown
   idempotencyKey: string | undefined
 }
@@ -436,6 +443,7 @@ export type OutreachApiFixtureOptions = Readonly<{
   gmailMode?: "selected" | "reusable"
   performanceBacklinksMode?: "fresh" | "provider_failed"
   recommendationMode?: "ready" | "generate"
+  recommendationMetricsMode?: "available" | "unavailable"
   recommendationCompleteAfterReads?: number
   recommendationPoolSize?: number
   draftJobStatuses?: readonly (
@@ -462,6 +470,8 @@ export async function installOutreachApiFixtures(
   const performanceBacklinksMode =
     options.performanceBacklinksMode ?? "provider_failed"
   const recommendationMode = options.recommendationMode ?? "ready"
+  const recommendationMetricsMode =
+    options.recommendationMetricsMode ?? "available"
   const recommendationCompleteAfterReads =
     options.recommendationCompleteAfterReads ?? 3
   const recommendationPoolSize =
@@ -487,6 +497,9 @@ export async function installOutreachApiFixtures(
   let archivedVisiblePoolCount = 0
   let visiblePoolArchivedAt: string | null = null
   let recommendationStartedAt = new Date(Date.now() - 125_000).toISOString()
+  let recommendationFeedMoreReleased = false
+  let recommendationFeedOpportunityItemId: string | null = null
+  const archivedRecommendationFeedItemIds = new Set<string>()
   let manualCandidateCreated = false
   let manualContactConfirmed = false
   let opportunityManagementStatus: "ACTIVE" | "PAUSED" | "ARCHIVED" = "ACTIVE"
@@ -589,7 +602,25 @@ export async function installOutreachApiFixtures(
     generation: number,
     itemNumber: number
   ): RecommendationListItem => {
-    if (generation === 1 && itemNumber === 1) return recommendationListItem
+    if (generation === 1 && itemNumber === 1) {
+      if (recommendationMetricsMode === "available") {
+        return recommendationListItem
+      }
+      return {
+        ...recommendationListItem,
+        fitDecision: {
+          ...recommendationListItem.fitDecision,
+          dataForSeo: {
+            ...recommendationListItem.fitDecision.dataForSeo,
+            rank: null,
+            traffic: null,
+            backlinks: null,
+            referringDomains: null,
+            spamScore: null,
+          },
+        },
+      }
+    }
     const hostname = `publisher-g${generation}-${String(itemNumber).padStart(2, "0")}.example.test`
     const itemId = `recommendation-e2e-g${generation}-${itemNumber}`
     const candidateId = `contact-candidate-e2e-g${generation}-${itemNumber}`
@@ -660,6 +691,61 @@ export async function installOutreachApiFixtures(
           recommendationPoolItem(visiblePoolGeneration, index + 1)
         )
       : []
+  const recommendationFeedItem = (
+    batchOrdinal: number,
+    itemNumber: number
+  ): RecommendationFeedItem => {
+    const firstItem = batchOrdinal === 1 && itemNumber === 1
+    const itemId = `018f0000-0000-7000-8000-${String(
+      700 + batchOrdinal * 100 + itemNumber
+    ).padStart(12, "0")}`
+    const domain = firstItem
+      ? "publisher.example.test"
+      : `publisher-v2-b${batchOrdinal}-${String(itemNumber).padStart(
+          2,
+          "0"
+        )}.example.test`
+    const metricsAvailable =
+      recommendationMetricsMode === "available" || !firstItem
+    const opportunityCreated = recommendationFeedOpportunityItemId === itemId
+    return {
+      itemId,
+      domain,
+      displayUrl: `https://${domain}/`,
+      recommended: true,
+      reasons: ["受众与项目匹配", "内容主题相关"],
+      category: "Editorial",
+      metrics: {
+        targetMarketOrganicTraffic: metricsAvailable ? 12_500 : null,
+        dataForSeoRank: metricsAvailable ? 320 : null,
+        spamScore: metricsAvailable ? 4 : null,
+      },
+      contact: {
+        email: `editor@${domain}`,
+        contactPage: `https://${domain}/contact`,
+        outcome: "PUBLIC_EMAIL_FOUND",
+      },
+      opportunity: {
+        opportunityId: opportunityCreated ? opportunityId : null,
+        businessStage: opportunityCreated ? "JOINED" : null,
+        managementStatus: opportunityCreated ? "ACTIVE" : null,
+        outcomeStatus: opportunityCreated ? "OPEN" : null,
+        createdByCurrentUser: opportunityCreated,
+      },
+      archived: false,
+      releasedAt: `2026-08-31T0${batchOrdinal}:00:00.000Z`,
+    }
+  }
+  const currentRecommendationFeedItems = () => {
+    const batchCount = recommendationFeedMoreReleased ? 2 : 1
+    return Array.from({ length: batchCount }, (_, batchIndex) =>
+      Array.from({ length: recommendationPoolSize }, (_, itemIndex) =>
+        recommendationFeedItem(batchIndex + 1, itemIndex + 1)
+      )
+    )
+      .flat()
+      .filter((item) => !archivedRecommendationFeedItemIds.has(item.itemId))
+  }
   const draftJob = (status: Exclude<typeof latestDraftJobStatus, null>) => {
     const started = status !== "QUEUED"
     const terminal =
@@ -724,6 +810,7 @@ export async function installOutreachApiFixtures(
       capturedRequests.push({
         method,
         pathname,
+        search: url.search,
         body: request.postData() ? request.postDataJSON() : null,
         idempotencyKey: request.headers()["idempotency-key"],
       })
@@ -778,6 +865,7 @@ export async function installOutreachApiFixtures(
               languages: ["en"],
               content_topics: ["publisher outreach"],
               conversion_actions: ["Contact publisher"],
+              partnership_goals: ["Editorial resource placement"],
               key_pages: [
                 {
                   url: "https://owner.example.test/guide",
@@ -794,6 +882,66 @@ export async function installOutreachApiFixtures(
             created_at: "2026-08-05T00:00:00.000Z",
           },
         ])
+      }
+
+      if (method === "GET" && pathname === `/api/v1/projects/${projectKey}`) {
+        return json(route, {
+          id: projectKey,
+          workspace_id: "workspace-e2e",
+          lifecycle_status: "ACTIVE",
+          lifecycle_version: 1,
+          archived_at: null,
+          archive_reason: null,
+          context_version: 1,
+          name: "E2E Project",
+          domain: "owner.example.test",
+          country: "US",
+          language: "en",
+          competitor_domain: null,
+          understanding_run_id: "understanding-run-e2e",
+          understanding_status: "completed",
+          understanding_stage: "completed",
+          understanding_message: "Website understanding completed.",
+          understanding_progress: 100,
+          understanding_attempt: 1,
+          understanding_started_at: "2026-08-05T00:00:00.000Z",
+          understanding_finished_at: "2026-08-05T00:01:00.000Z",
+          understanding_elapsed_seconds: 60,
+          audit_run_id: "audit-run-e2e",
+          audit_status: "completed",
+          audit_health: 100,
+          site_profile: {
+            profile_version: 1,
+            extraction_method: "e2e_fixture",
+            source_page_count: 1,
+            favicon_url: "/favicon.ico",
+            business_name: "E2E Project",
+            business_type: "Publisher services",
+            business_summary: "E2E publisher outreach project.",
+            products_services: ["E2E product"],
+            target_audiences: ["site owners"],
+            value_propositions: ["Editorial resource placement"],
+            use_cases: ["Publisher outreach"],
+            target_markets: ["United States"],
+            languages: ["en"],
+            content_topics: ["publisher outreach"],
+            conversion_actions: ["Contact publisher"],
+            partnership_goals: ["Editorial resource placement"],
+            key_pages: [
+              {
+                url: "https://owner.example.test/guide",
+                title: "Owner guide",
+                description: "Primary promotion target.",
+              },
+            ],
+            evidence: [],
+            user_overridden_fields: [],
+            confidence: 1,
+            ai_content_rules: "Use concise professional language.",
+            confirmed_at: "2026-08-05T00:02:00.000Z",
+          },
+          created_at: "2026-08-05T00:00:00.000Z",
+        })
       }
 
       if (
@@ -879,6 +1027,22 @@ export async function installOutreachApiFixtures(
 
       if (
         method === "GET" &&
+        pathname === `/api/v1/projects/${projectKey}/outreach-readiness`
+      ) {
+        return json(route, {
+          website_project_id: projectKey,
+          status: "READY",
+          site_profile_version_id: "profile-e2e",
+          outreach_profile_version_id: "profile-e2e",
+          promotion_target_version_id: "promotion-target-e2e",
+          fingerprint: "sha256:outreach-readiness-e2e",
+          input_required: [],
+          primary_recovery_action: "OPEN_RECOMMENDATIONS",
+        })
+      }
+
+      if (
+        method === "GET" &&
         pathname === `/api/v1/projects/${projectKey}/backlinks/context`
       ) {
         return json(route, {
@@ -911,6 +1075,116 @@ export async function installOutreachApiFixtures(
           nextCursor: null,
           hasMore: false,
           meta,
+        })
+      }
+
+      if (
+        method === "GET" &&
+        pathname ===
+          `/api/v1/projects/${projectKey}/backlinks/recommendation-feed`
+      ) {
+        const domainSearch =
+          url.searchParams.get("domainSearch")?.toLowerCase() ?? ""
+        const items = currentRecommendationFeedItems().filter((item) =>
+          item.domain.toLowerCase().includes(domainSearch)
+        )
+        return json(route, {
+          items,
+          releasedPool: {
+            generationCount: 1,
+            oldestVisiblePoolGeneration: 1,
+            newestVisiblePoolGeneration: 1,
+          },
+          latestGeneration: {
+            generationContractId: "018f0000-0000-7000-8000-000000000701",
+            visiblePoolGeneration: 1,
+            jobState: "SUCCESS",
+            progress: 100,
+            discoveryResult: "COMPLETED",
+            contactPreparation: "COMPLETED",
+            releaseResult: "COMPLETED",
+            effectiveUniqueCandidateCount: recommendationPoolSize,
+            admittedCount: recommendationPoolSize,
+            releasedCount: recommendationPoolSize,
+            terminalReason: null,
+            retrySafe: false,
+          },
+          totalCount: items.length,
+          nextCursor: null,
+          meta: {
+            ...meta,
+            requestId: "request-recommendation-feed-e2e",
+            schemaVersion: "backlinks.recommendation-feed.v2",
+          },
+        })
+      }
+
+      if (
+        method === "GET" &&
+        pathname ===
+          `/api/v1/projects/${projectKey}/backlinks/recommendation-user-release/status`
+      ) {
+        return json(route, {
+          state: "PUBLISHED",
+          currentBatchOrdinal: recommendationFeedMoreReleased ? 2 : 1,
+          requiredOpportunityCount: 1,
+          successfulOpportunityCount:
+            recommendationFeedOpportunityItemId === null ? 0 : 1,
+          unlockAt: "2026-08-31T18:00:00.000Z",
+          unlockReason:
+            recommendationFeedOpportunityItemId === null
+              ? "ELAPSED_18H"
+              : "OPPORTUNITY_RATIO",
+          canGetMore: !recommendationFeedMoreReleased,
+          getMoreState: recommendationFeedMoreReleased
+            ? "POOL_EXHAUSTED"
+            : "RELEASE_NEXT",
+          meta: {
+            ...meta,
+            requestId: "request-recommendation-release-status-e2e",
+            schemaVersion: "backlinks.recommendation-user-release.v2",
+          },
+        })
+      }
+
+      if (
+        method === "POST" &&
+        pathname ===
+          `/api/v1/projects/${projectKey}/backlinks/recommendation-user-release/get-more`
+      ) {
+        recommendationFeedMoreReleased = true
+        return json(route, {
+          state: "RELEASED",
+          currentBatchOrdinal: 2,
+          releasedBatchOrdinal: 2,
+          replayed: false,
+          meta: {
+            ...meta,
+            requestId: "request-recommendation-get-more-e2e",
+            schemaVersion: "backlinks.recommendation-user-release.v2",
+          },
+        })
+      }
+
+      const recommendationFeedArchiveMatch = pathname.match(
+        new RegExp(
+          `^/api/v1/projects/${projectKey}/backlinks/recommendation-user-release/items/([^/]+)/(archive|unarchive)$`
+        )
+      )
+      if (method === "POST" && recommendationFeedArchiveMatch) {
+        const itemId = decodeURIComponent(recommendationFeedArchiveMatch[1]!)
+        const archived = recommendationFeedArchiveMatch[2] === "archive"
+        if (archived) archivedRecommendationFeedItemIds.add(itemId)
+        else archivedRecommendationFeedItemIds.delete(itemId)
+        return json(route, {
+          itemId,
+          archived,
+          replayed: false,
+          meta: {
+            ...meta,
+            requestId: `request-recommendation-${archived ? "archive" : "unarchive"}-e2e`,
+            schemaVersion: "backlinks.recommendation-user-release.v2",
+          },
         })
       }
 
@@ -1014,6 +1288,11 @@ export async function installOutreachApiFixtures(
           errorCode: null,
           recoveryAction: null,
           providerCallOccurred: false,
+          providerActualCostMicros: 0,
+          providerReservedCostMicros: 0,
+          providerPaidCallCount: 0,
+          providerUnknownChargeCount: 0,
+          providerUniqueCallCount: 0,
           recommendationContextVersionId,
           serverUpdatedAt,
           candidateReadyCount: recommendationRefillRequested
@@ -1196,6 +1475,13 @@ export async function installOutreachApiFixtures(
         method === "POST" &&
         pathname === `/api/v1/projects/${projectKey}/backlinks/opportunities`
       ) {
+        const requestBody = request.postDataJSON() as {
+          recommendationFeedItemId?: string
+        }
+        if (requestBody.recommendationFeedItemId) {
+          recommendationFeedOpportunityItemId =
+            requestBody.recommendationFeedItemId
+        }
         return json(
           route,
           {
@@ -1216,6 +1502,15 @@ export async function installOutreachApiFixtures(
             lifecycleEventId: "lifecycle-opportunity-create-e2e",
             auditEventId: "audit-opportunity-create-e2e",
             replayed: false,
+            ...(requestBody.recommendationFeedItemId
+              ? {
+                  recommendationFeedItemId:
+                    requestBody.recommendationFeedItemId,
+                  existingOpportunity: false,
+                  teamAdded: false,
+                  createdByCurrentUser: true,
+                }
+              : {}),
             meta,
           },
           201
@@ -1399,6 +1694,14 @@ export async function installOutreachApiFixtures(
             status: draftApproved ? "approved" : "draft",
             draftVersion: 1,
             approvedVersionId: draftApproved ? draftVersionId : null,
+            inputSnapshot: null,
+            freshness: {
+              state: "FRESH",
+              staleReasons: [],
+              unknownReason: null,
+              regenerateRequired: false,
+              manualEditsPreserved: true,
+            },
             currentVersion: {
               id: draftVersionId,
               versionNo: 1,
@@ -1668,55 +1971,60 @@ export async function installOutreachApiFixtures(
         method === "GET" &&
         pathname === `/api/v1/projects/${projectKey}/backlinks/send-intents`
       ) {
+        const requestedDraftId = url.searchParams.get("draftId")
         return json(route, {
-          items: [
-            {
-              sendIntentId: reconciliationSendIntentId,
-              opportunityId,
-              draftId,
-              approvedDraftVersionId: draftVersionId,
-              messagePurpose: "INITIAL_OUTREACH",
-              followUpIndex: 0,
-              status: "DELIVERY_UNKNOWN",
-              queueKind: "RECONCILIATION_REQUIRED",
-              version: 4,
-              requestedSendAt: now,
-              updatedAt: now,
-              deliveryEnvelope: {
-                sendSnapshotId: reconciliationSendSnapshotId,
-                gmailConnectionId: gmailAccount.connectionId,
-                gmailAccountEmail: gmailAccount.primaryEmail,
-                gmailIdentityId: "gmail-identity-e2e",
-                fromAddress: "outreach@example.test",
-                recipient: "finance@publisher.example.test",
-                contactId,
-                contactVersion: 1,
-                approvalRecordedAt: now,
-              },
-              diagnostics: {
-                operationId: reconciliationSendIntentId,
-                operationCheckpoint: "DELIVERY_UNKNOWN_PERSISTED",
-                retryable: false,
-                nextRetryAt: null,
-                costUncertainty: "UNKNOWN",
-                workerMode: "normal",
-                buildIdentity: "local-product-e2e",
-                primaryNextAction: "RECONCILE_BEFORE_RETRY",
-              },
-              attempt: {
-                attemptId: reconciliationSendAttemptId,
-                attemptNo: 1,
-                status: "DELIVERY_UNKNOWN",
-                rfcMessageId: "<growthos-reconciliation-e2e@example.test>",
-                providerMessageId: null,
-                providerThreadId: null,
-                errorCode: "PROVIDER_RESULT_NOT_PERSISTED",
-                startedAt: now,
-                completedAt: now,
-                retryEligibleAt: null,
-              },
-            },
-          ],
+          items:
+            requestedDraftId === draftId
+              ? []
+              : [
+                  {
+                    sendIntentId: reconciliationSendIntentId,
+                    opportunityId,
+                    draftId,
+                    approvedDraftVersionId: draftVersionId,
+                    messagePurpose: "INITIAL_OUTREACH",
+                    followUpIndex: 0,
+                    status: "DELIVERY_UNKNOWN",
+                    queueKind: "RECONCILIATION_REQUIRED",
+                    version: 4,
+                    requestedSendAt: now,
+                    updatedAt: now,
+                    deliveryEnvelope: {
+                      sendSnapshotId: reconciliationSendSnapshotId,
+                      gmailConnectionId: gmailAccount.connectionId,
+                      gmailAccountEmail: gmailAccount.primaryEmail,
+                      gmailIdentityId: "gmail-identity-e2e",
+                      fromAddress: "outreach@example.test",
+                      recipient: "finance@publisher.example.test",
+                      contactId,
+                      contactVersion: 1,
+                      approvalRecordedAt: now,
+                    },
+                    diagnostics: {
+                      operationId: reconciliationSendIntentId,
+                      operationCheckpoint: "DELIVERY_UNKNOWN_PERSISTED",
+                      retryable: false,
+                      nextRetryAt: null,
+                      costUncertainty: "UNKNOWN",
+                      workerMode: "normal",
+                      buildIdentity: "local-product-e2e",
+                      primaryNextAction: "RECONCILE_BEFORE_RETRY",
+                    },
+                    attempt: {
+                      attemptId: reconciliationSendAttemptId,
+                      attemptNo: 1,
+                      status: "DELIVERY_UNKNOWN",
+                      rfcMessageId:
+                        "<growthos-reconciliation-e2e@example.test>",
+                      providerMessageId: null,
+                      providerThreadId: null,
+                      errorCode: "PROVIDER_RESULT_NOT_PERSISTED",
+                      startedAt: now,
+                      completedAt: now,
+                      retryEligibleAt: null,
+                    },
+                  },
+                ],
           nextCursor: null,
           hasMore: false,
           meta,
@@ -2070,7 +2378,8 @@ export async function installOutreachApiFixtures(
         const source = url.searchParams.get("source")
         const query = url.searchParams.get("query")?.toLowerCase() ?? ""
         const sort = url.searchParams.get("sort") ?? "last_seen_desc"
-        const filtered = profileInventory
+        const view = url.searchParams.get("view") ?? "all"
+        let filtered = profileInventory
           .filter((item) => status === null || item.providerStatus === status)
           .filter((item) => source === null || item.sourceType === source)
           .filter(
@@ -2080,13 +2389,27 @@ export async function installOutreachApiFixtures(
               item.sourceUrl.toLowerCase().includes(query) ||
               item.anchorText.toLowerCase().includes(query)
           )
-          .sort((left, right) =>
-            sort === "rank_desc"
-              ? right.rank - left.rank
-              : sort === "spam_desc"
-                ? right.spamScore - left.spamScore
-                : 0
+        if (view === "new") {
+          filtered = filtered.slice(0, 7)
+        } else if (view === "lost") {
+          filtered = filtered.filter((item) => item.providerStatus === "lost")
+        } else if (view === "referring_domains") {
+          filtered = Array.from(
+            new Map(
+              filtered.map((item) => [
+                item.sourceDomain.toLowerCase() || item.sourceUrl,
+                item,
+              ])
+            ).values()
           )
+        }
+        filtered.sort((left, right) =>
+          sort === "rank_desc"
+            ? right.rank - left.rank
+            : sort === "spam_desc"
+              ? right.spamScore - left.spamScore
+              : 0
+        )
         const offset = (pageNumber - 1) * pageSize
         return json(route, {
           items: filtered.slice(offset, offset + pageSize),
@@ -2392,6 +2715,57 @@ export async function installOutreachApiFixtures(
 
       if (
         method === "GET" &&
+        pathname === `/api/v1/projects/${projectKey}/performance/overview`
+      ) {
+        return json(route, {
+          gsc_connected: false,
+          site_url: null,
+          date_range: Number(url.searchParams.get("days") ?? 28),
+          range_start: "2026-08-04",
+          range_end: "2026-08-31",
+          previous_start: "2026-07-07",
+          previous_end: "2026-08-03",
+          metrics: { clicks: 0, impressions: 0, ctr: 0, position: 0 },
+          previous_metrics: {
+            clicks: 0,
+            impressions: 0,
+            ctr: 0,
+            position: 0,
+          },
+          change: {
+            clicks: null,
+            impressions: null,
+            ctr: null,
+            position: null,
+          },
+          trend: [],
+          article_count: 0,
+          status_counts: {},
+          growing_articles: [],
+          declining_articles: [],
+          sync: {
+            status: "never",
+            data_through: null,
+            synced_at: null,
+            error: null,
+          },
+        })
+      }
+
+      if (
+        method === "GET" &&
+        pathname === `/api/v1/projects/${projectKey}/performance/articles`
+      ) {
+        return json(route, {
+          items: [],
+          total: 0,
+          page: Number(url.searchParams.get("page") ?? 1),
+          page_size: Number(url.searchParams.get("page_size") ?? 25),
+        })
+      }
+
+      if (
+        method === "GET" &&
         pathname === `/api/v1/projects/${projectKey}/backlinks/links`
       ) {
         return json(route, {
@@ -2578,6 +2952,14 @@ export async function installOutreachApiFixtures(
           },
           meta,
         })
+      }
+
+      if (
+        method === "POST" &&
+        pathname ===
+          `/api/v1/projects/${projectKey}/backlinks/recommendation-feed/observations`
+      ) {
+        return json(route, { recorded: true })
       }
 
       unexpectedNetwork.push(`${method} ${request.url()}`)

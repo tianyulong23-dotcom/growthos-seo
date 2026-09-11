@@ -66,6 +66,8 @@ export type CommercialSupplyCursor = Readonly<{
 
 export type CommercialSupplyProviderState =
   "available" | "budget_paused" | "provider_paused";
+export type CommercialRefillWaitReason =
+  "budget" | "provider" | "project_context";
 
 export type CommercialSupplyPlan =
   | Readonly<{
@@ -80,7 +82,7 @@ export type CommercialSupplyPlan =
         CommercialSupplyOutcome,
         "TARGET_REACHED" | "SUPPLY_FLOOR_REACHED"
       > | null;
-      reason: "budget" | "provider" | "project_context";
+      reason: CommercialRefillWaitReason;
     }>
   | Readonly<{
       kind: "complete";
@@ -600,6 +602,29 @@ export function planCommercialSupplyOperation(
     round: nextRound,
     window: 1,
   });
+}
+
+function stableRetryJitter(stableKey: string, spreadMs: number): number {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < stableKey.length; index += 1) {
+    hash ^= stableKey.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0) % (spreadMs + 1);
+}
+
+export function resolveCommercialRefillRetryDelay(
+  input: Readonly<{
+    reason: CommercialRefillWaitReason;
+    stableKey: string;
+  }>,
+): number {
+  if (input.reason === "budget") return 60_000;
+  const minimumMs = input.reason === "provider" ? 15_000 : 5_000;
+  return minimumMs + stableRetryJitter(
+    `${input.reason}:${input.stableKey}`,
+    5_000,
+  );
 }
 
 export function commercialSupplyOutcome(

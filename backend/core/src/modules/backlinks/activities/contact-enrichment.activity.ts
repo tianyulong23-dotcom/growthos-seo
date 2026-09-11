@@ -64,6 +64,15 @@ export type ContactEnrichmentActivityResult = Readonly<{
   browserUsed: boolean;
   terminalReasonCode: ContactTerminalReason | null;
   method: ContactEnrichmentMethod;
+  timing?: Readonly<{
+    startedAt: string;
+    durationMs: number;
+    spans: readonly Readonly<{
+      phase: string;
+      startMs: number;
+      endMs: number;
+    }>[];
+  }>;
 }>;
 
 type Job = Readonly<{
@@ -111,6 +120,7 @@ const commonPaths = [
 const decoder = new TextDecoder("utf-8", { fatal: false });
 const priorityPath =
   /(?:contact|about|team|editor|advert|partner|write-for-us|author|press|media)/iu;
+const contactPath = /\/(?:contact|advertis|partner)[^/]*(?:\/|$)/iu;
 
 type CrawlSignals = {
   -readonly [Key in keyof ContactConvergenceSignals]:
@@ -167,11 +177,9 @@ export function inspectContactHtml(html: string): Readonly<{
       loginForm
       || /\b(?:login required|members only|subscribe to continue|paywall)\b/iu
         .test(text),
+    // Public contact forms can embed a CAPTCHA without gating readable content.
     challenge:
-      $(
-        ".g-recaptcha,.h-captcha,[data-sitekey],iframe[src*='recaptcha'],iframe[src*='hcaptcha']",
-      ).length > 0
-      || /\b(?:captcha|verify you are human|checking your browser|attention required|bot challenge|cloudflare ray id)\b/iu
+      /\b(?:verify you are human|checking your browser|attention required|bot challenge|cloudflare ray id|complete the captcha to continue)\b/iu
         .test(text),
   };
 }
@@ -539,7 +547,32 @@ export function createContactEnrichmentActivity(options: Readonly<{
   return async (
     input: ContactEnrichmentActivityInput,
   ): Promise<ContactEnrichmentActivityResult> => {
-    const job = await claimJob(options.pool, input);
+    const startedAt = new Date().toISOString();
+    const started = performance.now();
+    const spans: { phase: string; startMs: number; endMs: number }[] = [];
+    const measure = async <T>(
+      phase: string, operation: () => Promise<T>,
+    ): Promise<T> => {
+      const startMs = performance.now() - started;
+      try {
+        return await operation();
+      } finally {
+        spans.push({ phase, startMs, endMs: performance.now() - started });
+      }
+    };
+    const fetchPage = (request: Parameters<SafeFetchAdapter["fetch"]>[0]) =>
+      measure("public_http", () => safeFetch.fetch(request));
+    const discover = (
+      context: Parameters<ContactDiscoveryService["discoverFetched"]>[0],
+      page: Parameters<ContactDiscoveryService["discoverFetched"]>[1],
+    ) => measure("contact_parse_and_persist",
+      () => discovery.discoverFetched(context, page));
+    const record = (
+      page: QueuedPage, outcome: Parameters<typeof recordPage>[3],
+    ) => measure("page_persistence",
+      () => recordPage(options.pool, input, page, outcome));
+    const job = await measure("job_claim",
+      () => claimJob(options.pool, input));
     if (job === null) {
       const existing = await withBacklinkTenantTransaction(
         options.pool,
@@ -586,7 +619,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
     ];
     const queued = new Set(queue.map((page) => page.url));
     try {
-      const robotsPage = await safeFetch.fetch({
+      const robotsPage = await fetchPage({
         url: new URL("/robots.txt", job.rootUrl).toString(),
         purpose: "contact-enrichment",
         workspaceId: input.workspaceId,
@@ -604,7 +637,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
           .slice(0, 2);
         for (const sitemapUrl of sitemapUrls) {
           try {
-            const sitemap = await safeFetch.fetch({
+            const sitemap = await fetchPage({
               url: sitemapUrl,
               purpose: "contact-enrichment",
               workspaceId: input.workspaceId,
@@ -639,6 +672,8 @@ export function createContactEnrichmentActivity(options: Readonly<{
     let retryableFailures = 0;
     let browserUsed = false;
     let browserAttempted = false;
+    const browserPages = new Set<string>();
+    let browserAvailableForLinks = false;
     let lastErrorCode: string | null = null;
     const signals: CrawlSignals = {
       contactForm: false,
@@ -651,17 +686,36 @@ export function createContactEnrichmentActivity(options: Readonly<{
       parsedPages: 0,
     };
     const browserConfigured = job.browserAllowed
-      && await browserEnabledForProject(options.pool, input);
+      && await measure("browser_authorization",
+        () => browserEnabledForProject(options.pool, input));
     const browserWorker = options.browserWorker;
     const browserAuthorized = browserConfigured && browserWorker !== null;
+    const enqueueLinks = (html: string, finalUrl: string, depth: number) => {
+      if (depth >= job.maxDepth) return;
+      const links = discoverLinks(html, finalUrl, depth)
+        .filter(link => sameSite(link.url, job.rootUrl) && !queued.has(link.url));
+      const prioritized = links.filter(link => priorityPath.test(link.url)
+        || link.source === "navigation" || link.source === "footer")
+        .sort((left, right) =>
+          (Number(contactPath.test(right.url)) * 2 + Number(priorityPath.test(right.url)))
+          - (Number(contactPath.test(left.url)) * 2 + Number(priorityPath.test(left.url))));
+      const remaining = links.filter(link => !prioritized.includes(link));
+      for (const link of [...prioritized.slice(0, 4), ...remaining]) {
+        queued.add(link.url);
+      }
+      queue.unshift(...prioritized.slice(0, 4));
+      queue.push(...remaining);
+    };
     const attemptBrowser = async (
       page: QueuedPage,
       targetUrl: string,
     ): Promise<void> => {
       browserAttempted = true;
-      if (browserWorker === null) return;
+      if (browserWorker === null || browserPages.has(targetUrl)
+        || browserPages.size >= job.maxPages) return;
+      browserPages.add(targetUrl);
       try {
-        const rendered = await browserWorker.render({
+        const rendered = await measure("browser_render", () => browserWorker.render({
           url: targetUrl,
           taskType: "contact_enrichment",
           requestId: randomUUID(),
@@ -669,8 +723,25 @@ export function createContactEnrichmentActivity(options: Readonly<{
           workspaceId: input.workspaceId,
           websiteProjectId: input.websiteProjectId,
           actorId: input.actorId,
-        });
-        const browserDiscovery = await discovery.discoverFetched({
+        }));
+        browserUsed = true;
+        const html = decoder.decode(rendered.body);
+        const renderedSignals = inspectContactHtml(html);
+        signals.challenge ||= renderedSignals.challenge;
+        signals.loginRequired ||= renderedSignals.loginRequired;
+        signals.contactForm ||= renderedSignals.contactForm;
+        if (rendered.status < 200 || rendered.status >= 300
+          || renderedSignals.challenge || renderedSignals.loginRequired) {
+          browserAvailableForLinks = false;
+          failures += 1;
+          lastErrorCode = `BROWSER_HTTP_${rendered.status}`;
+          await record(page, {
+            status: "browser_failed", httpStatus: rendered.status,
+            browserRendered: true, errorCode: lastErrorCode,
+          });
+          return;
+        }
+        const browserDiscovery = await discover({
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
           websiteProjectId: input.websiteProjectId,
@@ -681,8 +752,10 @@ export function createContactEnrichmentActivity(options: Readonly<{
           targetUrl: page.url,
           actorId: input.actorId,
         }, rendered);
-        browserUsed = true;
-        await recordPage(options.pool, input, page, {
+        browserAvailableForLinks = true;
+        signals.parsedPages += 1;
+        enqueueLinks(html, rendered.finalUrl, page.depth);
+        await record(page, {
           status: "browser_fetched",
           httpStatus: 200,
           browserRendered: true,
@@ -692,7 +765,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
         failures += 1;
         retryableFailures += 1;
         lastErrorCode = "BROWSER_FETCH_FAILED";
-        await recordPage(options.pool, input, page, {
+        await record(page, {
           status: "browser_failed",
           browserRendered: true,
           errorCode: error instanceof Error
@@ -711,22 +784,22 @@ export function createContactEnrichmentActivity(options: Readonly<{
       const page = queue.shift();
       if (page === undefined || page.depth > job.maxDepth) continue;
       pagesAttempted += 1;
-      const policy = await robots.evaluate({
+      const policy = await measure("robots_policy", () => robots.evaluate({
         targetUrl: page.url,
         userAgent: "GrowthOS-SafeFetch/1.0",
         workspaceId: input.workspaceId,
         websiteProjectId: input.websiteProjectId,
-      });
+      }));
       if (policy.decision === "disallow") {
         signals.robotsDisallowed += 1;
-        await recordPage(options.pool, input, page, {
+        await record(page, {
           status: "robots_disallowed",
           errorCode: "ROBOTS_DISALLOWED",
         });
         continue;
       }
       try {
-        const fetched = await safeFetch.fetch({
+        const fetched = await fetchPage({
           url: page.url,
           purpose: "contact-enrichment",
           workspaceId: input.workspaceId,
@@ -747,14 +820,14 @@ export function createContactEnrichmentActivity(options: Readonly<{
             fetched.status === 401 || pageSignals.loginRequired;
           signals.accessDenied ||= fetched.status === 403
             && !pageSignals.challenge;
-          await recordPage(options.pool, input, page, {
+          await record(page, {
             status: "fetch_failed",
             httpStatus: fetched.status,
             errorCode: lastErrorCode,
           });
           if (shouldAttemptContactBrowserFallback({
             browserAuthorized,
-            browserAttempted,
+            browserAttempted: browserAttempted && !browserAvailableForLinks,
             status: fetched.status,
             challenge: pageSignals.challenge,
           })) {
@@ -770,7 +843,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
         signals.challenge ||= pageSignals.challenge;
         let discovered;
         try {
-          discovered = await discovery.discoverFetched({
+          discovered = await discover({
             organizationId: input.organizationId,
             workspaceId: input.workspaceId,
             websiteProjectId: input.websiteProjectId,
@@ -786,42 +859,24 @@ export function createContactEnrichmentActivity(options: Readonly<{
           lastErrorCode = error instanceof Error
             ? error.message.slice(0, 200)
             : "UNSUPPORTED_CONTENT";
-          await recordPage(options.pool, input, page, {
+          await record(page, {
             status: "unsupported_content",
             httpStatus: fetched.status,
             errorCode: lastErrorCode,
           });
           continue;
         }
-        await recordPage(options.pool, input, page, {
+        await record(page, {
           status: "fetched",
           httpStatus: fetched.status,
           candidateCount: discovered.candidateCount,
         });
         signals.parsedPages += 1;
-        if (page.depth < job.maxDepth) {
-          const prioritized: QueuedPage[] = [];
-          const remaining: QueuedPage[] = [];
-          for (const link of discoverLinks(html, fetched.finalUrl, page.depth)) {
-            if (queued.has(link.url)) continue;
-            queued.add(link.url);
-            if (
-              link.source === "navigation"
-              || link.source === "footer"
-              || priorityPath.test(link.url)
-            ) {
-              prioritized.push(link);
-            } else {
-              remaining.push(link);
-            }
-          }
-          queue.unshift(...prioritized.slice(0, 4));
-          queue.push(...remaining);
-        }
+        enqueueLinks(html, fetched.finalUrl, page.depth);
         if (
           discovered.candidateCount === 0
           && browserAuthorized
-          && !browserAttempted
+          && (!browserAttempted || browserAvailableForLinks)
           && !pageSignals.challenge
           && !pageSignals.loginRequired
           && dynamicPage(html)
@@ -842,7 +897,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
           retryableFailures += 1;
           signals.transportFailures += 1;
           lastErrorCode = "BROWSER_UNAVAILABLE";
-          await recordPage(options.pool, input, page, {
+          await record(page, {
             status: "browser_failed",
             browserRendered: false,
             errorCode: lastErrorCode,
@@ -864,7 +919,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
           && "code" in error
           ? String(error.code)
           : "CONTACT_PAGE_FAILED";
-        await recordPage(options.pool, input, page, {
+        await record(page, {
           status: "fetch_failed",
           errorCode: lastErrorCode,
         });
@@ -877,13 +932,19 @@ export function createContactEnrichmentActivity(options: Readonly<{
         }
       }
     }
-    return finishJob(options.pool, input, job, {
+    const result = await measure("job_completion_persistence",
+      () => finishJob(options.pool, input, job, {
       pagesVisited,
       browserUsed,
       failures,
       retryableFailures,
       lastErrorCode,
       signals,
-    });
+      }));
+    // Activity results persist in Temporal history, including failed HTTP spans.
+    return {
+      ...result,
+      timing: { startedAt, durationMs: performance.now() - started, spans },
+    };
   };
 }

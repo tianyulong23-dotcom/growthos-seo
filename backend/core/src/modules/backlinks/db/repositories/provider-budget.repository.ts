@@ -21,6 +21,46 @@ export type ProviderBudgetReservationInput = Readonly<{
   estimatedCostMicros: number;
 }>;
 
+export type ProviderBudgetExecutionCeiling = Readonly<{
+  startedAt: string;
+  limitMicros: number;
+}>;
+
+export type ProviderBudgetOperationReservationScope =
+  | Readonly<{ mode: "prefix"; ledgerPrefix: string }>
+  | Readonly<{ mode: "v2_intent"; ledgerPrefix: string }>;
+
+export function resolveProviderBudgetOperationReservationScope(
+  input: Readonly<{
+    reservation: ProviderBudgetReservationInput;
+    operationPrefix: string;
+    authorization?: ProviderOperationBudgetAuthorization;
+  }>,
+): ProviderBudgetOperationReservationScope | null {
+  const operationKey = input.operationPrefix.trim().replace(/:+$/u, "");
+  const ledgerPrefix = `${operationKey}:`;
+  if (
+    operationKey.length > 0
+    && input.reservation.reservationKey.startsWith(ledgerPrefix)
+  ) {
+    return Object.freeze({ mode: "prefix", ledgerPrefix });
+  }
+  if (
+    input.authorization?.reasonCode
+      === "user_authorized_bounded_real_refill"
+    && input.reservation.reservationKey
+      === input.reservation.context.requestId
+    && input.reservation.reservationKey
+      === input.reservation.context.budgetReservationId
+  ) {
+    return Object.freeze({
+      mode: "v2_intent",
+      ledgerPrefix: input.reservation.reservationKey,
+    });
+  }
+  return null;
+}
+
 const errorCode = (error: unknown) =>
   typeof error === "object" && error !== null && "code" in error
     ? error.code
@@ -106,14 +146,74 @@ export async function ensureProviderBudgetCycle(
   ]);
 }
 
+export async function checkProviderExecutionCeiling(
+  client: ProviderArtifactQueryClient,
+  input: Readonly<{
+    context: Pick<ProviderRequestContext, "organizationId" | "workspaceId" | "websiteProjectId">;
+    provider: "dataforseo";
+    reservationKey: string;
+    estimatedCostMicros: number;
+  }>,
+  executionCeiling: ProviderBudgetExecutionCeiling | undefined,
+  now: () => Date = () => new Date(),
+): Promise<"allow" | "deny"> {
+  if (executionCeiling === undefined) return "allow";
+  const startedAt = new Date(executionCeiling.startedAt);
+  if (
+    !Number.isFinite(startedAt.getTime())
+    || startedAt > now()
+    || !Number.isSafeInteger(executionCeiling.limitMicros)
+    || executionCeiling.limitMicros < 1
+    || !Number.isSafeInteger(input.estimatedCostMicros)
+    || input.estimatedCostMicros < 0
+  ) return "deny";
+  // The caller must retain this transaction lock through reservation.
+  await client.query(
+    `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,
+    [[input.context.organizationId, input.context.workspaceId,
+      input.provider, "execution-ceiling"].join(":")],
+  );
+  const usage = await client.query(`
+    SELECT COALESCE(sum(CASE
+             WHEN status='settled'
+               THEN COALESCE(actual_cost_micros,estimated_cost_micros)
+             WHEN status='reserved' THEN estimated_cost_micros
+             ELSE 0 END),0)::bigint AS "exposureMicros",
+           COALESCE(bool_or(
+             reservation_key=$4 AND website_project_id=$5::uuid
+             AND status IN ('reserved','settled')
+           ),false) AS "alreadyReserved"
+      FROM backlink_provider_usage_ledger
+     WHERE organization_id=$1::uuid AND workspace_id=$2::uuid
+       AND provider=$3 AND (
+         created_at >= $6::timestamptz OR status='reserved'
+       )
+  `, [
+    input.context.organizationId, input.context.workspaceId,
+    input.provider, input.reservationKey,
+    input.context.websiteProjectId, startedAt,
+  ]);
+  const exposureMicros = Number(usage.rows[0]?.exposureMicros);
+  const additionalMicros = usage.rows[0]?.alreadyReserved === true
+    ? 0 : input.estimatedCostMicros;
+  return !Number.isSafeInteger(exposureMicros)
+    || exposureMicros < 0
+    || exposureMicros + additionalMicros > executionCeiling.limitMicros
+    ? "deny" : "allow";
+}
+
 export function createProviderBudgetRepository(
   client: ProviderArtifactQueryClient,
   now: () => Date = () => new Date(),
+  executionCeiling?: ProviderBudgetExecutionCeiling,
 ) {
   const reserveBudgetFor = async (
     input: ProviderBudgetReservationInput,
     budgetId?: string,
   ): Promise<"allow" | "deny"> => {
+    if (await checkProviderExecutionCeiling(client, input, executionCeiling, now) === "deny") {
+      return "deny";
+    }
     try {
       const result = await client.query(`
         WITH batch AS MATERIALIZED (
@@ -287,17 +387,21 @@ export function createProviderBudgetRepository(
         requiredRemainingPaidCalls: number;
         requiredRemainingCostMicros: number;
         authorization?: ProviderOperationBudgetAuthorization;
-      }> = {
-        requiredRemainingPaidCalls: 0,
-        requiredRemainingCostMicros: 0,
-      },
+    }> = {
+      requiredRemainingPaidCalls: 0,
+      requiredRemainingCostMicros: 0,
+    },
     ): Promise<"allow" | "deny"> {
-      const normalizedPrefix = operationPrefix.endsWith(":")
-        ? operationPrefix
-        : `${operationPrefix}:`;
+      const reservationScope =
+        resolveProviderBudgetOperationReservationScope({
+          reservation: input,
+          operationPrefix,
+          ...(headroom.authorization === undefined
+            ? {}
+            : { authorization: headroom.authorization }),
+        });
       if (
-        normalizedPrefix.length < 2
-        || !input.reservationKey.startsWith(normalizedPrefix)
+        reservationScope === null
         || !Number.isSafeInteger(maxPaidCalls)
         || maxPaidCalls < 1
         || !Number.isSafeInteger(operationBudgetLimitMicros)
@@ -308,6 +412,30 @@ export function createProviderBudgetRepository(
         || headroom.requiredRemainingCostMicros < 0
       ) {
         return "deny";
+      }
+      if (reservationScope.mode === "v2_intent") {
+        const intent = await client.query(`
+          SELECT 1
+            FROM backlink_recommendation_discovery_request_intents
+           WHERE organization_id=$1::uuid
+             AND workspace_id=$2::uuid
+             AND website_project_id=$3::uuid
+             AND pool_contract_version='recommendation-pool.v2'
+             AND canonical_request_fingerprint=$4
+             AND authorized_cost_micros >= $5
+             AND $6 IN (id::text,idempotency_key)
+             AND $7 IN (id::text,idempotency_key)
+           LIMIT 1
+        `, [
+          input.context.organizationId,
+          input.context.workspaceId,
+          input.context.websiteProjectId,
+          input.requestFingerprint,
+          input.estimatedCostMicros,
+          input.context.requestId,
+          input.reservationKey,
+        ]);
+        if (intent.rows[0] === undefined) return "deny";
       }
       const observedAt = now();
       await ensureProviderBudgetCycle(client, {
@@ -353,7 +481,7 @@ export function createProviderBudgetRepository(
             input.context.workspaceId,
             input.context.websiteProjectId,
             input.provider,
-            normalizedPrefix,
+            reservationScope.ledgerPrefix,
           ].join(":"),
         ],
       );
@@ -410,17 +538,24 @@ export function createProviderBudgetRepository(
           usage.website_project_id
         )=($1::uuid,$2::uuid,$3::uuid)
           AND usage.provider=$4
-          AND usage.reservation_key LIKE $6 || '%'
+          AND (
+            ($10::boolean AND usage.reservation_key=$5)
+            OR (
+              NOT $10::boolean
+              AND usage.reservation_key LIKE $6 || '%'
+            )
+          )
       `, [
         input.context.organizationId,
         input.context.workspaceId,
         input.context.websiteProjectId,
         input.provider,
         input.reservationKey,
-        normalizedPrefix,
+        reservationScope.ledgerPrefix,
         input.estimatedCostMicros,
         input.requestFingerprint,
         input.context.requestId,
+        reservationScope.mode === "v2_intent",
       ]);
       const paidCallCount = Number(usage.rows[0]?.count ?? 0);
       const exposureMicros = Number(usage.rows[0]?.exposureMicros ?? 0);

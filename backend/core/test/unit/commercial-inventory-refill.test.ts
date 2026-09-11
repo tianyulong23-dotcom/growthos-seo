@@ -38,6 +38,7 @@ const inventoryState = {
   minimumEmailHitRate: 0.1,
   maximumEmailHitRate: 0.8,
   candidateReadyCount: 25,
+  preparedCandidateCount: 0,
   historicalCandidateCount: 20,
   rawCandidateCount: 68,
   eliminationReasonCounts: {
@@ -315,6 +316,106 @@ describe("commercial inventory automatic refill", () => {
     expect(query.mock.calls.find(([text]) =>
       String(text).includes("WITH candidate_counts AS")
     )?.[1]?.[7]).toBe(input.maxPaidCalls);
+  });
+
+  it("queues archived qualified inventory through a zero-cost durable refill", async () => {
+    let commandValues: readonly unknown[] | undefined;
+    const queries: string[] = [];
+    const query = vi.fn(async (
+      text: string,
+      values?: readonly unknown[],
+    ) => {
+      queries.push(text);
+      if (text.includes("WITH candidate_counts AS")) {
+        return {
+          rows: [{
+            ...inventoryState,
+            visiblePoolState: "awaiting_refresh",
+            visiblePoolGeneration: 2,
+            visiblePoolTargetCount: 10,
+            candidateReadyCount: 3,
+            preparedCandidateCount: 3,
+          }],
+        };
+      }
+      if (text.includes("WITH guard AS")) {
+        commandValues = values;
+        return {
+          rows: [{
+            state: "completed",
+            requestHash: values?.[7],
+            responseBody: {
+              jobId: values?.[9],
+              workflowId: values?.[14],
+              status: "queued",
+              version: 1,
+              lifecycleEventId: values?.[11],
+              auditEventId: values?.[12],
+            },
+          }],
+        };
+      }
+      return { rows: [] };
+    });
+
+    await expect(ensureCommercialRecommendationRefill(
+      { query },
+      { ...input, providerAvailable: false },
+    )).resolves.toMatchObject({
+      status: "queued",
+      requestedCandidateCount: 3,
+      currentTier: "exact_product_target_market",
+      currentRound: 1,
+      terminationReason: null,
+    });
+    expect(commandValues?.[17]).toBe(
+      "commercial-existing:"
+        + `${input.websiteProjectId}:${input.projectContextVersionId}:g2:archive-prepared`,
+    );
+    expect(commandValues?.[22]).toBeNull();
+    expect(commandValues?.[23]).toBe("existing_evidence");
+    expect(queries.some((text) =>
+      text.includes("WITH accepted_recovery AS MATERIALIZED")
+    )).toBe(false);
+    expect(queries.some((text) =>
+      text.includes("visible_pool_state=COALESCE")
+    )).toBe(true);
+  });
+
+  it("pauses an empty archived generation when the provider is unavailable", async () => {
+    const query = vi.fn(async (text: string) => {
+      if (text.includes("WITH candidate_counts AS")) {
+        return {
+          rows: [{
+            ...inventoryState,
+            visiblePoolState: "awaiting_refresh",
+            visiblePoolGeneration: 2,
+            visiblePoolTargetCount: 10,
+            candidateReadyCount: 0,
+            preparedCandidateCount: 0,
+          }],
+        };
+      }
+      return { rows: [] };
+    });
+
+    await expect(ensureCommercialRecommendationRefill(
+      { query },
+      { ...input, providerAvailable: false },
+    )).resolves.toMatchObject({
+      status: "paused",
+      pauseReason: "provider_unavailable",
+      currentTier: "exact_product_target_market",
+      currentRound: 1,
+      terminationReason: "PROVIDER_UNAVAILABLE",
+    });
+    expect(query.mock.calls.some(([text]) =>
+      String(text).includes("WITH guard AS")
+    )).toBe(false);
+    expect(query.mock.calls.some(([, values]) =>
+      values?.includes("PROVIDER_UNAVAILABLE")
+      && values?.includes("provider_unavailable")
+    )).toBe(true);
   });
 
   it("recovers an accepted provider operation after refill tier drift", async () => {

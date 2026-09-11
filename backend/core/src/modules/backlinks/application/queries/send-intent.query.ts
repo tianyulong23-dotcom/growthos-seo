@@ -369,7 +369,10 @@ const sendIntentColumns = `
   attempt.rfc_message_id AS "rfcMessageId",
   attempt.provider_message_id AS "providerMessageId",
   attempt.provider_thread_id AS "providerThreadId",
-  attempt.provider_error_code AS "errorCode",
+  coalesce(
+    attempt.provider_error_code,
+    reservation.release_reason
+  ) AS "errorCode",
   attempt.started_at AS "startedAt",
   attempt.completed_at AS "completedAt",
   attempt.retry_eligible_at AS "retryEligibleAt"`;
@@ -387,6 +390,11 @@ const sendIntentJoins = `
     ON (identity.organization_id,identity.gmail_connection_id,identity.id)
      = (snapshot.organization_id,snapshot.gmail_connection_id,
         snapshot.gmail_identity_id)
+  LEFT JOIN backlinks.backlink_rate_limit_reservations AS reservation
+    ON reservation.organization_id = intent.organization_id
+   AND reservation.workspace_id = intent.workspace_id
+   AND reservation.website_project_id = intent.website_project_id
+   AND reservation.send_intent_id = intent.id
   LEFT JOIN LATERAL (
     SELECT latest.*
       FROM backlinks.backlink_send_attempts AS latest

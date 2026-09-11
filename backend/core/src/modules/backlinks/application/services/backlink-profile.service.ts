@@ -384,12 +384,14 @@ export function createBacklinkProfileStore(
       input: Readonly<{
         page: number;
         pageSize: number;
+        view?: "all" | "referring_domains" | "new" | "lost";
         status?: "live" | "lost" | "unknown" | undefined;
         source?: "DATAFORSEO" | "USER_IMPORTED" | undefined;
         query?: string | undefined;
         sort: "last_seen_desc" | "rank_desc" | "spam_desc";
       }>,
     ): Promise<BacklinkInventoryPage> {
+      const view = input.view ?? "all";
       const order = input.sort === "rank_desc"
         ? "inventory.rank DESC NULLS LAST,inventory.updated_at DESC,inventory.id"
         : input.sort === "spam_desc"
@@ -397,6 +399,7 @@ export function createBacklinkProfileStore(
           : "inventory.last_seen_at DESC NULLS LAST,inventory.updated_at DESC,inventory.id";
       const values = [
         ...scope(context),
+        view,
         input.status ?? null,
         input.source ?? null,
         input.query?.trim() || null,
@@ -404,19 +407,89 @@ export function createBacklinkProfileStore(
         (input.page - 1) * input.pageSize,
       ];
       const result = await client.query(`
+        WITH latest_snapshot AS (
+          SELECT snapshot.id
+            FROM backlink_profile_snapshots snapshot
+           WHERE (
+             snapshot.organization_id,snapshot.workspace_id,
+             snapshot.website_project_id
+           )=($1,$2,$3)
+           ORDER BY snapshot.observed_at DESC,snapshot.id DESC
+           LIMIT 1
+        ),
+        filtered_inventory AS (
+          SELECT inventory.*,
+                 policy.tier,policy.importance,
+                 policy.monitoring_status,
+                 policy.policy_version,
+                 policy.version AS policy_revision,
+                 policy.next_check_at,
+                 policy.provider_only_reason,
+                 row_number() OVER (
+                   PARTITION BY COALESCE(
+                     NULLIF(lower(inventory.source_domain),''),
+                     inventory.normalized_source_url
+                   )
+                   ORDER BY ${order}
+                 ) AS source_domain_rank
+            FROM backlink_inventory_items inventory
+            JOIN backlink_inventory_monitor_policies policy ON (
+              policy.organization_id,policy.workspace_id,
+              policy.website_project_id,policy.inventory_item_id
+            )=(
+              inventory.organization_id,inventory.workspace_id,
+              inventory.website_project_id,inventory.id
+            )
+           WHERE (
+             inventory.organization_id,inventory.workspace_id,
+             inventory.website_project_id
+           )=($1,$2,$3)
+             AND ($5::text IS NULL OR inventory.provider_status=$5)
+             AND ($6::text IS NULL OR inventory.source_type=$6)
+             AND ($7::text IS NULL
+                  OR inventory.source_domain ILIKE '%'||$7||'%'
+                  OR inventory.normalized_source_url ILIKE '%'||$7||'%'
+                  OR inventory.anchor_text ILIKE '%'||$7||'%')
+             AND (
+               $4::text IN ('all','referring_domains')
+               OR EXISTS (
+                 SELECT 1
+                   FROM backlink_inventory_observations observation
+                  WHERE (
+                    observation.organization_id,observation.workspace_id,
+                    observation.website_project_id
+                  )=($1,$2,$3)
+                    AND observation.inventory_item_id=inventory.id
+                    AND observation.snapshot_id=(
+                      SELECT id FROM latest_snapshot
+                    )
+                    AND observation.observation_type=$4
+               )
+             )
+        ),
+        projected_inventory AS (
+          SELECT *
+            FROM filtered_inventory inventory
+           WHERE $4::text<>'referring_domains'
+              OR inventory.source_domain_rank=1
+        )
         SELECT inventory.id "inventoryItemId",
                inventory.source_type "sourceType",inventory.provider,
-               source_domain "sourceDomain",
-               normalized_source_url "sourceUrl",
-               normalized_target_url "targetUrl",anchor_text "anchorText",
-               rel_attributes "relAttributes",
-               provider_status "providerStatus",
-               first_seen_at "firstSeenAt",last_seen_at "lastSeenAt",
-               rank,spam_score "spamScore",country_code "countryCode",
-               tld,language_code "languageCode",
-               source_http_status "sourceHttpStatus",
-               target_http_status "targetHttpStatus",
-               redirect_url "redirectUrl",inventory.placement_id "placementId",
+               inventory.source_domain "sourceDomain",
+               inventory.normalized_source_url "sourceUrl",
+               inventory.normalized_target_url "targetUrl",
+               inventory.anchor_text "anchorText",
+               inventory.rel_attributes "relAttributes",
+               inventory.provider_status "providerStatus",
+               inventory.first_seen_at "firstSeenAt",
+               inventory.last_seen_at "lastSeenAt",
+               inventory.rank,inventory.spam_score "spamScore",
+               inventory.country_code "countryCode",
+               inventory.tld,inventory.language_code "languageCode",
+               inventory.source_http_status "sourceHttpStatus",
+               inventory.target_http_status "targetHttpStatus",
+               inventory.redirect_url "redirectUrl",
+               inventory.placement_id "placementId",
                inventory.opportunity_id "opportunityId",
                inventory.pinned,inventory.managed,
                inventory.direct_health_status "directHealthStatus",
@@ -425,33 +498,16 @@ export function createBacklinkProfileStore(
                inventory.restriction_reason "restrictionReason",
                inventory.user_notes "userNotes",
                inventory.latest_direct_evidence_id "latestDirectEvidenceId",
-               policy.tier,policy.importance,
-               policy.monitoring_status "monitoringStatus",
-               policy.policy_version "policyVersion",
-               policy.version "policyRevision",
-               policy.next_check_at "nextCheckAt",
-               policy.provider_only_reason "providerOnlyReason",
+               inventory.tier,inventory.importance,
+               inventory.monitoring_status "monitoringStatus",
+               inventory.policy_version "policyVersion",
+               inventory.policy_revision "policyRevision",
+               inventory.next_check_at "nextCheckAt",
+               inventory.provider_only_reason "providerOnlyReason",
                count(*) OVER() "totalCount"
-          FROM backlink_inventory_items inventory
-          JOIN backlink_inventory_monitor_policies policy ON (
-            policy.organization_id,policy.workspace_id,
-            policy.website_project_id,policy.inventory_item_id
-          )=(
-            inventory.organization_id,inventory.workspace_id,
-            inventory.website_project_id,inventory.id
-          )
-         WHERE (
-           inventory.organization_id,inventory.workspace_id,
-           inventory.website_project_id
-         )=($1,$2,$3)
-           AND ($4::text IS NULL OR inventory.provider_status=$4)
-           AND ($5::text IS NULL OR inventory.source_type=$5)
-           AND ($6::text IS NULL
-                OR inventory.source_domain ILIKE '%'||$6||'%'
-                OR inventory.normalized_source_url ILIKE '%'||$6||'%'
-                OR inventory.anchor_text ILIKE '%'||$6||'%')
+          FROM projected_inventory inventory
          ORDER BY ${order}
-         LIMIT $7 OFFSET $8
+         LIMIT $8 OFFSET $9
       `, values);
       const totalCount = number(result.rows[0]?.totalCount ?? 0);
       return {

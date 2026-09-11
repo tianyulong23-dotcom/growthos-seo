@@ -25,6 +25,14 @@ describe("Send resubmission policy", () => {
     })).toBe(true);
   });
 
+  it("allows a fresh Intent after an unused send reservation expires", () => {
+    expect(canReplaceFailedSendIntent({
+      ...verifiedNotSent,
+      attemptStatus: null,
+      errorCode: "GMAIL_SEND_RESERVATION_EXPIRED",
+    })).toBe(true);
+  });
+
   it.each([
     ["unknown provider result", {
       ...verifiedNotSent,
@@ -39,6 +47,11 @@ describe("Send resubmission policy", () => {
     }],
     ["unclassified terminal failure", {
       ...verifiedNotSent,
+      errorCode: "GMAIL_SEND_FAILED",
+    }],
+    ["unclassified failure without an attempt", {
+      ...verifiedNotSent,
+      attemptStatus: null,
       errorCode: "GMAIL_SEND_FAILED",
     }],
   ])("blocks %s", (_name, evidence) => {

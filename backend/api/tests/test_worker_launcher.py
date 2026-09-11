@@ -52,6 +52,7 @@ def test_local_launcher_builds_crawler_environment(tmp_path: Path) -> None:
     settings = Settings(
         database_url="postgresql+asyncpg://postgres:postgres@localhost:5432/seo",
         crawler_database_url=None,
+        crawler_probe_listen_address="127.0.0.1:7310",
         crawler_worker_idle_timeout_seconds=120,
         ai_settings_encryption_key="encryption-key",
     )
@@ -63,6 +64,7 @@ def test_local_launcher_builds_crawler_environment(tmp_path: Path) -> None:
         "postgresql://postgres:postgres@localhost:5432/seo"
     )
     assert environment["CRAWLER_WORKER_IDLE_TIMEOUT"] == "120s"
+    assert environment["CRAWLER_PROBE_LISTEN_ADDRESS"] == "127.0.0.1:7310"
     assert environment["CRAWLER_BROWSER_CACHE_DIR"] == str(tmp_path / "browser")
     assert environment["AI_SETTINGS_ENCRYPTION_KEY"] == "encryption-key"
     assert environment["BUSINESS_PROFILE_AI_TIMEOUT"] == "90s"
@@ -83,3 +85,14 @@ def test_production_uses_disabled_launcher(monkeypatch: Any) -> None:
         worker.get_crawler_worker_launcher.cache_clear()
 
     assert isinstance(launcher, worker.DisabledWorkerLauncher)
+
+
+def test_boot_started_browser_service_does_not_idle_exit(tmp_path: Path) -> None:
+    settings = Settings(
+        crawler_worker_start_on_boot=True,
+        crawler_worker_idle_timeout_seconds=120,
+    )
+    launcher = worker.LocalCrawlerWorkerLauncher(
+        settings, tmp_path / "crawler-worker.exe"
+    )
+    assert launcher._environment()["CRAWLER_WORKER_IDLE_TIMEOUT"] == "0s"

@@ -29,6 +29,7 @@ const scope = Object.freeze({
   recommendationContextVersionId: "44444444-4444-4444-8444-444444444444",
 });
 const profileVersionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const outreachProfileRecordId = "88888888-8888-4888-8888-888888888888";
 const promotionTargetVersionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 const context = Object.freeze({
@@ -49,7 +50,7 @@ const context = Object.freeze({
 });
 const inputBinding: GenerationInputBinding = Object.freeze({
   inputPinId: "99999999-9999-4999-8999-999999999999",
-  outreachProfileRecordId: "88888888-8888-4888-8888-888888888888",
+  outreachProfileRecordId,
   immutableFingerprint: "fixture-binding",
   pins: Object.freeze({
     organizationId: scope.organizationId,
@@ -459,11 +460,112 @@ describe("commercial qualification production", () => {
     }));
   });
 
-  it("uses three sequential bulk calls and reuses metrics for both sources", async () => {
+  it("accepts V2 seed topics appended after immutable profile keywords", async () => {
+    const repos = repositories();
+    const execute = vi.fn();
+    const result = await executeCommercialQualificationProduction({
+      scope,
+      context: Object.freeze({
+        ...context,
+        keywords: Object.freeze([
+          ...context.keywords,
+          "film reviews",
+          "south african viewers",
+        ]),
+      }),
+      inputBinding,
+      topics: ["film reviews"],
+      candidates: [],
+      visiblePoolGeneration: 2,
+      locationCode: 2710,
+      languageCode: "en",
+      endpointAllowlist: [],
+      metricRuntime: { execute },
+      ...repos,
+      createdBy: "v2-seed-test",
+    });
+
+    expect(result).toMatchObject({
+      state: "candidate_supply_required",
+      callCount: 0,
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("reuses the generation contract created by the V2 launcher", async () => {
+    const repos = repositories();
+    const execute = vi.fn();
+    const generationContractId = "77777777-7777-4777-8777-777777777777";
+
+    await executeCommercialQualificationProduction({
+      scope,
+      context,
+      inputBinding,
+      topics: ["film reviews"],
+      candidates: [],
+      generationContractId,
+      visiblePoolGeneration: 3,
+      locationCode: 2710,
+      languageCode: "en",
+      endpointAllowlist: [],
+      metricRuntime: { execute },
+      ...repos,
+      createdBy: "v2-generation-test",
+    });
+
+    expect(
+      repos.recommendationRepository.assertCorrectedGenerationAvailable,
+    ).toHaveBeenCalledWith(expect.objectContaining({ generationContractId }));
+    expect(
+      repos.recommendationRepository.createCorrectedGeneration,
+    ).toHaveBeenCalledWith(expect.objectContaining({ generationContractId }));
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects discovery keywords that do not preserve the profile prefix", async () => {
+    const repos = repositories();
+    const execute = vi.fn();
+
+    await expect(executeCommercialQualificationProduction({
+      scope,
+      context: Object.freeze({
+        ...context,
+        keywords: Object.freeze([
+          "eleph tv",
+          "streaming service in sa",
+          "film reviews",
+        ]),
+      }),
+      inputBinding,
+      topics: ["film reviews"],
+      candidates: [],
+      visiblePoolGeneration: 2,
+      locationCode: 2710,
+      languageCode: "en",
+      endpointAllowlist: [],
+      metricRuntime: { execute },
+      ...repos,
+      createdBy: "v2-seed-test",
+    })).rejects.toThrow(
+      "reason=qualification_input_binding_mismatch",
+    );
+    expect(execute).not.toHaveBeenCalled();
+    expect(
+      repos.recommendationRepository.createCorrectedGeneration,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("uses bounded bulk-call concurrency and reuses metrics for both sources", async () => {
     const repos = repositories();
     const observedKinds: string[] = [];
+    let inFlight = 0;
+    let maximumInFlight = 0;
     const execute = vi.fn(async (call: CommercialQualificationBulkCall) => {
       observedKinds.push(call.kind);
+      inFlight += 1;
+      maximumInFlight = Math.max(maximumInFlight, inFlight);
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
       return Object.freeze({
         status: "completed" as const,
         body: providerBody(call),
@@ -493,12 +595,14 @@ describe("commercial qualification production", () => {
         "/v3/backlinks/bulk_ranks/live",
       ],
       metricRuntime: { execute },
+      metricConcurrency: 2,
       ...repos,
       createdBy: "phase-4-test",
       observedAt: new Date("2026-08-17T03:00:00.000Z"),
     });
 
     expect(observedKinds).toEqual(["traffic", "spam", "rank"]);
+    expect(maximumInFlight).toBe(2);
     expect(result).toMatchObject({
       state: "completed",
       candidateCount: 2,

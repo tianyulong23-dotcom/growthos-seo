@@ -129,13 +129,13 @@ const input: ProjectContextProjectionInput = {
         "018f0000-0000-7000-8000-000000000011",
       ],
       market: "United States home cinema",
-      qualificationContractVersion: "recommendation-qualification.v1",
+      qualificationContractVersion: "recommendation-pool-admission.v2",
     },
   },
 };
 
 describe("Website Project runtime governance projection", () => {
-  it("projects analysis without implicitly requesting a recommendation refill", async () => {
+  it("projects V2 context without retired jobs or implicit provider work", async () => {
     const queries: Readonly<{
       sql: string;
       values: readonly unknown[];
@@ -175,47 +175,33 @@ describe("Website Project runtime governance projection", () => {
     ).resolves.toMatchObject({
       state: "projected",
       snapshotVersion: 4,
-      jobScheduled: true,
-      jobId: input.jobId,
+      jobScheduled: false,
+      jobId: null,
     });
 
     const outbox = queries.find(({ sql }) =>
       sql.startsWith("INSERT INTO backlink_outbox_events")
     );
-    expect(outbox?.values[4]).toBe(
-      "backlinks.project-analysis.requested.v1",
-    );
-    expect(outbox?.values[7]).toBe(
-      `project-analysis:${input.websiteProjectId}:${input.snapshotVersion}`,
-    );
+    expect(outbox).toBeUndefined();
+    expect(queries.some(({ sql }) => sql.startsWith("INSERT INTO backlink_jobs"))).toBe(false);
     const demand = queries.find(({ sql }) =>
-      sql.includes("recommendation.demand.ready")
+      sql.includes("INSERT INTO backlinks.backlink_recommendation_pool_project_contracts")
     );
+    expect(demand?.sql).toContain("'recommendation-pool.v2','V2_READY'");
     expect(demand?.sql).toContain(
-      "'idle','idle',NULL,NULL,NULL",
+      "ON CONFLICT (organization_id,workspace_id,website_project_id) DO NOTHING",
     );
-    expect(demand?.sql).toContain(
-      "'authorization_gate_removed'::text \"policyAction\"",
-    );
-    expect(demand?.sql).toContain(
-      "ON CONFLICT (workspace_id,idempotency_key) DO NOTHING",
-    );
-    expect(demand?.sql).toContain(
-      "'snapshotVersion',$7::integer",
-    );
-    expect(demand?.values[6]).toBe(input.snapshotVersion);
+    expect(demand?.values.slice(1)).toEqual([
+      input.organizationId, input.workspaceId, input.websiteProjectId, input.actorId,
+    ]);
     expect(demand?.sql).not.toContain(
       "INSERT INTO backlink_recommendation_refills",
     );
     expect(demand?.sql).not.toContain("INSERT INTO backlink_jobs");
     expect(demand?.sql).not.toContain("INSERT INTO backlink_outbox_events");
-    expect(demand?.values[11]).toBe([
-      "recommendation-demand",
-      input.websiteProjectId,
-      input.profileVersionId,
-      input.promotionTargetVersionId,
-      input.generationInputPins.immutableFingerprint,
-    ].join(":"));
+    expect(queries.some(({ sql }) =>
+      sql.includes("backlink_commercial_inventory_policies")
+    )).toBe(false);
     expect(queries.some(({ sql }) =>
       sql.includes("INSERT INTO backlink_recommendation_refills")
       || sql.includes("'backlinks.recommendation-refill.requested.v1'")
@@ -317,7 +303,7 @@ describe("Website Project runtime governance projection", () => {
       ],
     ]);
     const demand = queries.find(({ sql }) =>
-      sql.includes("recommendation.demand.ready")
+      sql.includes("INSERT INTO backlinks.backlink_recommendation_pool_project_contracts")
     );
     expect(demand).toBeDefined();
     expect(queries.some(({ sql }) =>

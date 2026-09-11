@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
 
 import type { BacklinkTransactionClient } from "../../db/tenant-transaction.js";
+import { guardV1RecommendationPoolProjectWrites } from "../../domain/recommendations/recommendation-pool-contract-guard.js";
 import type { RecommendationRefillSupersessionSignal } from "../../workflows/definitions/backlink-recommendation-refill.orchestration.js";
 
 export type RecommendationRefillSupersessionResult = Readonly<{
-  status:
-    | "cancelled"
-    | "awaiting_provider_reconciliation"
-    | "no_change";
+  status: "cancelled" | "awaiting_provider_reconciliation" | "no_change";
   replayed: boolean;
 }>;
 
@@ -27,6 +25,20 @@ export type RecommendationRefillFailureArbitrationResult =
       supersession: RecommendationRefillSupersessionSignal;
     }>;
 
+async function assertV1RecommendationPoolWritesApplicable(
+  client: BacklinkTransactionClient,
+  input: Readonly<{
+    organizationId: string;
+    workspaceId: string;
+    websiteProjectId: string;
+  }>,
+): Promise<void> {
+  const contract = await guardV1RecommendationPoolProjectWrites(client, input);
+  if (contract.status === "contract_not_applicable") {
+    throw new Error("BACKLINK_RECOMMENDATION_POOL_CONTRACT_NOT_APPLICABLE");
+  }
+}
+
 function deterministicUuid(value: string): string {
   const hex = createHash("sha256").update(value, "utf8").digest("hex");
   return [
@@ -40,7 +52,7 @@ function deterministicUuid(value: string): string {
 
 function object(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -51,12 +63,12 @@ function contextIdentity(
   if (record === null) return null;
   const snapshotVersion = Number(record.snapshotVersion);
   if (
-    typeof record.contextVersionId !== "string"
-    || !Number.isSafeInteger(snapshotVersion)
-    || snapshotVersion < 1
-    || typeof record.profileVersionId !== "string"
-    || typeof record.promotionTargetVersionId !== "string"
-    || typeof record.generationInputFingerprint !== "string"
+    typeof record.contextVersionId !== "string" ||
+    !Number.isSafeInteger(snapshotVersion) ||
+    snapshotVersion < 1 ||
+    typeof record.profileVersionId !== "string" ||
+    typeof record.promotionTargetVersionId !== "string" ||
+    typeof record.generationInputFingerprint !== "string"
   ) {
     return null;
   }
@@ -84,9 +96,9 @@ function supersessionSignal(
   const oldContext = contextIdentity(record.oldContext);
   const authoritativeContext = contextIdentity(record.authoritativeContext);
   if (
-    oldContext === null
-    || authoritativeContext === null
-    || authoritativeContext.snapshotVersion <= oldContext.snapshotVersion
+    oldContext === null ||
+    authoritativeContext === null ||
+    authoritativeContext.snapshotVersion <= oldContext.snapshotVersion
   ) {
     return null;
   }
@@ -122,8 +134,7 @@ function supersessionSignal(
   });
 }
 
-const requestSupersessionSql =
-  `WITH locked_job AS (
+const requestSupersessionSql = `WITH locked_job AS (
      SELECT job.*,
             refill.id "refillId",
             old_context.snapshot_version "oldSnapshotVersion",
@@ -294,6 +305,7 @@ export async function requestRecommendationRefillSupersession(
   }>,
 ): Promise<RecommendationRefillSupersessionRequestResult> {
   const { signal } = input;
+  await assertV1RecommendationPoolWritesApplicable(client, signal);
   const requestIdempotencyKey = `${signal.idempotencyKey}:requested`;
   const result = await client.query(requestSupersessionSql, [
     signal.organizationId,
@@ -328,8 +340,7 @@ export async function requestRecommendationRefillSupersession(
   });
 }
 
-const completeSupersessionSql =
-  `WITH locked_job AS (
+const completeSupersessionSql = `WITH locked_job AS (
      SELECT job.*,
              refill.id "refillId",
              refill.visible_pool_generation "visiblePoolGeneration",
@@ -616,6 +627,7 @@ export async function completeRecommendationRefillSupersession(
   }>,
 ): Promise<RecommendationRefillSupersessionResult> {
   const { signal } = input;
+  await assertV1RecommendationPoolWritesApplicable(client, signal);
   const result = await client.query(completeSupersessionSql, [
     signal.organizationId,
     signal.workspaceId,
@@ -645,9 +657,9 @@ export async function completeRecommendationRefillSupersession(
   const row = result.rows[0];
   const status = row?.status;
   if (
-    status !== "cancelled"
-    && status !== "awaiting_provider_reconciliation"
-    && status !== "no_change"
+    status !== "cancelled" &&
+    status !== "awaiting_provider_reconciliation" &&
+    status !== "no_change"
   ) {
     return Object.freeze({ status: "no_change", replayed: false });
   }
@@ -657,8 +669,7 @@ export async function completeRecommendationRefillSupersession(
   });
 }
 
-const providerExecutionPreflightSql =
-  `SELECT job.source_object_id "jobContextVersionId",
+const providerExecutionPreflightSql = `SELECT job.source_object_id "jobContextVersionId",
           current_context.snapshot_version "jobSnapshotVersion",
           latest_context.id "latestContextVersionId",
           latest_context.snapshot_version "latestSnapshotVersion",
@@ -710,6 +721,7 @@ export async function assertRecommendationRefillProviderExecutionCurrent(
     recommendationContextVersionId: string;
   }>,
 ): Promise<void> {
+  await assertV1RecommendationPoolWritesApplicable(client, input);
   const result = await client.query(providerExecutionPreflightSql, [
     input.organizationId,
     input.workspaceId,
@@ -719,14 +731,9 @@ export async function assertRecommendationRefillProviderExecutionCurrent(
   ]);
   const row = result.rows[0];
   if (row === undefined) {
-    throw new Error(
-      "BACKLINK_RECOMMENDATION_REFILL_CONTEXT_IDENTITY_MISMATCH",
-    );
+    throw new Error("BACKLINK_RECOMMENDATION_REFILL_CONTEXT_IDENTITY_MISMATCH");
   }
-  if (
-    row.supersessionSignal !== null
-    && row.supersessionSignal !== undefined
-  ) {
+  if (row.supersessionSignal !== null && row.supersessionSignal !== undefined) {
     throw new Error(
       "BACKLINK_RECOMMENDATION_REFILL_SUPERSEDED_PROJECT_CONTEXT",
     );
@@ -734,9 +741,9 @@ export async function assertRecommendationRefillProviderExecutionCurrent(
   const jobSnapshotVersion = Number(row.jobSnapshotVersion);
   const latestSnapshotVersion = Number(row.latestSnapshotVersion);
   if (
-    !Number.isSafeInteger(jobSnapshotVersion)
-    || !Number.isSafeInteger(latestSnapshotVersion)
-    || latestSnapshotVersion > jobSnapshotVersion
+    !Number.isSafeInteger(jobSnapshotVersion) ||
+    !Number.isSafeInteger(latestSnapshotVersion) ||
+    latestSnapshotVersion > jobSnapshotVersion
   ) {
     throw new Error(
       "BACKLINK_RECOMMENDATION_REFILL_SUPERSEDED_PROJECT_CONTEXT",
@@ -744,8 +751,7 @@ export async function assertRecommendationRefillProviderExecutionCurrent(
   }
 }
 
-const readSupersessionRequestSql =
-  `SELECT result_summary->'supersessionRequest'->'signal'
+const readSupersessionRequestSql = `SELECT result_summary->'supersessionRequest'->'signal'
             "supersessionSignal"
      FROM backlink_jobs
     WHERE (organization_id,workspace_id,website_project_id,id)=
@@ -755,8 +761,7 @@ const readSupersessionRequestSql =
       AND source_object_id=$5::uuid
     FOR UPDATE`;
 
-const recordFailureSql =
-  `WITH failed_refill AS (
+const recordFailureSql = `WITH failed_refill AS (
       SELECT refill.refill_window_key "refillWindowKey",
              refill.recommendation_context_version_id
                "recommendationContextVersionId",
@@ -882,6 +887,7 @@ export async function arbitrateRecommendationRefillFailure(
     integrityHash: string;
   }>,
 ): Promise<RecommendationRefillFailureArbitrationResult> {
+  await assertV1RecommendationPoolWritesApplicable(client, input);
   const request = await client.query(readSupersessionRequestSql, [
     input.organizationId,
     input.workspaceId,
@@ -897,10 +903,11 @@ export async function arbitrateRecommendationRefillFailure(
         "BACKLINK_RECOMMENDATION_REFILL_SUPERSESSION_REQUEST_INVALID",
       );
     }
-    const completion = await completeRecommendationRefillSupersession(
-      client,
-      { signal, now: input.now, integrityHash: input.integrityHash },
-    );
+    const completion = await completeRecommendationRefillSupersession(client, {
+      signal,
+      now: input.now,
+      integrityHash: input.integrityHash,
+    });
     if (completion.status === "cancelled") {
       return Object.freeze({ status: "superseded", supersession: signal });
     }

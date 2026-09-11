@@ -20,10 +20,8 @@ test("mail center exposes persisted reconciliation state without send or sync si
   const session = await installOutreachApiFixtures(page)
 
   await page.goto(`/projects/${projectKey}/backlinks/email`)
-  const queue = page.getByLabel("发送与对账队列")
-  await expect(
-    queue.getByRole("heading", { name: "发送与对账队列" })
-  ).toBeVisible()
+  const queue = page.getByRole("region", { name: "发送记录" })
+  await expect(queue.getByRole("heading", { name: "发送记录" })).toBeVisible()
   await expect(queue.getByText("发送结果未知", { exact: true })).toBeVisible()
 
   const reconciliationItem = queue.getByRole("button", {

@@ -15,8 +15,10 @@ import {
 } from "../../domain/recommendations/commercial-discovery-blueprint.js";
 import {
   commercialDiscoveryCallSchema,
+  commercialDiscoverySemanticPlanningQueryLimit,
   createCommercialDiscoveryPlan,
   fingerprintCommercialDiscoveryCall,
+  fingerprintCommercialDiscoverySemanticRequest,
   mergeCommercialDiscoveryArtifacts,
   parseCommercialDiscoveryRequestPayload,
   type CommercialBacklinkPageEvidence,
@@ -41,6 +43,9 @@ import {
   commercialSemanticDiscoveryPaidCallReserve,
 } from "../../domain/recommendations/provider-operation-budget.js";
 import {
+  recommendationDiscoveryRoundBudgetMicros,
+} from "../../domain/recommendations/recommendation-pool-v2-policy.js";
+import {
   buildCommercialRefillWindowKey,
   type CommercialRefillTier,
 } from "../../domain/recommendations/commercial-refill-cycle.js";
@@ -60,6 +65,7 @@ import type {
 import {
   CommercialDiscoveryRequestService,
   type CommercialDiscoveryQueryClient,
+  type CommercialDiscoveryRequestResult,
 } from "./commercial-discovery-request.service.js";
 import type {
   CommercialDiscoveryEvidenceReusePort,
@@ -67,6 +73,9 @@ import type {
 import {
   extractTargetLanguageSearchPhrases,
 } from "./target-language-search-phrase.js";
+
+const nativeV2BlueprintIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 const blockedDiscoveryDomains = Object.freeze([
   "ahrefs.com",
@@ -89,7 +98,14 @@ const blockedDiscoveryDomains = Object.freeze([
   "youtube.com",
 ]);
 const staticAssessmentConcurrency = 4;
-const providerRequestConcurrency = 1;
+const defaultProviderRequestConcurrency = 1;
+const maximumProviderRequestConcurrency = 4;
+const crossGenerationReassessmentStates = new Set([
+  "candidate_ready",
+  "enrichment_eligible",
+  "insufficient_data",
+  "manual_review",
+]);
 const currentV4VisiblePoolPredicate = `(
   policy.visible_pool_state='building'
   OR (
@@ -164,6 +180,65 @@ export type CommercialRecommendationDiscoveryConfiguration = Readonly<{
   candidateLimit: number;
   locationCode: string;
   languageCode: string;
+  providerRequestConcurrency?: number;
+}>;
+
+export type CommercialRecommendationNativeV2RequestPort = Readonly<{
+  authoritativeBlueprintId: string;
+  verifiedCompetitorDomains?: readonly string[];
+  maxRequests: number;
+  maxAuthorizedCostMicros: number;
+  requestOffset?: number;
+  excludedSemanticRequestFingerprints?: readonly string[];
+  recordRequestPlan?(
+    input: Readonly<{
+      calls: readonly CommercialDiscoveryCall[];
+      selectedCalls: readonly CommercialDiscoveryCall[];
+    }>,
+  ): Promise<void>;
+  shouldContinue?(): Promise<boolean>;
+  prepareRequest(input: Readonly<{
+    call: CommercialDiscoveryCall;
+    index: number;
+    requestFingerprint: string;
+  }>): Promise<Readonly<{
+    context: ProviderRequestContext;
+    actorId: string;
+    refreshMode: "CACHE_PREFERRED" | "FORCE_LIVE";
+    replayResult?: CommercialDiscoveryRequestResult;
+  }>>;
+  recordRequestStarted?(input: Readonly<{
+    call: CommercialDiscoveryCall;
+    index: number;
+    requestFingerprint: string;
+    replayed: boolean;
+  }>): Promise<void>;
+  recordRequestCompleted?(input: Readonly<{
+    call: CommercialDiscoveryCall;
+    index: number;
+    requestFingerprint: string;
+    replayed: boolean;
+    status: "SUCCEEDED" | "FAILED";
+  }>): Promise<void>;
+  recordRequestSuccess(input: Readonly<{
+    call: CommercialDiscoveryCall;
+    index: number;
+    requestFingerprint: string;
+    result: CommercialDiscoveryRequestResult;
+  }>): Promise<void>;
+  recordRequestFailure(input: Readonly<{
+    call: CommercialDiscoveryCall;
+    index: number;
+    requestFingerprint: string;
+    error: unknown;
+  }>): Promise<void>;
+}>;
+
+export type CommercialRecommendationNativeV2RequestResult = Readonly<{
+  call: CommercialDiscoveryCall;
+  index: number;
+  requestFingerprint: string;
+  result: CommercialDiscoveryRequestResult;
 }>;
 
 export type CommercialReadyCandidate = Readonly<{
@@ -202,6 +277,72 @@ export type CommercialRecommendationDiscoveryResult = Readonly<{
     reason: string | null;
   }>;
 }>;
+
+export type CommercialRecommendationNativeV2DiscoveryResult = Readonly<{
+  candidates: readonly never[];
+  requests: readonly CommercialRecommendationNativeV2RequestResult[];
+  provider: CommercialRecommendationDiscoveryResult["provider"];
+  discovery: CommercialRecommendationDiscoveryResult["discovery"];
+}>;
+
+export function orderCommercialNativeV2DiscoveryCalls(
+  calls: readonly CommercialDiscoveryCall[],
+): readonly CommercialDiscoveryCall[] {
+  const competitors = calls.filter(
+    (call) => call.sourceType === "VERIFIED_COMPETITOR_REFERRING_DOMAINS",
+  );
+  const searches = calls.filter(
+    (call) => call.sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE",
+  );
+  const ordered: CommercialDiscoveryCall[] = [];
+  for (let index = 0; index < Math.max(competitors.length, searches.length); index += 1) {
+    const competitor = competitors[index];
+    const search = searches[index];
+    if (competitor !== undefined) ordered.push(competitor);
+    if (search !== undefined) ordered.push(search);
+  }
+  return Object.freeze(ordered);
+}
+
+export function selectCommercialNativeV2RequestPlan(
+  input: Readonly<{
+    calls: readonly CommercialDiscoveryCall[];
+    requestOffset?: number;
+    maxRequests: number;
+    maxAuthorizedCostMicros: number;
+  }>,
+): readonly CommercialDiscoveryCall[] {
+  const requestOffset = input.requestOffset ?? 0;
+  if (
+    !Number.isSafeInteger(requestOffset)
+    || requestOffset < 0
+    || !Number.isSafeInteger(input.maxRequests)
+    || input.maxRequests < 1
+    || input.maxRequests > commercialSemanticDiscoveryPaidCallReserve
+    || !Number.isSafeInteger(input.maxAuthorizedCostMicros)
+    || input.maxAuthorizedCostMicros < 0
+    || input.maxAuthorizedCostMicros > recommendationDiscoveryRoundBudgetMicros
+  ) {
+    throw new TypeError(
+      "Recommendation V2 native discovery request plan is invalid.",
+    );
+  }
+
+  const selected: CommercialDiscoveryCall[] = [];
+  let authorizedCostMicros = 0;
+  for (const call of input.calls.slice(requestOffset)) {
+    if (selected.length >= input.maxRequests) break;
+    if (
+      authorizedCostMicros + call.estimatedCostMicros
+      > input.maxAuthorizedCostMicros
+    ) {
+      break;
+    }
+    selected.push(call);
+    authorizedCostMicros += call.estimatedCostMicros;
+  }
+  return Object.freeze(selected);
+}
 
 type CommercialDiscoveryRequestClientLease = Readonly<{
   client: CommercialDiscoveryQueryClient;
@@ -410,6 +551,7 @@ async function loadHistory(
   scope: Scope,
   contextVersionId: string,
   context: CommercialRecommendationContext,
+  allowCrossGenerationReassessment: boolean,
 ): Promise<CandidateHistory> {
   const prospects = await client.query(
     `SELECT p.hostname_ascii AS hostname,
@@ -447,7 +589,9 @@ async function loadHistory(
     [scope.organizationId, scope.workspaceId, scope.websiteProjectId],
   );
   const candidates = await client.query(
-    `SELECT canonical_domain AS hostname,state
+    `SELECT canonical_domain AS hostname,state,
+            recommendation_id AS "recommendationId",
+            prospect_id AS "prospectId"
        FROM backlink_commercial_candidates
       WHERE organization_id=$1 AND workspace_id=$2
         AND website_project_id=$3 AND project_context_version_id=$4
@@ -486,7 +630,12 @@ async function loadHistory(
       .trim()
       .toLowerCase();
     if (hostname.length === 0) continue;
-    excluded.add(hostname);
+    const canReassess =
+      allowCrossGenerationReassessment
+      && row.recommendationId == null
+      && row.prospectId == null
+      && crossGenerationReassessmentStates.has(String(row.state));
+    if (!canReassess) excluded.add(hostname);
     if (row.state === "excluded") previouslyExcluded.add(hostname);
   }
   for (const targetUrl of context.targetUrls) {
@@ -1076,30 +1225,52 @@ async function openBatch(
     refillRound: number;
     actorId: string;
     startedAt: Date;
+    allowCompletedReplay: boolean;
   }>,
 ): Promise<string> {
   const batchId = randomUUID();
   const result = await input.client.query(
-    `INSERT INTO backlink_commercial_discovery_batches (
-       id,organization_id,workspace_id,website_project_id,blueprint_id,
-       project_context_version_id,visible_pool_generation,refill_job_id,status,
-       idempotency_key,request_intent,
-       source_types,refill_tier,refill_round,started_at,created_by
-     ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,'running',$9,'DISCOVERY',
-       '["EXISTING_HISTORY"]'::jsonb,$10,$11,$12,$13
+    `WITH opened AS (
+       INSERT INTO backlink_commercial_discovery_batches (
+         id,organization_id,workspace_id,website_project_id,blueprint_id,
+         project_context_version_id,visible_pool_generation,refill_job_id,
+         status,idempotency_key,request_intent,source_types,refill_tier,
+         refill_round,started_at,created_by
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,'running',$9,'DISCOVERY',
+         '["EXISTING_HISTORY"]'::jsonb,$10,$11,$12,$13
+       )
+       ON CONFLICT (
+         organization_id,workspace_id,website_project_id,
+         project_context_version_id,idempotency_key
+       ) DO UPDATE SET
+         status='running',
+         pause_reason=NULL,
+         finished_at=NULL
+       WHERE backlink_commercial_discovery_batches.refill_job_id=
+               EXCLUDED.refill_job_id
+         AND backlink_commercial_discovery_batches.status
+               IN ('paused','running')
+       RETURNING id
+     ),
+     completed_replay AS (
+       SELECT batch.id
+         FROM backlink_commercial_discovery_batches AS batch
+        WHERE (batch.organization_id,batch.workspace_id,
+               batch.website_project_id)=($2::uuid,$3::uuid,$4::uuid)
+          AND batch.blueprint_id=$5::uuid
+          AND batch.project_context_version_id=$6::uuid
+          AND batch.visible_pool_generation=$7
+          AND batch.refill_job_id=$8::uuid
+          AND batch.idempotency_key=$9
+          AND batch.status='completed'
+          AND $14::boolean
      )
-     ON CONFLICT (
-       organization_id,workspace_id,website_project_id,
-       project_context_version_id,idempotency_key
-     ) DO UPDATE SET
-       status='running',
-       pause_reason=NULL,
-       finished_at=NULL
-     WHERE backlink_commercial_discovery_batches.refill_job_id=
-             EXCLUDED.refill_job_id
-       AND backlink_commercial_discovery_batches.status IN ('paused','running')
-     RETURNING id`,
+     SELECT id FROM opened
+     UNION ALL
+     SELECT id FROM completed_replay
+      WHERE NOT EXISTS (SELECT 1 FROM opened)
+     LIMIT 1`,
     [
       batchId,
       input.scope.organizationId,
@@ -1114,6 +1285,7 @@ async function openBatch(
       input.refillRound,
       input.startedAt,
       input.actorId,
+      input.allowCompletedReplay,
     ],
   );
   const storedId = result.rows[0]?.id;
@@ -1394,6 +1566,9 @@ export function buildCommercialTierSearchQueries(
     refillRound: number;
     refillWindow: number;
     languageCode: string;
+    queryOffset?: number;
+    queryLimit?: number;
+    includeDeterministicExpansion?: boolean;
   }>,
 ): readonly string[] {
   if (input.tier === "curated_resource_library") {
@@ -1436,22 +1611,40 @@ export function buildCommercialTierSearchQueries(
   const keywords = phrases(input.context.keywords, 4);
   const topics = phrases(input.blueprint.topicClusters, 6);
   const audiences = phrases(input.context.targetAudiences, 4);
+  const competitors = phrases(
+    [
+      ...input.context.explicitCompetitorDomains,
+      ...input.blueprint.discoveredCompetitorSeeds,
+    ],
+    4,
+  );
   const blueprintQueries = phrases(
     input.blueprint.searchQueryClusters,
-    12,
+    20,
   );
   const targetMarketScoped = input.tier !== "same_language_expansion";
-  const subjects = uniqueQueries(
+  const subjectBuckets =
     input.tier === "exact_product_target_market"
-      ? [...keywords, ...products, ...topics]
+      ? [keywords, products, topics, competitors, audiences]
       : input.tier === "same_topic_target_market"
-        ? [...topics, ...keywords, ...products]
+        ? [topics, keywords, products, competitors, audiences]
         : input.tier === "adjacent_industry_same_audience"
-          ? [...audiences, ...topics, ...products, ...keywords]
+          ? [audiences, topics, products, keywords, competitors]
           : input.tier === "resource_media_review_partner_ecosystem"
-            ? [...products, ...topics, ...keywords]
-            : [...topics, ...keywords, ...products],
-  ).slice(0, 4);
+            ? [products, topics, keywords, competitors, audiences]
+            : [topics, keywords, products, competitors, audiences];
+  const interleavedSubjects: string[] = [];
+  const maximumBucketLength = Math.max(
+    0,
+    ...subjectBuckets.map((bucket) => bucket.length),
+  );
+  for (let index = 0; index < maximumBucketLength; index += 1) {
+    for (const bucket of subjectBuckets) {
+      const subject = bucket[index];
+      if (subject !== undefined) interleavedSubjects.push(subject);
+    }
+  }
+  const subjects = uniqueQueries(interleavedSubjects).slice(0, 6);
   if (subjects.length === 0 && blueprintQueries.length === 0) {
     throw discoveryLanguageInputRequired(input.languageCode);
   }
@@ -1495,8 +1688,8 @@ export function buildCommercialTierSearchQueries(
           "useful links",
           "resource directory",
         ];
-  const generatedQueries = subjects.flatMap((subject) =>
-    patterns.map((pattern) =>
+  const generatedQueries = patterns.flatMap((pattern) =>
+    subjects.map((subject) =>
       query(
         targetMarketScoped ? market : "",
         subject,
@@ -1505,6 +1698,7 @@ export function buildCommercialTierSearchQueries(
     )
   );
   const plannedQueries = input.blueprint.generator === "AI"
+      && input.includeDeterministicExpansion !== true
     ? blueprintQueries
     : uniqueQueries([
         ...blueprintQueries.map(scopeQuery),
@@ -1524,7 +1718,20 @@ export function buildCommercialTierSearchQueries(
     input.refillRound,
     input.refillWindow,
   );
-  return Object.freeze(allQueries.slice(pageIndex * 6, pageIndex * 6 + 6));
+  const queryOffset = input.queryOffset ?? pageIndex * 6;
+  const queryLimit = input.queryLimit ?? 6;
+  if (
+    !Number.isSafeInteger(queryOffset)
+    || queryOffset < 0
+    || !Number.isSafeInteger(queryLimit)
+    || queryLimit < 1
+    || queryLimit > commercialDiscoverySemanticPlanningQueryLimit
+  ) {
+    throw new TypeError("Commercial discovery query window is invalid.");
+  }
+  return Object.freeze(
+    allQueries.slice(queryOffset, queryOffset + queryLimit),
+  );
 }
 
 async function loadProjectAuthority(
@@ -1714,12 +1921,12 @@ function eliminationReasonCounts(
   return Object.freeze(counts);
 }
 
-export async function executeCommercialRecommendationDiscovery(
-  input: Readonly<{
+type CommercialRecommendationDiscoveryInput = Readonly<{
     client: CommercialDiscoveryQueryClient;
     provider: CommercialDataForSeoRuntime;
     gate: DataForSeoCallGate;
     safeFetch: Pick<SafeFetchPort, "fetch">;
+    browserFetch?: Pick<SafeFetchPort, "fetch">;
     scope: Scope;
     contextVersionId: string;
     context: CommercialRecommendationContext;
@@ -1731,6 +1938,7 @@ export async function executeCommercialRecommendationDiscovery(
       | (() => Promise<CommercialDiscoveryRequestClientLease>)
       | undefined;
     providerBudgetOperationPrefix?: string | undefined;
+    nativeV2?: CommercialRecommendationNativeV2RequestPort | undefined;
     requestedCount: number;
     jobId: string;
     visiblePoolGeneration: number;
@@ -1739,8 +1947,28 @@ export async function executeCommercialRecommendationDiscovery(
     refillWindow?: number | undefined;
     actorId: string;
     now(): Date;
-  }>,
-): Promise<CommercialRecommendationDiscoveryResult> {
+  }>;
+
+export function executeCommercialRecommendationDiscovery(
+  input: CommercialRecommendationDiscoveryInput &
+    Readonly<{ nativeV2: CommercialRecommendationNativeV2RequestPort }>,
+): Promise<CommercialRecommendationNativeV2DiscoveryResult>;
+export function executeCommercialRecommendationDiscovery(
+  input: CommercialRecommendationDiscoveryInput &
+    Readonly<{ nativeV2?: undefined }>,
+): Promise<CommercialRecommendationDiscoveryResult>;
+export function executeCommercialRecommendationDiscovery(
+  input: CommercialRecommendationDiscoveryInput,
+): Promise<
+  | CommercialRecommendationDiscoveryResult
+  | CommercialRecommendationNativeV2DiscoveryResult
+>;
+export async function executeCommercialRecommendationDiscovery(
+  input: CommercialRecommendationDiscoveryInput,
+): Promise<
+  | CommercialRecommendationDiscoveryResult
+  | CommercialRecommendationNativeV2DiscoveryResult
+> {
   const startedAt = input.now();
   const providerBudgetOperationPrefix = (
     input.providerBudgetOperationPrefix
@@ -1749,6 +1977,26 @@ export async function executeCommercialRecommendationDiscovery(
   if (providerBudgetOperationPrefix.length === 0) {
     throw new TypeError(
       "Commercial discovery provider budget operation prefix is required.",
+    );
+  }
+  if (
+    input.nativeV2 !== undefined &&
+    (!nativeV2BlueprintIdPattern.test(
+      input.nativeV2.authoritativeBlueprintId.trim(),
+    ) ||
+      !Number.isSafeInteger(input.nativeV2.maxRequests) ||
+      input.nativeV2.maxRequests < 1 ||
+      input.nativeV2.maxRequests > commercialSemanticDiscoveryPaidCallReserve ||
+      !Number.isSafeInteger(input.nativeV2.maxAuthorizedCostMicros) ||
+      input.nativeV2.maxAuthorizedCostMicros < 0 ||
+      input.nativeV2.maxAuthorizedCostMicros >
+        recommendationDiscoveryRoundBudgetMicros ||
+      (input.nativeV2.requestOffset !== undefined &&
+        (!Number.isSafeInteger(input.nativeV2.requestOffset) ||
+          input.nativeV2.requestOffset < 0)))
+  ) {
+    throw new TypeError(
+      "Recommendation V2 native discovery request limit is invalid.",
     );
   }
   const authorizedSources = new Set(
@@ -1762,25 +2010,27 @@ export async function executeCommercialRecommendationDiscovery(
       `WEBSITE_PROJECT_DISCOVERY_INPUT_REQUIRED owner=WEBSITE_PROJECT recovery=reproject_current_website_project reason=source_not_authorized:${requiredSource}`,
     );
   }
-  const activePool = await input.client.query(
-    `SELECT visible_pool_generation AS "visiblePoolGeneration"
-       FROM backlink_commercial_inventory_policies AS policy
-      WHERE policy.organization_id=$1 AND policy.workspace_id=$2
-        AND policy.website_project_id=$3
-        AND policy.project_context_version_id=$4
-        AND policy.visible_pool_generation=$5
-        AND ${currentV4VisiblePoolPredicate}
-      FOR SHARE`,
-    [
-      input.scope.organizationId,
-      input.scope.workspaceId,
-      input.scope.websiteProjectId,
-      input.contextVersionId,
-      input.visiblePoolGeneration,
-    ],
-  );
-  if (activePool.rows[0] === undefined) {
-    throw new Error("COMMERCIAL_VISIBLE_POOL_GENERATION_STALE");
+  if (input.nativeV2 === undefined) {
+    const activePool = await input.client.query(
+      `SELECT visible_pool_generation AS "visiblePoolGeneration"
+         FROM backlink_commercial_inventory_policies AS policy
+        WHERE policy.organization_id=$1 AND policy.workspace_id=$2
+          AND policy.website_project_id=$3
+          AND policy.project_context_version_id=$4
+          AND policy.visible_pool_generation=$5
+          AND ${currentV4VisiblePoolPredicate}
+        FOR SHARE`,
+      [
+        input.scope.organizationId,
+        input.scope.workspaceId,
+        input.scope.websiteProjectId,
+        input.contextVersionId,
+        input.visiblePoolGeneration,
+      ],
+    );
+    if (activePool.rows[0] === undefined) {
+      throw new Error("COMMERCIAL_VISIBLE_POOL_GENERATION_STALE");
+    }
   }
   const refillKey = buildCommercialRefillWindowKey({
     websiteProjectId: input.scope.websiteProjectId,
@@ -1795,10 +2045,13 @@ export async function executeCommercialRecommendationDiscovery(
     input.scope,
     input.contextVersionId,
     input.context,
+    input.nativeV2 !== undefined,
   );
   const curatedResourceLibrary =
     input.refillTier === "curated_resource_library";
   const artifacts: CommercialDiscoveryArtifact[] = [];
+  const nativeRequestResults: CommercialRecommendationNativeV2RequestResult[] =
+    [];
   const sources: ("cache" | "stale-cache" | "single-flight" | "provider")[] =
     [];
   let paidCostMicros = 0;
@@ -1811,6 +2064,7 @@ export async function executeCommercialRecommendationDiscovery(
   let semanticRequiredCallCount = 0;
   let semanticCompletedCallCount = 0;
   let requiredSemanticQueryIds = new Set<string>();
+  let stoppedByNativePolicy = false;
   let batchId = "";
   const lockKey = [
     input.scope.organizationId,
@@ -1884,7 +2138,7 @@ export async function executeCommercialRecommendationDiscovery(
       });
       blueprintId = "";
     }
-    if (!curatedResourceLibrary) {
+    if (!curatedResourceLibrary && input.nativeV2 === undefined) {
       acceptedRecoveryPlan = await loadAcceptedProviderRecoveryPlan({
         client: input.client,
         scope: input.scope,
@@ -1895,20 +2149,22 @@ export async function executeCommercialRecommendationDiscovery(
         now: startedAt,
       });
     }
-    const claimedBatch = await claimPausedCommercialDiscoveryBatch({
-      client: input.client,
-      scope: input.scope,
-      contextVersionId: input.contextVersionId,
-      visiblePoolGeneration: input.visiblePoolGeneration,
-      jobId: input.jobId,
-      refillKey,
-      inputBinding: input.inputBinding,
-      actorId: input.actorId,
-      claimedAt: startedAt,
-      acceptedProviderRecoveryPending: acceptedRecoveryPlan.length > 0,
-    });
-    if (claimedBatch !== null) {
-      batchId = claimedBatch.batchId;
+    if (input.nativeV2 === undefined) {
+      const claimedBatch = await claimPausedCommercialDiscoveryBatch({
+        client: input.client,
+        scope: input.scope,
+        contextVersionId: input.contextVersionId,
+        visiblePoolGeneration: input.visiblePoolGeneration,
+        jobId: input.jobId,
+        refillKey,
+        inputBinding: input.inputBinding,
+        actorId: input.actorId,
+        claimedAt: startedAt,
+        acceptedProviderRecoveryPending: acceptedRecoveryPlan.length > 0,
+      });
+      if (claimedBatch !== null) {
+        batchId = claimedBatch.batchId;
+      }
     }
     const persistGeneratedBlueprintWithObservedEvidence = async () => {
       if (generatedContext === null || blueprintId !== "") return;
@@ -1942,26 +2198,29 @@ export async function executeCommercialRecommendationDiscovery(
     const ensureBatchOpen = async () => {
       if (batchId.length > 0) return;
       await persistGeneratedBlueprintWithObservedEvidence();
-      const activePolicy = await input.client.query(
-        `UPDATE backlink_commercial_inventory_policies AS policy
-            SET updated_at=now(),updated_by=$6
-          WHERE policy.organization_id=$1 AND policy.workspace_id=$2
-            AND policy.website_project_id=$3
-            AND policy.project_context_version_id=$4
-            AND policy.visible_pool_generation=$5
-            AND ${currentV4VisiblePoolPredicate}
-          RETURNING visible_pool_generation`,
-        [
-          input.scope.organizationId,
-          input.scope.workspaceId,
-          input.scope.websiteProjectId,
-          input.contextVersionId,
-          input.visiblePoolGeneration,
-          input.actorId,
-        ],
-      );
-      if (activePolicy.rows[0] === undefined) {
-        throw new Error("COMMERCIAL_VISIBLE_POOL_GENERATION_STALE");
+      if (input.nativeV2 !== undefined) return;
+      if (input.nativeV2 === undefined) {
+        const activePolicy = await input.client.query(
+          `UPDATE backlink_commercial_inventory_policies AS policy
+              SET updated_at=now(),updated_by=$6
+            WHERE policy.organization_id=$1 AND policy.workspace_id=$2
+              AND policy.website_project_id=$3
+              AND policy.project_context_version_id=$4
+              AND policy.visible_pool_generation=$5
+              AND ${currentV4VisiblePoolPredicate}
+            RETURNING visible_pool_generation`,
+          [
+            input.scope.organizationId,
+            input.scope.workspaceId,
+            input.scope.websiteProjectId,
+            input.contextVersionId,
+            input.visiblePoolGeneration,
+            input.actorId,
+          ],
+        );
+        if (activePolicy.rows[0] === undefined) {
+          throw new Error("COMMERCIAL_VISIBLE_POOL_GENERATION_STALE");
+        }
       }
       batchId = await openBatch({
         client: input.client,
@@ -1975,6 +2234,7 @@ export async function executeCommercialRecommendationDiscovery(
         refillRound: input.refillRound,
         actorId: input.actorId,
         startedAt,
+        allowCompletedReplay: input.nativeV2 !== undefined,
       });
     };
     if (curatedResourceLibrary) {
@@ -1992,10 +2252,20 @@ export async function executeCommercialRecommendationDiscovery(
       );
       sources.push("cache");
     } else {
+      const configuredConcurrency =
+        input.configuration.providerRequestConcurrency
+        ?? defaultProviderRequestConcurrency;
+      if (
+        !Number.isSafeInteger(configuredConcurrency)
+        || configuredConcurrency < 1
+        || configuredConcurrency > maximumProviderRequestConcurrency
+      ) {
+        throw new TypeError(
+          "Commercial discovery provider concurrency must be between 1 and 4.",
+        );
+      }
       const concurrency =
-        input.requestClientFactory === undefined
-          ? 1
-          : providerRequestConcurrency;
+        input.requestClientFactory === undefined ? 1 : configuredConcurrency;
       let nextPlanIndex = 0;
       const executePlan = async (
         calls: readonly CommercialDiscoveryCall[],
@@ -2015,7 +2285,8 @@ export async function executeCommercialRecommendationDiscovery(
             continue;
           }
           const reusable =
-            input.sharedEvidence === undefined
+            input.nativeV2 !== undefined
+              || input.sharedEvidence === undefined
               ? null
               : await input.sharedEvidence.readReusable(call);
           if (reusable === null) {
@@ -2055,31 +2326,78 @@ export async function executeCommercialRecommendationDiscovery(
                   now: input.now,
                 });
                 const fingerprint = fingerprintCommercialDiscoveryCall(call);
-                const context: ProviderRequestContext = {
-                  ...input.scope,
-                  requestId:
-                    recovery?.requestId ?? `${refillKey}:${index + 1}`,
-                  idempotencyKey:
-                    `commercial-discovery:${refillKey}:${fingerprint}`,
-                  budgetReservationId:
-                    recovery?.budgetReservationId
-                    ?? [
-                      providerBudgetOperationPrefix,
-                      "discovery",
-                      refillKey,
-                      fingerprint,
-                    ].join(":"),
-                };
-                return await requestService.execute({
-                  context,
-                  projectContextVersionId: input.contextVersionId,
+                const nativeRequest =
+                  input.nativeV2 === undefined
+                    ? null
+                    : await input.nativeV2.prepareRequest({
+                        call,
+                        index,
+                        requestFingerprint: fingerprint,
+                      });
+                const context: ProviderRequestContext =
+                  nativeRequest?.context ?? {
+                    ...input.scope,
+                    requestId:
+                      recovery?.requestId ?? `${refillKey}:${index + 1}`,
+                    idempotencyKey:
+                      `commercial-discovery:${refillKey}:${fingerprint}`,
+                    budgetReservationId:
+                      recovery?.budgetReservationId
+                      ?? [
+                        providerBudgetOperationPrefix,
+                        "discovery",
+                        refillKey,
+                        fingerprint,
+                      ].join(":"),
+                  };
+                const replayed = nativeRequest?.replayResult !== undefined;
+                await input.nativeV2?.recordRequestStarted?.({
                   call,
-                  locationCode: input.configuration.locationCode,
-                  languageCode: input.configuration.languageCode,
-                  refreshMode: "CACHE_PREFERRED",
-                  actorId: input.actorId,
-                  recoveryOnly: recovery !== null,
+                  index,
+                  requestFingerprint: fingerprint,
+                  replayed,
                 });
+                try {
+                  const result =
+                    nativeRequest?.replayResult
+                    ?? await requestService.execute({
+                        context,
+                        projectContextVersionId: input.contextVersionId,
+                        call,
+                        locationCode: input.configuration.locationCode,
+                        languageCode: input.configuration.languageCode,
+                        refreshMode:
+                          nativeRequest?.refreshMode ?? "CACHE_PREFERRED",
+                        actorId: nativeRequest?.actorId ?? input.actorId,
+                        recoveryOnly: recovery !== null,
+                        preserveBudgetReservationId:
+                          input.nativeV2 !== undefined,
+                        allowSucceededRequestReplay:
+                          input.nativeV2 !== undefined,
+                      });
+                  await input.nativeV2?.recordRequestCompleted?.({
+                    call,
+                    index,
+                    requestFingerprint: fingerprint,
+                    replayed,
+                    status: "SUCCEEDED",
+                  });
+                  return Object.freeze({
+                    call,
+                    index,
+                    requestFingerprint: fingerprint,
+                    result,
+                  });
+                } catch (error) {
+                  await input.nativeV2?.recordRequestCompleted?.({
+                    call,
+                    index,
+                    requestFingerprint: fingerprint,
+                    replayed,
+                    status: "FAILED",
+                  });
+                  throw error;
+                }
               } finally {
                 await lease.release();
               }
@@ -2088,14 +2406,27 @@ export async function executeCommercialRecommendationDiscovery(
           let firstFailure: unknown;
           let internalFailure: unknown;
           let unknownChargeFailure: unknown;
-          for (const outcome of settled) {
+          for (const [settledIndex, outcome] of settled.entries()) {
             if (outcome.status === "fulfilled") {
-              artifacts.push(outcome.value.artifact);
-              sources.push(outcome.value.source);
-              if (outcome.value.source === "provider") {
-                paidCostMicros += outcome.value.artifact.costMicros;
+              const completed = outcome.value;
+              await input.nativeV2?.recordRequestSuccess(completed);
+              nativeRequestResults.push(completed);
+              artifacts.push(completed.result.artifact);
+              sources.push(completed.result.source);
+              if (completed.result.source === "provider") {
+                paidCostMicros += completed.result.artifact.costMicros;
               }
               continue;
+            }
+            const failed = group[settledIndex];
+            if (failed !== undefined) {
+              await input.nativeV2?.recordRequestFailure({
+                call: failed.call,
+                index: failed.index,
+                requestFingerprint:
+                  fingerprintCommercialDiscoveryCall(failed.call),
+                error: outcome.reason,
+              });
             }
             const message =
               outcome.reason instanceof Error
@@ -2133,6 +2464,13 @@ export async function executeCommercialRecommendationDiscovery(
                 : "unavailable";
             return false;
           }
+          if (
+            input.nativeV2?.shouldContinue !== undefined
+            && !(await input.nativeV2.shouldContinue())
+          ) {
+            stoppedByNativePolicy = true;
+            return true;
+          }
         }
         return true;
       };
@@ -2144,11 +2482,21 @@ export async function executeCommercialRecommendationDiscovery(
         refillRound: input.refillRound,
         refillWindow: input.refillWindow ?? 1,
         languageCode: input.configuration.languageCode,
+        ...(input.nativeV2 === undefined
+          ? {}
+          : {
+              queryOffset: 0,
+              queryLimit: commercialDiscoverySemanticPlanningQueryLimit,
+              includeDeterministicExpansion: true,
+            }),
       });
       const candidatePlan = createCommercialDiscoveryPlan({
-        blueprintId,
+        blueprintId:
+          input.nativeV2?.authoritativeBlueprintId.trim() ?? blueprintId,
         searchQueries,
-        verifiedCompetitorDomains: blueprint.explicitCompetitorDomains,
+        verifiedCompetitorDomains: input.nativeV2 === undefined
+          ? blueprint.explicitCompetitorDomains
+          : input.nativeV2.verifiedCompetitorDomains ?? [],
         userDomain: input.context.canonicalDomain,
         locationCode: input.configuration.locationCode,
         languageCode: input.configuration.languageCode,
@@ -2156,20 +2504,50 @@ export async function executeCommercialRecommendationDiscovery(
         estimatedCostMicros: input.configuration.estimatedCostMicros,
         remainingBudgetMicros: Number.MAX_SAFE_INTEGER,
       });
-      const semanticPlan = candidatePlan
-        .filter(
-          ({ sourceType }) =>
-            sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE",
-        )
-        .slice(0, commercialSemanticDiscoveryPaidCallReserve);
+      const excludedSemanticRequestFingerprints = new Set(
+        input.nativeV2?.excludedSemanticRequestFingerprints ?? [],
+      );
+      const orderedCandidatePlan = input.nativeV2 === undefined
+        ? candidatePlan
+        : orderCommercialNativeV2DiscoveryCalls(candidatePlan);
+      const availableSemanticPlan = orderedCandidatePlan.filter(
+        (call) =>
+          (call.sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE"
+            || (input.nativeV2 !== undefined
+              && call.sourceType === "VERIFIED_COMPETITOR_REFERRING_DOMAINS"))
+          && !excludedSemanticRequestFingerprints.has(
+            fingerprintCommercialDiscoverySemanticRequest(call),
+          ),
+      );
+      const semanticPlan = input.nativeV2 === undefined
+        ? availableSemanticPlan.slice(
+            0,
+            commercialSemanticDiscoveryPaidCallReserve,
+          )
+        : selectCommercialNativeV2RequestPlan({
+            calls: availableSemanticPlan,
+            maxRequests: input.nativeV2.maxRequests,
+            maxAuthorizedCostMicros: input.nativeV2.maxAuthorizedCostMicros,
+            ...(input.nativeV2.requestOffset === undefined
+              ? {}
+              : { requestOffset: input.nativeV2.requestOffset }),
+          });
+      await input.nativeV2?.recordRequestPlan?.({
+        calls: availableSemanticPlan,
+        selectedCalls: semanticPlan,
+      });
       requiredSemanticQueryIds = new Set(
-        semanticPlan.flatMap(({ plannerLineage }) =>
-          plannerLineage === undefined ? [] : [plannerLineage.queryId]
+        semanticPlan.flatMap(({ plannerLineage, sourceType }) =>
+          plannerLineage === undefined || sourceType !== "BLUEPRINT_SERP_STANDARD_QUEUE"
+            ? [] : [plannerLineage.queryId]
         ),
       );
       semanticRequiredCallCount = requiredSemanticQueryIds.size;
 
-      if (input.sharedEvidence !== undefined) {
+      if (
+        input.nativeV2 === undefined
+        && input.sharedEvidence !== undefined
+      ) {
         for (const call of candidatePlan) {
           const reusable = await input.sharedEvidence.readReusable(call);
           if (
@@ -2204,7 +2582,18 @@ export async function executeCommercialRecommendationDiscovery(
         );
         await executePlan(pendingSemanticPlan, []);
       }
-      if (semanticRequiredCallCount === 0) {
+      if (stoppedByNativePolicy) {
+        requiredSemanticQueryIds = new Set(
+          nativeRequestResults.flatMap(({ call }) =>
+            call.plannerLineage === undefined
+              || call.sourceType !== "BLUEPRINT_SERP_STANDARD_QUEUE"
+              ? []
+              : [call.plannerLineage.queryId]
+          ),
+        );
+        semanticRequiredCallCount = requiredSemanticQueryIds.size;
+      }
+      if (semanticPlan.length === 0) {
         pauseReason = "semantic_discovery_not_planned_endpoint_allowlist";
       }
     }
@@ -2215,6 +2604,64 @@ export async function executeCommercialRecommendationDiscovery(
       "SELECT pg_advisory_unlock(hashtextextended($1,0))",
       [lockKey],
     );
+  }
+  if (input.nativeV2 !== undefined) {
+    const authoritativeBlueprintId =
+      input.nativeV2.authoritativeBlueprintId.trim();
+    const collectedAt =
+      artifacts
+        .map(({ collectedAt }) => collectedAt)
+        .sort()
+        .at(-1) ?? startedAt.toISOString();
+    if (!curatedResourceLibrary) {
+      semanticCompletedCallCount = new Set(
+        artifacts.flatMap(({ sourceType, plannerLineage }) =>
+          sourceType === "BLUEPRINT_SERP_STANDARD_QUEUE" &&
+          plannerLineage !== undefined &&
+          plannerLineage.blueprintId === authoritativeBlueprintId &&
+          requiredSemanticQueryIds.has(plannerLineage.queryId)
+            ? [plannerLineage.queryId]
+            : [],
+        ),
+      ).size;
+      if (semanticCompletedCallCount < semanticRequiredCallCount) {
+        failureStatus ??= "paused";
+        pauseReason ??=
+          semanticCompletedCallCount === 0
+            ? "semantic_discovery_not_executed"
+            : "semantic_discovery_incomplete";
+      }
+    }
+    const batchStatus = failureStatus ?? "completed";
+    const fingerprints = artifacts.map(
+      ({ requestFingerprint }) => requestFingerprint,
+    );
+    return Object.freeze({
+      candidates: Object.freeze([]),
+      requests: Object.freeze(nativeRequestResults),
+      provider: Object.freeze({
+        source: providerSource(sources),
+        acquiredAt: collectedAt,
+        costMicros: paidCostMicros,
+        requestFingerprint: aggregateHash(
+          fingerprints.length === 0
+            ? [`commercial-discovery-native-v2:${input.jobId}`]
+            : fingerprints,
+        ),
+      }),
+      discovery: Object.freeze({
+        semanticStatus: curatedResourceLibrary
+          ? "not_required"
+          : semanticRequiredCallCount === 0
+            ? "not_required"
+            : batchStatus === "completed"
+              ? "completed"
+              : batchStatus,
+        semanticRequiredCallCount,
+        semanticCompletedCallCount,
+        reason: pauseReason,
+      }),
+    });
   }
   if (batchId.length === 0) {
     throw new Error("COMMERCIAL_DISCOVERY_BATCH_NOT_OPEN");
@@ -2255,6 +2702,9 @@ export async function executeCommercialRecommendationDiscovery(
           partnershipGoals: input.context.partnershipGoals,
         },
         safeFetch: input.safeFetch,
+        ...(input.browserFetch === undefined
+          ? {}
+          : { browserFetch: input.browserFetch }),
         pageParser: commercialPageParser,
         now: () => input.now().toISOString(),
       });
@@ -2319,6 +2769,7 @@ export async function executeCommercialRecommendationDiscovery(
   const progressiveAdmission =
     applyProgressiveCommercialCandidateAdmission(
       baselineEvaluated.map(({ commercialScore }) => commercialScore),
+      { visiblePoolGeneration: input.visiblePoolGeneration },
     );
   const evaluated = Object.freeze(
     baselineEvaluated.map((candidate, index) => {
@@ -2482,33 +2933,35 @@ export async function executeCommercialRecommendationDiscovery(
       input.visiblePoolGeneration,
     ],
   );
-  await input.client.query(
-    `UPDATE backlink_commercial_inventory_policies AS policy
-        SET latest_refill_at=$5,next_refill_at=$6,
-            latest_provider_collected_at=$7,pause_reason=$8,
-            last_raw_candidate_count=$9,
-            elimination_reason_counts=$10::jsonb,
-            updated_at=$5,updated_by=$11,version=version+1
-      WHERE policy.organization_id=$1 AND policy.workspace_id=$2
-        AND policy.website_project_id=$3
-        AND policy.project_context_version_id=$4
-        AND policy.visible_pool_generation=$12
-        AND ${currentV4VisiblePoolPredicate}`,
-    [
-      input.scope.organizationId,
-      input.scope.workspaceId,
-      input.scope.websiteProjectId,
-      input.contextVersionId,
-      finishedAt,
-      new Date(finishedAt.getTime() + 15 * 60_000),
-      artifacts.length === 0 ? null : collectedAt,
-      pauseReason,
-      evaluated.length,
-      JSON.stringify(eliminationCounts),
-      input.actorId,
-      input.visiblePoolGeneration,
-    ],
-  );
+  if (input.nativeV2 === undefined) {
+    await input.client.query(
+      `UPDATE backlink_commercial_inventory_policies AS policy
+          SET latest_refill_at=$5,next_refill_at=$6,
+              latest_provider_collected_at=$7,pause_reason=$8,
+              last_raw_candidate_count=$9,
+              elimination_reason_counts=$10::jsonb,
+              updated_at=$5,updated_by=$11,version=version+1
+        WHERE policy.organization_id=$1 AND policy.workspace_id=$2
+          AND policy.website_project_id=$3
+          AND policy.project_context_version_id=$4
+          AND policy.visible_pool_generation=$12
+          AND ${currentV4VisiblePoolPredicate}`,
+      [
+        input.scope.organizationId,
+        input.scope.workspaceId,
+        input.scope.websiteProjectId,
+        input.contextVersionId,
+        finishedAt,
+        new Date(finishedAt.getTime() + 15 * 60_000),
+        artifacts.length === 0 ? null : collectedAt,
+        pauseReason,
+        evaluated.length,
+        JSON.stringify(eliminationCounts),
+        input.actorId,
+        input.visiblePoolGeneration,
+      ],
+    );
+  }
   return Object.freeze({
     candidates: Object.freeze(ranked),
     enrichmentCandidates: enrichment.candidates,

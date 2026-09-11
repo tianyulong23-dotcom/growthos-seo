@@ -116,45 +116,130 @@ describe("contact enrichment job command", () => {
     ]);
   });
 
+  it("republishes due retries without creating new inventory jobs", async () => {
+    const batchId = "018f0000-0000-7000-8000-000000000008";
+    const calls: { text: string; values?: readonly unknown[] }[] = [];
+    const responses: readonly Record<string, unknown>[][] = [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [
+        {
+          id: jobId,
+          batchId,
+          recommendationId,
+          prospectId,
+          recommendationContextVersionId: contextVersionId,
+          rootUrl: "https://publisher.example/",
+          status: "retry_scheduled",
+          attemptCount: 1,
+          maxAttempts: 3,
+          maxPages: 8,
+          maxDepth: 2,
+          browserAllowed: false,
+          browserUsed: false,
+          pagesVisited: 0,
+          candidateCount: 0,
+          evidenceCount: 0,
+          lastErrorCode: "SAFE_FETCH_TIMEOUT",
+          terminalReasonCode: null,
+          method: "none",
+          lastErrorCategory: "TRANSPORT",
+          retryAfter: "2026-09-07T02:51:00.000Z",
+          completedAt: null,
+          startedAt: "2026-09-07T02:46:43.000Z",
+          finishedAt: null,
+          version: 2,
+        },
+      ],
+      [],
+      [{ id: "018f0000-0000-7000-8000-000000000009" }],
+    ];
+
+    const created = await ensureReadyContactEnrichmentJobs(
+      {
+        query: async (text, values) => {
+          calls.push({ text, values });
+          return { rows: responses[calls.length - 1] ?? [] };
+        },
+      },
+      {
+        scope: { organizationId, workspaceId, websiteProjectId },
+        actorId: "phase4-worker",
+        limit: 2,
+        options: {
+          maxAttempts: 3,
+          maxPages: 8,
+          maxDepth: 2,
+          browserAllowed: false,
+        },
+        createNewJobs: false,
+      },
+    );
+
+    expect(created).toBe(1);
+    expect(calls).toHaveLength(8);
+    expect(calls[5]?.text).toContain("status='retry_scheduled'");
+    expect(calls[7]?.values?.slice(1, 7)).toEqual([
+      organizationId,
+      workspaceId,
+      websiteProjectId,
+      "backlinks.contact-enrichment.requested.v1",
+      jobId,
+      2,
+    ]);
+    expect(
+      calls.some(({ text }) =>
+        text.includes("FROM backlink_recommendation_inventory i"),
+      ),
+    ).toBe(false);
+  });
+
   it("allows an accepted recommendation to start contact enrichment", async () => {
     const batchId = "018f0000-0000-7000-8000-000000000008";
     const calls: { text: string; values?: readonly unknown[] }[] = [];
     const responses: readonly Record<string, unknown>[][] = [
-      [{
-        recommendationId,
-        prospectId,
-        recommendationContextVersionId: contextVersionId,
-        hostname: "publisher.example",
-        inventoryStatus: "accepted",
-      }],
+      [
+        {
+          recommendationId,
+          prospectId,
+          recommendationContextVersionId: contextVersionId,
+          hostname: "publisher.example",
+          inventoryStatus: "accepted",
+        },
+      ],
       [{ id: jobId }],
-      [{
-        id: jobId,
-        batchId,
-        recommendationId,
-        prospectId,
-        recommendationContextVersionId: contextVersionId,
-        rootUrl: "https://publisher.example/",
-        status: "pending",
-        attemptCount: 0,
-        maxAttempts: 3,
-        maxPages: 8,
-        maxDepth: 2,
-        browserAllowed: false,
-        browserUsed: false,
-        pagesVisited: 0,
-        candidateCount: 0,
-        evidenceCount: 0,
-        lastErrorCode: null,
-        terminalReasonCode: null,
-        method: "none",
-        lastErrorCategory: null,
-        retryAfter: null,
-        completedAt: null,
-        startedAt: null,
-        finishedAt: null,
-        version: 1,
-      }],
+      [
+        {
+          id: jobId,
+          batchId,
+          recommendationId,
+          prospectId,
+          recommendationContextVersionId: contextVersionId,
+          rootUrl: "https://publisher.example/",
+          status: "pending",
+          attemptCount: 0,
+          maxAttempts: 3,
+          maxPages: 8,
+          maxDepth: 2,
+          browserAllowed: false,
+          browserUsed: false,
+          pagesVisited: 0,
+          candidateCount: 0,
+          evidenceCount: 0,
+          lastErrorCode: null,
+          terminalReasonCode: null,
+          method: "none",
+          lastErrorCategory: null,
+          retryAfter: null,
+          completedAt: null,
+          startedAt: null,
+          finishedAt: null,
+          version: 1,
+        },
+      ],
       [{ id: "018f0000-0000-7000-8000-000000000009" }],
     ];
     const commands = createContactEnrichmentCommands(
@@ -345,7 +430,12 @@ describe("contact enrichment job command", () => {
           return {
             rows:
               calls.length === 1
-                ? [{ prospectId, recommendationContextVersionId: contextVersionId }]
+                ? [
+                    {
+                      prospectId,
+                      recommendationContextVersionId: contextVersionId,
+                    },
+                  ]
                 : [],
           };
         },
@@ -515,18 +605,20 @@ describe("contact enrichment job command", () => {
         query: async (text, values) => {
           calls.push({ text, values });
           return {
-            rows: [{
-              recommendationId,
-              prospectId,
-              recommendationContextVersionId: contextVersionId,
-              hostname: "publisher.example",
-              currentContext: true,
-              jobId,
-              jobStatus: "retry_scheduled",
-              attemptCount: 1,
-              maxAttempts: 3,
-              batchId: "018f0000-0000-7000-8000-000000000008",
-            }],
+            rows: [
+              {
+                recommendationId,
+                prospectId,
+                recommendationContextVersionId: contextVersionId,
+                hostname: "publisher.example",
+                currentContext: true,
+                jobId,
+                jobStatus: "retry_scheduled",
+                attemptCount: 1,
+                maxAttempts: 3,
+                batchId: "018f0000-0000-7000-8000-000000000008",
+              },
+            ],
           };
         },
       },
@@ -551,5 +643,63 @@ describe("contact enrichment job command", () => {
       outboxEventsCreated: 0,
     });
     expect(calls).toHaveLength(1);
+  });
+
+  it("uses canonical V2 membership without retrying a shared terminal job", async () => {
+    const calls: { text: string; values?: readonly unknown[] }[] = [];
+    const result = await queueHistoricalContactEnrichmentJobs(
+      {
+        query: async (text, values) => {
+          calls.push({ text, values });
+          return {
+            rows: [
+              {
+                recommendationId,
+                prospectId,
+                recommendationContextVersionId: contextVersionId,
+                hostname: "publisher.example",
+                currentContext: true,
+                jobId,
+                jobStatus: "no_contact_found",
+                attemptCount: 3,
+                maxAttempts: 3,
+                batchId: "018f0000-0000-7000-8000-000000000008",
+              },
+            ],
+          };
+        },
+      },
+      {
+        scope: { organizationId, workspaceId, websiteProjectId },
+        actorId: "phase4-worker",
+        recommendationIds: [recommendationId],
+        options: {
+          maxAttempts: 3,
+          maxPages: 8,
+          maxDepth: 2,
+          browserAllowed: false,
+        },
+        sourceSelection: "canonical_v2",
+      },
+    );
+
+    expect(result).toMatchObject({
+      eligibleRecommendationCount: 1,
+      jobsCreated: 0,
+      jobsRetried: 0,
+      activeJobsPreserved: 1,
+      outboxEventsCreated: 0,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.text).toContain(
+      "TRUE /* recommendation-pool-v2-canonical-source */",
+    );
+    expect(calls[0]?.text).not.toContain("inventory.fit_decision='eligible'");
+    expect(calls[0]?.values).toEqual([
+      organizationId,
+      workspaceId,
+      websiteProjectId,
+      [recommendationId],
+    ]);
   });
 });

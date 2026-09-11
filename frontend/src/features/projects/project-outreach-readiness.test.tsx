@@ -48,6 +48,10 @@ describe("ProjectOutreachReadiness", () => {
     expect(
       screen.getByRole("button", { name: "前往准备推广主题" })
     ).toBeTruthy()
+    const details = screen.getByText("版本详情").closest("details")
+    expect(details).not.toBeNull()
+    expect(details?.open).toBe(false)
+    expect(details?.textContent).toContain("sha256:input-required")
   })
 
   it("does not expose a late response from the previously selected project", async () => {

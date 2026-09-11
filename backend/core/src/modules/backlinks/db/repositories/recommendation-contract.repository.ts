@@ -131,8 +131,10 @@ async function createGeneration(
   client: BacklinkTransactionClient,
   input: CreateCorrectedGenerationInput,
 ): Promise<void> {
-  await client.query(
-    `INSERT INTO backlinks.backlink_recommendation_generation_contracts (
+  let generation = await findGenerationContract(client, input);
+  if (generation === undefined) {
+    await client.query(
+      `INSERT INTO backlinks.backlink_recommendation_generation_contracts (
        id, organization_id, workspace_id, website_project_id,
        recommendation_context_version_id, visible_pool_generation,
        input_pin_id, qualification_contract_version,
@@ -146,30 +148,30 @@ async function createGeneration(
      )
      ON CONFLICT ON CONSTRAINT backlink_rec_generation_scope_generation_uq
      DO NOTHING`,
-    [
-      input.generationContractId,
-      input.organizationId,
-      input.workspaceId,
-      input.websiteProjectId,
-      input.recommendationContextVersionId,
-      input.visiblePoolGeneration,
-      input.inputPinId,
-      CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-      CORRECTED_VISIBILITY_CONTRACT_VERSION,
-      CORRECTED_SCORE_MODEL_VERSION,
-      input.metricScope,
-      input.market,
-      input.location,
-      input.language,
-      input.trafficLocationCode,
-      input.trafficLanguageCode,
-      json(input.requestFingerprints),
-      input.workerContractVersion,
-      input.createdBy,
-    ],
-  );
-
-  const generation = await findGenerationContract(client, input);
+      [
+        input.generationContractId,
+        input.organizationId,
+        input.workspaceId,
+        input.websiteProjectId,
+        input.recommendationContextVersionId,
+        input.visiblePoolGeneration,
+        input.inputPinId,
+        CORRECTED_QUALIFICATION_CONTRACT_VERSION,
+        CORRECTED_VISIBILITY_CONTRACT_VERSION,
+        CORRECTED_SCORE_MODEL_VERSION,
+        input.metricScope,
+        input.market,
+        input.location,
+        input.language,
+        input.trafficLocationCode,
+        input.trafficLanguageCode,
+        json(input.requestFingerprints),
+        input.workerContractVersion,
+        input.createdBy,
+      ],
+    );
+    generation = await findGenerationContract(client, input);
+  }
   assertGenerationContract(generation, input.generationContractId);
 
   await client.query(

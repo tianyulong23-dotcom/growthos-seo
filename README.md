@@ -18,6 +18,14 @@ seo/
 
 `storage/` 是本地运行产生的数据，不提交到 GitHub。
 
+## 推荐池团队交付
+
+推荐池资源库现随代码保存在 `backend/core/resources/resource-library/bundled/`，
+包含完整的 49,742 条网站资源记录，默认从项目内读取，不依赖作者电脑路径。
+数据库迁移、Core API/Worker、前端、供应商凭据初始化及同事首次启动步骤见
+[推荐池团队交付与首次启动](docs/recommendation-pool-team-setup.md)。
+API 密钥、Gmail 授权和用户业务数据库不随 Git 共享。
+
 ## 前端开发
 
 要求安装 Node.js 24 和 npm。

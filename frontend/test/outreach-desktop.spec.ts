@@ -26,10 +26,9 @@ test("desktop outreach path composes from an opportunity, sends, syncs a reply, 
   ).toBeVisible()
   await expect(
     page.getByRole("link", { name: "publisher.example.test", exact: true })
-  ).toBeVisible()
-  await expect(
-    page.getByText("高适合度 · 综合适合度 92.0", { exact: true })
-  ).toBeVisible()
+  ).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText("受众与项目匹配", { exact: true })).toBeVisible()
+  await expect(page.getByText("12,500", { exact: true })).toBeVisible()
 
   await page.getByRole("tab", { name: "外链机会" }).click()
   await expect(page).toHaveURL(
@@ -42,7 +41,7 @@ test("desktop outreach path composes from an opportunity, sends, syncs a reply, 
   await expect(
     page.getByRole("heading", { name: "publisher.example.test" })
   ).toBeVisible()
-  await page.getByRole("link", { name: "撰写邮件" }).click()
+  await page.getByRole("link", { name: "创建邮件草稿" }).click()
   await expect(page).toHaveURL(
     new RegExp(
       `/projects/${projectKey}/backlinks/drafts/new\\?opportunityId=${opportunityId}$`
@@ -63,10 +62,19 @@ test("desktop outreach path composes from an opportunity, sends, syncs a reply, 
 
   await page.getByRole("button", { name: "人工批准" }).click()
   await expect(page.getByText("当前草稿版本已人工批准。")).toBeVisible()
-  await page.getByRole("checkbox").check()
-  await page.getByRole("button", { name: "最终确认并发送" }).click()
-  await expect(page.getByText("Gmail Provider 已接受")).toBeVisible()
-  await expect(page.getByText("gmail-message-e2e")).toBeVisible()
+  const sendConfirmation = page.getByRole("checkbox", {
+    name: "我已核对发件账号、收件人和已批准版本，并确认立即发送。",
+  })
+  await expect(sendConfirmation).toBeEnabled()
+  await sendConfirmation.click()
+  await expect(sendConfirmation).toBeChecked()
+  const sendButton = page.getByRole("button", {
+    name: "确认并发送",
+    exact: true,
+  })
+  await expect(sendButton).toBeEnabled()
+  await sendButton.click()
+  await expect(page.getByText("邮件发送成功")).toBeVisible()
 
   await page.goto(`/projects/${projectKey}/backlinks/email`)
   await expect(page.getByTestId("mail-sync-diagnostics")).toBeHidden()
@@ -82,8 +90,10 @@ test("desktop outreach path composes from an opportunity, sends, syncs a reply, 
   await page.getByRole("button", { name: "确认关联" }).click()
   await expect(page.getByText("已关联到外链机会")).toBeVisible()
 
-  await page.goto(`/projects/${projectKey}/performance/links`)
-  await expect(page.getByRole("heading", { name: "效果" })).toBeVisible()
+  await page.goto(`/projects/${projectKey}/backlinks/links`)
+  await expect(
+    page.getByRole("heading", { name: "Backlink Profile" })
+  ).toBeVisible()
   await page.getByRole("tab", { name: "Confirmed" }).click()
   await expect(
     page.getByText("https://publisher.example.test/article")
@@ -168,11 +178,20 @@ test("phase 9 persists readiness confirmation before accepted send and exposes s
 
   await page.getByRole("button", { name: "人工批准" }).click()
   await expect(page.getByText("当前草稿版本已人工批准。")).toBeVisible()
-  await page.getByRole("checkbox").check()
-  await page.getByRole("button", { name: "最终确认并发送" }).click()
+  const sendConfirmation = page.getByRole("checkbox", {
+    name: "我已核对发件账号、收件人和已批准版本，并确认立即发送。",
+  })
+  await expect(sendConfirmation).toBeEnabled()
+  await sendConfirmation.click()
+  await expect(sendConfirmation).toBeChecked()
+  const sendButton = page.getByRole("button", {
+    name: "确认并发送",
+    exact: true,
+  })
+  await expect(sendButton).toBeEnabled()
+  await sendButton.click()
 
-  await expect(page.getByText("Gmail Provider 已接受")).toBeVisible()
-  await expect(page.getByText("gmail-message-e2e")).toBeVisible()
+  await expect(page.getByText("邮件发送成功")).toBeVisible()
   await expect
     .poll(
       () =>
@@ -231,34 +250,38 @@ test("phase 9 persists readiness confirmation before accepted send and exposes s
   ).toBeVisible()
 })
 
-test("recommendation generation reconnects one server batch across navigation and refresh", async ({
+test("recommendation feed remains V2 across navigation and refresh without V1 writes", async ({
   page,
-}) => {
+}, testInfo) => {
   test.setTimeout(45_000)
   const session = await installOutreachApiFixtures(page, {
-    recommendationMode: "generate",
-    recommendationCompleteAfterReads: 6,
+    recommendationPoolSize: 20,
   })
 
   await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
-  await expect
-    .poll(
-      () =>
-        session.capturedRequests.filter(
-          (request) =>
-            request.method === "POST" &&
-            request.pathname.endsWith("/recommendation-refill-jobs")
-        ).length
-    )
-    .toBe(1)
   await expect(
-    page.getByText(/推荐任务已排队|正在计算网站适合度|正在处理联系人/)
+    page.getByRole("heading", { name: "外链推荐", exact: true })
   ).toBeVisible()
+  await expect(
+    page.getByRole("link", {
+      name: "publisher.example.test",
+      exact: true,
+    })
+  ).toBeVisible()
+  await expect(page.getByText("共 20 条已发布推荐")).toBeVisible()
+  await page.screenshot({
+    path: testInfo.outputPath("recommendation-feed-v2-desktop.png"),
+    fullPage: true,
+  })
 
   await page.getByRole("tab", { name: "外链机会" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/${projectKey}/backlinks/opportunities$`)
+  )
   await page.getByRole("tab", { name: "推荐池" }).click()
-  await expect(page.getByText("前台等待已结束")).toHaveCount(0)
-
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/${projectKey}/backlinks/recommendations$`)
+  )
   await expect(
     page.getByRole("link", {
       name: "publisher.example.test",
@@ -271,161 +294,128 @@ test("recommendation generation reconnects one server batch across navigation an
       name: "publisher.example.test",
       exact: true,
     })
-  ).toBeVisible()
-  const currentPoolMetric = page
-    .getByText("本轮推荐", { exact: true })
-    .locator("..")
-  await expect(currentPoolMetric.getByText("20", { exact: true })).toBeVisible()
-  await expect(page.getByRole("button", { name: "归档本轮" })).toBeEnabled()
-  await expect(
-    page.getByRole("button", { name: "归档并生成下一轮" })
-  ).toBeEnabled()
+  ).toBeVisible({ timeout: 20_000 })
+  expect(
+    session.capturedRequests.filter((request) =>
+      request.pathname.includes("/recommendation-feed")
+    ).length
+  ).toBeGreaterThanOrEqual(2)
+  expect(
+    session.capturedRequests.filter(
+      (request) =>
+        request.pathname.endsWith("/backlinks/recommendations") ||
+        request.pathname.includes("/recommendation-inventory") ||
+        request.pathname.includes("/recommendation-refill-jobs") ||
+        request.pathname.includes("/recommendation-pools/")
+    )
+  ).toHaveLength(0)
+  expect(session.unexpectedNetwork).toEqual([])
+})
+
+test("recommendation details hide unavailable website metrics", async ({
+  page,
+}) => {
+  await installOutreachApiFixtures(page, {
+    recommendationMetricsMode: "unavailable",
+  })
+
+  await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
+  const recommendation = page.locator("article").filter({
+    has: page.getByRole("link", {
+      name: "publisher.example.test",
+      exact: true,
+    }),
+  })
+  await expect(recommendation.getByText("未知", { exact: true })).toHaveCount(3)
+  await expect(page.getByText("高适合度")).toHaveCount(0)
+  await expect(page.getByText("推荐依据", { exact: true })).toHaveCount(0)
+})
+
+test("recommendation feed uses V2 Opportunity, archive, undo, and get-more contracts", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(45_000)
+  const session = await installOutreachApiFixtures(page, {
+    recommendationPoolSize: 20,
+  })
+
+  await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
   const firstRecommendation = page.locator("article").filter({
     has: page.getByRole("link", {
       name: "publisher.example.test",
       exact: true,
     }),
   })
+  await firstRecommendation.getByRole("button", { name: "加入" }).click()
   await expect(
-    firstRecommendation.getByText("高适合度 · 综合适合度 92.0", {
-      exact: true,
-    })
+    firstRecommendation.getByText("你已加入 Opportunity", { exact: true })
   ).toBeVisible()
-  await expect(firstRecommendation.getByText("产品：E2E product")).toBeVisible()
-  await expect(
-    firstRecommendation.getByText("12,500", { exact: true })
-  ).toBeVisible()
-  await expect(
-    firstRecommendation.getByRole("link", { name: "相关内容页" })
-  ).toBeVisible()
-  await expect(
-    firstRecommendation.getByText("查看公开证据 · visible_text")
-  ).toBeVisible()
-
-  const refillRequests = session.capturedRequests.filter(
+  const opportunityRequest = session.capturedRequests.find(
     (request) =>
       request.method === "POST" &&
-      request.pathname.endsWith("/recommendation-refill-jobs")
+      request.pathname.endsWith("/backlinks/opportunities")
   )
-  expect(refillRequests).toHaveLength(1)
-  expect(refillRequests[0]?.idempotencyKey).toBeUndefined()
-  expect(refillRequests[0]?.body).toMatchObject({
-    expectedVersion: 0,
-    recommendationContextVersionId: "018f0000-0000-7000-8000-000000000401",
-    visiblePoolGeneration: 1,
-    lowWatermark: 20,
-    highWatermark: 40,
-  })
-  expect(
-    await page.evaluate(() =>
-      window.localStorage.getItem(
-        "growthos:recommendation-refill:e2e-project:018f0000-0000-7000-8000-000000000401:g1"
-      )
-    )
-  ).toBe("018f0000-0000-7000-8000-000000000402")
-  expect(session.unexpectedNetwork).toEqual([])
-})
-
-test("recommendation pool waits after archive and only builds the next fixed generation on user request", async ({
-  page,
-}, testInfo) => {
-  test.setTimeout(45_000)
-  const session = await installOutreachApiFixtures(page, {
-    recommendationMode: "ready",
-    recommendationPoolSize: 20,
-    recommendationCompleteAfterReads: 3,
+  expect(opportunityRequest?.body).toEqual({
+    recommendationFeedItemId: "018f0000-0000-7000-8000-000000000801",
   })
 
-  await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
-  const currentPoolMetric = page
-    .getByText("本轮推荐", { exact: true })
-    .locator("..")
-  await expect(currentPoolMetric.getByText("20", { exact: true })).toBeVisible()
-
-  await page.getByRole("button", { name: "加入 Opportunity" }).first().click()
-  await expect(
-    page.getByRole("status").filter({ hasText: "你仍在推荐池中" })
-  ).toContainText("publisher.example.test 已加入 Opportunity")
-  await expect(
-    page.getByRole("link", { name: "publisher.example.test", exact: true })
-  ).toBeVisible()
-  expect(
-    session.capturedRequests.filter(
-      (request) =>
-        request.method === "POST" &&
-        request.pathname.endsWith("/recommendation-refill-jobs")
-    )
-  ).toHaveLength(0)
-
-  await page.getByRole("button", { name: "归档本轮" }).click()
-  await expect(page.getByText("当前推荐轮次已归档")).toBeVisible()
-  await expect(page.getByRole("button", { name: "生成下一轮" })).toBeVisible()
+  await firstRecommendation.getByRole("button", { name: "归档" }).click()
+  await expect(page.getByText("publisher.example.test 已归档")).toBeVisible()
   const archiveRequests = session.capturedRequests.filter(
     (request) =>
       request.method === "POST" &&
-      request.pathname.endsWith("/recommendation-pools/1/archive")
+      request.pathname.endsWith(
+        "/recommendation-user-release/items/018f0000-0000-7000-8000-000000000801/archive"
+      )
   )
   expect(archiveRequests).toHaveLength(1)
   expect(archiveRequests[0]?.idempotencyKey).toBe(
-    "recommendation-pool-archive:018f0000-0000-7000-8000-000000000401:g1"
+    "recommendation-feed:archive:e2e-project:018f0000-0000-7000-8000-000000000801"
   )
-  expect(archiveRequests[0]?.body).toEqual({
-    recommendationContextVersionId: "018f0000-0000-7000-8000-000000000401",
-  })
+
+  await page.getByRole("button", { name: "撤销" }).click()
+  await expect(
+    page.getByRole("link", { name: "publisher.example.test", exact: true })
+  ).toBeVisible()
+  const unarchiveRequest = session.capturedRequests.find(
+    (request) =>
+      request.method === "POST" &&
+      request.pathname.endsWith(
+        "/recommendation-user-release/items/018f0000-0000-7000-8000-000000000801/unarchive"
+      )
+  )
+  expect(unarchiveRequest?.idempotencyKey).toBe(
+    "recommendation-feed:unarchive:e2e-project:018f0000-0000-7000-8000-000000000801"
+  )
+
+  await page.getByRole("button", { name: "获取更多" }).click()
+  await expect(
+    page.getByRole("link", {
+      name: "publisher-v2-b2-01.example.test",
+      exact: true,
+    })
+  ).toBeVisible()
+  const getMoreRequest = session.capturedRequests.find(
+    (request) =>
+      request.method === "POST" &&
+      request.pathname.endsWith("/recommendation-user-release/get-more")
+  )
+  expect(getMoreRequest?.idempotencyKey).toBeTruthy()
   expect(
     session.capturedRequests.filter(
       (request) =>
-        request.method === "POST" &&
-        request.pathname.endsWith("/recommendation-refill-jobs")
+        request.pathname.endsWith("/backlinks/recommendations") ||
+        request.pathname.includes("/recommendation-inventory") ||
+        request.pathname.includes("/recommendation-refill-jobs") ||
+        request.pathname.includes("/recommendation-pools/")
     )
   ).toHaveLength(0)
 
-  await page.getByRole("button", { name: "生成下一轮" }).click()
-  await expect
-    .poll(
-      () =>
-        session.capturedRequests.filter(
-          (request) =>
-            request.method === "POST" &&
-            request.pathname.endsWith("/recommendation-refill-jobs")
-        ).length
-    )
-    .toBe(1)
-  const refillRequest = session.capturedRequests.find(
-    (request) =>
-      request.method === "POST" &&
-      request.pathname.endsWith("/recommendation-refill-jobs")
-  )
-  expect(refillRequest?.body).toMatchObject({
-    recommendationContextVersionId: "018f0000-0000-7000-8000-000000000401",
-    visiblePoolGeneration: 2,
-    lowWatermark: 20,
-    highWatermark: 40,
-  })
-  await expect(
-    page.getByRole("link", {
-      name: "publisher-g2-01.example.test",
-      exact: true,
-    })
-  ).toBeVisible({ timeout: 15_000 })
-  await expect(currentPoolMetric.getByText("20", { exact: true })).toBeVisible()
-  const archivedMetric = page
-    .getByText("历史已归档", { exact: true })
-    .locator("..")
-  await expect(archivedMetric.getByText("20", { exact: true })).toBeVisible()
-  expect(
-    await page.evaluate(() =>
-      window.localStorage.getItem(
-        "growthos:recommendation-refill:e2e-project:018f0000-0000-7000-8000-000000000401:g2"
-      )
-    )
-  ).toBe("018f0000-0000-7000-8000-000000000412")
-
   const screenshot = await page.screenshot({
-    path: testInfo.outputPath("fixed-recommendation-pool-generation-2.png"),
+    path: testInfo.outputPath("recommendation-feed-v2-actions.png"),
     fullPage: true,
   })
-  await testInfo.attach("fixed-recommendation-pool-generation-2", {
+  await testInfo.attach("recommendation-feed-v2-actions", {
     body: screenshot,
     contentType: "image/png",
   })
@@ -499,7 +489,7 @@ test("Backlink Profile exposes stale partial inventory with filters and paginati
 }) => {
   const session = await installOutreachApiFixtures(page)
 
-  await page.goto(`/projects/${projectKey}/performance/links`)
+  await page.goto(`/projects/${projectKey}/backlinks/links`)
   await expect(
     page.getByRole("heading", { name: "Backlink Profile" })
   ).toBeVisible()

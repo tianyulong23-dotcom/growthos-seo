@@ -6,24 +6,18 @@ import Fastify from "fastify";
 
 import { createBacklinksModule } from "../src/modules/backlinks/application/backlinks.module.js";
 import { createContactCommands } from "../src/modules/backlinks/application/commands/contacts.command.js";
-import {
-  createContactEnrichmentCommands,
-} from "../src/modules/backlinks/application/commands/contact-enrichment.command.js";
+import { createContactEnrichmentCommands } from "../src/modules/backlinks/application/commands/contact-enrichment.command.js";
 import type {
   createDraftCommands,
   createDraftEditingCommands,
 } from "../src/modules/backlinks/application/commands/draft.command.js";
 import type { GmailConnectionView } from "../src/modules/backlinks/application/gmail-connection.gateway.js";
-import {
-  createCooperationPathOpportunityCommands,
-} from "../src/modules/backlinks/application/commands/cooperation-path-opportunities.command.js";
+import { createCooperationPathOpportunityCommands } from "../src/modules/backlinks/application/commands/cooperation-path-opportunities.command.js";
 import { createOpportunityCommands } from "../src/modules/backlinks/application/commands/opportunities.command.js";
 import { createReplyMatchCommands } from "../src/modules/backlinks/application/commands/reply-match.command.js";
-import type {
-  NegotiationFactsService,
-} from "../src/modules/backlinks/application/services/negotiation-facts.service.js";
+import type { NegotiationFactsService } from "../src/modules/backlinks/application/services/negotiation-facts.service.js";
 import { createPlacementLinksQuery } from "../src/modules/backlinks/application/queries/placement-links.query.js";
-import { createRecommendationCommands } from "../src/modules/backlinks/application/commands/recommendations.command.js";
+import { createRecommendationSeedCommands } from "../src/modules/backlinks/application/commands/recommendation-seeds.command.js";
 import type { createSendIntentCommands } from "../src/modules/backlinks/application/commands/send-intent.command.js";
 import { createAssessmentQuery } from "../src/modules/backlinks/application/queries/assessment.query.js";
 import { createOpportunitiesQuery } from "../src/modules/backlinks/application/queries/opportunities.query.js";
@@ -34,9 +28,7 @@ import { createDisabledGmailPushWebhook } from "../src/modules/backlinks/applica
 import { registerBacklinksAssessmentRoute } from "../src/modules/backlinks/api/assessment.route.js";
 import { registerBacklinksContextRoute } from "../src/modules/backlinks/api/context.route.js";
 import { registerBacklinksContactsRoutes } from "../src/modules/backlinks/api/contacts.route.js";
-import {
-  registerBacklinksContactEnrichmentRoutes,
-} from "../src/modules/backlinks/api/contact-enrichment.route.js";
+import { registerBacklinksContactEnrichmentRoutes } from "../src/modules/backlinks/api/contact-enrichment.route.js";
 import {
   registerBacklinksDraftEditingRoutes,
   registerBacklinksDraftRoutes,
@@ -46,21 +38,19 @@ import { registerBacklinksHealthRoute } from "../src/modules/backlinks/api/healt
 import { registerBacklinksGmailConnectionRoutes } from "../src/modules/backlinks/api/gmail-connection.route.js";
 import { registerBacklinksGmailMailPushRoute } from "../src/modules/backlinks/api/gmail-mail-push.route.js";
 import { registerBacklinksOpenApi } from "../src/modules/backlinks/api/openapi.js";
-import {
-  registerCooperationPathOpportunityCommandsRoutes,
-} from "../src/modules/backlinks/api/cooperation-path-opportunity-commands.route.js";
+import { registerCooperationPathOpportunityCommandsRoutes } from "../src/modules/backlinks/api/cooperation-path-opportunity-commands.route.js";
 import { registerBacklinksOpportunitiesRoutes } from "../src/modules/backlinks/api/opportunities.route.js";
 import { registerBacklinksOpportunityCommandsRoutes } from "../src/modules/backlinks/api/opportunity-commands.route.js";
 import { registerBacklinksPlacementCandidateRoutes } from "../src/modules/backlinks/api/placement-candidates.route.js";
 import { registerBacklinksPlacementReviewRoutes } from "../src/modules/backlinks/api/placement-review.route.js";
-import { registerBacklinksRecommendationCommandsRoutes } from "../src/modules/backlinks/api/recommendation-commands.route.js";
 import { registerBacklinksRecommendationsRoute } from "../src/modules/backlinks/api/recommendations.route.js";
+import { registerRecommendationFeedRoutes } from "../src/modules/backlinks/api/recommendation-feed.route.js";
+import { registerBacklinksRecommendationSeedRoutes } from "../src/modules/backlinks/api/recommendation-seeds.route.js";
+import { registerBacklinksRecommendationUserReleaseRoutes } from "../src/modules/backlinks/api/recommendation-user-release.route.js";
 import { registerBacklinksResourceLibraryRoute } from "../src/modules/backlinks/api/resource-library.route.js";
 import { registerBacklinksReplyMailRoutes } from "../src/modules/backlinks/api/reply-mail.route.js";
 import { registerBacklinksReplyMatchRoutes } from "../src/modules/backlinks/api/reply-match.route.js";
-import {
-  registerBacklinksNegotiationFactsRoutes,
-} from "../src/modules/backlinks/api/negotiation-facts.route.js";
+import { registerBacklinksNegotiationFactsRoutes } from "../src/modules/backlinks/api/negotiation-facts.route.js";
 import { registerBacklinksSendIntentRoute } from "../src/modules/backlinks/api/send-intent.route.js";
 import { registerBacklinksSendIntentListRoute } from "../src/modules/backlinks/api/send-intent.route.js";
 import { registerBacklinksSummaryRoute } from "../src/modules/backlinks/api/summary.route.js";
@@ -72,7 +62,7 @@ import { registerBacklinksSettingsGovernanceRoutes } from "../src/modules/backli
 import { gmailOAuthScopes } from "../src/modules/backlinks/domain/sending/oauth-attempt.js";
 
 export type JsonValue =
-  | null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+  null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 type JsonObject = { [key: string]: JsonValue };
 type DraftCommands = ReturnType<typeof createDraftCommands>;
@@ -99,8 +89,9 @@ function isSensitiveFieldName(value: string): boolean {
   ) {
     return true;
   }
-  return tokens.some((token) => ["provider", "vendor"].includes(token))
-    && tokens.some((token) =>
+  return (
+    tokens.some((token) => ["provider", "vendor"].includes(token)) &&
+    tokens.some((token) =>
       [
         "payload",
         "request",
@@ -111,7 +102,8 @@ function isSensitiveFieldName(value: string): boolean {
         "secret",
         "credential",
       ].includes(token),
-    );
+    )
+  );
 }
 
 export function findSensitiveOpenApiFields(
@@ -208,7 +200,9 @@ export function findBreakingOpenApiChanges(
 
   return Object.is(baseline, current)
     ? []
-    : [`${path} changed from ${JSON.stringify(baseline)} to ${JSON.stringify(current)}`];
+    : [
+        `${path} changed from ${JSON.stringify(baseline)} to ${JSON.stringify(current)}`,
+      ];
 }
 
 export async function generateBacklinksOpenApi(): Promise<JsonObject> {
@@ -258,8 +252,7 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         sendIntentId: "018f0000-0000-7000-8000-000000000114",
         sendSnapshotId: "018f0000-0000-7000-8000-000000000115",
         draftId: "018f0000-0000-7000-8000-000000000011",
-        approvedDraftVersionId:
-          "018f0000-0000-7000-8000-000000000012",
+        approvedDraftVersionId: "018f0000-0000-7000-8000-000000000012",
         contactId: "018f0000-0000-7000-8000-000000000013",
         contactVersion: 1,
         status: "READY",
@@ -290,15 +283,17 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         state: "WAITING_FOR_ACCEPTED_SEND" as const,
         ready: true,
       },
-      blockers: [{
-        code: "SEND_CONTEXT_REQUIRED" as const,
-        capability: "SEND" as const,
-        owner: "USER" as const,
-        retrySafe: true,
-        recoveryAction: "OPEN_APPROVED_DRAFT" as const,
-        detail:
-          "Open an approved draft and recipient to evaluate send-specific readiness.",
-      }],
+      blockers: [
+        {
+          code: "SEND_CONTEXT_REQUIRED" as const,
+          capability: "SEND" as const,
+          owner: "USER" as const,
+          retrySafe: true,
+          recoveryAction: "OPEN_APPROVED_DRAFT" as const,
+          detail:
+            "Open an approved draft and recipient to evaluate send-specific readiness.",
+        },
+      ],
       primaryBlocker: {
         code: "SEND_CONTEXT_REQUIRED" as const,
         capability: "SEND" as const,
@@ -331,10 +326,13 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
     const module = createBacklinksModule({
       projectContext: {
         resolve: async () => {
-          throw new Error("OpenAPI generation does not resolve project context.");
+          throw new Error(
+            "OpenAPI generation does not resolve project context.",
+          );
         },
       },
-      queries: { ...createEmptySummaryQuery(),
+      queries: {
+        ...createEmptySummaryQuery(),
         ...createAssessmentQuery({ query: async () => ({ rows: [] }) }),
         getJob: async () => ({
           id: "018f0000-0000-7000-8000-000000000010",
@@ -370,10 +368,12 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
             bodyText: "Draft body",
             bodyDocument: {
               type: "doc",
-              content: [{
-                type: "paragraph",
-                content: [{ type: "text", text: "Draft body" }],
-              }],
+              content: [
+                {
+                  type: "paragraph",
+                  content: [{ type: "text", text: "Draft body" }],
+                },
+              ],
             },
             source: "MODEL",
             createdAt: "2026-07-27T05:00:00.000Z",
@@ -409,12 +409,16 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         ...createOpportunitiesQuery({ query: async () => ({ rows: [] }) }),
         ...createPlacementLinksQuery({ query: async () => ({ rows: [] }) }),
         ...createRecommendationsQuery({ query: async () => ({ rows: [] }) }),
-        ...createResourceLibraryQuery({ query: async () => ({ rows: [] }) }) },
+        ...createResourceLibraryQuery({ query: async () => ({ rows: [] }) }),
+      },
     });
     await registerBacklinksOpenApi(app);
     registerBacklinksHealthRoute(app, { BACKLINKS_API_ENABLED: true });
     registerBacklinksContextRoute(app, { module });
-    registerBacklinksContactsRoutes(app, { module, commands: createContactCommands({ query: async () => ({ rows: [] }) }) });
+    registerBacklinksContactsRoutes(app, {
+      module,
+      commands: createContactCommands({ query: async () => ({ rows: [] }) }),
+    });
     registerBacklinksContactEnrichmentRoutes(app, {
       module,
       commands: createContactEnrichmentCommands(
@@ -431,17 +435,97 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
       module,
       runningBuildId: "openapi-build",
     });
+    registerRecommendationFeedRoutes(app, {
+      module,
+      query: {
+        list: async () => ({
+          items: [],
+          totalCount: 0,
+          nextCursor: null,
+        }),
+        export: async () => ({
+          contentType: "text/csv",
+          fileName: "backlink-recommendations.csv",
+          content: "",
+        }),
+      },
+    });
+    registerBacklinksRecommendationUserReleaseRoutes(app, {
+      module,
+      commands: {
+        publishInitial: async () => ({
+          state: "NOT_READY",
+          currentBatchOrdinal: null,
+          replayed: false,
+        }),
+        getStatus: async () => ({
+          state: "NOT_PUBLISHED",
+          currentBatchOrdinal: null,
+          requiredOpportunityCount: null,
+          successfulOpportunityCount: 0,
+          unlockAt: null,
+          unlockReason: null,
+          canGetMore: false,
+          getMoreState: "INITIAL_BATCH_NOT_PUBLISHED",
+        }),
+        getMore: async () => ({
+          state: "INITIAL_BATCH_NOT_READY",
+          currentBatchOrdinal: null,
+          releasedBatchOrdinal: null,
+          replayed: false,
+        }),
+        setArchived: async (input) => ({
+          itemId: input.itemId,
+          archived: input.archived,
+          replayed: false,
+        }),
+      },
+    });
+    const recommendationSeedCommands = createRecommendationSeedCommands({
+      prepare: async () => {
+        throw new Error(
+          "OpenAPI generation does not prepare recommendation seeds.",
+        );
+      },
+      validate: async () => {
+        throw new Error(
+          "OpenAPI generation does not validate recommendation seeds.",
+        );
+      },
+    });
+    registerBacklinksRecommendationSeedRoutes(app, {
+      module,
+      commands: Object.freeze({
+        ...recommendationSeedCommands,
+        launch: async () => ({
+          generationContractId: "00000000-0000-4000-8000-000000000001",
+          visiblePoolGeneration: 1,
+          jobId: "00000000-0000-4000-8000-000000000002",
+          workflowId: "backlinks:recommendation-pool-v2:openapi",
+          state: "STARTED" as const,
+          replayed: false,
+        }),
+      }),
+    });
     registerBacklinksResourceLibraryRoute(app, { module });
     registerBacklinksOpportunitiesRoutes(app, { module });
-    registerBacklinksOpportunityCommandsRoutes(app, { module,
+    registerBacklinksOpportunityCommandsRoutes(app, {
+      module,
       commands: createOpportunityCommands({
         createFromRecommendation: async () => ({
-          state: "not_found", requestHash: "openapi" }),
+          state: "not_found",
+          requestHash: "openapi",
+        }),
         transitionBusinessStage: async () => ({
-          state: "not_found", requestHash: "openapi" }),
+          state: "not_found",
+          requestHash: "openapi",
+        }),
         patchManagement: async () => ({
-          state: "not_found", requestHash: "openapi" }),
-      }) });
+          state: "not_found",
+          requestHash: "openapi",
+        }),
+      }),
+    });
     registerCooperationPathOpportunityCommandsRoutes(app, {
       module,
       commands: createCooperationPathOpportunityCommands({
@@ -658,8 +742,7 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
           workspaceId: "workspace-openapi",
           websiteProjectId: "project-openapi",
           reportKey: "weekly-performance",
-          reportRevisionId:
-            "018f0000-0000-7000-8000-000000000165",
+          reportRevisionId: "018f0000-0000-7000-8000-000000000165",
           format: "csv",
           status: "completed",
           requestedBy: "user-openapi",
@@ -692,15 +775,17 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
               exportExpiryHours: 24,
             },
           },
-          killSwitches: [{
-            capability: "DATA_PROVIDER",
-            provider: "DataForSEO",
-            effectiveBlocked: true,
-            sourceLayer: "organization",
-            sourceScopeId: "organization-openapi",
-            sourceVersion: 1,
-            editable: false,
-          }],
+          killSwitches: [
+            {
+              capability: "DATA_PROVIDER",
+              provider: "DataForSEO",
+              effectiveBlocked: true,
+              sourceLayer: "organization",
+              sourceScopeId: "organization-openapi",
+              sourceVersion: 1,
+              editable: false,
+            },
+          ],
           editableKillSwitchLayers: ["project", "provider"],
           retention: {
             id: "retention-openapi",
@@ -725,7 +810,6 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
         }),
       },
     });
-    registerBacklinksRecommendationCommandsRoutes(app, { module, commands: createRecommendationCommands({ query: async () => ({ rows: [] }) }) });
     registerBacklinksAssessmentRoute(app, { module });
     registerBacklinksDraftRoutes(app, { module, commands: draftCommands });
     registerBacklinksDraftEditingRoutes(app, {
@@ -832,16 +916,13 @@ export async function generateBacklinksOpenApi(): Promise<JsonObject> {
       decide: async (input) => ({
         decision: input.decision,
         replayed: false,
-        appendedFactVersionIds: [
-          "018f0000-0000-7000-8000-000000000174",
-        ],
+        appendedFactVersionIds: ["018f0000-0000-7000-8000-000000000174"],
         latestFact: {
           ...negotiationFact,
           id: "018f0000-0000-7000-8000-000000000174",
           factVersion: 2,
           factAuthority: "MANUAL",
-          reviewStatus:
-            input.decision === "REJECT" ? "REJECTED" : "CONFIRMED",
+          reviewStatus: input.decision === "REJECT" ? "REJECTED" : "CONFIRMED",
           extractorType: "MANUAL",
           extractorVersion: "manual-review-v1",
           confidenceScore: 1,
@@ -883,14 +964,20 @@ export async function writeBacklinksOpenApiBaseline(): Promise<void> {
     );
   }
   await mkdir(dirname(baselinePath), { recursive: true });
-  await writeFile(baselinePath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+  await writeFile(
+    baselinePath,
+    `${JSON.stringify(document, null, 2)}\n`,
+    "utf8",
+  );
   console.log(
     `Backlinks OpenAPI baseline written: ${Object.keys(document.paths ?? {}).length} paths`,
   );
 }
 
 export async function checkBacklinksOpenApi(): Promise<void> {
-  const baseline = JSON.parse(await readFile(baselinePath, "utf8")) as JsonValue;
+  const baseline = JSON.parse(
+    await readFile(baselinePath, "utf8"),
+  ) as JsonValue;
   const current = await generateBacklinksOpenApi();
   const breakingChanges = findBreakingOpenApiChanges(baseline, current);
   const sensitiveFields = findSensitiveOpenApiFields(current);

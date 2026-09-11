@@ -1,0 +1,26 @@
+{
+  "formatVersion": 1,
+  "source": "publisher-catalog",
+  "rowCount": 49742,
+  "distinctDomains": 49737,
+  "contentSha256": "ceb757658444339334575435bb5eef5f924b6d866bc683e387ebb10ed1feb1b7",
+  "sha256": "b33597e185be10ab528562cdf2ec3e99188869b6b1fc49d68e686e22c45313ce",
+  "columns": [
+    "website_id",
+    "website",
+    "domain",
+    "website_url",
+    "categories_json",
+    "monthly_traffic",
+    "ahrefs_dr",
+    "moz_da",
+    "language",
+    "price",
+    "currency",
+    "max_links",
+    "link_type",
+    "turnaround",
+    "added_on",
+    "source_page"
+  ]
+}

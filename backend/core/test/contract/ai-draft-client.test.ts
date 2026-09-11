@@ -106,6 +106,8 @@ describe("BL-AI-090 real AI Adapter shell", () => {
     expect(logs).toEqual([
       { event: "backlinks.ai_draft.started", modelId: "model-1",
         providerRef: "provider-ref" },
+      { event: "backlinks.ai_draft.usage", modelId: "model-1",
+        providerRef: "provider-ref", inputTokens: 10, outputTokens: 20 },
       { event: "backlinks.ai_draft.completed", modelId: "model-1",
         providerRef: "provider-ref", latencyMs: 12 },
     ]);

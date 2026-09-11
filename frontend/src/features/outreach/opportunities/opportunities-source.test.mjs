@@ -43,8 +43,8 @@ test("Opportunities use generated list, detail, and versioned commands", async (
   assert.match(workspace, /engagementPathState === "CONTACT_PENDING"/)
   assert.match(workspace, /function contactResolutionHref/)
   assert.match(workspace, /detail\.engagementChannel !== "EMAIL"/)
-  assert.match(workspace, /完善联系人并创建草稿/)
-  assert.match(workspace, /草稿仍需审阅、批准和最终发送确认/)
+  assert.match(workspace, /确认邮箱并写邮件/)
+  assert.match(workspace, /邮件不会自动发送/)
   assert.doesNotMatch(workspace, /请先从推荐记录补齐有效联系人/)
   assert.doesNotMatch(workspace, /createSendIntent/)
   assert.doesNotMatch(

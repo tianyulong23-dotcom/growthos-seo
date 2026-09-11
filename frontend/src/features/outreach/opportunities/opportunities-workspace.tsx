@@ -1064,11 +1064,11 @@ export function OpportunitiesWorkspace({
           }
         }}
       >
-        <SheetContent className="overflow-y-auto sm:max-w-lg">
+        <SheetContent className="overflow-y-auto sm:max-w-lg [&_[data-slot=select-trigger]]:rounded-md [&_textarea]:rounded-md">
           <SheetHeader>
             <SheetTitle>{detail?.targetHostAscii ?? "外链机会详情"}</SheetTitle>
             <SheetDescription>
-              查看当前进度、投放信息和下一步操作
+              外链合作详情
             </SheetDescription>
           </SheetHeader>
 
@@ -1091,20 +1091,18 @@ export function OpportunitiesWorkspace({
                   >
                     {managementMeta[detail.managementStatus].label}
                   </Badge>
-                  {detail.contactReviewRequired && (
-                    <Badge variant="outline">联系人需复核</Badge>
-                  )}
-                  {engagementPathState && (
+                  {engagementPathState && engagementPathState !== "CONTACT_PENDING" && (
                     <Badge variant="outline">
                       {engagementPathLabels[engagementPathState]}
                     </Badge>
                   )}
                 </div>
 
-                <section className="space-y-3 border-y py-4">
+                <details className="space-y-3 border-y py-3">
+                  <summary className="cursor-pointer text-sm text-muted-foreground">推荐来源与推广目标</summary>
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
-                      <div className="text-sm font-medium">推荐交接</div>
+                      <div className="text-sm font-medium">推荐来源</div>
                       <div className="text-xs text-muted-foreground">
                         {primaryNextActionKind
                           ? primaryNextActionLabels[primaryNextActionKind]
@@ -1123,28 +1121,16 @@ export function OpportunitiesWorkspace({
                     </Link>
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                    <span className="text-muted-foreground">推荐代次</span>
+                    <span className="text-muted-foreground">推荐轮次</span>
                     <span className="text-right">
                       {selectionSnapshot?.visiblePoolGeneration ?? "不可用"}
-                    </span>
-                    <span className="text-muted-foreground">上下文版本</span>
-                    <span className="truncate text-right">
-                      {detail.recommendationContextVersionId}
                     </span>
                     <span className="text-muted-foreground">推广目标</span>
                     <span className="truncate text-right">
                       {selectionSnapshot?.selectedTargetUrl ?? "不可用"}
                     </span>
-                    <span className="text-muted-foreground">快照状态</span>
-                    <span className="text-right">
-                      {selectionSnapshot?.lineageStatus === "COMPLETE"
-                        ? "完整"
-                        : selectionSnapshot
-                          ? "部分可用"
-                          : "当前接口未提供"}
-                    </span>
                   </div>
-                </section>
+                </details>
 
                 {engagementPathState === "EMAIL_READY" && draftHref && (
                   <Link
@@ -1162,16 +1148,16 @@ export function OpportunitiesWorkspace({
 
                 {primaryNextActionKind === "WAIT_FOR_DRAFT" && (
                   <div role="status" className="border-l-2 py-1 pl-3 text-sm">
-                    草稿 Job 正在运行；刷新后继续，不会创建第二个生命周期状态。
+                    草稿正在生成，请稍后刷新查看。
                   </div>
                 )}
 
                 {engagementPathState === "CONTACT_PENDING" && (
-                  <section className="space-y-3 border-l-2 border-amber-500 py-1 pl-3">
+                  <section className="space-y-3 border-b pb-5">
                     <div role="status" className="space-y-1 text-sm">
-                      <div className="font-medium">联系人尚未确认</div>
+                      <div className="font-medium">下一步：确认收件人</div>
                       <p className="text-muted-foreground">
-                        先核对或录入真实联系人，再生成邮件草稿。
+                        {detail.contactEmail ?? "尚未确认收件邮箱"}
                       </p>
                     </div>
                     {resolveContactHref && (
@@ -1182,11 +1168,11 @@ export function OpportunitiesWorkspace({
                         to={resolveContactHref}
                       >
                         <MailPlus />
-                        完善联系人并创建草稿
+                        确认邮箱并写邮件
                       </Link>
                     )}
                     <p className="text-xs text-muted-foreground">
-                      此操作不会直接发送；草稿仍需审阅、批准和最终发送确认。
+                      邮件不会自动发送。
                     </p>
                   </section>
                 )}
@@ -1328,7 +1314,9 @@ export function OpportunitiesWorkspace({
                     </section>
                   )}
 
-                <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-y py-4 text-sm">
+                <details className="space-y-3 border-b pb-4">
+                  <summary className="cursor-pointer text-sm font-medium">更多合作信息</summary>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
                   <span className="text-muted-foreground">结果状态</span>
                   <span className="text-right">
                     {outcomeLabels[detail.outcomeStatus]}
@@ -1360,8 +1348,9 @@ export function OpportunitiesWorkspace({
                       : "非邮件合作路径"}
                   </span>
                 </div>
+                </details>
 
-                <section className="space-y-2 border-b pb-4">
+                {detail.placementCandidate && <section className="space-y-2 border-b pb-4">
                   <div className="text-sm font-medium">链接投放信息</div>
                   {detail.placementCandidate ? (
                     <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
@@ -1388,7 +1377,7 @@ export function OpportunitiesWorkspace({
                       暂时没有可用的链接投放信息。
                     </p>
                   )}
-                </section>
+                </section>}
 
                 {commandStatus !== "idle" && commandStatus !== "submitting" && (
                   <Card role="alert">
@@ -1418,13 +1407,8 @@ export function OpportunitiesWorkspace({
                   </Card>
                 )}
 
-                <section className="space-y-3 border-b pb-4">
-                  <div>
-                    <div className="text-sm font-medium">更新推进阶段</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      选择新的阶段并记录调整原因。
-                    </div>
-                  </div>
+                <details className="space-y-3 border-b pb-4">
+                  <summary className="cursor-pointer text-sm font-medium">调整合作进度</summary>
                   <Select
                     value={transitionStage}
                     onValueChange={(value) =>
@@ -1438,7 +1422,7 @@ export function OpportunitiesWorkspace({
                       className="w-full"
                       aria-label="选择新的推进阶段"
                     >
-                      <SelectValue />
+                      <SelectValue>{stageMeta[transitionStage].label}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       {Object.entries(stageMeta).map(([value, meta]) => (
@@ -1466,14 +1450,11 @@ export function OpportunitiesWorkspace({
                   >
                     更新阶段
                   </Button>
-                </section>
+                </details>
 
                 <section className="space-y-3">
                   <div>
-                    <div className="text-sm font-medium">管理状态操作</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      暂停或归档不会改变当前推进阶段。
-                    </div>
+                    <div className="text-sm font-medium">管理此机会</div>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {detail.managementStatus === "ACTIVE" && (

@@ -171,8 +171,8 @@
           "queryTypes": []
         },
         {
-          "workflowType": "backlinksRecommendationRefillV1Workflow",
-          "workflowIdPattern": "backlinks:<workspaceId>:<websiteProjectId>:recommendation-refill:v1:<instanceId>",
+          "workflowType": "backlinksRecommendationPoolV2Workflow",
+          "workflowIdPattern": "backlinks:<organizationId>:<workspaceId>:<websiteProjectId>:recommendation-pool-v2:v1:<instanceId>",
           "replayPolicy": "deterministic",
           "restartPolicy": "reuse-workflow-id",
           "cancellationPolicy": "propagate",

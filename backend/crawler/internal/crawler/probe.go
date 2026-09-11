@@ -17,6 +17,48 @@ const (
 	probeExcerptLimit   = 3000
 )
 
+type RenderRequest struct {
+	Version   string `json:"version"`
+	RequestID string `json:"requestId"`
+	TaskType  string `json:"taskType"`
+	Tenant    struct {
+		OrganizationID string `json:"organizationId"`
+		WorkspaceID    string `json:"workspaceId"`
+	} `json:"tenant"`
+	Project struct {
+		WebsiteProjectID string `json:"websiteProjectId"`
+	} `json:"project"`
+	Target struct {
+		URLs []string `json:"urls"`
+	} `json:"target"`
+	RequestedBy struct {
+		ModuleID string `json:"moduleId"`
+		ActorID  string `json:"actorId"`
+	} `json:"requestedBy"`
+	RequestedAt string `json:"requestedAt"`
+}
+
+type RenderEvidencePage struct {
+	RequestedURL string    `json:"requestedUrl"`
+	FinalURL     string    `json:"finalUrl"`
+	Rendered     bool      `json:"rendered"`
+	RenderMode   string    `json:"renderMode"`
+	FetchedAt    time.Time `json:"fetchedAt"`
+}
+
+type RenderEvidence struct {
+	Version string               `json:"version"`
+	Outcome string               `json:"outcome"`
+	Pages   []RenderEvidencePage `json:"pages"`
+}
+
+type RenderResponse struct {
+	HTML      string         `json:"html"`
+	FinalURL  string         `json:"finalUrl"`
+	FetchedAt time.Time      `json:"fetchedAt"`
+	Evidence  RenderEvidence `json:"evidence"`
+}
+
 type ProbeCandidate struct {
 	Domain string   `json:"domain"`
 	URLs   []string `json:"urls"`
@@ -54,8 +96,9 @@ type ProbeResponse struct {
 }
 
 type ProbeService struct {
-	fetcher     Fetcher
-	concurrency int
+	fetcher       Fetcher
+	renderFetcher Fetcher
+	concurrency   int
 }
 
 func NewProbeService(config Config) (*ProbeService, func(), error) {
@@ -70,9 +113,11 @@ func NewProbeService(config Config) (*ProbeService, func(), error) {
 		return nil, nil, err
 	}
 	var fetcher Fetcher = httpFetcher
+	var renderFetcher Fetcher
 	closeService := func() {}
 	if probeConfig.BrowserEnabled {
 		browser := NewBrowserFetcherWithLimiter(probeConfig, limiter)
+		renderFetcher = browser
 		fetcher = HybridFetcher{
 			HTTP:               httpFetcher,
 			Browser:            browser,
@@ -87,14 +132,19 @@ func NewProbeService(config Config) (*ProbeService, func(), error) {
 		concurrency = min(concurrency, positiveOrDefault(probeConfig.BrowserConcurrency, 3))
 	}
 	return &ProbeService{
-		fetcher:     fetcher,
-		concurrency: concurrency,
+		fetcher:       fetcher,
+		renderFetcher: renderFetcher,
+		concurrency:   concurrency,
 	}, closeService, nil
 }
 
 func (s *ProbeService) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.Method == http.MethodGet && request.URL.Path == "/health" {
 		writeProbeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	if request.Method == http.MethodPost && request.URL.Path == "/render" {
+		s.render(writer, request)
 		return
 	}
 	if request.Method != http.MethodPost || request.URL.Path != "/v1/probe" {
@@ -136,6 +186,100 @@ func (s *ProbeService) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 	}
 	group.Wait()
 	writeProbeJSON(writer, http.StatusOK, ProbeResponse{Results: results})
+}
+
+func (s *ProbeService) render(writer http.ResponseWriter, request *http.Request) {
+	if s.renderFetcher == nil {
+		writeProbeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+			"error": "browser rendering is disabled",
+		})
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, 32*1024)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var payload RenderRequest
+	if err := decoder.Decode(&payload); err != nil {
+		writeProbeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := validateRenderRequest(payload); err != nil {
+		writeProbeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	rawURL := payload.Target.URLs[0]
+	scope, _, err := NewScope(rawURL)
+	if err != nil {
+		writeProbeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	resource, err := s.renderFetcher.Fetch(withScope(request.Context(), scope), rawURL)
+	if err != nil {
+		writeProbeJSON(writer, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	probe := buildProbeResult("", rawURL, resource, nil)
+	if !resource.Rendered ||
+		resource.StatusCode < http.StatusOK ||
+		resource.StatusCode >= http.StatusBadRequest ||
+		!strings.Contains(strings.ToLower(resource.ContentType), "html") ||
+		len(resource.Body) == 0 ||
+		(probe.Status != "ok" && probe.Status != "redirected") {
+		writeProbeJSON(writer, http.StatusUnprocessableEntity, map[string]string{
+			"error": "rendered page did not produce usable public HTML",
+		})
+		return
+	}
+	fetchedAt := resource.FetchedAt.UTC()
+	if fetchedAt.IsZero() {
+		fetchedAt = time.Now().UTC()
+	}
+	finalURL := resource.FinalURL
+	if finalURL == "" {
+		finalURL = rawURL
+	}
+	writeProbeJSON(writer, http.StatusOK, RenderResponse{
+		HTML:      string(resource.Body),
+		FinalURL:  finalURL,
+		FetchedAt: fetchedAt,
+		Evidence: RenderEvidence{
+			Version: "crawler.evidence.v1",
+			Outcome: "completed",
+			Pages: []RenderEvidencePage{{
+				RequestedURL: rawURL,
+				FinalURL:     finalURL,
+				Rendered:     true,
+				RenderMode:   "browser",
+				FetchedAt:    fetchedAt,
+			}},
+		},
+	})
+}
+
+func validateRenderRequest(payload RenderRequest) error {
+	if payload.Version != "crawler.evidence.request.v1" {
+		return errors.New("unsupported render request version")
+	}
+	if payload.RequestID == "" ||
+		payload.Tenant.OrganizationID == "" ||
+		payload.Tenant.WorkspaceID == "" ||
+		payload.Project.WebsiteProjectID == "" ||
+		payload.RequestedBy.ModuleID != "backlinks" ||
+		payload.RequestedBy.ActorID == "" {
+		return errors.New("render request lineage is incomplete")
+	}
+	if payload.TaskType != "contact_enrichment" &&
+		payload.TaskType != "backlink_validation" &&
+		payload.TaskType != "seo_assessment" {
+		return errors.New("unsupported render task type")
+	}
+	if len(payload.Target.URLs) != 1 {
+		return errors.New("render target must contain exactly one URL")
+	}
+	if _, err := time.Parse(time.RFC3339, payload.RequestedAt); err != nil {
+		return errors.New("requestedAt must be an RFC3339 timestamp")
+	}
+	return nil
 }
 
 func (s *ProbeService) probeCandidate(ctx context.Context, candidate ProbeCandidate) ProbeResult {

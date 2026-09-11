@@ -51,6 +51,7 @@ import {
 } from "@/components/ui/select"
 import { ArticleTypedDiff } from "@/features/content/article-typed-diff"
 import { articleDocumentAssetReferences } from "@/features/content/article-document"
+import { scheduleCandidates } from "@/features/content/article-publication-schedule"
 
 const ACTIVE_STATUSES = new Set<CmsPublicationStatus>([
   "queued",
@@ -87,74 +88,6 @@ function dateTimeLabel(value: string | null) {
 
 function browserTimezone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-}
-
-function localParts(value: string) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value)
-  if (!match) return null
-  return {
-    year: Number(match[1]),
-    month: Number(match[2]),
-    day: Number(match[3]),
-    hour: Number(match[4]),
-    minute: Number(match[5]),
-  }
-}
-
-function timezoneParts(date: Date, timezone: string) {
-  const values: Record<string, number> = {}
-  for (const part of new Intl.DateTimeFormat("en-CA", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(date)) {
-    if (part.type !== "literal") values[part.type] = Number(part.value)
-  }
-  return values
-}
-
-function offsetLabel(minutes: number) {
-  const sign = minutes >= 0 ? "+" : "-"
-  const absolute = Math.abs(minutes)
-  return `${sign}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(
-    absolute % 60
-  ).padStart(2, "0")}`
-}
-
-export function scheduleCandidates(value: string, timezone: string) {
-  const desired = localParts(value)
-  if (!desired) return []
-  const desiredUtc = Date.UTC(
-    desired.year,
-    desired.month - 1,
-    desired.day,
-    desired.hour,
-    desired.minute
-  )
-  const results: Array<{ value: string; offset: string; instant: number }> = []
-  for (
-    let deltaMinutes = -14 * 60;
-    deltaMinutes <= 14 * 60;
-    deltaMinutes += 15
-  ) {
-    const instant = desiredUtc + deltaMinutes * 60_000
-    const parts = timezoneParts(new Date(instant), timezone)
-    if (
-      parts.year === desired.year &&
-      parts.month === desired.month &&
-      parts.day === desired.day &&
-      parts.hour === desired.hour &&
-      parts.minute === desired.minute
-    ) {
-      const offset = offsetLabel((desiredUtc - instant) / 60_000)
-      results.push({ value: `${value}:00${offset}`, offset, instant })
-    }
-  }
-  return results.sort((left, right) => left.instant - right.instant)
 }
 
 function statusBadgeVariant(status: CmsPublicationStatus) {
@@ -215,10 +148,8 @@ function PreviewControls({
   const [working, setWorking] = React.useState(false)
   const [error, setError] = React.useState("")
   const [latest, setLatest] = React.useState<ArticlePreview | null>(null)
-
-  React.useEffect(() => {
-    if (!autosaveId && source === "autosave") setSource("current")
-  }, [autosaveId, source])
+  const effectiveSource =
+    !autosaveId && source === "autosave" ? "current" : source
 
   async function openPreview() {
     const previewWindow = window.open("", "_blank")
@@ -232,7 +163,7 @@ function PreviewControls({
     setError("")
     try {
       const input =
-        source === "autosave"
+        effectiveSource === "autosave"
           ? {
               source_type: "autosave" as const,
               autosave_id: autosaveId!,
@@ -241,7 +172,7 @@ function PreviewControls({
           : {
               source_type: "version" as const,
               version_number:
-                source === "approved"
+                effectiveSource === "approved"
                   ? article.approved_version_number!
                   : article.current_version_number,
               target_id: targetId,
@@ -292,7 +223,7 @@ function PreviewControls({
           )}
       </div>
       <Select
-        value={source}
+        value={effectiveSource}
         onValueChange={(value) =>
           setSource((value ?? "current") as "autosave" | "current" | "approved")
         }
@@ -412,8 +343,10 @@ export function ArticlePublicationPanel({
     []
   )
   const [selectedId, setSelectedId] = React.useState("")
-  const [snapshot, setSnapshot] =
-    React.useState<ArticlePublicationSnapshot | null>(null)
+  const [snapshotState, setSnapshotState] = React.useState<{
+    publicationId: string
+    value: ArticlePublicationSnapshot
+  } | null>(null)
   const [approvedVersionHasAssets, setApprovedVersionHasAssets] =
     React.useState<boolean | null>(null)
   const [mode, setMode] = React.useState<"immediate" | "scheduled">("immediate")
@@ -434,6 +367,11 @@ export function ArticlePublicationPanel({
     publications.find((item) => item.id === selectedId) ??
     publications[0] ??
     null
+  const snapshot =
+    selected?.status === "published" &&
+    snapshotState?.publicationId === selected.id
+      ? snapshotState.value
+      : null
   const selectedTarget = targets.find((item) => item.id === targetId) ?? null
   const candidates = React.useMemo(() => {
     try {
@@ -492,7 +430,13 @@ export function ArticlePublicationPanel({
   )
 
   React.useEffect(() => {
-    void load(false)
+    let active = true
+    queueMicrotask(() => {
+      if (active) void load(false)
+    })
+    return () => {
+      active = false
+    }
   }, [load])
 
   React.useEffect(() => {
@@ -511,11 +455,17 @@ export function ArticlePublicationPanel({
   }, [onRefreshArticle, projectId, selected])
 
   React.useEffect(() => {
-    setSnapshot(null)
     if (selected?.status !== "published") return
+    let active = true
+    const publicationId = selected.id
     void getArticlePublicationSnapshot(projectId, selected.id)
-      .then(setSnapshot)
+      .then((value) => {
+        if (active) setSnapshotState({ publicationId, value })
+      })
       .catch(() => undefined)
+    return () => {
+      active = false
+    }
   }, [projectId, selected?.id, selected?.status])
 
   async function run(name: string, action: () => Promise<void>) {

@@ -1,9 +1,7 @@
 export {
   backlinksProjectAnalysisV1Workflow,
 } from "./backlink-project-analysis.workflow.js";
-export {
-  backlinksRecommendationRefillV1Workflow,
-} from "./backlink-recommendation-refill.workflow.js";
+export { backlinksRecommendationPoolV2Workflow } from "./recommendation-pool-v2.workflow.js";
 export {
   backlinksContactEnrichmentV1Workflow,
 } from "./contact-enrichment.workflow.js";

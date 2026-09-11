@@ -109,27 +109,36 @@ test("reports expose frozen metric keys without frontend recomputation", async (
 })
 
 test("Backlinks stays within its registered module routes", async () => {
-  const manifest = await read("../manifest.ts")
+  const outreachManifest = await read("../manifest.ts")
+  const performanceManifest = await read("../../performance/manifest.ts")
   const registration = await read("../registration.ts")
-  const workspace = await read("../outreach-workspace.tsx")
+  const outreachWorkspace = await read("../outreach-workspace.tsx")
+  const performanceWorkspace = await read(
+    "../../performance/performance-workspace.tsx"
+  )
+  const reportsRoute = await read(
+    "../../performance/backlinks/backlink-reports-route-workspace.tsx"
+  )
   const modulePage = await read("../../../pages/module-page.tsx")
   const moduleWorkspace = await read("../module.tsx")
-  const platformNavigation = await read("../../../app/platform-navigation.ts")
 
-  assert.match(manifest, /\{ id: "links", label: "外链监控"/)
-  assert.match(manifest, /\{ id: "reports", label: "指标报告"/)
+  assert.doesNotMatch(outreachManifest, /\{ id: "links", label: "外链监控"/)
+  assert.doesNotMatch(outreachManifest, /\{ id: "reports", label: "指标报告"/)
+  assert.match(performanceManifest, /\{ id: "backlinks", label: "外链监控"/)
+  assert.match(performanceManifest, /\{ id: "reports", label: "指标报告"/)
   assert.match(registration, /id: "backlinks"/)
   assert.match(registration, /navigation: \[backlinksNavigation\]/)
-  assert.match(workspace, /ReportsRouteWorkspace/)
-  assert.match(workspace, /<ReportsWorkspace/)
-  assert.match(workspace, /backlinksProjectQueries\.fetch/)
-  assert.match(workspace, /reportingTimezone/)
-  assert.match(workspace, /reportLookbackDays/)
-  assert.match(workspace, /BusinessContextBar/)
-  assert.match(workspace, /returnTo/)
+  assert.match(outreachWorkspace, /BacklinkReportsRouteWorkspace/)
+  assert.match(outreachWorkspace, /BusinessContextBar/)
+  assert.match(outreachWorkspace, /returnTo/)
+  assert.match(performanceWorkspace, /view === "reports"/)
+  assert.match(performanceWorkspace, /BacklinkReportsRouteWorkspace/)
+  assert.match(reportsRoute, /<ReportsWorkspace/)
+  assert.match(reportsRoute, /backlinksProjectQueries\.fetch/)
+  assert.match(reportsRoute, /reportingTimezone/)
+  assert.match(reportsRoute, /reportLookbackDays/)
   assert.match(modulePage, /key=\{`\$\{project\.id\}:\$\{view\}`\}/)
   assert.match(moduleWorkspace, /key=\{`\$\{project\.id\}:\$\{activeView\}`\}/)
-  assert.doesNotMatch(platformNavigation, /指标与报告|ReportsWorkspace/)
 })
 
 test("legacy Reports manual preview is absent", async () => {

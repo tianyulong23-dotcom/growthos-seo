@@ -960,10 +960,18 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                intent.requested_send_at AS "requestedSendAt",
                intent.status AS "intentStatus",
                attempt.status AS "attemptStatus",
-               attempt.provider_error_code AS "errorCode",
+               coalesce(
+                 attempt.provider_error_code,
+                 reservation.release_reason
+               ) AS "errorCode",
                attempt.provider_message_id AS "providerMessageId",
                attempt.provider_thread_id AS "providerThreadId"
              FROM backlinks.backlink_send_intents AS intent
+             LEFT JOIN backlinks.backlink_rate_limit_reservations AS reservation
+               ON reservation.organization_id = intent.organization_id
+              AND reservation.workspace_id = intent.workspace_id
+              AND reservation.website_project_id = intent.website_project_id
+              AND reservation.send_intent_id = intent.id
              LEFT JOIN LATERAL (
                SELECT latest.status,
                       latest.provider_error_code,
@@ -1242,10 +1250,18 @@ implements SendIntentRepository, SendIntentPreflightRepository {
                intent.requested_send_at AS "requestedSendAt",
                intent.status AS "intentStatus",
                attempt.status AS "attemptStatus",
-               attempt.provider_error_code AS "errorCode",
+               coalesce(
+                 attempt.provider_error_code,
+                 reservation.release_reason
+               ) AS "errorCode",
                attempt.provider_message_id AS "providerMessageId",
                attempt.provider_thread_id AS "providerThreadId"
              FROM backlinks.backlink_send_intents AS intent
+             LEFT JOIN backlinks.backlink_rate_limit_reservations AS reservation
+               ON reservation.organization_id = intent.organization_id
+              AND reservation.workspace_id = intent.workspace_id
+              AND reservation.website_project_id = intent.website_project_id
+              AND reservation.send_intent_id = intent.id
              LEFT JOIN LATERAL (
                SELECT latest.status,
                       latest.provider_error_code,

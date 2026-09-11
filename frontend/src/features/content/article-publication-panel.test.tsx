@@ -1,4 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type {
@@ -8,10 +15,8 @@ import type {
   ArticlePublicationSnapshot,
   PublicationTarget,
 } from "@/api/articles"
-import {
-  ArticlePublicationPanel,
-  scheduleCandidates,
-} from "@/features/content/article-publication-panel"
+import { ArticlePublicationPanel } from "@/features/content/article-publication-panel"
+import { scheduleCandidates } from "@/features/content/article-publication-schedule"
 
 const articleApi = vi.hoisted(() => ({
   cancelArticlePublication: vi.fn(),
@@ -109,7 +114,8 @@ function publication(
     payload_hash: "payload-hash",
     asset_manifest_hash: "asset-hash",
     remote_post_id: status === "published" ? 42 : null,
-    remote_url: status === "published" ? "https://wordpress.example/post/42" : null,
+    remote_url:
+      status === "published" ? "https://wordpress.example/post/42" : null,
     attempt_count: 1,
     last_error_code: status === "failed" ? "wordpress_http_error" : null,
     last_error_detail: null,
@@ -131,11 +137,13 @@ function publication(
   }
 }
 
-function renderPanel(input: {
-  publications?: ArticlePublication[]
-  autosaveId?: string | null
-  article?: ArticleDetail
-} = {}) {
+function renderPanel(
+  input: {
+    publications?: ArticlePublication[]
+    autosaveId?: string | null
+    article?: ArticleDetail
+  } = {}
+) {
   articleApi.listArticlePublications.mockResolvedValue({
     items: input.publications ?? [],
   })
@@ -143,7 +151,9 @@ function renderPanel(input: {
     <ArticlePublicationPanel
       projectId="project-1"
       article={input.article ?? article}
-      autosaveId={input.autosaveId === undefined ? "autosave-3" : input.autosaveId}
+      autosaveId={
+        input.autosaveId === undefined ? "autosave-3" : input.autosaveId
+      }
       dirty={false}
       parentWorking={false}
       onRefreshArticle={vi.fn().mockResolvedValue(undefined)}
@@ -185,9 +195,9 @@ describe("ArticlePublicationPanel", () => {
       document: { title: "", body: { textContent: "" } },
       location: { href: "" },
     }
-    const open = vi.spyOn(window, "open").mockReturnValue(
-      previewWindow as unknown as Window
-    )
+    const open = vi
+      .spyOn(window, "open")
+      .mockReturnValue(previewWindow as unknown as Window)
     renderPanel()
 
     await screen.findByText("连接已验证")
@@ -336,10 +346,12 @@ describe("ArticlePublicationPanel", () => {
 
   it("blocks a first publication when WordPress cannot create or reconcile posts", async () => {
     articleApi.listPublicationTargets.mockResolvedValue({
-      items: [{
-        ...target,
-        capabilities: { ...target.capabilities, post_create: false },
-      }],
+      items: [
+        {
+          ...target,
+          capabilities: { ...target.capabilities, post_create: false },
+        },
+      ],
     })
     renderPanel()
 
@@ -352,13 +364,15 @@ describe("ArticlePublicationPanel", () => {
 
   it("blocks an update when WordPress cannot edit the published post", async () => {
     articleApi.listPublicationTargets.mockResolvedValue({
-      items: [{
-        ...target,
-        capabilities: {
-          ...target.capabilities,
-          post_update_by_remote_id: false,
+      items: [
+        {
+          ...target,
+          capabilities: {
+            ...target.capabilities,
+            post_update_by_remote_id: false,
+          },
         },
-      }],
+      ],
     })
     renderPanel({ publications: [publication("published")] })
 
@@ -369,23 +383,27 @@ describe("ArticlePublicationPanel", () => {
 
   it("blocks media publication without both upload and lookup permissions", async () => {
     articleApi.listPublicationTargets.mockResolvedValue({
-      items: [{
-        ...target,
-        capabilities: {
-          ...target.capabilities,
-          media_lookup: false,
+      items: [
+        {
+          ...target,
+          capabilities: {
+            ...target.capabilities,
+            media_lookup: false,
+          },
         },
-      }],
+      ],
     })
     articleApi.getArticleVersion.mockResolvedValue({
       version_number: 3,
       document: {
         type: "doc",
         schema_version: 2,
-        content: [{
-          type: "image",
-          attrs: { node_id: "image-1", asset_id: "asset-1" },
-        }],
+        content: [
+          {
+            type: "image",
+            attrs: { node_id: "image-1", asset_id: "asset-1" },
+          },
+        ],
       },
     })
     renderPanel()
@@ -396,7 +414,9 @@ describe("ArticlePublicationPanel", () => {
   })
 
   it("rejects nonexistent DST time and exposes both offsets for an ambiguous time", () => {
-    expect(scheduleCandidates("2026-03-08T02:30", "America/New_York")).toEqual([])
+    expect(scheduleCandidates("2026-03-08T02:30", "America/New_York")).toEqual(
+      []
+    )
     expect(
       scheduleCandidates("2026-11-01T01:30", "America/New_York").map(
         (candidate) => candidate.offset
@@ -405,10 +425,30 @@ describe("ArticlePublicationPanel", () => {
   })
 
   it.each([
-    ["queued", "取消发布任务", "从失败 checkpoint 续跑", "校准 WordPress 远端状态"],
-    ["scheduled", "取消发布任务", "从失败 checkpoint 续跑", "校准 WordPress 远端状态"],
-    ["failed", "从失败 checkpoint 续跑", "取消发布任务", "校准 WordPress 远端状态"],
-    ["uncertain", "校准 WordPress 远端状态", "取消发布任务", "从失败 checkpoint 续跑"],
+    [
+      "queued",
+      "取消发布任务",
+      "从失败 checkpoint 续跑",
+      "校准 WordPress 远端状态",
+    ],
+    [
+      "scheduled",
+      "取消发布任务",
+      "从失败 checkpoint 续跑",
+      "校准 WordPress 远端状态",
+    ],
+    [
+      "failed",
+      "从失败 checkpoint 续跑",
+      "取消发布任务",
+      "校准 WordPress 远端状态",
+    ],
+    [
+      "uncertain",
+      "校准 WordPress 远端状态",
+      "取消发布任务",
+      "从失败 checkpoint 续跑",
+    ],
   ] as const)(
     "shows only the valid recovery action for %s",
     async (status, allowed, forbiddenOne, forbiddenTwo) => {
@@ -508,9 +548,9 @@ describe("ArticlePublicationPanel", () => {
     expect(await screen.findByText("1/2")).toBeTruthy()
     expect(screen.getByText(/WordPress #101/)).toBeTruthy()
     expect(screen.getByText("wordpress_media_upload_failed")).toBeTruthy()
-    expect((await screen.findByTestId("published-draft-diff")).textContent).toBe(
-      "article-typed-diff.v1"
-    )
+    expect(
+      (await screen.findByTestId("published-draft-diff")).textContent
+    ).toBe("article-typed-diff.v1")
     expect(articleApi.getArticlePublicationSnapshot).toHaveBeenCalledWith(
       "project-1",
       published.id

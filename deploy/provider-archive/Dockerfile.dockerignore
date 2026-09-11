@@ -1,0 +1,11 @@
+**
+!backend/
+!backend/core/
+!backend/core/package.json
+!backend/core/package-lock.json
+!backend/core/tsconfig.json
+!backend/core/src/
+!backend/core/src/**
+!deploy/
+!deploy/provider-archive/
+!deploy/provider-archive/Dockerfile

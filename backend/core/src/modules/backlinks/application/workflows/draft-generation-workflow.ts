@@ -85,14 +85,11 @@ export async function runDraftGenerationWorkflow(
       );
       source = "TEMPLATE_FALLBACK";
       basicDraftReason = "MODEL_DISABLED";
+    } else if (ai === null) {
+      result = createDraftTemplateFallback(context.prompt, "MISCONFIGURED");
+      source = "TEMPLATE_FALLBACK";
+      basicDraftReason = "MISCONFIGURED";
     } else {
-      if (ai === null) {
-        throw new AiDraftError({
-          code: "MISCONFIGURED",
-          message: "AI Draft Provider is not configured.",
-          retryable: false,
-        });
-      }
       let modelError: unknown = null;
       let modelResult: AiDraftResult | null = null;
       try {

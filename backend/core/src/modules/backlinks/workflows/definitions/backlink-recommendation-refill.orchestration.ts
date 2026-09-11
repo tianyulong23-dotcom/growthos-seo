@@ -9,9 +9,9 @@ import {
   type RecommendationRefillRootCause,
 } from "../../domain/recommendations/refill-failure.js";
 import type { CommercialSupplyOperationStep } from "../../application/services/commercial-supply-operation.service.js";
-import type {
-  ProviderOperationBudgetAuthorization,
-} from "../../domain/recommendations/provider-operation-budget.js";
+import { resolveCommercialRefillRetryDelay } from "../../domain/recommendations/commercial-refill-cycle.js";
+import type { ProviderOperationBudgetAuthorization } from "../../domain/recommendations/provider-operation-budget.js";
+import type { RecommendationPoolContractNotApplicable } from "../../domain/recommendations/recommendation-pool-contract-guard.js";
 
 export type BacklinkRecommendationRefillRequest = Readonly<{
   organizationId: string;
@@ -66,9 +66,9 @@ export type BacklinkRecommendationRefillContinuation = Readonly<{
 }>;
 export type BacklinkRecommendationRefillInput =
   BacklinkRecommendationRefillRequest &
-  Readonly<{
-    continuation?: BacklinkRecommendationRefillContinuation;
-  }>;
+    Readonly<{
+      continuation?: BacklinkRecommendationRefillContinuation;
+    }>;
 export type RecommendationProviderExecutionSummary = Readonly<{
   source: "cache" | "stale-cache" | "single-flight" | "provider";
   acquiredAt: string;
@@ -82,7 +82,8 @@ export type RecommendationRefillStart =
       readyCount: number;
       jobId: string;
     }>
-  | Readonly<{ status: "started"; readyCount: number; jobId: string }>;
+  | Readonly<{ status: "started"; readyCount: number; jobId: string }>
+  | RecommendationPoolContractNotApplicable;
 type ExecuteRefillInput = BacklinkRecommendationRefillRequest &
   Readonly<{
     jobId: string;
@@ -122,8 +123,7 @@ type RecordFailureResult =
       supersession: RecommendationRefillSupersessionSignal;
     }>;
 export type RecommendationRefillTerminalReason =
-  | "EXISTING_EVIDENCE_WINDOW_COMPLETED"
-  | "EXISTING_EVIDENCE_NO_PROGRESS";
+  "EXISTING_EVIDENCE_WINDOW_COMPLETED" | "EXISTING_EVIDENCE_NO_PROGRESS";
 type CompleteSupplyInput = BacklinkRecommendationRefillRequest &
   Readonly<{
     jobId: string;
@@ -145,27 +145,34 @@ export type BacklinkRecommendationRefillActivities = Readonly<{
     input: BacklinkRecommendationRefillRequest,
   ): Promise<RecommendationRefillStart>;
   executeRecommendationRefill(input: ExecuteRefillInput): Promise<
-    Readonly<{
-      candidates: readonly RecommendationEvidenceCandidate[];
-      provider: RecommendationProviderExecutionSummary;
-    }>
+    | Readonly<{
+        candidates: readonly RecommendationEvidenceCandidate[];
+        provider: RecommendationProviderExecutionSummary;
+      }>
+    | RecommendationPoolContractNotApplicable
   >;
   storeReadyRecommendations(
     input: StoreReadyRecommendationsInput,
-  ): Promise<Readonly<{ addedCount: number }>>;
+  ): Promise<
+    Readonly<{ addedCount: number }> | RecommendationPoolContractNotApplicable
+  >;
   planRecommendationRefillSupply(
     input: BacklinkRecommendationRefillRequest & Readonly<{ jobId: string }>,
-  ): Promise<CommercialSupplyOperationStep>;
-  completeRecommendationRefillSupply(input: CompleteSupplyInput): Promise<void>;
+  ): Promise<
+    CommercialSupplyOperationStep | RecommendationPoolContractNotApplicable
+  >;
+  completeRecommendationRefillSupply(
+    input: CompleteSupplyInput,
+  ): Promise<RecommendationPoolContractNotApplicable | undefined>;
   completeRecommendationRefillSupersession(
     input: CompleteSupersessionInput,
-  ): Promise<Readonly<{
-    status:
-      | "cancelled"
-      | "awaiting_provider_reconciliation"
-      | "no_change";
-    replayed: boolean;
-  }>>;
+  ): Promise<
+    | Readonly<{
+        status: "cancelled" | "awaiting_provider_reconciliation" | "no_change";
+        replayed: boolean;
+      }>
+    | RecommendationPoolContractNotApplicable
+  >;
   waitForRecommendationRefillRetry(
     input: Readonly<{
       retryAfterMs: number;
@@ -174,7 +181,9 @@ export type BacklinkRecommendationRefillActivities = Readonly<{
   ): Promise<void>;
   recordRecommendationRefillFailure(
     input: RecordFailureInput,
-  ): Promise<RecordFailureResult | undefined>;
+  ): Promise<
+    RecordFailureResult | RecommendationPoolContractNotApplicable | undefined
+  >;
 }>;
 export type BacklinkRecommendationRefillResult =
   | RecommendationRefillStart
@@ -230,27 +239,24 @@ function resumeState(
   const lastExecutedRefillWindowKey =
     continuation.lastExecutedRefillWindowKey?.trim();
   if (
-    continuation.lastExecutedRefillWindowKey !== undefined
-    && lastExecutedRefillWindowKey === ""
+    continuation.lastExecutedRefillWindowKey !== undefined &&
+    lastExecutedRefillWindowKey === ""
   ) {
     throw new TypeError(
       "Invalid recommendation refill continuation lastExecutedRefillWindowKey",
     );
   }
-  const executedRefillWindowKeys =
-    continuation.executedRefillWindowKeys?.map((value) => value.trim());
+  const executedRefillWindowKeys = continuation.executedRefillWindowKeys?.map(
+    (value) => value.trim(),
+  );
   if (
-    executedRefillWindowKeys?.some((value) => value === "")
-    || (
-      executedRefillWindowKeys !== undefined
-      && new Set(executedRefillWindowKeys).size
-        !== executedRefillWindowKeys.length
-    )
-    || (
-      lastExecutedRefillWindowKey !== undefined
-      && executedRefillWindowKeys !== undefined
-      && !executedRefillWindowKeys.includes(lastExecutedRefillWindowKey)
-    )
+    executedRefillWindowKeys?.some((value) => value === "") ||
+    (executedRefillWindowKeys !== undefined &&
+      new Set(executedRefillWindowKeys).size !==
+        executedRefillWindowKeys.length) ||
+    (lastExecutedRefillWindowKey !== undefined &&
+      executedRefillWindowKeys !== undefined &&
+      !executedRefillWindowKeys.includes(lastExecutedRefillWindowKey))
   ) {
     throw new TypeError(
       "Invalid recommendation refill continuation executedRefillWindowKeys",
@@ -284,8 +290,9 @@ function resumeState(
     ...(executedRefillWindowKeys === undefined
       ? {}
       : {
-          executedRefillWindowKeys:
-            Object.freeze([...executedRefillWindowKeys]),
+          executedRefillWindowKeys: Object.freeze([
+            ...executedRefillWindowKeys,
+          ]),
         }),
     ...(continuation.supersession === undefined
       ? {}
@@ -317,17 +324,19 @@ function validSupersession(
   request: BacklinkRecommendationRefillRequest,
   signal: RecommendationRefillSupersessionSignal | undefined,
 ): signal is RecommendationRefillSupersessionSignal {
-  return signal !== undefined
-    && signal.contractVersion === 1
-    && signal.organizationId === request.organizationId
-    && signal.workspaceId === request.workspaceId
-    && signal.websiteProjectId === request.websiteProjectId
-    && signal.jobId === request.jobId
-    && signal.workflowId === request.workflowId
-    && signal.oldContext.contextVersionId
-      === request.recommendationContextVersionId
-    && signal.authoritativeContext.snapshotVersion
-      > signal.oldContext.snapshotVersion;
+  return (
+    signal !== undefined &&
+    signal.contractVersion === 1 &&
+    signal.organizationId === request.organizationId &&
+    signal.workspaceId === request.workspaceId &&
+    signal.websiteProjectId === request.websiteProjectId &&
+    signal.jobId === request.jobId &&
+    signal.workflowId === request.workflowId &&
+    signal.oldContext.contextVersionId ===
+      request.recommendationContextVersionId &&
+    signal.authoritativeContext.snapshotVersion >
+      signal.oldContext.snapshotVersion
+  );
 }
 
 export async function runBacklinkRecommendationRefillWorkflow(
@@ -341,8 +350,7 @@ export async function runBacklinkRecommendationRefillWorkflow(
     allowExistingEvidenceWindowReplay?: boolean;
     enforceExistingEvidenceWindowOnce?: boolean;
     completeExistingEvidenceWindow?: () => boolean;
-    readSupersession?: () =>
-      RecommendationRefillSupersessionSignal | undefined;
+    readSupersession?: () => RecommendationRefillSupersessionSignal | undefined;
   }> = {},
 ): Promise<BacklinkRecommendationRefillSliceResult> {
   const { continuation, ...request } = input;
@@ -358,8 +366,8 @@ export async function runBacklinkRecommendationRefillWorkflow(
     options.enforceExistingEvidenceWindowOnce ?? true;
   const completeExistingEvidenceWindow =
     options.completeExistingEvidenceWindow ?? (() => true);
-  const readSupersession = options.readSupersession
-    ?? (() => continuation?.supersession);
+  const readSupersession =
+    options.readSupersession ?? (() => continuation?.supersession);
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) {
     throw new TypeError("Recommendation refill maxSteps must be positive");
   }
@@ -368,12 +376,14 @@ export async function runBacklinkRecommendationRefillWorkflow(
   ): Promise<BacklinkRecommendationRefillSliceResult | null> => {
     const supersession = readSupersession();
     if (!validSupersession(request, supersession)) return null;
-    const completed =
-      await activities.completeRecommendationRefillSupersession({
+    const completed = await activities.completeRecommendationRefillSupersession(
+      {
         ...request,
         jobId: state.jobId,
         supersession,
-      });
+      },
+    );
+    if (completed.status === "contract_not_applicable") return completed;
     if (completed.status === "no_change") return null;
     if (completed.status === "cancelled") {
       return Object.freeze({
@@ -390,79 +400,77 @@ export async function runBacklinkRecommendationRefillWorkflow(
     return continuationResult(request, state, "wait", supersession);
   };
 
-  const initialSupersession = await settleSupersession(Object.freeze({
-    jobId: continuation?.jobId ?? request.jobId,
-    readyCount: continuation?.readyCount ?? 0,
-    addedCount: continuation?.addedCount ?? 0,
-    evaluatedCount: continuation?.evaluatedCount ?? 0,
-    excludedCount: continuation?.excludedCount ?? 0,
-    insufficientDataCount: continuation?.insufficientDataCount ?? 0,
-    ...(continuation?.lastExecutedRefillWindowKey === undefined
-      ? {}
-      : {
-          lastExecutedRefillWindowKey:
-            continuation.lastExecutedRefillWindowKey,
-        }),
-    ...(continuation?.executedRefillWindowKeys === undefined
-      ? {}
-      : {
-          executedRefillWindowKeys:
-            continuation.executedRefillWindowKeys,
-        }),
-  }));
+  const initialSupersession = await settleSupersession(
+    Object.freeze({
+      jobId: continuation?.jobId ?? request.jobId,
+      readyCount: continuation?.readyCount ?? 0,
+      addedCount: continuation?.addedCount ?? 0,
+      evaluatedCount: continuation?.evaluatedCount ?? 0,
+      excludedCount: continuation?.excludedCount ?? 0,
+      insufficientDataCount: continuation?.insufficientDataCount ?? 0,
+      ...(continuation?.lastExecutedRefillWindowKey === undefined
+        ? {}
+        : {
+            lastExecutedRefillWindowKey:
+              continuation.lastExecutedRefillWindowKey,
+          }),
+      ...(continuation?.executedRefillWindowKeys === undefined
+        ? {}
+        : {
+            executedRefillWindowKeys: continuation.executedRefillWindowKeys,
+          }),
+    }),
+  );
   if (initialSupersession !== null) return initialSupersession;
 
-  const initialState = continuation === undefined
-    ? await activities.reserveRecommendationRefill(request)
-    : resumeState(continuation);
-  if (
-    "status" in initialState &&
-    initialState.status !== "started"
-  ) {
+  const initialState =
+    continuation === undefined
+      ? await activities.reserveRecommendationRefill(request)
+      : resumeState(continuation);
+  if ("status" in initialState && initialState.status !== "started") {
     return initialState;
   }
   const state: BacklinkRecommendationRefillContinuation =
     "status" in initialState
-    ? Object.freeze({
-        jobId: initialState.jobId,
-        readyCount: initialState.readyCount,
-        addedCount: 0,
-        evaluatedCount: 0,
-        excludedCount: 0,
-        insufficientDataCount: 0,
-      })
-    : initialState;
+      ? Object.freeze({
+          jobId: initialState.jobId,
+          readyCount: initialState.readyCount,
+          addedCount: 0,
+          evaluatedCount: 0,
+          excludedCount: 0,
+          insufficientDataCount: 0,
+        })
+      : initialState;
 
   try {
     let addedCount = state.addedCount;
     let evaluatedCount = state.evaluatedCount;
     let excludedCount = state.excludedCount;
     let insufficientDataCount = state.insufficientDataCount;
-    let lastExecutedRefillWindowKey =
-      state.lastExecutedRefillWindowKey;
+    let lastExecutedRefillWindowKey = state.lastExecutedRefillWindowKey;
     const executedRefillWindowKeys = new Set(
-      state.executedRefillWindowKeys
-        ?? (
-          state.lastExecutedRefillWindowKey === undefined
-            ? []
-            : [state.lastExecutedRefillWindowKey]
-        ),
+      state.executedRefillWindowKeys ??
+        (state.lastExecutedRefillWindowKey === undefined
+          ? []
+          : [state.lastExecutedRefillWindowKey]),
     );
     const executionHistory = () =>
       enableRefillCycleHistoryGuard && executedRefillWindowKeys.size > 0
         ? {
-            executedRefillWindowKeys:
-              Object.freeze([...executedRefillWindowKeys]),
+            executedRefillWindowKeys: Object.freeze([
+              ...executedRefillWindowKeys,
+            ]),
           }
         : {};
     const completeExistingEvidence = async (
       terminalReason: RecommendationRefillTerminalReason,
     ): Promise<BacklinkRecommendationRefillResult> => {
       const publishedCount = state.readyCount + addedCount;
-      const outcome = publishedCount >= request.highWatermark
-        ? "TARGET_REACHED"
-        : "SUPPLY_FLOOR_REACHED";
-      await activities.completeRecommendationRefillSupply({
+      const outcome =
+        publishedCount >= request.highWatermark
+          ? "TARGET_REACHED"
+          : "SUPPLY_FLOOR_REACHED";
+      const completion = await activities.completeRecommendationRefillSupply({
         ...request,
         jobId: state.jobId,
         outcome,
@@ -473,6 +481,7 @@ export async function runBacklinkRecommendationRefillWorkflow(
         excludedCount,
         insufficientDataCount,
       });
+      if (completion?.status === "contract_not_applicable") return completion;
       return Object.freeze({
         status: outcome === "TARGET_REACHED" ? "completed" : "incomplete",
         readyCount: state.readyCount,
@@ -486,7 +495,11 @@ export async function runBacklinkRecommendationRefillWorkflow(
         publishedCount,
       });
     };
-    for (let completedSteps = 0; completedSteps < maxSteps; completedSteps += 1) {
+    for (
+      let completedSteps = 0;
+      completedSteps < maxSteps;
+      completedSteps += 1
+    ) {
       const beforePlan = await settleSupersession({
         ...state,
         addedCount,
@@ -503,18 +516,23 @@ export async function runBacklinkRecommendationRefillWorkflow(
         ...request,
         jobId: state.jobId,
       });
+      if (step.status === "contract_not_applicable") return step;
       if (step.status === "wait") {
         if (enableBudgetTerminal && step.reason === "budget") {
-          await activities.completeRecommendationRefillSupply({
-            ...request,
-            jobId: state.jobId,
-            outcome: "PAUSED_BUDGET",
-            publishedCount: step.publishedCount,
-            addedCount,
-            evaluatedCount,
-            excludedCount,
-            insufficientDataCount,
-          });
+          const completion =
+            await activities.completeRecommendationRefillSupply({
+              ...request,
+              jobId: state.jobId,
+              outcome: "PAUSED_BUDGET",
+              publishedCount: step.publishedCount,
+              addedCount,
+              evaluatedCount,
+              excludedCount,
+              insufficientDataCount,
+            });
+          if (completion?.status === "contract_not_applicable") {
+            return completion;
+          }
           return {
             status: "incomplete",
             readyCount: state.readyCount,
@@ -543,24 +561,28 @@ export async function runBacklinkRecommendationRefillWorkflow(
           ...executionHistory(),
         });
         if (afterWait !== null) return afterWait;
-        return continuationResult(request, {
-          jobId: state.jobId,
-          readyCount: state.readyCount,
-          addedCount,
-          evaluatedCount,
-          excludedCount,
-          insufficientDataCount,
-          ...(lastExecutedRefillWindowKey === undefined
-            ? {}
-            : { lastExecutedRefillWindowKey }),
-          ...executionHistory(),
-        }, "wait");
+        return continuationResult(
+          request,
+          {
+            jobId: state.jobId,
+            readyCount: state.readyCount,
+            addedCount,
+            evaluatedCount,
+            excludedCount,
+            insufficientDataCount,
+            ...(lastExecutedRefillWindowKey === undefined
+              ? {}
+              : { lastExecutedRefillWindowKey }),
+            ...executionHistory(),
+          },
+          "wait",
+        );
       }
       if (step.status === "complete") {
         const completed =
           step.outcome === "TARGET_REACHED" &&
           step.publishedCount >= request.highWatermark;
-        await activities.completeRecommendationRefillSupply({
+        const completion = await activities.completeRecommendationRefillSupply({
           ...request,
           jobId: state.jobId,
           outcome: step.outcome,
@@ -570,6 +592,7 @@ export async function runBacklinkRecommendationRefillWorkflow(
           excludedCount,
           insufficientDataCount,
         });
+        if (completion?.status === "contract_not_applicable") return completion;
         return {
           status: completed ? "completed" : "incomplete",
           readyCount: state.readyCount,
@@ -583,33 +606,36 @@ export async function runBacklinkRecommendationRefillWorkflow(
         };
       }
       if (
-        enableNoProgressGuard
-        && enforceExistingEvidenceWindowOnce
-        && step.source === "existing"
-        && (
-          enableRefillCycleHistoryGuard
-            ? executedRefillWindowKeys.has(step.refillWindowKey)
-            : step.refillWindowKey === lastExecutedRefillWindowKey
-        )
+        enableNoProgressGuard &&
+        enforceExistingEvidenceWindowOnce &&
+        step.source === "existing" &&
+        (enableRefillCycleHistoryGuard
+          ? executedRefillWindowKeys.has(step.refillWindowKey)
+          : step.refillWindowKey === lastExecutedRefillWindowKey)
       ) {
         return completeExistingEvidence("EXISTING_EVIDENCE_NO_PROGRESS");
       }
       if (
-        enableNoProgressGuard
-        && !(
-          allowExistingEvidenceWindowReplay
-          && !enforceExistingEvidenceWindowOnce
-          && step.source === "existing"
-        )
-        && (
-          enableRefillCycleHistoryGuard
-            ? executedRefillWindowKeys.has(step.refillWindowKey)
-            : step.refillWindowKey === lastExecutedRefillWindowKey
-        )
+        enableNoProgressGuard &&
+        !(
+          allowExistingEvidenceWindowReplay &&
+          !enforceExistingEvidenceWindowOnce &&
+          step.source === "existing"
+        ) &&
+        (enableRefillCycleHistoryGuard
+          ? executedRefillWindowKeys.has(step.refillWindowKey)
+          : step.refillWindowKey === lastExecutedRefillWindowKey)
       ) {
+        const retryReason =
+          step.source === "paid" ? "provider" : "project_context";
         await activities.waitForRecommendationRefillRetry({
-          retryAfterMs: 60_000,
-          reason: step.source === "paid" ? "provider" : "project_context",
+          retryAfterMs: resolveCommercialRefillRetryDelay({
+            reason: retryReason,
+            stableKey: [state.jobId, step.refillWindowKey, retryReason].join(
+              ":",
+            ),
+          }),
+          reason: retryReason,
         });
         const afterWait = await settleSupersession({
           ...state,
@@ -623,18 +649,22 @@ export async function runBacklinkRecommendationRefillWorkflow(
           ...executionHistory(),
         });
         if (afterWait !== null) return afterWait;
-        return continuationResult(request, {
-          jobId: state.jobId,
-          readyCount: state.readyCount,
-          addedCount,
-          evaluatedCount,
-          excludedCount,
-          insufficientDataCount,
-          ...(lastExecutedRefillWindowKey === undefined
-            ? {}
-            : { lastExecutedRefillWindowKey }),
-          ...executionHistory(),
-        }, "wait");
+        return continuationResult(
+          request,
+          {
+            jobId: state.jobId,
+            readyCount: state.readyCount,
+            addedCount,
+            evaluatedCount,
+            excludedCount,
+            insufficientDataCount,
+            ...(lastExecutedRefillWindowKey === undefined
+              ? {}
+              : { lastExecutedRefillWindowKey }),
+            ...executionHistory(),
+          },
+          "wait",
+        );
       }
       const beforeProvider = await settleSupersession({
         ...state,
@@ -655,6 +685,7 @@ export async function runBacklinkRecommendationRefillWorkflow(
         requestedCount: step.requestedCandidateCount,
         source: step.source,
       });
+      if (!("candidates" in result)) return result;
       const afterProvider = await settleSupersession({
         ...state,
         addedCount,
@@ -680,6 +711,7 @@ export async function runBacklinkRecommendationRefillWorkflow(
         provider: result.provider,
         evaluationSummary: prepared.counts,
       });
+      if ("status" in stored) return stored;
       if (
         !Number.isInteger(stored.addedCount) ||
         stored.addedCount < 0 ||
@@ -697,10 +729,7 @@ export async function runBacklinkRecommendationRefillWorkflow(
       if (enableRefillCycleHistoryGuard) {
         executedRefillWindowKeys.add(step.refillWindowKey);
       }
-      if (
-        step.source === "existing"
-        && completeExistingEvidenceWindow()
-      ) {
+      if (step.source === "existing" && completeExistingEvidenceWindow()) {
         return completeExistingEvidence(
           stored.addedCount === 0
             ? "EXISTING_EVIDENCE_NO_PROGRESS"
@@ -720,18 +749,22 @@ export async function runBacklinkRecommendationRefillWorkflow(
       ...executionHistory(),
     });
     if (beforeContinueAsNew !== null) return beforeContinueAsNew;
-    return continuationResult(request, {
-      jobId: state.jobId,
-      readyCount: state.readyCount,
-      addedCount,
-      evaluatedCount,
-      excludedCount,
-      insufficientDataCount,
-      ...(lastExecutedRefillWindowKey === undefined
-        ? {}
-        : { lastExecutedRefillWindowKey }),
-      ...executionHistory(),
-    }, "step_limit");
+    return continuationResult(
+      request,
+      {
+        jobId: state.jobId,
+        readyCount: state.readyCount,
+        addedCount,
+        evaluatedCount,
+        excludedCount,
+        insufficientDataCount,
+        ...(lastExecutedRefillWindowKey === undefined
+          ? {}
+          : { lastExecutedRefillWindowKey }),
+        ...executionHistory(),
+      },
+      "step_limit",
+    );
   } catch (error) {
     const failure = normalizeRecommendationRefillFailure(error, state.jobId);
     const terminal = await activities.recordRecommendationRefillFailure({
@@ -740,6 +773,7 @@ export async function runBacklinkRecommendationRefillWorkflow(
       errorCode: "BACKLINK_RECOMMENDATION_REFILL_FAILED",
       ...failure,
     });
+    if (terminal?.status === "contract_not_applicable") return terminal;
     if (terminal?.status === "superseded") {
       return Object.freeze({
         status: "cancelled",
@@ -753,12 +787,7 @@ export async function runBacklinkRecommendationRefillWorkflow(
         retryAfterMs: 30_000,
         reason: "project_context",
       });
-      return continuationResult(
-        request,
-        state,
-        "wait",
-        terminal.supersession,
-      );
+      return continuationResult(request, state, "wait", terminal.supersession);
     }
     throw error;
   }

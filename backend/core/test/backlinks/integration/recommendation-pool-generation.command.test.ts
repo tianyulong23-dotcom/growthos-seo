@@ -1,6 +1,4 @@
-import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -13,6 +11,7 @@ import {
   createTenantContext,
 } from "../../../src/modules/backlinks/domain/context/index.js";
 import { buildCommercialRefillWindowKey } from "../../../src/modules/backlinks/domain/recommendations/commercial-refill-cycle.js";
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -26,27 +25,10 @@ type Client = {
     values?: readonly unknown[],
   ): Promise<{ rows: Record<string, unknown>[] }>;
 };
-type DeploymentManifest = Readonly<{
-  steps: readonly Readonly<{ migrationId: string; path: string }>[];
-}>;
-
 const require = createRequire(import.meta.url);
 const { Client: PgClient } = require("pg") as {
   readonly Client: new (config: unknown) => Client;
 };
-const rolesUrl = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
-const manifestUrl = new URL(
-  "../../../../database/deployment-manifest.v1.json",
-  import.meta.url,
-);
-const migrationUrl = (path: string) =>
-  new URL(
-    `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
-    import.meta.url,
-  );
 const id = (value: number) =>
   `018f0059-0000-7000-8000-${String(value).padStart(12, "0")}`;
 const organizationId = id(1);
@@ -63,35 +45,7 @@ describe("recommendation pool generation lifecycle", () => {
     await harness.migrate();
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
-    await client.query(await readFile(rolesUrl, "utf8"));
-    await client.query(`
-      SET ROLE growthos_platform_owner;
-      SET search_path = platform, pg_catalog;
-      CREATE FUNCTION backlink_list_active_website_projects(text, text)
-      RETURNS TABLE (website_project_id text, context_version integer)
-      LANGUAGE sql STABLE SECURITY DEFINER
-      SET search_path = platform, pg_catalog
-      AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
-      REVOKE ALL
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        FROM PUBLIC;
-      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
-      GRANT EXECUTE
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        TO growthos_backlinks_owner;
-      RESET ROLE;
-      RESET search_path;
-    `);
-    const manifest = JSON.parse(
-      await readFile(manifestUrl, "utf8"),
-    ) as DeploymentManifest;
-    for (const step of manifest.steps.filter(
-      ({ migrationId }) =>
-        migrationId.startsWith("backlinks-")
-        && migrationId !== "backlinks-0001",
-    )) {
-      await client.query(await readFile(migrationUrl(step.path), "utf8"));
-    }
+    await installBacklinksManifestAfterFoundation(client, "0092");
     await client.query("SET search_path = backlinks, pg_catalog");
     await client.query(
       `INSERT INTO backlink_project_context_snapshots (
@@ -211,7 +165,7 @@ describe("recommendation pool generation lifecycle", () => {
     await harness?.stop();
   });
 
-  it("archives a complete generation and waits for an explicit next generation", async () => {
+  it("archives a complete generation and preserves qualified reserve for the next generation", async () => {
     const context = {
       actor: createActorContext({
         userId: "pool-operator",
@@ -229,11 +183,130 @@ describe("recommendation pool generation lifecycle", () => {
       }),
     };
     const commands = createRecommendationCommands(client);
+    const generationContractId = id(900);
+    const blueprintId = id(901);
+    const discoveryBatchId = id(902);
+    const reserveCandidateId = id(903);
+    await client.query(
+      `INSERT INTO backlink_recommendation_generation_contracts (
+         id,organization_id,workspace_id,website_project_id,
+         recommendation_context_version_id,visible_pool_generation,
+         input_pin_id,qualification_contract_version,
+         visibility_contract_version,score_model_version,metric_scope,
+         market,location,language,traffic_location_code,
+         traffic_language_code,request_fingerprints,
+         creator_worker_contract_version,created_by
+       ) VALUES (
+         $1,$2,$3,$4,$5,1,$6,'recommendation-qualification.v1',
+         'recommendation-visibility.v1','recommendation-commercial-fit.v4',
+         'TARGET_MARKET','US','United States','en',2840,'en',
+         '{}'::jsonb,'recommendation-qualification.v1','pool-test'
+       )`,
+      [
+        generationContractId,
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        recommendationContextVersionId,
+        id(6),
+      ],
+    );
+    await client.query(
+      `INSERT INTO backlink_commercial_discovery_blueprints (
+         id,organization_id,workspace_id,website_project_id,
+         project_context_version_id,blueprint_version,generator,schema_version,
+         prompt_version,rule_version,blueprint,evidence_refs,generated_at,
+         created_by
+       ) VALUES (
+         $1,$2,$3,$4,$5,1,'DETERMINISTIC_FALLBACK',
+         'archive-reserve.v1','archive-reserve.v1','archive-reserve.v1',
+         '{}'::jsonb,'[]'::jsonb,now(),'pool-test'
+       )`,
+      [
+        blueprintId,
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        recommendationContextVersionId,
+      ],
+    );
+    await client.query(
+      `INSERT INTO backlink_commercial_discovery_batches (
+         id,organization_id,workspace_id,website_project_id,blueprint_id,
+         project_context_version_id,status,idempotency_key,request_intent,
+         source_types,provider_request_fingerprints,paid_cost_micros,
+         started_at,finished_at,created_by,visible_pool_generation,
+         raw_candidate_count,eligible_candidate_count
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,'completed','archive-reserve:g1','DISCOVERY',
+         '["EXISTING_HISTORY"]'::jsonb,'[]'::jsonb,0,now(),now(),
+         'pool-test',1,1,1
+       )`,
+      [
+        discoveryBatchId,
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        blueprintId,
+        recommendationContextVersionId,
+      ],
+    );
+    await client.query(
+      `INSERT INTO backlink_commercial_candidates (
+         id,organization_id,workspace_id,website_project_id,blueprint_id,
+         discovery_batch_id,project_context_version_id,canonical_domain,
+         source_types,static_assessment,gate_decision,commercial_score,
+         score_model_version,state,provider_collected_at,created_by,updated_by,
+         visible_pool_generation
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,'qualified-reserve.test',
+         '["EXISTING_HISTORY"]'::jsonb,'{}'::jsonb,
+         '{"decision":"eligible","hitGates":[],"missingEvidence":[]}'::jsonb,
+         '{"decision":"eligible","total":72,"scoreModelVersion":"recommendation-commercial-fit.v4","ruleVersion":"recommendation-commercial-fit-rules.v4.2","admission":{"appliedThreshold":50}}'::jsonb,
+         'recommendation-commercial-fit.v4','candidate_ready',now(),
+         'pool-test','pool-test',1
+       )`,
+      [
+        reserveCandidateId,
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        blueprintId,
+        discoveryBatchId,
+        recommendationContextVersionId,
+      ],
+    );
+    await client.query(
+      `INSERT INTO backlink_recommendation_qualification_facts (
+         id,organization_id,workspace_id,website_project_id,
+         generation_contract_id,recommendation_context_version_id,candidate_id,
+         canonical_domain,metric_scope,traffic_organic_etv,spam_score,
+         authority_rank,accessibility_decision,semantic_score,attempt,decision,
+         decision_reason_code,score_model_version,rule_version,
+         fact_contract_version,worker_contract_version,request_fingerprints,
+         evidence,observed_at,created_by
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,'qualified-reserve.test','TARGET_MARKET',
+         45000,3,70,'accessible',80,1,'eligible','QUALIFIED',
+         'recommendation-commercial-fit.v4',
+         'recommendation-commercial-fit-rules.v4.2',
+         'recommendation-qualification.v1','recommendation-qualification.v1',
+         '{}'::jsonb,'{}'::jsonb,now(),'pool-test'
+       )`,
+      [
+        id(904),
+        organizationId,
+        workspaceId,
+        websiteProjectId,
+        generationContractId,
+        recommendationContextVersionId,
+        reserveCandidateId,
+      ],
+    );
     const archiveInput = {
       context,
       requestId: "archive-request-1",
-      idempotencyKey:
-        `recommendation-pool-archive:${recommendationContextVersionId}:g1`,
+      idempotencyKey: `recommendation-pool-archive:${recommendationContextVersionId}:g1`,
       recommendationContextVersionId,
       visiblePoolGeneration: 1,
     } as const;
@@ -242,6 +315,7 @@ describe("recommendation pool generation lifecycle", () => {
       archivedGeneration: 1,
       nextGeneration: 2,
       archivedCount: 20,
+      preparedCandidateCount: 1,
       state: "awaiting_refresh",
       replayed: false,
     });
@@ -249,6 +323,7 @@ describe("recommendation pool generation lifecycle", () => {
       archivedGeneration: 1,
       nextGeneration: 2,
       archivedCount: 20,
+      preparedCandidateCount: 1,
       state: "awaiting_refresh",
       replayed: true,
     });
@@ -271,11 +346,13 @@ describe("recommendation pool generation lifecycle", () => {
           ],
         )
       ).rows,
-    ).toEqual([{
-      generation: 2,
-      state: "awaiting_refresh",
-      archivedCount: 20,
-    }]);
+    ).toEqual([
+      {
+        generation: 2,
+        state: "awaiting_refresh",
+        archivedCount: 20,
+      },
+    ]);
     expect(
       (
         await client.query(
@@ -295,6 +372,41 @@ describe("recommendation pool generation lifecycle", () => {
         )
       ).rows,
     ).toEqual([{ status: "archived", count: 20 }]);
+    expect(
+      (
+        await client.query(
+          `SELECT canonical_domain AS domain,
+                  visible_pool_generation AS generation,
+                  state,recommendation_id AS "recommendationId",
+                  prospect_id AS "prospectId",
+                  gate_decision->>'decision' AS "gateDecision",
+                  commercial_score->>'decision' AS "scoreDecision",
+                  (commercial_score->>'total')::integer AS score
+             FROM backlink_commercial_candidates
+            WHERE organization_id=$1 AND workspace_id=$2
+              AND website_project_id=$3
+              AND project_context_version_id=$4
+              AND visible_pool_generation=2`,
+          [
+            organizationId,
+            workspaceId,
+            websiteProjectId,
+            recommendationContextVersionId,
+          ],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        domain: "qualified-reserve.test",
+        generation: 2,
+        state: "candidate_ready",
+        recommendationId: null,
+        prospectId: null,
+        gateDecision: "eligible",
+        scoreDecision: "eligible",
+        score: 72,
+      },
+    ]);
     expect(
       (
         await client.query(
@@ -364,14 +476,15 @@ describe("recommendation pool generation lifecycle", () => {
                AS "outboxCount"`,
         )
       ).rows,
-    ).toEqual([{
-      refillCount: 1,
-      jobCount: 1,
-      supplyOperationCount: 1,
-      outboxCount: 1,
-    }]);
-    const providerOperationId =
-      `commercial-refill-operation:${started.jobId}`;
+    ).toEqual([
+      {
+        refillCount: 1,
+        jobCount: 1,
+        supplyOperationCount: 1,
+        outboxCount: 1,
+      },
+    ]);
+    const providerOperationId = `commercial-refill-operation:${started.jobId}`;
     expect(
       (
         await client.query(
@@ -416,55 +529,56 @@ describe("recommendation pool generation lifecycle", () => {
           [started.jobId],
         )
       ).rows,
-    ).toEqual([expect.objectContaining({
-      operationId: providerOperationId,
-      operationContextId: recommendationContextVersionId,
-      operationGeneration: 2,
-      operationJobId: started.jobId,
-      operationAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
-      },
-      operationAuthorizationHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
-      operationStatus: "authorized",
-      operationIdempotencyKey:
-        `recommendation-refill:manual:${recommendationContextVersionId}:g2:blueprint-v5`,
-      jobOperationId: providerOperationId,
-      jobAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
-      },
-      lifecycleOperationId: `commercial-refill-operation:${started.jobId}`,
-      lifecycleAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
-      },
-      auditOperationId: `commercial-refill-operation:${started.jobId}`,
-      auditAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
-      },
-      outboxOperationId: `commercial-refill-operation:${started.jobId}`,
-      outboxAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
-      },
-    })]);
+    ).toEqual([
+      expect.objectContaining({
+        operationId: providerOperationId,
+        operationContextId: recommendationContextVersionId,
+        operationGeneration: 2,
+        operationJobId: started.jobId,
+        operationAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+        operationAuthorizationHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        operationStatus: "authorized",
+        operationIdempotencyKey: `recommendation-refill:manual:${recommendationContextVersionId}:g2:blueprint-v5`,
+        jobOperationId: providerOperationId,
+        jobAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+        lifecycleOperationId: `commercial-refill-operation:${started.jobId}`,
+        lifecycleAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+        auditOperationId: `commercial-refill-operation:${started.jobId}`,
+        auditAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+        outboxOperationId: `commercial-refill-operation:${started.jobId}`,
+        outboxAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+      }),
+    ]);
 
     await expect(
       reserveRecommendationRefillJob(client, {
@@ -523,35 +637,37 @@ describe("recommendation pool generation lifecycle", () => {
           [started.jobId],
         )
       ).rows,
-    ).toEqual([{
-      jobOperationId: providerOperationId,
-      jobAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
+    ).toEqual([
+      {
+        jobOperationId: providerOperationId,
+        jobAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+        operationAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+        operationAuthorizationHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        operationStatus: "authorized",
+        operationGeneration: 2,
+        operationJobId: started.jobId,
+        outboxOperationId: providerOperationId,
+        outboxAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
       },
-      operationAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
-      },
-      operationAuthorizationHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
-      operationStatus: "authorized",
-      operationGeneration: 2,
-      operationJobId: started.jobId,
-      outboxOperationId: providerOperationId,
-      outboxAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
-      },
-    }]);
+    ]);
     expect(
       (
         await client.query(
@@ -560,11 +676,7 @@ describe("recommendation pool generation lifecycle", () => {
             WHERE organization_id=$1 AND workspace_id=$2
               AND provider='dataforseo'
               AND period_start<=$3 AND period_end>$3`,
-          [
-            organizationId,
-            workspaceId,
-            new Date("2026-08-20T12:00:00.000Z"),
-          ],
+          [organizationId, workspaceId, new Date("2026-08-20T12:00:00.000Z")],
         )
       ).rows,
     ).toEqual([{ count: 0 }]);
@@ -783,29 +895,31 @@ describe("recommendation pool generation lifecycle", () => {
           ],
         )
       ).rows,
-    ).toEqual([
-      {
-        jobId: started.jobId,
-        refillWindowKey: buildCommercialRefillWindowKey({
-          websiteProjectId,
-          projectContextVersionId: recommendationContextVersionId,
-          visiblePoolGeneration: 2,
-          tier: "exact_product_target_market",
-          round: 1,
-          window: 2,
-        }),
-      },
-      {
-        jobId: historicalJobId,
-        refillWindowKey: historicalWindowKey,
-      },
-    ].sort((left, right) => left.jobId.localeCompare(right.jobId)));
+    ).toEqual(
+      [
+        {
+          jobId: started.jobId,
+          refillWindowKey: buildCommercialRefillWindowKey({
+            websiteProjectId,
+            projectContextVersionId: recommendationContextVersionId,
+            visiblePoolGeneration: 2,
+            tier: "exact_product_target_market",
+            round: 1,
+            window: 2,
+          }),
+        },
+        {
+          jobId: historicalJobId,
+          refillWindowKey: historicalWindowKey,
+        },
+      ].sort((left, right) => left.jobId.localeCompare(right.jobId)),
+    );
 
     const settledAttempts = (activePolicy?.attemptedRefillTiers ?? []).map(
       (attempt) =>
-        attempt.tier === "exact_product_target_market"
-        && attempt.round === 1
-        && attempt.window === 2
+        attempt.tier === "exact_product_target_market" &&
+        attempt.round === 1 &&
+        attempt.window === 2
           ? {
               ...attempt,
               rawCandidateCount: 25,
@@ -886,23 +1000,25 @@ describe("recommendation pool generation lifecycle", () => {
           ],
         )
       ).rows,
-    ).toEqual([
-      {
-        jobId: started.jobId,
-        refillWindowKey: buildCommercialRefillWindowKey({
-          websiteProjectId,
-          projectContextVersionId: recommendationContextVersionId,
-          visiblePoolGeneration: 2,
-          tier: "exact_product_target_market",
-          round: 1,
-          window: 3,
-        }),
-      },
-      {
-        jobId: historicalJobId,
-        refillWindowKey: historicalWindowKey,
-      },
-    ].sort((left, right) => left.jobId.localeCompare(right.jobId)));
+    ).toEqual(
+      [
+        {
+          jobId: started.jobId,
+          refillWindowKey: buildCommercialRefillWindowKey({
+            websiteProjectId,
+            projectContextVersionId: recommendationContextVersionId,
+            visiblePoolGeneration: 2,
+            tier: "exact_product_target_market",
+            round: 1,
+            window: 3,
+          }),
+        },
+        {
+          jobId: historicalJobId,
+          refillWindowKey: historicalWindowKey,
+        },
+      ].sort((left, right) => left.jobId.localeCompare(right.jobId)),
+    );
     expect(
       (
         await client.query(
@@ -924,25 +1040,27 @@ describe("recommendation pool generation lifecycle", () => {
           [started.jobId],
         )
       ).rows,
-    ).toEqual([{
-      jobOperationId: providerOperationId,
-      jobAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
+    ).toEqual([
+      {
+        jobOperationId: providerOperationId,
+        jobAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+        jobSupplyMode: null,
+        operationAuthorization: {
+          provider: "dataforseo",
+          reasonCode: "user_authorized_bounded_real_refill",
+          maxPaidCalls: 4,
+          maxCostMicros: 1_000_000,
+          authorizedBy: "pool-operator",
+        },
+        operationStatus: "authorized",
       },
-      jobSupplyMode: null,
-      operationAuthorization: {
-        provider: "dataforseo",
-        reasonCode: "user_authorized_bounded_real_refill",
-        maxPaidCalls: 4,
-        maxCostMicros: 1_000_000,
-        authorizedBy: "pool-operator",
-      },
-      operationStatus: "authorized",
-    }]);
+    ]);
     expect(
       (
         await client.query(
@@ -955,11 +1073,13 @@ describe("recommendation pool generation lifecycle", () => {
                AS "leaseCount"`,
         )
       ).rows,
-    ).toEqual([{
-      providerRequestCount: 0,
-      usageCount: 0,
-      leaseCount: 0,
-    }]);
+    ).toEqual([
+      {
+        providerRequestCount: 0,
+        usageCount: 0,
+        leaseCount: 0,
+      },
+    ]);
 
     const historicalWindowJobIds = [id(770), id(771)] as const;
     const historicalWindowRefillIds = [id(772), id(773)] as const;
@@ -971,7 +1091,7 @@ describe("recommendation pool generation lifecycle", () => {
         tier: "exact_product_target_market",
         round: 1,
         window,
-      })
+      }),
     );
     const completedWindowKeys = [5, 6].map((window) =>
       buildCommercialRefillWindowKey({
@@ -981,7 +1101,7 @@ describe("recommendation pool generation lifecycle", () => {
         tier: "exact_product_target_market",
         round: 1,
         window,
-      })
+      }),
     );
     await client.query(
       `UPDATE backlink_recommendation_refills
@@ -1176,16 +1296,18 @@ describe("recommendation pool generation lifecycle", () => {
           [organizationId, workspaceId, websiteProjectId, started.jobId],
         )
       ).rows,
-    ).toEqual([{
-      refillWindowKey: buildCommercialRefillWindowKey({
-        websiteProjectId,
-        projectContextVersionId: recommendationContextVersionId,
-        visiblePoolGeneration: 2,
-        tier: "exact_product_target_market",
-        round: 1,
-        window: 7,
-      }),
-    }]);
+    ).toEqual([
+      {
+        refillWindowKey: buildCommercialRefillWindowKey({
+          websiteProjectId,
+          projectContextVersionId: recommendationContextVersionId,
+          visiblePoolGeneration: 2,
+          tier: "exact_product_target_market",
+          round: 1,
+          window: 7,
+        }),
+      },
+    ]);
     expect(
       (
         await client.query(
@@ -1196,10 +1318,12 @@ describe("recommendation pool generation lifecycle", () => {
           [id(775), id(776)],
         )
       ).rows,
-    ).toEqual(completedWindowKeys.map((key) => ({
-      idempotencyKey: `commercial-discovery:${key}`,
-      status: "completed",
-    })));
+    ).toEqual(
+      completedWindowKeys.map((key) => ({
+        idempotencyKey: `commercial-discovery:${key}`,
+        status: "completed",
+      })),
+    );
     expect(
       (
         await client.query(
@@ -1212,11 +1336,13 @@ describe("recommendation pool generation lifecycle", () => {
                AS "leaseCount"`,
         )
       ).rows,
-    ).toEqual([{
-      providerRequestCount: 0,
-      usageCount: 0,
-      leaseCount: 0,
-    }]);
+    ).toEqual([
+      {
+        providerRequestCount: 0,
+        usageCount: 0,
+        leaseCount: 0,
+      },
+    ]);
 
     await expect(
       commands.requestRefill({
@@ -1264,15 +1390,13 @@ describe("recommendation pool generation lifecycle", () => {
     const input = {
       context,
       requestId: "reassessment-request-1",
-      idempotencyKey:
-        `recommendation-v4-reassessment:${reassessmentContextId}:g1`,
+      idempotencyKey: `recommendation-v4-reassessment:${reassessmentContextId}:g1`,
       expectedVersion: 0,
       recommendationContextVersionId: reassessmentContextId,
       visiblePoolGeneration: 1,
       lowWatermark: 9,
       highWatermark: 10,
-      refillWindowKey:
-        `v4-reassessment:${reassessmentContextId}:g1:rule-current`,
+      refillWindowKey: `v4-reassessment:${reassessmentContextId}:g1:rule-current`,
       supplyMode: "existing_evidence",
     } as const;
 
@@ -1313,15 +1437,17 @@ describe("recommendation pool generation lifecycle", () => {
           [reassessmentProjectId],
         )
       ).rows,
-    ).toEqual([{
-      refillCount: 1,
-      jobCount: 1,
-      outboxCount: 1,
-      supplyOperationCount: 0,
-      providerRequestCount: 0,
-      usageCount: 0,
-      leaseCount: 0,
-    }]);
+    ).toEqual([
+      {
+        refillCount: 1,
+        jobCount: 1,
+        outboxCount: 1,
+        supplyOperationCount: 0,
+        providerRequestCount: 0,
+        usageCount: 0,
+        leaseCount: 0,
+      },
+    ]);
     expect(
       (
         await client.query(
@@ -1342,14 +1468,16 @@ describe("recommendation pool generation lifecycle", () => {
           [started.jobId],
         )
       ).rows,
-    ).toEqual([{
-      jobSupplyMode: "existing_evidence",
-      outboxSupplyMode: "existing_evidence",
-      hasProviderBudget: false,
-      hasProviderOperation: false,
-      outboxHasProviderBudget: false,
-      outboxHasProviderOperation: false,
-    }]);
+    ).toEqual([
+      {
+        jobSupplyMode: "existing_evidence",
+        outboxSupplyMode: "existing_evidence",
+        hasProviderBudget: false,
+        hasProviderOperation: false,
+        outboxHasProviderBudget: false,
+        outboxHasProviderOperation: false,
+      },
+    ]);
     await client.query(
       `UPDATE backlink_commercial_inventory_policies
           SET visible_pool_state='building'
@@ -1390,11 +1518,13 @@ describe("recommendation pool generation lifecycle", () => {
           [started.jobId],
         )
       ).rows,
-    ).toEqual([{
-      supplyMode: "existing_evidence",
-      hasProviderOperation: false,
-      hasProviderBudget: false,
-    }]);
+    ).toEqual([
+      {
+        supplyMode: "existing_evidence",
+        hasProviderOperation: false,
+        hasProviderBudget: false,
+      },
+    ]);
   });
 
   it("rearms one unpublished existing-evidence terminal under concurrent recovery", async () => {
@@ -1408,8 +1538,7 @@ describe("recommendation pool generation lifecycle", () => {
     const eligibleCandidateId = id(810);
     const ineligibleCandidateId = id(811);
     const staleQualificationFactId = id(812);
-    const recoveryWindowKey =
-      `commercial-existing:${recoveryProjectId}:${recoveryContextId}:g1:publication`;
+    const recoveryWindowKey = `commercial-existing:${recoveryProjectId}:${recoveryContextId}:g1:publication`;
     const context = {
       actor: createActorContext({
         userId: "publication-recovery-operator",
@@ -1489,8 +1618,7 @@ describe("recommendation pool generation lifecycle", () => {
     const input = {
       context,
       requestId: "publication-recovery-start",
-      idempotencyKey:
-        `recommendation-publication-recovery:${recoveryContextId}:g1`,
+      idempotencyKey: `recommendation-publication-recovery:${recoveryContextId}:g1`,
       expectedVersion: 0,
       recommendationContextVersionId: recoveryContextId,
       visiblePoolGeneration: 1,
@@ -1499,9 +1627,8 @@ describe("recommendation pool generation lifecycle", () => {
       refillWindowKey: recoveryWindowKey,
       supplyMode: "existing_evidence",
     } as const;
-    const started = await createRecommendationCommands(client).requestRefill(
-      input,
-    );
+    const started =
+      await createRecommendationCommands(client).requestRefill(input);
     await client.query(
       `INSERT INTO backlink_recommendation_generation_contracts (
          id,organization_id,workspace_id,website_project_id,
@@ -1655,10 +1782,9 @@ describe("recommendation pool generation lifecycle", () => {
       [started.outboxEventId],
     );
     const beforeRecovery = (
-      await client.query(
-        `SELECT version FROM backlink_jobs WHERE id=$1`,
-        [started.jobId],
-      )
+      await client.query(`SELECT version FROM backlink_jobs WHERE id=$1`, [
+        started.jobId,
+      ])
     ).rows[0] as { version: number };
     const recoveryInput = {
       context,
@@ -1674,18 +1800,21 @@ describe("recommendation pool generation lifecycle", () => {
       new PgClient({ connectionString: harness.connectionString }),
       new PgClient({ connectionString: harness.connectionString }),
     ];
-    await Promise.all(concurrentClients.map(async (concurrentClient) => {
-      await concurrentClient.connect();
-      await concurrentClient.query("SET search_path = backlinks, pg_catalog");
-    }));
+    await Promise.all(
+      concurrentClients.map(async (concurrentClient) => {
+        await concurrentClient.connect();
+        await concurrentClient.query("SET search_path = backlinks, pg_catalog");
+      }),
+    );
     try {
       const recovered = await Promise.all(
         concurrentClients.map(async (concurrentClient) => {
           await concurrentClient.query("BEGIN");
           try {
-            const result = await createRecommendationCommands(
-              concurrentClient,
-            ).requestRefill(recoveryInput);
+            const result =
+              await createRecommendationCommands(
+                concurrentClient,
+              ).requestRefill(recoveryInput);
             await concurrentClient.query("COMMIT");
             return result;
           } catch (error) {
@@ -1699,12 +1828,11 @@ describe("recommendation pool generation lifecycle", () => {
         new Set([started.jobId]),
       );
     } finally {
-      await Promise.all(concurrentClients.map((concurrentClient) =>
-        concurrentClient.end()
-      ));
+      await Promise.all(
+        concurrentClients.map((concurrentClient) => concurrentClient.end()),
+      );
     }
-    const recoveryKey =
-      `existing-evidence-publication-recovery:${started.jobId}:${recoveryWindowKey}`;
+    const recoveryKey = `existing-evidence-publication-recovery:${started.jobId}:${recoveryWindowKey}`;
     expect(
       (
         await client.query(
@@ -1730,17 +1858,19 @@ describe("recommendation pool generation lifecycle", () => {
           [started.jobId, started.outboxEventId],
         )
       ).rows,
-    ).toEqual([{
-      status: "queued",
-      step: "recovery_queued",
-      version: Number(beforeRecovery.version) + 1,
-      existingCandidatesCompleted: false,
-      jobRecoveryKey: recoveryKey,
-      outboxStatus: "pending",
-      outboxAttemptCount: 0,
-      outboxPublishedAt: null,
-      idempotencyRecoveryKey: recoveryKey,
-    }]);
+    ).toEqual([
+      {
+        status: "queued",
+        step: "recovery_queued",
+        version: Number(beforeRecovery.version) + 1,
+        existingCandidatesCompleted: false,
+        jobRecoveryKey: recoveryKey,
+        outboxStatus: "pending",
+        outboxAttemptCount: 0,
+        outboxPublishedAt: null,
+        idempotencyRecoveryKey: recoveryKey,
+      },
+    ]);
     expect(
       (
         await client.query(
@@ -1758,13 +1888,15 @@ describe("recommendation pool generation lifecycle", () => {
           [recoveryProjectId],
         )
       ).rows,
-    ).toEqual([{
-      refillCount: 1,
-      jobCount: 1,
-      outboxCount: 1,
-      providerRequestCount: 0,
-      usageCount: 0,
-    }]);
+    ).toEqual([
+      {
+        refillCount: 1,
+        jobCount: 1,
+        outboxCount: 1,
+        providerRequestCount: 0,
+        usageCount: 0,
+      },
+    ]);
 
     await client.query(
       `UPDATE backlink_jobs
@@ -1799,11 +1931,13 @@ describe("recommendation pool generation lifecycle", () => {
           [started.jobId],
         )
       ).rows,
-    ).toEqual([{
-      status: "partial_success",
-      step: "existing_evidence_no_progress",
-      version: Number(beforeRecovery.version) + 1,
-    }]);
+    ).toEqual([
+      {
+        status: "partial_success",
+        step: "existing_evidence_no_progress",
+        version: Number(beforeRecovery.version) + 1,
+      },
+    ]);
 
     await client.query(
       `UPDATE backlink_commercial_candidates
@@ -1866,11 +2000,13 @@ describe("recommendation pool generation lifecycle", () => {
           [recoveryProjectId],
         )
       ).rows,
-    ).toEqual([{
-      refillCount: 1,
-      providerRequestCount: 0,
-      usageCount: 0,
-    }]);
+    ).toEqual([
+      {
+        refillCount: 1,
+        providerRequestCount: 0,
+        usageCount: 0,
+      },
+    ]);
   });
 
   it("creates one paid supply operation under concurrent idempotent refill requests", async () => {
@@ -1901,12 +2037,7 @@ describe("recommendation pool generation lifecycle", () => {
          $1,$2,$3,$4,1,'ACTIVE','concurrent-owner.test','en-US','US',
          'profile-concurrent-v1','target-concurrent-v1','concurrent-test'
        )`,
-      [
-        concurrentContextId,
-        organizationId,
-        workspaceId,
-        concurrentProjectId,
-      ],
+      [concurrentContextId, organizationId, workspaceId, concurrentProjectId],
     );
     await client.query(
       `INSERT INTO backlink_commercial_inventory_policies (
@@ -1919,8 +2050,7 @@ describe("recommendation pool generation lifecycle", () => {
     const input = {
       context,
       requestId: "concurrent-refill-request",
-      idempotencyKey:
-        `recommendation-paid-refill:${concurrentContextId}:g1`,
+      idempotencyKey: `recommendation-paid-refill:${concurrentContextId}:g1`,
       expectedVersion: 0,
       recommendationContextVersionId: concurrentContextId,
       visiblePoolGeneration: 1,
@@ -1937,18 +2067,21 @@ describe("recommendation pool generation lifecycle", () => {
       new PgClient({ connectionString: harness.connectionString }),
       new PgClient({ connectionString: harness.connectionString }),
     ];
-    await Promise.all(clients.map(async (concurrentClient) => {
-      await concurrentClient.connect();
-      await concurrentClient.query("SET search_path = backlinks, pg_catalog");
-    }));
+    await Promise.all(
+      clients.map(async (concurrentClient) => {
+        await concurrentClient.connect();
+        await concurrentClient.query("SET search_path = backlinks, pg_catalog");
+      }),
+    );
     try {
       const results = await Promise.all(
         clients.map(async (concurrentClient) => {
           await concurrentClient.query("BEGIN");
           try {
-            const result = await createRecommendationCommands(
-              concurrentClient,
-            ).requestRefill(input);
+            const result =
+              await createRecommendationCommands(
+                concurrentClient,
+              ).requestRefill(input);
             await concurrentClient.query("COMMIT");
             return result;
           } catch (error) {
@@ -1980,12 +2113,13 @@ describe("recommendation pool generation lifecycle", () => {
             ],
           )
         ).rows,
-      ).toEqual([{
-        count: 1,
-        operationId:
-          `commercial-refill-operation:${results[0]?.jobId as string}`,
-        jobId: results[0]?.jobId,
-      }]);
+      ).toEqual([
+        {
+          count: 1,
+          operationId: `commercial-refill-operation:${results[0]?.jobId as string}`,
+          jobId: results[0]?.jobId,
+        },
+      ]);
       expect(
         (
           await client.query(
@@ -2001,9 +2135,9 @@ describe("recommendation pool generation lifecycle", () => {
         ).rows,
       ).toEqual([{ providerRequestCount: 0, usageCount: 0 }]);
     } finally {
-      await Promise.all(clients.map((concurrentClient) =>
-        concurrentClient.end()
-      ));
+      await Promise.all(
+        clients.map((concurrentClient) => concurrentClient.end()),
+      );
     }
   });
 });

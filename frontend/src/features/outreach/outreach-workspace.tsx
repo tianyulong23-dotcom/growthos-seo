@@ -1,111 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useSearchParams } from "react-router"
 
-import {
-  backlinksProjectQueries,
-  createProjectQueryKey,
-} from "@/features/outreach/api/project-query"
 import { useGmailConnection } from "@/features/outreach/gmail/use-gmail-connection"
 import { linksApi } from "@/features/outreach/links/api"
 import { LinksWorkspace } from "@/features/outreach/links/links-workspace"
 import { MailSyncStatusPanel } from "@/features/outreach/mail/mail-sync-status-panel"
 import { OpportunitiesWorkspace } from "@/features/outreach/opportunities/opportunities-workspace"
 import { toOutreachProject } from "@/features/outreach/project"
-import { RecommendationsWorkspace } from "@/features/outreach/recommendations/recommendations-workspace"
-import { ReportsWorkspace } from "@/features/outreach/reports/reports-workspace"
-import type { ReportingWindow } from "@/features/outreach/reports/types"
-import {
-  getSettings,
-  isSettingsApiStatus,
-} from "@/features/outreach/settings/api"
+import { RecommendationFeedWorkspace } from "@/features/outreach/recommendations/recommendation-feed-workspace"
+import { RecommendationProjectGate } from "@/features/outreach/recommendations/promotion-target-setup"
+import { BacklinkReportsRouteWorkspace } from "@/features/performance/backlinks/backlink-reports-route-workspace"
 import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
 import type { Project } from "@/features/projects/types"
-
-type ReportsConfiguration = {
-  workspaceTimezone: string
-  reportingWindow: ReportingWindow
-}
-
-function ReportsRouteWorkspace({
-  websiteProjectKey,
-}: {
-  websiteProjectKey: string
-}) {
-  const [configuration, setConfiguration] =
-    useState<ReportsConfiguration | null>(null)
-  const [state, setState] = useState<"loading" | "error" | "forbidden">(
-    "loading"
-  )
-  const request = useRef(0)
-  const asOf = useMemo(() => new Date().toISOString(), [websiteProjectKey])
-  const settingsKey = useMemo(
-    () => createProjectQueryKey(websiteProjectKey, "settings-governance"),
-    [websiteProjectKey]
-  )
-
-  const load = useCallback(
-    async (force = false) => {
-      const currentRequest = ++request.current
-      if (force) backlinksProjectQueries.invalidate(settingsKey)
-      setState("loading")
-      setConfiguration(null)
-      try {
-        const response = await backlinksProjectQueries.fetch(
-          settingsKey,
-          (signal) => getSettings(websiteProjectKey, signal)
-        )
-        if (currentRequest !== request.current) return
-        const lookbackMs =
-          response.settings.values.reportLookbackDays * 24 * 60 * 60 * 1000
-        setConfiguration({
-          workspaceTimezone: response.settings.values.reportingTimezone,
-          reportingWindow: {
-            from: new Date(new Date(asOf).getTime() - lookbackMs).toISOString(),
-            to: asOf,
-            asOf,
-          },
-        })
-      } catch (error) {
-        if (currentRequest !== request.current) return
-        if (error instanceof DOMException && error.name === "AbortError") return
-        setState(isSettingsApiStatus(error, 403) ? "forbidden" : "error")
-      }
-    },
-    [asOf, settingsKey, websiteProjectKey]
-  )
-
-  useEffect(() => {
-    queueMicrotask(() => void load())
-    return () => {
-      request.current += 1
-    }
-  }, [load])
-
-  if (configuration === null) {
-    return (
-      <OutreachStandardStateView
-        state={state}
-        title={
-          state === "loading"
-            ? "正在读取报告配置"
-            : state === "forbidden"
-              ? "没有读取此项目报告配置的权限"
-              : "报告配置读取失败"
-        }
-        description="报告时区和统计窗口必须来自当前项目的服务端设置。"
-        onRetry={state === "loading" ? undefined : () => void load(true)}
-      />
-    )
-  }
-
-  return (
-    <ReportsWorkspace
-      websiteProjectKey={websiteProjectKey}
-      workspaceTimezone={configuration.workspaceTimezone}
-      reportingWindow={configuration.reportingWindow}
-    />
-  )
-}
 
 function BusinessContextBar({
   websiteProjectKey,
@@ -121,7 +26,8 @@ function BusinessContextBar({
   const returnTo = searchParams.get("returnTo")
   const performanceReturnTo = `/projects/${websiteProjectKey}/performance/backlinks`
   const safeReturnTo =
-    returnTo?.startsWith(`/projects/${websiteProjectKey}/backlinks/`) === true ||
+    returnTo?.startsWith(`/projects/${websiteProjectKey}/backlinks/`) ===
+      true ||
     returnTo === performanceReturnTo ||
     returnTo?.startsWith(`${performanceReturnTo}?`) === true
       ? returnTo
@@ -161,13 +67,22 @@ export function OutreachWorkspace({
   let content
 
   if (view === "recommendations") {
-    content = <RecommendationsWorkspace project={toOutreachProject(project)} />
+    content = (
+      <RecommendationProjectGate
+        key={`${project.id}:${project.contextVersion}`}
+        project={toOutreachProject(project)}
+      >
+        {(readyProject) => (
+          <RecommendationFeedWorkspace project={readyProject} />
+        )}
+      </RecommendationProjectGate>
+    )
   } else if (view === "opportunities") {
     content = <OpportunitiesWorkspace websiteProjectKey={projectId} />
   } else if (view === "links") {
     content = <LinksWorkspace client={linksApi} websiteProjectKey={projectId} />
   } else if (view === "reports") {
-    content = <ReportsRouteWorkspace websiteProjectKey={projectId} />
+    content = <BacklinkReportsRouteWorkspace websiteProjectKey={projectId} />
   } else if (view === "email") {
     content = <MailSyncStatusPanel controller={gmailConnection} />
   } else {

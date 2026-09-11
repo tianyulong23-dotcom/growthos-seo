@@ -24,7 +24,6 @@ import { ContentLibrary } from "@/features/content/content-library"
 import { ContentPlan } from "@/features/content/content-plan"
 import { CreateArticleDialog } from "@/features/content/create-article-dialog"
 import { BusinessProfileForm } from "@/features/projects/business-profile-form"
-import { ProjectOutreachReadiness } from "@/features/projects/project-outreach-readiness"
 import { AIModelSettings } from "@/features/settings/ai-model-settings"
 import { DataForSEOSettings } from "@/features/settings/data-source-settings"
 import { GSCOAuthSettings } from "@/features/settings/gsc-oauth-settings"
@@ -135,13 +134,13 @@ function SettingsContent({
     )
   }
 
-  const readiness = <ProjectOutreachReadiness projectId={project.id} />
-
   if (project.siteProfile || project.understandingStatus === "failed") {
     return (
       <>
-        {readiness}
-        <div id="business-profile-settings">
+        <div
+          id="business-profile-settings"
+          className="mx-auto w-full max-w-5xl"
+        >
           <BusinessProfileForm
             project={project}
             onSave={onSaveBusinessProfile}
@@ -156,7 +155,6 @@ function SettingsContent({
   if (waitingForProfile) {
     return (
       <>
-        {readiness}
         <div className="max-w-2xl py-10">
           <div className="flex items-start gap-3">
             <LoaderCircle className="mt-0.5 size-5 animate-spin text-primary" />
@@ -178,7 +176,6 @@ function SettingsContent({
 
   return (
     <>
-      {readiness}
       <div className="max-w-2xl py-10">
         <h2 className="font-medium">还没有业务资料</h2>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -356,7 +353,10 @@ function RegisteredModulePage({
   if (!activeView) {
     return <Navigate to={`/projects/${projectId}/audit/overview`} replace />
   }
-  if (!module.tabs.some((tab) => tab.id === activeView)) {
+  if (
+    !module.tabs.some((tab) => tab.id === activeView) &&
+    !module.hiddenViews?.includes(activeView)
+  ) {
     return (
       <Navigate
         to={`/projects/${projectId}/${module.id}/${module.tabs[0].id}`}
@@ -699,7 +699,10 @@ function LegacyModulePage() {
       )
     }
   }
-  if (!moduleConfig.tabs.some((tab) => tab.id === activeView)) {
+  if (
+    !moduleConfig.tabs.some((tab) => tab.id === activeView) &&
+    !moduleConfig.hiddenViews?.includes(activeView)
+  ) {
     return (
       <Navigate
         to={`/projects/${projectId}/${moduleConfig.id}/${moduleConfig.tabs[0].id}`}

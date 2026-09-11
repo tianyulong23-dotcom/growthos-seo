@@ -25,6 +25,9 @@ export type ContactCandidate = Readonly<{
     | "partnerships"
     | "advertising"
     | "support"
+    | "business"
+    | "marketing"
+    | "site_owner"
     | "general"
     | "unknown";
   purposeConfidence: number;

@@ -138,7 +138,9 @@ export function ArticleVersionHistory({
     } catch (requestError) {
       if (requestId !== latestRequest.current) return
       setError(
-        requestError instanceof Error ? requestError.message : "读取版本历史失败"
+        requestError instanceof Error
+          ? requestError.message
+          : "读取版本历史失败"
       )
     } finally {
       if (requestId === latestRequest.current) setLoading(false)
@@ -146,7 +148,7 @@ export function ArticleVersionHistory({
   }, [applyVersions, articleId, projectId])
 
   React.useEffect(() => {
-    void loadVersions()
+    queueMicrotask(() => void loadVersions())
     return () => {
       latestRequest.current += 1
     }
@@ -187,7 +189,9 @@ export function ArticleVersionHistory({
       setDiffOpen(false)
       setRestoreTarget(null)
       setError(
-        requestError instanceof Error ? requestError.message : "读取版本差异失败"
+        requestError instanceof Error
+          ? requestError.message
+          : "读取版本差异失败"
       )
     } finally {
       setComparing(false)
@@ -275,13 +279,21 @@ export function ArticleVersionHistory({
             </div>
           ) : error ? (
             <div className="space-y-3 py-3 text-sm">
-              <p className="text-destructive" role="alert">{error}</p>
-              <Button variant="outline" size="sm" onClick={() => void loadVersions()}>
+              <p className="text-destructive" role="alert">
+                {error}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void loadVersions()}
+              >
                 <RefreshCw /> 重试
               </Button>
             </div>
           ) : versions.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">暂无版本记录</p>
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              暂无版本记录
+            </p>
           ) : (
             groups.map(({ group, items }) => (
               <section key={group} className="space-y-2">
@@ -290,14 +302,17 @@ export function ArticleVersionHistory({
                 </h3>
                 <div className="divide-y rounded-md border px-3">
                   {items.map((version) => {
-                    const isCurrent = version.version_number === currentVersionNumber
+                    const isCurrent =
+                      version.version_number === currentVersionNumber
                     return (
                       <div key={version.id} className="space-y-2 py-3">
                         <div className="flex items-start gap-2">
                           <Checkbox
                             aria-label={`选择版本 ${version.version_number}`}
                             checked={selected.includes(version.version_number)}
-                            onCheckedChange={() => toggleVersion(version.version_number)}
+                            onCheckedChange={() =>
+                              toggleVersion(version.version_number)
+                            }
                           />
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-1.5">
@@ -307,10 +322,13 @@ export function ArticleVersionHistory({
                               <Badge variant="outline">
                                 {versionTypeLabel(version.version_type)}
                               </Badge>
-                              {isCurrent && <Badge variant="secondary">当前</Badge>}
+                              {isCurrent && (
+                                <Badge variant="secondary">当前</Badge>
+                              )}
                             </div>
                             <p className="mt-1 truncate text-xs text-muted-foreground">
-                              {actorLabel(version.created_by)} · {dateTimeLabel(version.created_at)}
+                              {actorLabel(version.created_by)} ·{" "}
+                              {dateTimeLabel(version.created_at)}
                             </p>
                             <p className="mt-0.5 text-xs text-muted-foreground">
                               {version.review_version
@@ -331,7 +349,11 @@ export function ArticleVersionHistory({
                             }
                             aria-label={`恢复版本 ${version.version_number}`}
                             disabled={
-                              isCurrent || !version.restorable || dirty || working || comparing
+                              isCurrent ||
+                              !version.restorable ||
+                              dirty ||
+                              working ||
+                              comparing
                             }
                             onClick={() => void handleRestore(version)}
                           >
@@ -353,7 +375,11 @@ export function ArticleVersionHistory({
               disabled={selected.length !== 2 || comparing}
               onClick={() => void handleCompare()}
             >
-              {comparing ? <LoaderCircle className="animate-spin" /> : <GitCompareArrows />}
+              {comparing ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <GitCompareArrows />
+              )}
               比较所选版本
             </Button>
           )}
@@ -390,11 +416,22 @@ export function ArticleVersionHistory({
           </div>
           {dialogMode === "restore" && (
             <DialogFooter className="border-t px-6 py-4">
-              <Button variant="outline" disabled={restoring} onClick={() => setDiffOpen(false)}>
+              <Button
+                variant="outline"
+                disabled={restoring}
+                onClick={() => setDiffOpen(false)}
+              >
                 取消
               </Button>
-              <Button disabled={!diff || restoring} onClick={() => void confirmRestore()}>
-                {restoring ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}
+              <Button
+                disabled={!diff || restoring}
+                onClick={() => void confirmRestore()}
+              >
+                {restoring ? (
+                  <LoaderCircle className="animate-spin" />
+                ) : (
+                  <RotateCcw />
+                )}
                 确认恢复版本 {restoreTarget?.version_number}
               </Button>
             </DialogFooter>

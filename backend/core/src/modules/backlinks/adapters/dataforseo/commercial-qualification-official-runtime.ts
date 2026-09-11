@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { archiveDataForSeoFetch } from "../../../provider-archive/capture-fetch.js";
 
 import {
   commercialQualificationBulkEndpoints,
@@ -188,7 +189,9 @@ export function createCommercialQualificationOfficialRuntime(
     fetchImplementation?: FetchImplementation;
   }>,
 ): CommercialQualificationBulkRuntime {
-  const fetchImplementation = input.fetchImplementation ?? globalThis.fetch;
+  const fetchImplementation = archiveDataForSeoFetch(
+    input.fetchImplementation ?? globalThis.fetch, "backlinks-qualification",
+  );
 
   return Object.freeze({
     async execute(

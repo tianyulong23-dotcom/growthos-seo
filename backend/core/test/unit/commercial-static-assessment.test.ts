@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   commercialPageParser,
@@ -115,6 +115,39 @@ describe("commercial static assessment", () => {
     });
   });
 
+  it("uses Chromium evidence after an explicit 403 without replaying safe fetch", async () => {
+    const safeFetch = vi.fn(async ({ url }: { url: string }) => response({
+      requestedUrl: url,
+      status: 403,
+      body: "<html><body>Forbidden</body></html>",
+    }));
+    const browserFetch = vi.fn(async ({ url }: { url: string }) => response({
+      requestedUrl: url,
+      finalUrl: "https://www.publisher.com/",
+      body: "<html lang='en'><head><title>Projector reviews</title>"
+        + "<meta name='description' content='Home cinema projectors'>"
+        + "</head><body><main><article>Independent home cinema projector "
+        + "reviews and streaming guides.</article></main></body></html>",
+    }));
+    const assessment = await assessCommercialCandidateSite({
+      canonicalDomain: "publisher.com",
+      workspaceId: "workspace-1",
+      websiteProjectId: "project-1",
+      project,
+      safeFetch: { fetch: safeFetch },
+      browserFetch: { fetch: browserFetch },
+      pageParser: commercialPageParser,
+    });
+
+    expect(assessment.decision).toBe("ready");
+    expect(safeFetch).toHaveBeenCalledTimes(1);
+    expect(browserFetch).toHaveBeenCalledTimes(1);
+    expect(assessment.failedUrls).toEqual([]);
+    expect(assessment.evidenceRefs).toEqual([
+      expect.stringMatching(/^browser:publisher\.com:/u),
+    ]);
+  });
+
   it("uses same-domain discovery pages as bounded semantic evidence", async () => {
     const requested: string[] = [];
     const discoveryUrl =
@@ -155,6 +188,45 @@ describe("commercial static assessment", () => {
     expect(assessment.matchedKeywords).toContain("projector reviews");
     expect(assessment.matchedAudiences).toContain("home cinema buyers");
     expect(assessment.matchedPartnershipGoals).toContain("editorial review");
+  });
+
+  it("preserves phrases while splitting explicitly delimited project terms", async () => {
+    const assessment = await assessCommercialCandidateSite({
+      canonicalDomain: "silk-publisher.com",
+      workspaceId: "workspace-1",
+      websiteProjectId: "project-1",
+      project: {
+        products: [],
+        topics: ["finest mulberry silk, luxe pajamas；loungewear"],
+        keywords: ["mulberry silk，luxe pajamas;loungewear"],
+        targetPages: [],
+        targetAudiences: [],
+        partnershipGoals: [],
+      },
+      safeFetch: {
+        fetch: async ({ url }) => response({
+          requestedUrl: url,
+          body: "<html lang='en'><head><title>Luxury silk sleepwear</title>"
+            + "<meta name='description' content='Finest mulberry silk and luxe pajamas'>"
+            + "</head><body><main><article>Independent guides to finest mulberry silk, "
+            + "luxe pajamas, and comfortable loungewear.</article></main></body></html>",
+        }),
+      },
+      pageParser: commercialPageParser,
+    });
+
+    expect(assessment.matchedTopics).toHaveLength(3);
+    expect(assessment.matchedTopics).toEqual(expect.arrayContaining([
+      "finest mulberry silk",
+      "luxe pajamas",
+      "loungewear",
+    ]));
+    expect(assessment.matchedKeywords).toHaveLength(3);
+    expect(assessment.matchedKeywords).toEqual(expect.arrayContaining([
+      "mulberry silk",
+      "luxe pajamas",
+      "loungewear",
+    ]));
   });
 
   it("uses a public discovery page when the homepage is forbidden", async () => {

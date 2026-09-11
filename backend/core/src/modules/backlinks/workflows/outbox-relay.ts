@@ -1,37 +1,16 @@
 import type { BacklinkProjectAnalysisInput } from "../activities/backlink-project-analysis.activity.js";
-import type {
-  ContactEnrichmentActivityInput,
-} from "../activities/contact-enrichment.activity.js";
-import {
-  contactEnrichmentRequestedEventType,
-} from "../application/commands/contact-enrichment.command.js";
-import type {
-  PlacementInitialValidationWorkflowInput,
-} from "../application/workflows/placement-initial-validation.workflow.js";
-import type {
-  PlacementMonitorWorkflowInput,
-} from "../application/workflows/placement-monitor.workflow.js";
-import type {
-  PlacementMonitoringInitializationWorkflowInput,
-} from "../application/workflows/placement-monitoring-initialization.workflow.js";
-import type {
-  GmailSendWorkflowInput,
-} from "../application/workflows/send-workflow.js";
-import type {
-  BacklinkRecommendationRefillInput,
-} from "./definitions/backlink-recommendation-refill.orchestration.js";
-import {
-  parseProviderOperationBudgetAuthorization,
-} from "../domain/recommendations/provider-operation-budget.js";
-import {
-  sendIntentCreatedEventType,
-} from "../application/services/send-intent.repository.js";
+import type { ContactEnrichmentActivityInput } from "../activities/contact-enrichment.activity.js";
+import { contactEnrichmentRequestedEventType } from "../application/commands/contact-enrichment.command.js";
+import type { PlacementInitialValidationWorkflowInput } from "../application/workflows/placement-initial-validation.workflow.js";
+import type { PlacementMonitorWorkflowInput } from "../application/workflows/placement-monitor.workflow.js";
+import type { PlacementMonitoringInitializationWorkflowInput } from "../application/workflows/placement-monitoring-initialization.workflow.js";
+import type { GmailSendWorkflowInput } from "../application/workflows/send-workflow.js";
+import { sendIntentCreatedEventType } from "../application/services/send-intent.repository.js";
 import type {
   ClaimedOutboxEvent,
   createOutboxRepository,
 } from "../db/repositories/outbox.repository.js";
 import {
-  assertBacklinksRecoveryTaskQueue,
   assertBacklinksTaskQueue,
   assertBacklinksWorkflowId,
   backlinksRuntimeContract,
@@ -82,8 +61,7 @@ type ReverifyPlacementMonitoringRequest = Readonly<{
   browserFallbackAllowed: boolean;
 }>;
 export type PlacementMonitoringRequest =
-  | InitialPlacementMonitoringRequest
-  | ReverifyPlacementMonitoringRequest;
+  InitialPlacementMonitoringRequest | ReverifyPlacementMonitoringRequest;
 export type PlacementMonitoringLifecycle = Readonly<{
   organizationId: string;
   workspaceId: string;
@@ -111,15 +89,17 @@ type PlacementMonitoringLifecycleConsumer = Readonly<{
   consume(input: PlacementMonitoringLifecycle): Promise<unknown>;
 }>;
 type TemporalWorkflowClient = Readonly<{
-  start(type: string, options: Readonly<{
-    workflowId: string; taskQueue: string; args: readonly unknown[];
-  }>): Promise<unknown>;
+  start(
+    type: string,
+    options: Readonly<{
+      workflowId: string;
+      taskQueue: string;
+      args: readonly unknown[];
+    }>,
+  ): Promise<unknown>;
 }>;
 type GmailSendConsumer = Readonly<{
   consume(input: GmailSendWorkflowInput): Promise<unknown>;
-}>;
-type RecommendationRefillConsumer = Readonly<{
-  consume(input: BacklinkRecommendationRefillInput): Promise<unknown>;
 }>;
 type ContactEnrichmentConsumer = Readonly<{
   consume(input: ContactEnrichmentActivityInput): Promise<unknown>;
@@ -127,25 +107,35 @@ type ContactEnrichmentConsumer = Readonly<{
 
 function parseInput(event: ClaimedOutboxEvent): BacklinkProjectAnalysisInput {
   const payload = event.payload as Record<string, unknown> | null;
-  const strings = ["organizationId", "workspaceId", "websiteProjectId",
-    "jobId", "workflowId"] as const;
-  if (event.eventType !== BACKLINK_PROJECT_ANALYSIS_REQUESTED ||
-      event.payloadSchemaVersion !== 1 || payload === null ||
-      typeof payload !== "object" ||
-      strings.some((field) => typeof payload[field] !== "string") ||
-      !Number.isInteger(payload.snapshotVersion) ||
-      Number(payload.snapshotVersion) < 1) {
+  const strings = [
+    "organizationId",
+    "workspaceId",
+    "websiteProjectId",
+    "jobId",
+    "workflowId",
+  ] as const;
+  if (
+    event.eventType !== BACKLINK_PROJECT_ANALYSIS_REQUESTED ||
+    event.payloadSchemaVersion !== 1 ||
+    payload === null ||
+    typeof payload !== "object" ||
+    strings.some((field) => typeof payload[field] !== "string") ||
+    !Number.isInteger(payload.snapshotVersion) ||
+    Number(payload.snapshotVersion) < 1
+  ) {
     throw new Error("BACKLINK_ANALYSIS_OUTBOX_EVENT_INVALID");
   }
   return payload as BacklinkProjectAnalysisInput;
 }
 
-function parseObjectPayload(event: ClaimedOutboxEvent): Record<string, unknown> {
+function parseObjectPayload(
+  event: ClaimedOutboxEvent,
+): Record<string, unknown> {
   if (
-    event.payload === null
-    || typeof event.payload !== "object"
-    || Array.isArray(event.payload)
-    || event.payloadSchemaVersion !== 1
+    event.payload === null ||
+    typeof event.payload !== "object" ||
+    Array.isArray(event.payload) ||
+    event.payloadSchemaVersion !== 1
   ) {
     throw new Error("BACKLINK_PLACEMENT_OUTBOX_EVENT_INVALID");
   }
@@ -166,11 +156,8 @@ function requireNullablePayloadString(
   field: string,
 ): void {
   if (
-    !(field in payload)
-    || (
-      payload[field] !== null
-      && typeof payload[field] !== "string"
-    )
+    !(field in payload) ||
+    (payload[field] !== null && typeof payload[field] !== "string")
   ) {
     throw new Error("BACKLINK_PLACEMENT_OUTBOX_EVENT_INVALID");
   }
@@ -181,8 +168,8 @@ function parsePlacementMonitoringRequest(
 ): PlacementMonitoringRequest {
   const payload = parseObjectPayload(event);
   if (
-    event.eventType !== BACKLINK_PLACEMENT_MONITORING_REQUESTED
-    || payload.contractVersion !== BACKLINK_PLACEMENT_MONITORING_REQUESTED
+    event.eventType !== BACKLINK_PLACEMENT_MONITORING_REQUESTED ||
+    payload.contractVersion !== BACKLINK_PLACEMENT_MONITORING_REQUESTED
   ) {
     throw new Error("BACKLINK_PLACEMENT_OUTBOX_EVENT_INVALID");
   }
@@ -206,9 +193,9 @@ function parsePlacementMonitoringRequest(
     ]);
     const scheduledFor = new Date(payload.scheduledFor as string);
     if (
-      Number.isNaN(scheduledFor.getTime())
-      || payload.executionMode !== "static"
-      || typeof payload.browserFallbackAllowed !== "boolean"
+      Number.isNaN(scheduledFor.getTime()) ||
+      payload.executionMode !== "static" ||
+      typeof payload.browserFallbackAllowed !== "boolean"
     ) {
       throw new Error("BACKLINK_PLACEMENT_OUTBOX_EVENT_INVALID");
     }
@@ -219,9 +206,10 @@ function parsePlacementMonitoringRequest(
       requestKind: "reverify",
       placementId: payload.placementId as string,
       candidateId: payload.candidateId as string,
-      opportunityId: payload.opportunityId === null
-        ? null
-        : payload.opportunityId as string,
+      opportunityId:
+        payload.opportunityId === null
+          ? null
+          : (payload.opportunityId as string),
       initialValidationId: payload.initialValidationId as string,
       monitorRunId: payload.monitorRunId as string,
       monitorPolicyId: payload.monitorPolicyId as string,
@@ -240,17 +228,18 @@ function parsePlacementMonitoringRequest(
     requestedAt: event.availableAt,
     placementId: payload.placementId as string,
     candidateId: payload.candidateId as string,
-    opportunityId: payload.opportunityId === null
-      ? null
-      : payload.opportunityId as string,
+    opportunityId:
+      payload.opportunityId === null ? null : (payload.opportunityId as string),
     initialValidationId: payload.initialValidationId as string,
   };
 }
 
 function workflowAlreadyStarted(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return error.name === "WorkflowExecutionAlreadyStartedError"
-    || /workflow execution.*already (?:started|exists)/iu.test(error.message);
+  return (
+    error.name === "WorkflowExecutionAlreadyStartedError" ||
+    /workflow execution.*already (?:started|exists)/iu.test(error.message)
+  );
 }
 
 export function createTemporalPlacementMonitoringInitializationConsumer(
@@ -296,8 +285,8 @@ export function createTemporalPlacementMonitoringInitializationConsumer(
       };
       try {
         await client.start(
-          backlinksRuntimeContract.workflows
-            .placementMonitoringInitialization.workflowType,
+          backlinksRuntimeContract.workflows.placementMonitoringInitialization
+            .workflowType,
           {
             workflowId,
             taskQueue,
@@ -320,11 +309,11 @@ function parsePlacementMonitoringLifecycle(
 ): PlacementMonitoringLifecycle {
   const payload = parseObjectPayload(event);
   if (
-    event.eventType !== BACKLINK_PLACEMENT_MONITORING_LIFECYCLE
-    || payload.contractVersion !== BACKLINK_PLACEMENT_MONITORING_LIFECYCLE
-    || payload.kpiProjection === null
-    || typeof payload.kpiProjection !== "object"
-    || Array.isArray(payload.kpiProjection)
+    event.eventType !== BACKLINK_PLACEMENT_MONITORING_LIFECYCLE ||
+    payload.contractVersion !== BACKLINK_PLACEMENT_MONITORING_LIFECYCLE ||
+    payload.kpiProjection === null ||
+    typeof payload.kpiProjection !== "object" ||
+    Array.isArray(payload.kpiProjection)
   ) {
     throw new Error("BACKLINK_PLACEMENT_OUTBOX_EVENT_INVALID");
   }
@@ -359,15 +348,15 @@ function parseGmailSendRequest(
 ): GmailSendWorkflowInput {
   const payload = event.payload as Record<string, unknown> | null;
   if (
-    event.eventType !== sendIntentCreatedEventType
-    || event.payloadSchemaVersion !== 1
-    || payload === null
-    || typeof payload !== "object"
-    || Array.isArray(payload)
-    || typeof payload.sendIntentId !== "string"
-    || typeof payload.gmailConnectionId !== "string"
-    || typeof payload.actorId !== "string"
-    || payload.sendIntentId !== event.aggregateId
+    event.eventType !== sendIntentCreatedEventType ||
+    event.payloadSchemaVersion !== 1 ||
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    typeof payload.sendIntentId !== "string" ||
+    typeof payload.gmailConnectionId !== "string" ||
+    typeof payload.actorId !== "string" ||
+    payload.sendIntentId !== event.aggregateId
   ) {
     throw new Error("BACKLINK_GMAIL_SEND_OUTBOX_EVENT_INVALID");
   }
@@ -379,80 +368,6 @@ function parseGmailSendRequest(
     gmailConnectionId: payload.gmailConnectionId,
     actorId: payload.actorId,
   };
-}
-
-function parseRecommendationRefillRequest(
-  event: ClaimedOutboxEvent,
-): BacklinkRecommendationRefillInput {
-  const payload = event.payload as Record<string, unknown> | null;
-  const stringFields = [
-    "organizationId",
-    "workspaceId",
-    "websiteProjectId",
-    "recommendationContextVersionId",
-    "jobId",
-    "workflowId",
-    "correlationId",
-    "actorId",
-    "refillWindowKey",
-  ] as const;
-  if (
-    event.eventType !== BACKLINK_RECOMMENDATION_REFILL_REQUESTED
-    || event.payloadSchemaVersion !== 1
-    || payload === null
-    || typeof payload !== "object"
-    || Array.isArray(payload)
-    || payload.contractVersion !== BACKLINK_RECOMMENDATION_REFILL_REQUESTED
-    || stringFields.some((field) => typeof payload[field] !== "string")
-    || payload.organizationId !== event.organizationId
-    || payload.workspaceId !== event.workspaceId
-    || payload.websiteProjectId !== event.websiteProjectId
-    || payload.jobId !== event.aggregateId
-    || payload.workflowId !== event.idempotencyKey
-    || !Number.isInteger(payload.visiblePoolGeneration)
-    || Number(payload.visiblePoolGeneration) < 1
-    || !Number.isInteger(payload.lowWatermark)
-    || !Number.isInteger(payload.highWatermark)
-    || Number(payload.lowWatermark) < 0
-    || Number(payload.highWatermark) <= Number(payload.lowWatermark)
-    || (
-      payload.supplyMode !== undefined
-      && payload.supplyMode !== "existing_evidence"
-    )
-  ) {
-    throw new Error("BACKLINK_RECOMMENDATION_REFILL_OUTBOX_EVENT_INVALID");
-  }
-  const providerBudgetAuthorization =
-    payload.providerBudgetAuthorization === undefined
-      ? undefined
-      : parseProviderOperationBudgetAuthorization(
-        payload.providerBudgetAuthorization,
-      );
-  const expectedProviderOperationId =
-    `commercial-refill-operation:${payload.jobId as string}`;
-  if (
-    (
-      providerBudgetAuthorization === undefined
-      && payload.providerOperationId !== undefined
-    )
-    || (
-      providerBudgetAuthorization !== undefined
-      && payload.providerOperationId !== expectedProviderOperationId
-    )
-    || (
-      payload.supplyMode === "existing_evidence"
-      && (
-        providerBudgetAuthorization !== undefined
-        || payload.providerOperationId !== undefined
-      )
-    )
-  ) {
-    throw new Error("BACKLINK_RECOMMENDATION_REFILL_OUTBOX_EVENT_INVALID");
-  }
-  return {
-    ...payload,
-    providerBudgetAuthorization,
-  } as BacklinkRecommendationRefillInput;
 }
 
 function parseContactEnrichmentRequest(
@@ -467,19 +382,19 @@ function parseContactEnrichmentRequest(
     "actorId",
   ] as const;
   if (
-    event.eventType !== contactEnrichmentRequestedEventType
-    || event.payloadSchemaVersion !== 1
-    || payload === null
-    || typeof payload !== "object"
-    || Array.isArray(payload)
-    || payload.contractVersion !== contactEnrichmentRequestedEventType
-    || stringFields.some((field) => typeof payload[field] !== "string")
-    || payload.organizationId !== event.organizationId
-    || payload.workspaceId !== event.workspaceId
-    || payload.websiteProjectId !== event.websiteProjectId
-    || payload.jobId !== event.aggregateId
-    || !Number.isInteger(payload.requestVersion)
-    || Number(payload.requestVersion) < 1
+    event.eventType !== contactEnrichmentRequestedEventType ||
+    event.payloadSchemaVersion !== 1 ||
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    payload.contractVersion !== contactEnrichmentRequestedEventType ||
+    stringFields.some((field) => typeof payload[field] !== "string") ||
+    payload.organizationId !== event.organizationId ||
+    payload.workspaceId !== event.workspaceId ||
+    payload.websiteProjectId !== event.websiteProjectId ||
+    payload.jobId !== event.aggregateId ||
+    !Number.isInteger(payload.requestVersion) ||
+    Number(payload.requestVersion) < 1
   ) {
     throw new Error("BACKLINK_CONTACT_ENRICHMENT_OUTBOX_EVENT_INVALID");
   }
@@ -503,51 +418,6 @@ export function createTemporalContactEnrichmentConsumer(
       try {
         await client.start(
           backlinksRuntimeContract.workflows.contactEnrichment.workflowType,
-          {
-            workflowId,
-            taskQueue,
-            args: [input],
-          },
-        );
-      } catch (error) {
-        if (!workflowAlreadyStarted(error)) throw error;
-      }
-      return { workflowId };
-    },
-  };
-}
-
-export function createTemporalRecommendationRefillConsumer(
-  client: TemporalWorkflowClient,
-  taskQueue: string,
-  options: Readonly<{ expectedJobId: string }> | null = null,
-): RecommendationRefillConsumer {
-  if (options === null) {
-    assertBacklinksTaskQueue(taskQueue);
-  } else {
-    assertBacklinksRecoveryTaskQueue(taskQueue, options.expectedJobId);
-  }
-  return {
-    async consume(input) {
-      if (
-        options !== null
-        && input.jobId !== options.expectedJobId
-      ) {
-        throw new Error("BACKLINK_RECOMMENDATION_REFILL_RECOVERY_JOB_INVALID");
-      }
-      const workflowId = buildBacklinksWorkflowId({
-        organizationId: input.organizationId,
-        workspaceId: input.workspaceId,
-        websiteProjectId: input.websiteProjectId,
-        workflow: "recommendation-refill",
-        instanceId: input.jobId,
-      });
-      if (workflowId !== input.workflowId) {
-        throw new Error("BACKLINK_RECOMMENDATION_REFILL_WORKFLOW_ID_INVALID");
-      }
-      try {
-        await client.start(
-          backlinksRuntimeContract.workflows.recommendationRefill.workflowType,
           {
             workflowId,
             taskQueue,
@@ -617,8 +487,8 @@ export function createTemporalBacklinkProjectAnalysisStarter(
         input.jobId,
       ].join(":");
       if (
-        input.workflowId !== workflowId
-        && input.workflowId !== legacyWorkflowId
+        input.workflowId !== workflowId &&
+        input.workflowId !== legacyWorkflowId
       ) {
         assertBacklinksWorkflowId(input.workflowId);
         throw new Error("BACKLINKS_PROJECT_ANALYSIS_WORKFLOW_ID_MISMATCH");
@@ -686,8 +556,8 @@ export function createTemporalPlacementInitialValidationStarter(
       assertBacklinksWorkflowId(workflowId);
       try {
         return await client.start(
-          backlinksRuntimeContract.workflows
-            .placementInitialValidation.workflowType,
+          backlinksRuntimeContract.workflows.placementInitialValidation
+            .workflowType,
           {
             workflowId,
             taskQueue,
@@ -702,21 +572,25 @@ export function createTemporalPlacementInitialValidationStarter(
   };
 }
 
-function createPlacementOutboxRelay<T>(options: Readonly<{
-  repository: RelayRepository;
-  eventType: string;
-  consume(input: T): Promise<unknown>;
-  parse(event: ClaimedOutboxEvent): T;
-  retryAt?: () => Date;
-}>) {
+function createPlacementOutboxRelay<T>(
+  options: Readonly<{
+    repository: RelayRepository;
+    eventType: string;
+    consume(input: T): Promise<unknown>;
+    parse(event: ClaimedOutboxEvent): T;
+    retryAt?: () => Date;
+  }>,
+) {
   const retryAt = options.retryAt ?? (() => new Date(Date.now() + 5_000));
   return {
-    async runOnce(input: Readonly<{
-      workerId: string;
-      limit: number;
-      staleClaimBefore: Date;
-      eventId?: string;
-    }>) {
+    async runOnce(
+      input: Readonly<{
+        workerId: string;
+        limit: number;
+        staleClaimBefore: Date;
+        eventId?: string;
+      }>,
+    ) {
       const events = await options.repository.claim({
         ...input,
         eventType: options.eventType,
@@ -749,11 +623,13 @@ function createPlacementOutboxRelay<T>(options: Readonly<{
   };
 }
 
-export function createPlacementMonitoringRequestedOutboxRelay(options: Readonly<{
-  repository: RelayRepository;
-  consumer: PlacementMonitoringRequestConsumer;
-  retryAt?: () => Date;
-}>) {
+export function createPlacementMonitoringRequestedOutboxRelay(
+  options: Readonly<{
+    repository: RelayRepository;
+    consumer: PlacementMonitoringRequestConsumer;
+    retryAt?: () => Date;
+  }>,
+) {
   return createPlacementOutboxRelay({
     repository: options.repository,
     eventType: BACKLINK_PLACEMENT_MONITORING_REQUESTED,
@@ -763,11 +639,13 @@ export function createPlacementMonitoringRequestedOutboxRelay(options: Readonly<
   });
 }
 
-export function createPlacementMonitoringLifecycleOutboxRelay(options: Readonly<{
-  repository: RelayRepository;
-  consumer: PlacementMonitoringLifecycleConsumer;
-  retryAt?: () => Date;
-}>) {
+export function createPlacementMonitoringLifecycleOutboxRelay(
+  options: Readonly<{
+    repository: RelayRepository;
+    consumer: PlacementMonitoringLifecycleConsumer;
+    retryAt?: () => Date;
+  }>,
+) {
   return createPlacementOutboxRelay({
     repository: options.repository,
     eventType: BACKLINK_PLACEMENT_MONITORING_LIFECYCLE,
@@ -777,11 +655,13 @@ export function createPlacementMonitoringLifecycleOutboxRelay(options: Readonly<
   });
 }
 
-export function createGmailSendOutboxRelay(options: Readonly<{
-  repository: RelayRepository;
-  consumer: GmailSendConsumer;
-  retryAt?: () => Date;
-}>) {
+export function createGmailSendOutboxRelay(
+  options: Readonly<{
+    repository: RelayRepository;
+    consumer: GmailSendConsumer;
+    retryAt?: () => Date;
+  }>,
+) {
   return createPlacementOutboxRelay({
     repository: options.repository,
     eventType: sendIntentCreatedEventType,
@@ -791,25 +671,13 @@ export function createGmailSendOutboxRelay(options: Readonly<{
   });
 }
 
-export function createRecommendationRefillOutboxRelay(options: Readonly<{
-  repository: RelayRepository;
-  consumer: RecommendationRefillConsumer;
-  retryAt?: () => Date;
-}>) {
-  return createPlacementOutboxRelay({
-    repository: options.repository,
-    eventType: BACKLINK_RECOMMENDATION_REFILL_REQUESTED,
-    consume: (input) => options.consumer.consume(input),
-    parse: parseRecommendationRefillRequest,
-    ...(options.retryAt === undefined ? {} : { retryAt: options.retryAt }),
-  });
-}
-
-export function createContactEnrichmentOutboxRelay(options: Readonly<{
-  repository: RelayRepository;
-  consumer: ContactEnrichmentConsumer;
-  retryAt?: () => Date;
-}>) {
+export function createContactEnrichmentOutboxRelay(
+  options: Readonly<{
+    repository: RelayRepository;
+    consumer: ContactEnrichmentConsumer;
+    retryAt?: () => Date;
+  }>,
+) {
   return createPlacementOutboxRelay({
     repository: options.repository,
     eventType: contactEnrichmentRequestedEventType,
@@ -819,21 +687,26 @@ export function createContactEnrichmentOutboxRelay(options: Readonly<{
   });
 }
 
-export function createBacklinkOutboxRelay(options: Readonly<{
-  repository: RelayRepository;
-  workflowStarter: WorkflowStarter;
-  retryAt?: () => Date;
-}>) {
+export function createBacklinkOutboxRelay(
+  options: Readonly<{
+    repository: RelayRepository;
+    workflowStarter: WorkflowStarter;
+    retryAt?: () => Date;
+  }>,
+) {
   const retryAt = options.retryAt ?? (() => new Date(Date.now() + 5_000));
   return {
-    async runOnce(input: Readonly<{
-      workerId: string;
-      limit: number;
-      staleClaimBefore: Date;
-      eventId?: string;
-    }>) {
+    async runOnce(
+      input: Readonly<{
+        workerId: string;
+        limit: number;
+        staleClaimBefore: Date;
+        eventId?: string;
+      }>,
+    ) {
       const events = await options.repository.claim({
-        ...input, eventType: BACKLINK_PROJECT_ANALYSIS_REQUESTED,
+        ...input,
+        eventType: BACKLINK_PROJECT_ANALYSIS_REQUESTED,
       });
       let published = 0;
       let failed = 0;
@@ -841,15 +714,18 @@ export function createBacklinkOutboxRelay(options: Readonly<{
         try {
           await options.workflowStarter.start(parseInput(event));
           const marked = await options.repository.mark({
-            eventId: event.eventId, workerId: input.workerId,
+            eventId: event.eventId,
+            workerId: input.workerId,
             outcome: "published",
           });
           if (!marked) throw new Error("BACKLINK_OUTBOX_CLAIM_LOST");
           published += 1;
         } catch (error) {
           const marked = await options.repository.mark({
-            eventId: event.eventId, workerId: input.workerId,
-            outcome: "failed", retryAt: retryAt(),
+            eventId: event.eventId,
+            workerId: input.workerId,
+            outcome: "failed",
+            retryAt: retryAt(),
           });
           if (!marked) throw error;
           failed += 1;

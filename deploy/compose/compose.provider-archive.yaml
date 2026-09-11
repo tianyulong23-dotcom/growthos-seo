@@ -1,0 +1,55 @@
+# Optional overlay for container deployments. Core native processes use the same
+# host spool directory through scripts/dev-up.ps1.
+x-archive-environment: &archive-environment
+  PROVIDER_ARCHIVE_ENABLED: "true"
+  PROVIDER_ARCHIVE_DEPLOYMENT_ID: "${PROVIDER_ARCHIVE_DEPLOYMENT_ID:?Set a unique deployment ID}"
+  PROVIDER_ARCHIVE_SPOOL_DIR: /var/lib/provider-archive
+  PROVIDER_ARCHIVE_MAX_RESPONSE_BYTES: "${PROVIDER_ARCHIVE_MAX_RESPONSE_BYTES:-33554432}"
+  PROVIDER_ARCHIVE_MAX_PENDING: "${PROVIDER_ARCHIVE_MAX_PENDING:-100000}"
+
+x-archive-spool: &archive-spool
+  type: bind
+  source: "${PROVIDER_ARCHIVE_SPOOL_DIR:?Set a persistent host directory}"
+  target: /var/lib/provider-archive
+
+services:
+  api:
+    environment:
+      <<: *archive-environment
+    volumes:
+      - *archive-spool
+  agent-worker:
+    environment:
+      <<: *archive-environment
+    volumes:
+      - *archive-spool
+  content-worker:
+    environment:
+      <<: *archive-environment
+    volumes:
+      - *archive-spool
+  keyword-worker:
+    environment:
+      <<: *archive-environment
+    volumes:
+      - *archive-spool
+  provider-archive-uploader:
+    build:
+      context: ../..
+      dockerfile: deploy/provider-archive/Dockerfile
+    # Match the existing Python containers' UID; harden all producers together.
+    user: "${PROVIDER_ARCHIVE_UID:-0}:${PROVIDER_ARCHIVE_GID:-0}"
+    environment:
+      <<: *archive-environment
+      PROVIDER_ARCHIVE_CENTER_URL: "${PROVIDER_ARCHIVE_CENTER_URL:?Set HTTPS center URL}"
+      PROVIDER_ARCHIVE_UPLOAD_TOKEN_FILE: /run/secrets/archive-upload-token
+      PROVIDER_ARCHIVE_UPLOAD_TIMEOUT_MS: "${PROVIDER_ARCHIVE_UPLOAD_TIMEOUT_MS:-30000}"
+      PROVIDER_ARCHIVE_UPLOAD_BATCH_SIZE: "${PROVIDER_ARCHIVE_UPLOAD_BATCH_SIZE:-20}"
+      PROVIDER_ARCHIVE_UPLOAD_INTERVAL_MS: "${PROVIDER_ARCHIVE_UPLOAD_INTERVAL_MS:-5000}"
+      PROVIDER_ARCHIVE_RETRY_BASE_MS: "${PROVIDER_ARCHIVE_RETRY_BASE_MS:-5000}"
+      PROVIDER_ARCHIVE_RETRY_MAX_MS: "${PROVIDER_ARCHIVE_RETRY_MAX_MS:-300000}"
+    volumes:
+      - *archive-spool
+      - "${PROVIDER_ARCHIVE_UPLOAD_TOKEN_FILE:?Set token file}:/run/secrets/archive-upload-token:ro"
+    command: ["node", "dist/modules/provider-archive/cli.js", "upload"]
+    restart: unless-stopped

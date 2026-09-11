@@ -1,7 +1,14 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { MemoryRouter } from "react-router"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { ApiError } from "@/api/client"
 import {
   confirmPromotionTarget,
   getProjectOutreachReadiness,
@@ -12,7 +19,7 @@ import type {
   PromotionTargetVersion,
 } from "@/features/projects/types"
 
-import { getRecommendationInventory } from "./api"
+import { getRecommendationFeedStatus } from "./recommendation-feed-api"
 import { RecommendationProjectGate } from "./promotion-target-setup"
 
 vi.mock("@/api/projects", () => ({
@@ -20,13 +27,13 @@ vi.mock("@/api/projects", () => ({
   getProjectOutreachReadiness: vi.fn(),
 }))
 
-vi.mock("./api", () => ({
-  getRecommendationInventory: vi.fn(),
+vi.mock("./recommendation-feed-api", () => ({
+  getRecommendationFeedStatus: vi.fn(),
 }))
 
 const getReadiness = vi.mocked(getProjectOutreachReadiness)
 const confirmTarget = vi.mocked(confirmPromotionTarget)
-const getInventory = vi.mocked(getRecommendationInventory)
+const getInventory = vi.mocked(getRecommendationFeedStatus)
 
 const project: OutreachProject = {
   id: "project-1",
@@ -78,18 +85,94 @@ afterEach(() => {
 })
 
 describe("RecommendationProjectGate", () => {
+  it("explains archived projects without requesting a feed or editing their data", async () => {
+    getReadiness.mockResolvedValueOnce(readiness({
+      primaryRecoveryAction: "RESTORE_PROJECT",
+      inputRequired: ["PROJECTS:restore_project"],
+    }))
+    render(
+      <MemoryRouter>
+        <RecommendationProjectGate project={project}>
+          {() => <div>V2 pool</div>}
+        </RecommendationProjectGate>
+      </MemoryRouter>
+    )
+    expect(await screen.findByText("项目已归档")).toBeTruthy()
+    expect(screen.queryByText("设置本次外链推广目标")).toBeNull()
+    expect(getInventory).not.toHaveBeenCalled()
+    expect(confirmTarget).not.toHaveBeenCalled()
+  })
+
+  it("keeps the pool unmounted until the V2 context has synchronized", async () => {
+    getReadiness.mockResolvedValue(
+      readiness({
+        status: "READY",
+        inputRequired: [],
+        primaryRecoveryAction: "OPEN_RECOMMENDATIONS",
+      })
+    )
+    getInventory
+      .mockRejectedValueOnce(new ApiError(404, "Not yet projected"))
+      .mockResolvedValueOnce({} as never)
+    const child = vi.fn(() => <div>V2 pool</div>)
+    render(
+      <MemoryRouter>
+        <RecommendationProjectGate project={project}>
+          {child}
+        </RecommendationProjectGate>
+      </MemoryRouter>
+    )
+    await waitFor(() => expect(getInventory).toHaveBeenCalledTimes(1))
+    expect(child).not.toHaveBeenCalled()
+    expect(
+      await screen.findByText("V2 pool", {}, { timeout: 3000 })
+    ).toBeTruthy()
+    expect(getInventory).toHaveBeenCalledTimes(2)
+    expect(confirmTarget).not.toHaveBeenCalled()
+  })
+
+  it("does not treat a readiness request failure as missing promotion inputs", async () => {
+    getReadiness.mockRejectedValueOnce(new Error("Service unavailable"))
+    render(
+      <MemoryRouter>
+        <RecommendationProjectGate project={project}>
+          {() => <div>V2 pool</div>}
+        </RecommendationProjectGate>
+      </MemoryRouter>
+    )
+    expect(await screen.findByText("无法读取外链准备状态")).toBeTruthy()
+    expect(screen.queryByText("设置本次外链推广目标")).toBeNull()
+    expect(getInventory).not.toHaveBeenCalled()
+  })
+
+  it("rejects readiness belonging to another project", async () => {
+    getReadiness.mockResolvedValueOnce(
+      readiness({
+        websiteProjectId: "other-project",
+        status: "READY",
+      })
+    )
+    render(
+      <MemoryRouter>
+        <RecommendationProjectGate project={project}>
+          {() => <div>V2 pool</div>}
+        </RecommendationProjectGate>
+      </MemoryRouter>
+    )
+    expect(await screen.findByText("项目状态不匹配，请重新读取。")).toBeTruthy()
+    expect(getInventory).not.toHaveBeenCalled()
+  })
+
   it("collects promotion inputs before mounting the recommendation workspace", async () => {
-    getReadiness
-      .mockResolvedValueOnce(readiness())
-      .mockResolvedValueOnce(
-        readiness({
-          status: "READY",
-          promotionTargetVersionId: "target-5",
-          fingerprint: "sha256:ready",
-          inputRequired: [],
-          primaryRecoveryAction: "OPEN_RECOMMENDATIONS",
-        })
-      )
+    getReadiness.mockResolvedValueOnce(readiness()).mockResolvedValueOnce(
+      readiness({
+        status: "READY",
+        promotionTargetVersionId: "target-5",
+        fingerprint: "sha256:ready",
+        inputRequired: [],
+        primaryRecoveryAction: "OPEN_RECOMMENDATIONS",
+      })
+    )
     confirmTarget.mockResolvedValue(confirmedTarget)
     getInventory.mockResolvedValue({} as never)
 
@@ -97,9 +180,7 @@ describe("RecommendationProjectGate", () => {
       <MemoryRouter>
         <RecommendationProjectGate project={project}>
           {(readyProject) => (
-            <div>
-              推荐池已接通：{readyProject.targetUrls.join(",")}
-            </div>
+            <div>推荐池已接通：{readyProject.targetUrls.join(",")}</div>
           )}
         </RecommendationProjectGate>
       </MemoryRouter>
@@ -108,7 +189,7 @@ describe("RecommendationProjectGate", () => {
     expect(await screen.findByText("设置本次外链推广目标")).toBeTruthy()
     expect(getInventory).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole("button", { name: "保存并生成推荐" }))
+    fireEvent.click(screen.getByRole("button", { name: "确认并进入推荐池" }))
 
     await waitFor(() => {
       expect(confirmTarget).toHaveBeenCalledWith("project-1", {
@@ -124,6 +205,46 @@ describe("RecommendationProjectGate", () => {
       )
     ).toBeTruthy()
     expect(getInventory).toHaveBeenCalledTimes(1)
+  })
+
+  it("splits explicitly delimited promotion topics without breaking phrases", async () => {
+    getReadiness.mockResolvedValueOnce(readiness()).mockResolvedValueOnce(
+      readiness({
+        status: "READY",
+        promotionTargetVersionId: "target-5",
+        fingerprint: "sha256:ready",
+        inputRequired: [],
+        primaryRecoveryAction: "OPEN_RECOMMENDATIONS",
+      })
+    )
+    confirmTarget.mockResolvedValue(confirmedTarget)
+    getInventory.mockResolvedValue({} as never)
+
+    render(
+      <MemoryRouter>
+        <RecommendationProjectGate project={project}>
+          {() => <div>推荐池已接通</div>}
+        </RecommendationProjectGate>
+      </MemoryRouter>
+    )
+
+    const topicInput = await screen.findByLabelText("推广关键词或主题")
+    fireEvent.change(topicInput, {
+      target: {
+        value:
+          "finest mulberry silk, luxe pajamas；loungewear\nfinest mulberry silk",
+      },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "确认并进入推荐池" }))
+
+    await waitFor(() => {
+      expect(confirmTarget).toHaveBeenCalledWith("project-1", {
+        confirmedTopics: ["finest mulberry silk", "luxe pajamas", "loungewear"],
+        confirmedTargetUrls: ["https://example.com/products/projector"],
+        expectedProjectContextVersion: 4,
+        expectedSiteProfileVersionId: "profile-v4",
+      })
+    })
   })
 
   it("shows a validation message instead of calling the API with empty input", async () => {
@@ -144,7 +265,7 @@ describe("RecommendationProjectGate", () => {
     )
 
     expect(await screen.findByText("设置本次外链推广目标")).toBeTruthy()
-    fireEvent.click(screen.getByRole("button", { name: "保存并生成推荐" }))
+    fireEvent.click(screen.getByRole("button", { name: "确认并进入推荐池" }))
 
     expect(
       await screen.findByText("请至少填写一个推广主题或一个推广目标页。")

@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import pycountry
+from growthos_provider_archive import begin_capture
 
 
 class DataForSEOError(Exception):
@@ -267,12 +268,23 @@ class DataForSEOClient:
             },
             method=method,
         )
+        capture = begin_capture(
+            "content-serp", self.base_url + endpoint, method,
+            request.data.decode("utf-8") if request.data else None,
+        )
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
-                return json.loads(response.read().decode("utf-8"))
+                body = response.read()
+                if capture:
+                    capture.finish(body, response.status)
+                return json.loads(body.decode("utf-8"))
         except HTTPError as exc:
+            if capture:
+                capture.finish(exc.read(), exc.code)
             raise DataForSEOError("dataforseo_request_failed") from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            if capture and not isinstance(exc, json.JSONDecodeError):
+                capture.finish(b"", None)
             raise DataForSEOOutcomeUnknown(
                 "dataforseo_request_outcome_unknown"
             ) from exc

@@ -1,15 +1,6 @@
-import { readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
   arbitrateRecommendationRefillFailure,
@@ -17,16 +8,13 @@ import {
   completeRecommendationRefillSupersession,
   requestRecommendationRefillSupersession,
 } from "../../../src/modules/backlinks/application/services/recommendation-refill-supersession.service.js";
-import {
-  reconcileRecommendationRefillOrphans,
-} from "../../../src/modules/backlinks/application/services/recommendation-refill-reconciliation.service.js";
+import { reconcileRecommendationRefillOrphans } from "../../../src/modules/backlinks/application/services/recommendation-refill-reconciliation.service.js";
 import {
   withBacklinkTenantTransaction,
   type BacklinkTenantPool,
 } from "../../../src/modules/backlinks/db/tenant-transaction.js";
-import type {
-  RecommendationRefillSupersessionSignal,
-} from "../../../src/modules/backlinks/workflows/definitions/backlink-recommendation-refill.orchestration.js";
+import type { RecommendationRefillSupersessionSignal } from "../../../src/modules/backlinks/workflows/definitions/backlink-recommendation-refill.orchestration.js";
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -50,15 +38,6 @@ const { Client, Pool } = require("pg") as {
   readonly Client: new (config: unknown) => RuntimeClient;
   readonly Pool: new (config: unknown) => RuntimePool;
 };
-const migrationDirectory = new URL(
-  "../../../src/modules/backlinks/db/migrations/",
-  import.meta.url,
-);
-const rolesMigration = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
-
 const id = (value: number) =>
   `018f1000-0000-7000-8000-${value.toString().padStart(12, "0")}`;
 
@@ -83,12 +62,13 @@ const providerBudgetId = id(18);
 const providerUsageId = id(19);
 const siblingJobId = id(20);
 const siblingRefillId = id(21);
+const generationContractId = id(22);
+const projectContractId = id(23);
 const workflowId = "backlinks-recommendation-refill:legacy-v7";
 const siblingWorkflowId = "backlinks-recommendation-refill:legacy-v7-sibling";
 const batchIdempotencyKey =
   "commercial-discovery:recommendation-refill:legacy-v7";
-const providerRequestIdentity =
-  "recommendation-refill:legacy-v7:provider";
+const providerRequestIdentity = "recommendation-refill:legacy-v7:provider";
 const providerRequestFingerprint = "b".repeat(64);
 const providerBudgetReservationId = "reservation-v7";
 const now = new Date("2026-08-19T06:00:00.000Z");
@@ -123,24 +103,7 @@ const signal: RecommendationRefillSupersessionSignal = Object.freeze({
 });
 
 async function migrateBacklinks(client: RuntimeClient): Promise<void> {
-  const migrationNames = (await readdir(fileURLToPath(migrationDirectory)))
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const name of migrationNames.filter(
-    (item) => item >= "0002_" && item < "0005_",
-  )) {
-    await client.query(
-      await readFile(new URL(name, migrationDirectory), "utf8"),
-    );
-  }
-  await client.query(await readFile(rolesMigration, "utf8"));
-  for (const name of migrationNames.filter(
-    (item) => item >= "0005_" && !item.startsWith("0044_"),
-  )) {
-    await client.query(
-      await readFile(new URL(name, migrationDirectory), "utf8"),
-    );
-  }
+  await installBacklinksManifestAfterFoundation(client, "0092");
 }
 
 async function seedSupersededRefill(client: RuntimeClient): Promise<void> {
@@ -224,6 +187,40 @@ async function seedSupersededRefill(client: RuntimeClient): Promise<void> {
       oldOutreachProfileId,
       newOutreachProfileId,
     ],
+  );
+  await client.query(
+    `INSERT INTO backlinks.backlink_recommendation_generation_contracts (
+       id,organization_id,workspace_id,website_project_id,
+       recommendation_context_version_id,visible_pool_generation,input_pin_id,
+       qualification_contract_version,visibility_contract_version,
+       score_model_version,metric_scope,market,location,language,
+       traffic_location_code,traffic_language_code,request_fingerprints,
+       creator_worker_contract_version,created_by,pool_contract_version
+     ) VALUES (
+       $1,$2,$3,$4,$5,1,$6,'recommendation-qualification.v1',
+       'recommendation-visibility.v1','recommendation-commercial-fit.v4',
+       'TARGET_MARKET','ZA','ZA','en',2710,'en','{}'::jsonb,
+       'recommendation-qualification.v1','stage2e-test',
+       'recommendation-pool.v1'
+     )`,
+    [
+      generationContractId,
+      organizationId,
+      workspaceId,
+      websiteProjectId,
+      oldContextVersionId,
+      oldPinId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO backlinks.backlink_recommendation_pool_project_contracts (
+       id,organization_id,workspace_id,website_project_id,
+       pool_contract_version,migration_state,created_by,updated_by
+     ) VALUES (
+       $1,$2,$3,$4,'recommendation-pool.v1','V1_ACTIVE',
+       'stage2e-test','stage2e-test'
+     )`,
+    [projectContractId, organizationId, workspaceId, websiteProjectId],
   );
   await client.query(
     `INSERT INTO backlinks.backlink_jobs (
@@ -336,9 +333,7 @@ async function seedProviderRequest(
   client: RuntimeClient,
   status: "running" | "succeeded" | "unknown_charge",
 ): Promise<void> {
-  const finishedAt = status === "running"
-    ? null
-    : "2026-08-19T05:03:00Z";
+  const finishedAt = status === "running" ? null : "2026-08-19T05:03:00Z";
   await client.query(
     `INSERT INTO backlinks.provider_batch_requests (
        id,organization_id,workspace_id,website_project_id,provider,endpoint,
@@ -417,6 +412,8 @@ describe("recommendation refill cooperative supersession persistence", () => {
         backlinks.backlink_provider_usage_ledger,
         backlinks.backlink_provider_budgets,
         backlinks.backlink_provider_requests,
+        backlinks.backlink_recommendation_pool_project_contracts,
+        backlinks.backlink_recommendation_generation_contracts,
         backlinks.backlink_generation_input_pins,
         backlinks.backlink_outreach_profile_versions,
         backlinks.backlink_project_context_snapshots
@@ -432,18 +429,17 @@ describe("recommendation refill cooperative supersession persistence", () => {
   });
 
   it("atomically closes the old refill once and replays without new records", async () => {
-    const execute = () => withBacklinkTenantTransaction(
-      pool,
-      { organizationId, workspaceId, websiteProjectId },
-      (transaction) => completeRecommendationRefillSupersession(
-        transaction,
-        {
-          signal,
-          now,
-          integrityHash: "a".repeat(64),
-        },
-      ),
-    );
+    const execute = () =>
+      withBacklinkTenantTransaction(
+        pool,
+        { organizationId, workspaceId, websiteProjectId },
+        (transaction) =>
+          completeRecommendationRefillSupersession(transaction, {
+            signal,
+            now,
+            integrityHash: "a".repeat(64),
+          }),
+      );
 
     await expect(execute()).resolves.toEqual({
       status: "cancelled",
@@ -454,8 +450,9 @@ describe("recommendation refill cooperative supersession persistence", () => {
       replayed: true,
     });
 
-    const state = (await client.query(
-      `SELECT
+    const state = (
+      await client.query(
+        `SELECT
          (SELECT jsonb_build_object(
             'status',status,'step',step,'progress',progress,'version',version,
             'reason',result_summary->>'reason'
@@ -475,8 +472,9 @@ describe("recommendation refill cooperative supersession persistence", () => {
             WHERE event_type='recommendation_refill.superseded') lifecycle_count,
          (SELECT count(*)::int FROM backlinks.backlink_audit_events
             WHERE action='recommendation_refill.superseded') audit_count`,
-      [jobId, discoveryBatchId, oldContextVersionId],
-    )).rows[0];
+        [jobId, discoveryBatchId, oldContextVersionId],
+      )
+    ).rows[0];
 
     expect(state).toEqual({
       job: {
@@ -502,13 +500,15 @@ describe("recommendation refill cooperative supersession persistence", () => {
       audit_count: 1,
     });
 
-    const lifecycle = (await client.query(
-      `SELECT aggregate_type,"aggregate_id" AS "aggregateId",sequence,
+    const lifecycle = (
+      await client.query(
+        `SELECT aggregate_type,"aggregate_id" AS "aggregateId",sequence,
               aggregate_version "aggregateVersion",idempotency_key
                 "idempotencyKey"
          FROM backlinks.backlink_lifecycle_events
         WHERE event_type='recommendation_refill.superseded'`,
-    )).rows[0];
+      )
+    ).rows[0];
     expect(lifecycle).toEqual({
       aggregate_type: "recommendation_refill",
       aggregateId: refillId,
@@ -519,18 +519,17 @@ describe("recommendation refill cooperative supersession persistence", () => {
   });
 
   it("persists one non-terminal supersession request and replays it", async () => {
-    const execute = () => withBacklinkTenantTransaction(
-      pool,
-      { organizationId, workspaceId, websiteProjectId },
-      (transaction) => requestRecommendationRefillSupersession(
-        transaction,
-        {
-          signal,
-          now,
-          integrityHash: "1".repeat(64),
-        },
-      ),
-    );
+    const execute = () =>
+      withBacklinkTenantTransaction(
+        pool,
+        { organizationId, workspaceId, websiteProjectId },
+        (transaction) =>
+          requestRecommendationRefillSupersession(transaction, {
+            signal,
+            now,
+            integrityHash: "1".repeat(64),
+          }),
+      );
 
     await expect(execute()).resolves.toEqual({
       status: "requested",
@@ -541,8 +540,9 @@ describe("recommendation refill cooperative supersession persistence", () => {
       replayed: true,
     });
 
-    const state = (await client.query(
-      `SELECT
+    const state = (
+      await client.query(
+        `SELECT
          (SELECT jsonb_build_object(
             'status',status,
             'version',version,
@@ -555,8 +555,9 @@ describe("recommendation refill cooperative supersession persistence", () => {
          (SELECT count(*)::int FROM backlinks.backlink_audit_events
             WHERE action='recommendation_refill.supersession_requested')
               audit_count`,
-      [jobId],
-    )).rows[0];
+        [jobId],
+      )
+    ).rows[0];
     expect(state).toEqual({
       job: {
         status: "running",
@@ -579,18 +580,17 @@ describe("recommendation refill cooperative supersession persistence", () => {
         WHERE id=$1`,
       [jobId],
     );
-    const complete = () => withBacklinkTenantTransaction(
-      pool,
-      { organizationId, workspaceId, websiteProjectId },
-      (transaction) => completeRecommendationRefillSupersession(
-        transaction,
-        {
-          signal,
-          now,
-          integrityHash: "2".repeat(64),
-        },
-      ),
-    );
+    const complete = () =>
+      withBacklinkTenantTransaction(
+        pool,
+        { organizationId, workspaceId, websiteProjectId },
+        (transaction) =>
+          completeRecommendationRefillSupersession(transaction, {
+            signal,
+            now,
+            integrityHash: "2".repeat(64),
+          }),
+      );
 
     await expect(complete()).resolves.toEqual({
       status: "no_change",
@@ -599,14 +599,12 @@ describe("recommendation refill cooperative supersession persistence", () => {
     await withBacklinkTenantTransaction(
       pool,
       { organizationId, workspaceId, websiteProjectId },
-      (transaction) => requestRecommendationRefillSupersession(
-        transaction,
-        {
+      (transaction) =>
+        requestRecommendationRefillSupersession(transaction, {
           signal,
           now,
           integrityHash: "3".repeat(64),
-        },
-      ),
+        }),
     );
     await expect(complete()).resolves.toEqual({
       status: "cancelled",
@@ -617,12 +615,14 @@ describe("recommendation refill cooperative supersession persistence", () => {
       replayed: true,
     });
 
-    const state = (await client.query(
-      `SELECT status,step,result_summary->>'reason' reason
+    const state = (
+      await client.query(
+        `SELECT status,step,result_summary->>'reason' reason
          FROM backlinks.backlink_jobs
         WHERE id=$1`,
-      [jobId],
-    )).rows[0];
+        [jobId],
+      )
+    ).rows[0];
     expect(state).toEqual({
       status: "cancelled",
       step: "superseded_project_context",
@@ -680,32 +680,35 @@ describe("recommendation refill cooperative supersession persistence", () => {
         oldContextVersionId,
       ],
     );
-    const execute = () => reconcileRecommendationRefillOrphans({
-      pool,
-      scope: { organizationId, workspaceId, websiteProjectId },
-      actorId: "stage2f-reconciliation",
-      mode: "apply",
-      operation: { jobId, workflowId },
-      workflowProbe: {
-        inspect: async () => "closed",
-        readSupersession: async () => null,
-        signalSuperseded: async () => {
-          throw new Error("CLOSED_WORKFLOW_MUST_NOT_BE_SIGNALLED");
+    const execute = () =>
+      reconcileRecommendationRefillOrphans({
+        pool,
+        scope: { organizationId, workspaceId, websiteProjectId },
+        actorId: "stage2f-reconciliation",
+        mode: "apply",
+        operation: { jobId, workflowId },
+        workflowProbe: {
+          inspect: async () => "closed",
+          readSupersession: async () => null,
+          signalSuperseded: async () => {
+            throw new Error("CLOSED_WORKFLOW_MUST_NOT_BE_SIGNALLED");
+          },
         },
-      },
-      now: () => now,
-    });
+        now: () => now,
+      });
 
     await expect(execute()).resolves.toMatchObject({
       scannedRunningCount: 1,
       plannedChangeCount: 1,
       appliedChangeCount: 1,
-      entries: [{
-        jobId,
-        workflowId,
-        plannedAction: "COMPENSATE_SUPERSEDED_TERMINAL",
-        applied: true,
-      }],
+      entries: [
+        {
+          jobId,
+          workflowId,
+          plannedAction: "COMPENSATE_SUPERSEDED_TERMINAL",
+          applied: true,
+        },
+      ],
     });
     await expect(execute()).resolves.toMatchObject({
       scannedRunningCount: 0,
@@ -714,8 +717,9 @@ describe("recommendation refill cooperative supersession persistence", () => {
       entries: [],
     });
 
-    const state = (await client.query(
-      `SELECT
+    const state = (
+      await client.query(
+        `SELECT
          (SELECT status FROM backlinks.backlink_jobs WHERE id=$1)
            selected_status,
          (SELECT status FROM backlinks.backlink_jobs WHERE id=$2)
@@ -736,8 +740,9 @@ describe("recommendation refill cooperative supersession persistence", () => {
             WHERE job_id=$2
               AND action='recommendation_refill.superseded')
            sibling_audit_count`,
-      [jobId, siblingJobId],
-    )).rows[0];
+        [jobId, siblingJobId],
+      )
+    ).rows[0];
     expect(state).toEqual({
       selected_status: "cancelled",
       sibling_status: "failed",
@@ -752,44 +757,47 @@ describe("recommendation refill cooperative supersession persistence", () => {
     await withBacklinkTenantTransaction(
       pool,
       { organizationId, workspaceId, websiteProjectId },
-      (transaction) => requestRecommendationRefillSupersession(
-        transaction,
-        {
+      (transaction) =>
+        requestRecommendationRefillSupersession(transaction, {
           signal,
           now,
           integrityHash: "4".repeat(64),
-        },
-      ),
+        }),
     );
 
     const result = await withBacklinkTenantTransaction(
       pool,
       { organizationId, workspaceId, websiteProjectId },
-      (transaction) => arbitrateRecommendationRefillFailure(transaction, {
-        organizationId,
-        workspaceId,
-        websiteProjectId,
-        recommendationContextVersionId: oldContextVersionId,
-        jobId,
-        errorCode: "BACKLINK_INTERNAL",
-        rootCause: "UNKNOWN_INTERNAL",
-        recovery: "CONTACT_SUPPORT",
-        diagnosticId: "historical-provider-timeout",
-        message: "Historical provider timeout.",
-        actorId: "stage2f-test",
-        now,
-        integrityHash: "5".repeat(64),
-      }),
+      (transaction) =>
+        arbitrateRecommendationRefillFailure(transaction, {
+          organizationId,
+          workspaceId,
+          websiteProjectId,
+          recommendationContextVersionId: oldContextVersionId,
+          jobId,
+          errorCode: "BACKLINK_INTERNAL",
+          rootCause: "UNKNOWN_INTERNAL",
+          recovery: "CONTACT_SUPPORT",
+          diagnosticId: "historical-provider-timeout",
+          message: "Historical provider timeout.",
+          actorId: "stage2f-test",
+          now,
+          integrityHash: "5".repeat(64),
+        }),
     );
 
     expect(result).toMatchObject({
       status: "superseded",
       supersession: signal,
     });
-    expect((await client.query(
-      `SELECT status,step FROM backlinks.backlink_jobs WHERE id=$1`,
-      [jobId],
-    )).rows[0]).toEqual({
+    expect(
+      (
+        await client.query(
+          `SELECT status,step FROM backlinks.backlink_jobs WHERE id=$1`,
+          [jobId],
+        )
+      ).rows[0],
+    ).toEqual({
       status: "cancelled",
       step: "superseded_project_context",
     });
@@ -799,29 +807,34 @@ describe("recommendation refill cooperative supersession persistence", () => {
     const result = await withBacklinkTenantTransaction(
       pool,
       { organizationId, workspaceId, websiteProjectId },
-      (transaction) => arbitrateRecommendationRefillFailure(transaction, {
-        organizationId,
-        workspaceId,
-        websiteProjectId,
-        recommendationContextVersionId: oldContextVersionId,
-        jobId,
-        errorCode: "BACKLINK_INTERNAL",
-        rootCause: "UNKNOWN_INTERNAL",
-        recovery: "CONTACT_SUPPORT",
-        diagnosticId: "ordinary-failure",
-        message: "Ordinary failure.",
-        actorId: "stage2f-test",
-        now,
-        integrityHash: "6".repeat(64),
-      }),
+      (transaction) =>
+        arbitrateRecommendationRefillFailure(transaction, {
+          organizationId,
+          workspaceId,
+          websiteProjectId,
+          recommendationContextVersionId: oldContextVersionId,
+          jobId,
+          errorCode: "BACKLINK_INTERNAL",
+          rootCause: "UNKNOWN_INTERNAL",
+          recovery: "CONTACT_SUPPORT",
+          diagnosticId: "ordinary-failure",
+          message: "Ordinary failure.",
+          actorId: "stage2f-test",
+          now,
+          integrityHash: "6".repeat(64),
+        }),
     );
 
     expect(result).toEqual({ status: "failed" });
-    expect((await client.query(
-      `SELECT status,step,error->>'rootCause' "rootCause"
+    expect(
+      (
+        await client.query(
+          `SELECT status,step,error->>'rootCause' "rootCause"
          FROM backlinks.backlink_jobs WHERE id=$1`,
-      [jobId],
-    )).rows[0]).toEqual({
+          [jobId],
+        )
+      ).rows[0],
+    ).toEqual({
       status: "failed",
       step: "provider_request_failed",
       rootCause: "UNKNOWN_INTERNAL",
@@ -832,36 +845,38 @@ describe("recommendation refill cooperative supersession persistence", () => {
     await withBacklinkTenantTransaction(
       pool,
       { organizationId, workspaceId, websiteProjectId },
-      (transaction) => requestRecommendationRefillSupersession(
-        transaction,
-        {
+      (transaction) =>
+        requestRecommendationRefillSupersession(transaction, {
           signal,
           now,
           integrityHash: "7".repeat(64),
-        },
-      ),
+        }),
     );
 
-    await expect(withBacklinkTenantTransaction(
-      pool,
-      { organizationId, workspaceId, websiteProjectId },
-      (transaction) => assertRecommendationRefillProviderExecutionCurrent(
-        transaction,
-        {
-          organizationId,
-          workspaceId,
-          websiteProjectId,
-          jobId,
-          recommendationContextVersionId: oldContextVersionId,
-        },
+    await expect(
+      withBacklinkTenantTransaction(
+        pool,
+        { organizationId, workspaceId, websiteProjectId },
+        (transaction) =>
+          assertRecommendationRefillProviderExecutionCurrent(transaction, {
+            organizationId,
+            workspaceId,
+            websiteProjectId,
+            jobId,
+            recommendationContextVersionId: oldContextVersionId,
+          }),
       ),
-    )).rejects.toThrow(
+    ).rejects.toThrow(
       "BACKLINK_RECOMMENDATION_REFILL_SUPERSEDED_PROJECT_CONTEXT",
     );
-    expect((await client.query(
-      `SELECT count(*)::int count
+    expect(
+      (
+        await client.query(
+          `SELECT count(*)::int count
          FROM backlinks.provider_batch_requests`,
-    )).rows[0]?.count).toBe(0);
+        )
+      ).rows[0]?.count,
+    ).toBe(0);
   });
 
   it.each(["running", "unknown_charge"] as const)(
@@ -872,22 +887,21 @@ describe("recommendation refill cooperative supersession persistence", () => {
       const result = await withBacklinkTenantTransaction(
         pool,
         { organizationId, workspaceId, websiteProjectId },
-        (transaction) => completeRecommendationRefillSupersession(
-          transaction,
-          {
+        (transaction) =>
+          completeRecommendationRefillSupersession(transaction, {
             signal,
             now,
             integrityHash: "c".repeat(64),
-          },
-        ),
+          }),
       );
       expect(result).toEqual({
         status: "awaiting_provider_reconciliation",
         replayed: false,
       });
 
-      const state = (await client.query(
-        `SELECT
+      const state = (
+        await client.query(
+          `SELECT
            (SELECT status FROM backlinks.backlink_jobs WHERE id=$1) job_status,
            (SELECT status FROM backlinks.backlink_commercial_discovery_batches
              WHERE id=$2) batch_status,
@@ -899,8 +913,9 @@ describe("recommendation refill cooperative supersession persistence", () => {
                 lifecycle_count,
            (SELECT count(*)::int FROM backlinks.backlink_audit_events
               WHERE action='recommendation_refill.superseded') audit_count`,
-        [jobId, discoveryBatchId, oldContextVersionId],
-      )).rows[0];
+          [jobId, discoveryBatchId, oldContextVersionId],
+        )
+      ).rows[0];
       expect(state).toEqual({
         job_status: "running",
         batch_status: "running",
@@ -927,23 +942,25 @@ describe("recommendation refill cooperative supersession persistence", () => {
     const result = await withBacklinkTenantTransaction(
       pool,
       { organizationId, workspaceId, websiteProjectId },
-      (transaction) => completeRecommendationRefillSupersession(
-        transaction,
-        {
+      (transaction) =>
+        completeRecommendationRefillSupersession(transaction, {
           signal,
           now,
           integrityHash: "d".repeat(64),
-        },
-      ),
+        }),
     );
     expect(result).toEqual({
       status: "awaiting_provider_reconciliation",
       replayed: false,
     });
-    expect((await client.query(
-      `SELECT status FROM backlinks.backlink_jobs WHERE id=$1`,
-      [jobId],
-    )).rows[0]?.status).toBe("running");
+    expect(
+      (
+        await client.query(
+          `SELECT status FROM backlinks.backlink_jobs WHERE id=$1`,
+          [jobId],
+        )
+      ).rows[0]?.status,
+    ).toBe("running");
   });
 
   it("does not terminalize while an exact cost reservation is unsettled", async () => {
@@ -980,23 +997,25 @@ describe("recommendation refill cooperative supersession persistence", () => {
     const result = await withBacklinkTenantTransaction(
       pool,
       { organizationId, workspaceId, websiteProjectId },
-      (transaction) => completeRecommendationRefillSupersession(
-        transaction,
-        {
+      (transaction) =>
+        completeRecommendationRefillSupersession(transaction, {
           signal,
           now,
           integrityHash: "e".repeat(64),
-        },
-      ),
+        }),
     );
     expect(result).toEqual({
       status: "awaiting_provider_reconciliation",
       replayed: false,
     });
-    expect((await client.query(
-      `SELECT status FROM backlinks.backlink_jobs WHERE id=$1`,
-      [jobId],
-    )).rows[0]?.status).toBe("running");
+    expect(
+      (
+        await client.query(
+          `SELECT status FROM backlinks.backlink_jobs WHERE id=$1`,
+          [jobId],
+        )
+      ).rows[0]?.status,
+    ).toBe("running");
   });
 
   it("fails closed when the authoritative context pins do not match", async () => {
@@ -1012,22 +1031,21 @@ describe("recommendation refill cooperative supersession persistence", () => {
     const result = await withBacklinkTenantTransaction(
       pool,
       { organizationId, workspaceId, websiteProjectId },
-      (transaction) => completeRecommendationRefillSupersession(
-        transaction,
-        {
+      (transaction) =>
+        completeRecommendationRefillSupersession(transaction, {
           signal: mismatchedSignal,
           now,
           integrityHash: "f".repeat(64),
-        },
-      ),
+        }),
     );
     expect(result).toEqual({
       status: "no_change",
       replayed: false,
     });
 
-    const state = (await client.query(
-      `SELECT
+    const state = (
+      await client.query(
+        `SELECT
          (SELECT status FROM backlinks.backlink_jobs WHERE id=$1) job_status,
          (SELECT status FROM backlinks.backlink_commercial_discovery_batches
            WHERE id=$2) batch_status,
@@ -1039,8 +1057,9 @@ describe("recommendation refill cooperative supersession persistence", () => {
               lifecycle_count,
          (SELECT count(*)::int FROM backlinks.backlink_audit_events
             WHERE action='recommendation_refill.superseded') audit_count`,
-      [jobId, discoveryBatchId, oldContextVersionId],
-    )).rows[0];
+        [jobId, discoveryBatchId, oldContextVersionId],
+      )
+    ).rows[0];
     expect(state).toEqual({
       job_status: "running",
       batch_status: "running",

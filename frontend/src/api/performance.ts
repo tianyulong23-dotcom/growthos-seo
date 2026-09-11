@@ -149,8 +149,7 @@ export type PerformanceBacklinkView = Exclude<
   undefined
 >
 export type PerformanceBacklinkItem =
-  | PerformanceBacklinkCandidate
-  | PerformanceBacklinkPlacement
+  PerformanceBacklinkCandidate | PerformanceBacklinkPlacement
 export type PerformanceBacklinkOptions = {
   view?: PerformanceBacklinkView
   limit?: number
@@ -165,6 +164,28 @@ export type PerformanceBacklinkEvidence =
   BacklinksResponse<"backlinksGetPlacementEvidenceV1">["evidence"]
 export type PerformanceBacklinkReverifyResult =
   BacklinksResponse<"backlinksReverifyPlacementV1">
+export type PerformanceBacklinkProfileResponse =
+  BacklinksResponse<"backlinksGetProfileV1">
+export type PerformanceBacklinkProfileSyncResponse =
+  BacklinksResponse<"backlinksRequestProfileSyncV1">
+export type PerformanceBacklinkProfileSyncJob =
+  BacklinksResponse<"backlinksGetProfileSyncJobV1">["job"]
+export type PerformanceBacklinkInventoryResponse =
+  BacklinksResponse<"backlinksListInventoryV1">
+export type PerformanceBacklinkInventoryItem =
+  PerformanceBacklinkInventoryResponse["items"][number]
+export type PerformanceBacklinkInventoryView =
+  "all" | "referring_domains" | "new" | "lost"
+export type PerformanceBacklinkInventoryOptions = {
+  page?: number
+  pageSize?: number
+  view?: PerformanceBacklinkInventoryView
+  status?: "live" | "lost" | "unknown"
+  source?: "DATAFORSEO" | "USER_IMPORTED"
+  query?: string
+  sort?: "last_seen_desc" | "rank_desc" | "spam_desc"
+  signal?: AbortSignal
+}
 
 function basePath(projectId: string) {
   return `/api/v1/projects/${encodeURIComponent(projectId)}/performance`
@@ -239,6 +260,66 @@ export function getPerformanceBacklinks(
     },
     { signal: options.signal }
   )
+}
+
+export function getPerformanceBacklinkInventory(
+  projectId: string,
+  options: PerformanceBacklinkInventoryOptions = {}
+): Promise<PerformanceBacklinkInventoryResponse> {
+  return requestBacklinks(
+    "backlinksListInventoryV1",
+    {
+      path: { websiteProjectKey: projectId },
+      query: {
+        page: options.page,
+        pageSize: options.pageSize,
+        view: options.view === "all" ? undefined : options.view,
+        status: options.status,
+        source: options.source,
+        query: options.query,
+        sort: options.sort,
+      },
+    },
+    { signal: options.signal }
+  )
+}
+
+export function getPerformanceBacklinkProfile(
+  projectId: string,
+  signal?: AbortSignal
+): Promise<PerformanceBacklinkProfileResponse> {
+  return requestBacklinks(
+    "backlinksGetProfileV1",
+    {
+      path: { websiteProjectKey: projectId },
+    },
+    { signal }
+  )
+}
+
+export function requestPerformanceBacklinkProfileSync(
+  projectId: string,
+  idempotencyKey: string
+): Promise<PerformanceBacklinkProfileSyncResponse> {
+  return requestBacklinks("backlinksRequestProfileSyncV1", {
+    path: { websiteProjectKey: projectId },
+    headers: { "idempotency-key": idempotencyKey },
+  })
+}
+
+export async function getPerformanceBacklinkProfileSyncJob(
+  projectId: string,
+  jobId: string,
+  signal?: AbortSignal
+): Promise<PerformanceBacklinkProfileSyncJob> {
+  const response = await requestBacklinks(
+    "backlinksGetProfileSyncJobV1",
+    {
+      path: { websiteProjectKey: projectId, jobId },
+    },
+    { signal }
+  )
+  return response.job
 }
 
 export async function getPerformanceBacklinkPlacement(

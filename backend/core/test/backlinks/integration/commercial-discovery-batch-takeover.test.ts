@@ -1,26 +1,14 @@
-import { readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  claimPausedCommercialDiscoveryBatch,
-} from "../../../src/modules/backlinks/application/services/commercial-recommendation-discovery.service.js";
+import { claimPausedCommercialDiscoveryBatch } from "../../../src/modules/backlinks/application/services/commercial-recommendation-discovery.service.js";
 import {
   withBacklinkTenantTransaction,
   type BacklinkTenantPool,
 } from "../../../src/modules/backlinks/db/tenant-transaction.js";
-import type {
-  GenerationInputBinding,
-} from "../../../src/modules/backlinks/ports/shared-seo-evidence.port.js";
+import type { GenerationInputBinding } from "../../../src/modules/backlinks/ports/shared-seo-evidence.port.js";
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -44,15 +32,6 @@ const { Client, Pool } = require("pg") as {
   readonly Client: new (config: unknown) => RuntimeClient;
   readonly Pool: new (config: unknown) => RuntimePool;
 };
-const migrationDirectory = new URL(
-  "../../../src/modules/backlinks/db/migrations/",
-  import.meta.url,
-);
-const rolesMigration = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
-
 const id = (value: number) =>
   `018f3000-0000-7000-8000-${value.toString().padStart(12, "0")}`;
 
@@ -128,24 +107,7 @@ const inputBinding: GenerationInputBinding = Object.freeze({
 });
 
 async function migrateBacklinks(client: RuntimeClient): Promise<void> {
-  const migrationNames = (await readdir(fileURLToPath(migrationDirectory)))
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const name of migrationNames.filter(
-    (item) => item >= "0002_" && item < "0005_",
-  )) {
-    await client.query(
-      await readFile(new URL(name, migrationDirectory), "utf8"),
-    );
-  }
-  await client.query(await readFile(rolesMigration, "utf8"));
-  for (const name of migrationNames.filter(
-    (item) => item >= "0005_" && !item.startsWith("0044_"),
-  )) {
-    await client.query(
-      await readFile(new URL(name, migrationDirectory), "utf8"),
-    );
-  }
+  await installBacklinksManifestAfterFoundation(client, "0092");
 }
 
 async function seedTakeoverState(client: RuntimeClient): Promise<void> {
@@ -454,10 +416,8 @@ function claim(
   binding: GenerationInputBinding = inputBinding,
   acceptedProviderRecoveryPending = false,
 ) {
-  return withBacklinkTenantTransaction(
-    pool,
-    scope,
-    (transaction) => claimPausedCommercialDiscoveryBatch({
+  return withBacklinkTenantTransaction(pool, scope, (transaction) =>
+    claimPausedCommercialDiscoveryBatch({
       client: transaction,
       scope,
       contextVersionId,
@@ -750,13 +710,13 @@ describe("paused commercial discovery batch takeover", () => {
       claim(newJobBId),
     ]);
     const fulfilled = results.filter(
-      (result): result is PromiseFulfilledResult<
-        Awaited<ReturnType<typeof claim>>
-      > => result.status === "fulfilled",
+      (
+        result,
+      ): result is PromiseFulfilledResult<Awaited<ReturnType<typeof claim>>> =>
+        result.status === "fulfilled",
     );
     const rejected = results.filter(
-      (result): result is PromiseRejectedResult =>
-        result.status === "rejected",
+      (result): result is PromiseRejectedResult => result.status === "rejected",
     );
 
     expect(fulfilled).toHaveLength(1);
@@ -788,55 +748,72 @@ describe("paused commercial discovery batch takeover", () => {
   });
 
   it.each([
-    ["failed old job", async () => {
-      await client.query(
-        `UPDATE backlinks.backlink_jobs
+    [
+      "failed old job",
+      async () => {
+        await client.query(
+          `UPDATE backlinks.backlink_jobs
             SET status='failed'
           WHERE id=$1`,
-        [oldJobId],
-      );
-    }],
-    ["running batch", async () => {
-      await client.query(
-        `UPDATE backlinks.backlink_commercial_discovery_batches
+          [oldJobId],
+        );
+      },
+    ],
+    [
+      "running batch",
+      async () => {
+        await client.query(
+          `UPDATE backlinks.backlink_commercial_discovery_batches
             SET status='running',finished_at=NULL
           WHERE id=$1`,
-        [discoveryBatchId],
-      );
-    }],
-    ["reserved usage", async () => {
-      await client.query(
-        `UPDATE backlinks.backlink_provider_usage_ledger
+          [discoveryBatchId],
+        );
+      },
+    ],
+    [
+      "reserved usage",
+      async () => {
+        await client.query(
+          `UPDATE backlinks.backlink_provider_usage_ledger
             SET status='reserved',actual_cost_micros=NULL,settled_at=NULL
           WHERE id=$1`,
-        [providerUsageId],
-      );
-    }],
-    ["acquired lease", async () => {
-      await client.query(
-        `UPDATE backlinks.provider_fetch_leases
+          [providerUsageId],
+        );
+      },
+    ],
+    [
+      "acquired lease",
+      async () => {
+        await client.query(
+          `UPDATE backlinks.provider_fetch_leases
             SET status='acquired'
           WHERE artifact_fingerprint=$1`,
-        [providerRequestFingerprint],
-      );
-    }],
-    ["unknown-charge request", async () => {
-      await client.query(
-        `UPDATE backlinks.provider_batch_requests
+          [providerRequestFingerprint],
+        );
+      },
+    ],
+    [
+      "unknown-charge request",
+      async () => {
+        await client.query(
+          `UPDATE backlinks.provider_batch_requests
             SET status='unknown_charge'
           WHERE id=$1`,
-        [providerRequestId],
-      );
-      await client.query(
-        `UPDATE backlinks.backlink_provider_requests
+          [providerRequestId],
+        );
+        await client.query(
+          `UPDATE backlinks.backlink_provider_requests
             SET status='unknown_charge'
           WHERE id=$1`,
-        [providerRequestId],
-      );
-    }],
-    ["newer context", async () => {
-      await client.query(
-        `INSERT INTO backlinks.backlink_project_context_snapshots (
+          [providerRequestId],
+        );
+      },
+    ],
+    [
+      "newer context",
+      async () => {
+        await client.query(
+          `INSERT INTO backlinks.backlink_project_context_snapshots (
            id,organization_id,workspace_id,website_project_id,snapshot_version,
            project_status,canonical_domain,locale,country_code,
            profile_version_id,promotion_target_version_id,products,keywords,
@@ -850,17 +827,21 @@ describe("paused commercial discovery batch takeover", () => {
            '["South African viewers"]'::jsonb,
            '["editorial review"]'::jsonb,'stage2d-test'
          )`,
-        [newerContextId, organizationId, workspaceId, websiteProjectId],
-      );
-    }],
-  ])("fails closed for %s without partial audit writes", async (_name, setup) => {
-    await setup();
+          [newerContextId, organizationId, workspaceId, websiteProjectId],
+        );
+      },
+    ],
+  ])(
+    "fails closed for %s without partial audit writes",
+    async (_name, setup) => {
+      await setup();
 
-    await expect(claim(newJobAId)).rejects.toThrow(
-      "COMMERCIAL_DISCOVERY_BATCH_TAKEOVER_BLOCKED",
-    );
-    await assertNoTakeoverWrites();
-  });
+      await expect(claim(newJobAId)).rejects.toThrow(
+        "COMMERCIAL_DISCOVERY_BATCH_TAKEOVER_BLOCKED",
+      );
+      await assertNoTakeoverWrites();
+    },
+  );
 
   it("fails closed when the generation input pin does not match", async () => {
     const wrongBinding: GenerationInputBinding = Object.freeze({

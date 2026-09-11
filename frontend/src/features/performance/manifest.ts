@@ -11,6 +11,7 @@ export const performanceNavigation: NavigationItem = {
     { id: "overview", label: "总览" },
     { id: "articles", label: "文章效果" },
     { id: "backlinks", label: "外链监控" },
+    { id: "reports", label: "指标报告" },
   ],
   action: "",
 }

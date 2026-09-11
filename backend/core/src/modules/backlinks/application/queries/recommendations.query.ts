@@ -16,6 +16,7 @@ import {
   type RecommendationProviderAvailability,
   type RecommendationRecoveryCommand,
 } from "../../domain/recommendations/recommendation-product-state.js";
+import { assertV1RecommendationPoolReadContract } from "../../domain/recommendations/recommendation-pool-read-contract.js";
 import {
   resolveCommercialSupplyPublishedTarget,
 } from "../../domain/recommendations/commercial-refill-cycle.js";
@@ -564,6 +565,7 @@ async function readRecommendationSchemaCapabilities(
   Readonly<{
     correctedVisibility: boolean;
     aiCapacityAvailable: boolean;
+    poolContractAvailable: boolean;
   }>
 > {
   const result = await client.query(`
@@ -576,12 +578,16 @@ async function readRecommendationSchemaCapabilities(
       ) "correctedVisibility",
       (
         to_regclass('backlink_ai_capability_windows') IS NOT NULL
-      ) "aiCapacityAvailable"
+      ) "aiCapacityAvailable",
+      (
+        to_regclass('backlink_recommendation_pool_project_contracts') IS NOT NULL
+      ) "poolContractAvailable"
   `);
   const row = result.rows[0] ?? {};
   return Object.freeze({
     correctedVisibility: row.correctedVisibility === true,
     aiCapacityAvailable: row.aiCapacityAvailable === true,
+    poolContractAvailable: row.poolContractAvailable === true,
   });
 }
 const paidCandidateSourceTypes = new Set([
@@ -1025,6 +1031,13 @@ export function createRecommendationsQuery(
     async listRecommendations(context, input) {
       const after = decodeCursor(input.cursor);
       const capabilities = await readRecommendationSchemaCapabilities(client);
+      if (capabilities.poolContractAvailable) {
+        await assertV1RecommendationPoolReadContract(client, {
+          organizationId: context.tenant.organizationId,
+          workspaceId: context.tenant.workspaceId,
+          websiteProjectId: context.project.websiteProjectId,
+        });
+      }
       const executeListQuery = (correctedVisibility: boolean) =>
         client.query(
           `
@@ -1836,6 +1849,13 @@ export function createRecommendationsQuery(
       runningBuildId = "unknown",
     ) {
       const capabilities = await readRecommendationSchemaCapabilities(client);
+      if (capabilities.poolContractAvailable) {
+        await assertV1RecommendationPoolReadContract(client, {
+          organizationId: context.tenant.organizationId,
+          workspaceId: context.tenant.workspaceId,
+          websiteProjectId: context.project.websiteProjectId,
+        });
+      }
       const executeInventoryQuery = (
         correctedVisibility: boolean,
         aiCapacityAvailable: boolean,

@@ -22,6 +22,7 @@ export type ModuleConfig = {
   description: string
   icon: LucideIcon
   tabs: readonly ModuleTab[]
+  hiddenViews?: readonly string[]
   action: string
 }
 

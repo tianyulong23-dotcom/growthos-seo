@@ -1,30 +1,23 @@
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import {
-  runProjectScopedLane,
-} from "../../../src/modules/backlinks/application/services/project-scope-scheduler.js";
+import { runProjectScopedLane } from "../../../src/modules/backlinks/application/services/project-scope-scheduler.js";
 import { createJobRepository } from "../../../src/modules/backlinks/db/repositories/job.repository.js";
 import {
   createOutboxRepository,
   createScopedOutboxRelayRepository,
 } from "../../../src/modules/backlinks/db/repositories/outbox.repository.js";
-import {
-  createPostgresqlProjectScopeProvider,
-} from "../../../src/modules/backlinks/db/repositories/project-scope.repository.js";
+import { createPostgresqlProjectScopeProvider } from "../../../src/modules/backlinks/db/repositories/project-scope.repository.js";
 import {
   withBacklinkTenantTransaction,
   type BacklinkTenantPool,
 } from "../../../src/modules/backlinks/db/tenant-transaction.js";
-import type {
-  ActiveProjectScope,
-} from "../../../src/modules/backlinks/ports/project-scope-provider.port.js";
-import {
-  buildBacklinksWorkflowId,
-} from "../../../src/modules/backlinks/workflows/namespaces.js";
+import type { ActiveProjectScope } from "../../../src/modules/backlinks/ports/project-scope-provider.port.js";
+import { buildBacklinksWorkflowId } from "../../../src/modules/backlinks/workflows/namespaces.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -57,10 +50,11 @@ const manifestUrl = new URL(
   "../../../../database/deployment-manifest.v1.json",
   import.meta.url,
 );
-const migrationUrl = (path: string) => new URL(
-  `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
-  import.meta.url,
-);
+const migrationUrl = (path: string) =>
+  new URL(
+    `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
+    import.meta.url,
+  );
 const organizationId = "10000000-0000-4000-8000-000000000014";
 const workspaceId = "20000000-0000-4000-8000-000000000014";
 const projects = [
@@ -86,7 +80,7 @@ const projects = [
     eventId: "60000000-0000-4000-8000-000000000003",
   },
 ] as const;
-const runtimeRole = "local_product_014_runtime";
+const runtimeRole = `local_product_014_${randomBytes(6).toString("hex")}`;
 const runtimePassword = "local-product-014-password";
 const eventType = "backlinks.project-scope-probe.requested.v1";
 const legacyJobId = "50000000-0000-4000-8000-000000000014";
@@ -134,8 +128,8 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
     ) as DeploymentManifest;
     const backlinkSteps = manifest.steps.filter(
       ({ migrationId }) =>
-        migrationId.startsWith("backlinks-")
-        && migrationId !== "backlinks-0001"
+        migrationId.startsWith("backlinks-") &&
+        migrationId !== "backlinks-0001",
     );
     const scopeMigrationIndex = backlinkSteps.findIndex(
       ({ migrationId }) => migrationId === "backlinks-0043",
@@ -208,17 +202,16 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
       ],
     );
     const scopeMigration = backlinkSteps[scopeMigrationIndex];
-    await admin.query(await readFile(
-      migrationUrl(scopeMigration.path),
-      "utf8",
-    ));
+    await admin.query(
+      await readFile(migrationUrl(scopeMigration.path), "utf8"),
+    );
     await admin.query(`
-      CREATE ROLE ${runtimeRole}
+      CREATE ROLE "${runtimeRole}"
         LOGIN PASSWORD '${runtimePassword}'
         IN ROLE growthos_backlinks_writer
     `);
     await admin.query(
-      `ALTER ROLE ${runtimeRole} SET search_path = backlinks, pg_catalog`,
+      `ALTER ROLE "${runtimeRole}" SET search_path = backlinks, pg_catalog`,
     );
     runtimePool = new PgPool({
       connectionString: runtimeConnectionString(harness.connectionString),
@@ -228,40 +221,49 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
 
   afterAll(async () => {
     await runtimePool?.end();
+    await admin?.query(`DROP ROLE IF EXISTS "${runtimeRole}"`);
     await admin?.end();
     await harness?.stop();
   });
 
   it("enumerates three projects fairly, isolates RLS, and recovers from PostgreSQL", async () => {
-    await expect(admin.query(
-      `SELECT workflow_id AS "workflowId"
+    await expect(
+      admin.query(
+        `SELECT workflow_id AS "workflowId"
          FROM backlink_jobs
         WHERE id=$1`,
-      [legacyJobId],
-    )).resolves.toMatchObject({
+        [legacyJobId],
+      ),
+    ).resolves.toMatchObject({
       rows: [{ workflowId: scopedLegacyWorkflowId }],
     });
-    await expect(admin.query(
-      `SELECT idempotency_key AS "idempotencyKey",
+    await expect(
+      admin.query(
+        `SELECT idempotency_key AS "idempotencyKey",
               payload->>'workflowId' AS "workflowId"
          FROM backlink_outbox_events
         WHERE id=$1`,
-      [legacyEventId],
-    )).resolves.toMatchObject({
-      rows: [{
-        idempotencyKey: scopedLegacyWorkflowId,
-        workflowId: scopedLegacyWorkflowId,
-      }],
+        [legacyEventId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          idempotencyKey: scopedLegacyWorkflowId,
+          workflowId: scopedLegacyWorkflowId,
+        },
+      ],
     });
 
     const firstProvider = createPostgresqlProjectScopeProvider(runtimePool);
-    await expect(firstProvider.listActiveProjectScopes({
-      organizationId,
-      workspaceId,
-      lane: "draft-generation",
-      cursor: null,
-      limit: 2,
-    })).resolves.toMatchObject({
+    await expect(
+      firstProvider.listActiveProjectScopes({
+        organizationId,
+        workspaceId,
+        lane: "draft-generation",
+        cursor: null,
+        limit: 2,
+      }),
+    ).resolves.toMatchObject({
       scopes: [
         { websiteProjectId: projects[0].websiteProjectId },
         { websiteProjectId: projects[1].websiteProjectId },
@@ -276,11 +278,13 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
       visited: projects.map(({ websiteProjectId }) => websiteProjectId),
       errors: [],
     });
-    expect(await admin.query(
-      `SELECT count(*)::int AS count
+    expect(
+      await admin.query(
+        `SELECT count(*)::int AS count
          FROM backlink_jobs
         WHERE job_type='local_product_014_no_provider_probe'`,
-    )).toMatchObject({ rows: [{ count: 3 }] });
+      ),
+    ).toMatchObject({ rows: [{ count: 3 }] });
 
     for (const project of projects) {
       const repository = createScopedOutboxRelayRepository(runtimePool, {
@@ -295,11 +299,13 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
       });
       expect(claimed).toHaveLength(1);
       expect(claimed[0]?.websiteProjectId).toBe(project.websiteProjectId);
-      await expect(repository.mark({
-        eventId: project.eventId,
-        workerId: `local-product-014:${project.websiteProjectId}`,
-        outcome: "published",
-      })).resolves.toBe(true);
+      await expect(
+        repository.mark({
+          eventId: project.eventId,
+          workerId: `local-product-014:${project.websiteProjectId}`,
+          outcome: "published",
+        }),
+      ).resolves.toBe(true);
     }
 
     await admin.query(
@@ -324,10 +330,7 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
     expect(afterPause).toEqual({
       outcome: { visited: 2, completed: 2, failed: 0 },
       created: 0,
-      visited: [
-        projects[0].websiteProjectId,
-        projects[2].websiteProjectId,
-      ],
+      visited: [projects[0].websiteProjectId, projects[2].websiteProjectId],
       errors: [],
     });
 
@@ -338,17 +341,21 @@ describe("LOCAL-PRODUCT-014 project scope provider", () => {
     });
     const afterRestart = await runNoProviderProbe(runtimePool);
     expect(afterRestart).toEqual(afterPause);
-    expect(await admin.query(
-      `SELECT count(*)::int AS count
+    expect(
+      await admin.query(
+        `SELECT count(*)::int AS count
          FROM backlink_jobs
         WHERE job_type='local_product_014_no_provider_probe'`,
-    )).toMatchObject({ rows: [{ count: 3 }] });
-    expect(await admin.query(
-      `SELECT count(*)::int AS count
+      ),
+    ).toMatchObject({ rows: [{ count: 3 }] });
+    expect(
+      await admin.query(
+        `SELECT count(*)::int AS count
          FROM backlink_outbox_events
         WHERE event_type=$1`,
-      [eventType],
-    )).toMatchObject({ rows: [{ count: 3 }] });
+        [eventType],
+      ),
+    ).toMatchObject({ rows: [{ count: 3 }] });
   }, 60_000);
 });
 
@@ -372,8 +379,11 @@ async function runNoProviderProbe(pool: RuntimePool) {
             ORDER BY snapshot_version`,
         );
         expect([
-          ...new Set(visible.rows.map(({ websiteProjectId }) =>
-            String(websiteProjectId))),
+          ...new Set(
+            visible.rows.map(({ websiteProjectId }) =>
+              String(websiteProjectId),
+            ),
+          ),
         ]).toEqual([scope.websiteProjectId]);
 
         const workflowId = buildBacklinksWorkflowId({
@@ -383,18 +393,20 @@ async function runNoProviderProbe(pool: RuntimePool) {
           workflow: "draft-generation",
           instanceId: scope.projectContextSnapshotId,
         });
-        if (await createJobRepository(client).create({
-          organizationId,
-          workspaceId,
-          websiteProjectId: scope.websiteProjectId,
-          jobId: fixture.jobId,
-          jobType: "local_product_014_no_provider_probe",
-          sourceObjectType: "project_context_snapshot",
-          sourceObjectId: scope.projectContextSnapshotId,
-          workflowId,
-          correlationId: `local-product-014:${scope.websiteProjectId}`,
-          actorId: "local-product-014",
-        })) {
+        if (
+          await createJobRepository(client).create({
+            organizationId,
+            workspaceId,
+            websiteProjectId: scope.websiteProjectId,
+            jobId: fixture.jobId,
+            jobType: "local_product_014_no_provider_probe",
+            sourceObjectType: "project_context_snapshot",
+            sourceObjectId: scope.projectContextSnapshotId,
+            workflowId,
+            correlationId: `local-product-014:${scope.websiteProjectId}`,
+            actorId: "local-product-014",
+          })
+        ) {
           created += 1;
         }
         await createOutboxRepository(client).append({

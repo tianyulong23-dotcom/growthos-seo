@@ -268,6 +268,8 @@ describe("local product capability matrix", () => {
     expect(readBacklinksLiveCapabilities({
       ...localProductDataForSeo,
       DATAFORSEO_REQUEST_TIMEOUT_MS: "300000",
+      DATAFORSEO_DISCOVERY_CONCURRENCY: "2",
+      DATAFORSEO_QUALIFICATION_CONCURRENCY: "2",
     })).toMatchObject({
       mode: "LOCAL_PRODUCT",
       dataForSeoEnabled: true,
@@ -297,6 +299,18 @@ describe("local product capability matrix", () => {
       "300001",
       "BACKLINKS_DATAFORSEO_CONFIGURATION_INVALID:"
         + "DATAFORSEO_REQUEST_TIMEOUT_MS",
+    ],
+    [
+      "DATAFORSEO_DISCOVERY_CONCURRENCY",
+      "5",
+      "BACKLINKS_DATAFORSEO_CONFIGURATION_INVALID:"
+        + "DATAFORSEO_DISCOVERY_CONCURRENCY",
+    ],
+    [
+      "DATAFORSEO_QUALIFICATION_CONCURRENCY",
+      "0",
+      "BACKLINKS_DATAFORSEO_CONFIGURATION_INVALID:"
+        + "DATAFORSEO_QUALIFICATION_CONCURRENCY",
     ],
   ])(
     "fails closed when %s is unsafe",

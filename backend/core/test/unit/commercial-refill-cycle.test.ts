@@ -8,6 +8,7 @@ import {
   parseCommercialRefillAttempts,
   parseCommercialRefillWindowKey,
   planCommercialSupplyOperation,
+  resolveCommercialRefillRetryDelay,
   type CommercialRefillAttempt,
 } from "../../src/modules/backlinks/domain/recommendations/commercial-refill-cycle.js";
 
@@ -54,6 +55,30 @@ function zeroRawRound(round: number): readonly CommercialRefillAttempt[] {
 }
 
 describe("commercial recommendation refill cycle", () => {
+  it("uses deterministic short retry delays without weakening budget pauses", () => {
+    const provider = resolveCommercialRefillRetryDelay({
+      reason: "provider",
+      stableKey: "job-1:window-1",
+    });
+    const projectContext = resolveCommercialRefillRetryDelay({
+      reason: "project_context",
+      stableKey: "job-1:window-1",
+    });
+
+    expect(provider).toBeGreaterThanOrEqual(15_000);
+    expect(provider).toBeLessThanOrEqual(20_000);
+    expect(projectContext).toBeGreaterThanOrEqual(5_000);
+    expect(projectContext).toBeLessThanOrEqual(10_000);
+    expect(resolveCommercialRefillRetryDelay({
+      reason: "provider",
+      stableKey: "job-1:window-1",
+    })).toBe(provider);
+    expect(resolveCommercialRefillRetryDelay({
+      reason: "budget",
+      stableKey: "job-1:window-1",
+    })).toBe(60_000);
+  });
+
   it("builds a deterministic project/context/tier/round/window key", () => {
     const key = buildCommercialRefillWindowKey({
       websiteProjectId: "project-1",

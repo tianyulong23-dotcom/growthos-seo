@@ -537,11 +537,11 @@ async def backlinks_recommendations(
     return await _forward(request, websiteProjectKey)
 
 
-@router.post(
-    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendations/{recommendationId}/reject",
+@router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-feed",
     include_in_schema=False,
 )
-async def reject_backlinks_recommendation(
+async def backlinks_recommendation_feed(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:
@@ -549,10 +549,45 @@ async def reject_backlinks_recommendation(
 
 
 @router.post(
-    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-refill-jobs",
+    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-feed/observations",
     include_in_schema=False,
 )
-async def create_backlinks_recommendation_refill_job(
+async def observe_backlinks_recommendation_feed(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-feed/export",
+    include_in_schema=False,
+)
+async def export_backlinks_recommendation_feed(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/"
+    "recommendation-user-release/publish-initial",
+    include_in_schema=False,
+)
+async def publish_initial_backlinks_recommendations(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.get(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/"
+    "recommendation-user-release/status",
+    include_in_schema=False,
+)
+async def backlinks_recommendation_release_status(
     request: Request,
     websiteProjectKey: str,
 ) -> Response:
@@ -561,43 +596,70 @@ async def create_backlinks_recommendation_refill_job(
 
 @router.post(
     "/api/v1/projects/{websiteProjectKey}/backlinks/"
-    "recommendation-refill-jobs/{jobId}/cancel",
+    "recommendation-user-release/get-more",
     include_in_schema=False,
 )
-async def cancel_backlinks_recommendation_refill_job(
+async def get_more_backlinks_recommendations(
     request: Request,
     websiteProjectKey: str,
-    jobId: str,
 ) -> Response:
-    del jobId
     return await _forward(request, websiteProjectKey)
 
 
 @router.post(
     "/api/v1/projects/{websiteProjectKey}/backlinks/"
-    "recommendation-refill-jobs/{jobId}/close-duplicate",
+    "recommendation-user-release/items/{itemId}/archive",
     include_in_schema=False,
 )
-async def close_duplicate_backlinks_recommendation_refill_job(
+async def archive_backlinks_recommendation_feed_item(
     request: Request,
     websiteProjectKey: str,
-    jobId: str,
 ) -> Response:
-    del jobId
     return await _forward(request, websiteProjectKey)
 
 
 @router.post(
     "/api/v1/projects/{websiteProjectKey}/backlinks/"
-    "recommendation-pools/{visiblePoolGeneration}/archive",
+    "recommendation-user-release/items/{itemId}/unarchive",
     include_in_schema=False,
 )
-async def archive_backlinks_recommendation_pool(
+async def unarchive_backlinks_recommendation_feed_item(
     request: Request,
     websiteProjectKey: str,
-    visiblePoolGeneration: int,
 ) -> Response:
-    del visiblePoolGeneration
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-seeds/generate",
+    include_in_schema=False,
+)
+async def generate_backlinks_recommendation_seeds(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-seeds/launch",
+    include_in_schema=False,
+)
+async def launch_backlinks_recommendation_pool(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
+    return await _forward(request, websiteProjectKey)
+
+
+@router.post(
+    "/api/v1/projects/{websiteProjectKey}/backlinks/recommendation-seeds/validate",
+    include_in_schema=False,
+)
+async def validate_backlinks_recommendation_seeds(
+    request: Request,
+    websiteProjectKey: str,
+) -> Response:
     return await _forward(request, websiteProjectKey)
 
 

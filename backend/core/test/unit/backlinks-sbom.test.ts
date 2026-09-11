@@ -1,9 +1,13 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { buildBacklinksSbom, scanSensitiveFields } from "../../scripts/build-backlinks-sbom.js";
+import {
+  buildBacklinksSbom,
+  scanSensitiveFields,
+} from "../../scripts/build-backlinks-sbom.js";
 
 const base = new URL("../../", import.meta.url);
-const read = (path: string): string => readFileSync(new URL(path, base), "utf8");
+const read = (path: string): string =>
+  readFileSync(new URL(path, base), "utf8");
 const provenance = {
   node: "v24.14.1",
   npm: "11.11.0",
@@ -25,23 +29,32 @@ describe("buildBacklinksSbom", () => {
       devDependencies: Record<string, string>;
     };
     const bom = committedSbom();
-    const components = bom.components as Array<{ name: string; version: string }>;
-    const versions = new Map(components.map(({ name, version }) => [name, version]));
+    const components = bom.components as Array<{
+      name: string;
+      version: string;
+    }>;
+    const lockedComponents = new Set(
+      components.map(({ name, version }) => `${name}@${version}`),
+    );
     expect(bom.bomFormat).toBe("CycloneDX");
     expect(bom.specVersion).toBe("1.7");
-    expect(components.every(({ version }) => /^\d+\.\d+\.\d+/.test(version))).toBe(true);
+    expect(
+      components.every(({ version }) => /^\d+\.\d+\.\d+/.test(version)),
+    ).toBe(true);
     for (const [name, version] of Object.entries({
       ...packageJson.dependencies,
       ...packageJson.devDependencies,
     })) {
-      expect(versions.get(name)).toBe(version);
+      expect(lockedComponents.has(`${name}@${version}`)).toBe(true);
     }
-    expect(JSON.stringify(bom)).toContain("growthos:provenance:package-lock-sha256");
+    expect(JSON.stringify(bom)).toContain(
+      "growthos:provenance:package-lock-sha256",
+    );
     expect(scanSensitiveFields(bom)).toEqual([]);
   });
   it("detects sensitive fields without credential fixtures", () => {
-    expect(scanSensitiveFields({ metadata: { authorization: "redacted" } })).toEqual([
-      "$.metadata.authorization is a sensitive field",
-    ]);
+    expect(
+      scanSensitiveFields({ metadata: { authorization: "redacted" } }),
+    ).toEqual(["$.metadata.authorization is a sensitive field"]);
   });
 });

@@ -216,7 +216,7 @@ describe("commercial candidate evaluation", () => {
       "COOPERATION_PATH_REQUIRES_TOPIC_EVIDENCE",
     );
     expect(result.ruleVersion).toBe(
-      "recommendation-commercial-fit-rules.v4.2",
+      "recommendation-commercial-fit-rules.v4.3",
     );
     expect(result.decision).toBe("ineligible");
   });
@@ -459,7 +459,7 @@ describe("commercial candidate evaluation", () => {
     });
   });
 
-  it("does not lower the admission threshold to manufacture a candidate", () => {
+  it("keeps the first generation strict and only relaxes a strongly relevant second generation candidate", () => {
     const lowFit = evaluateCommercialCandidate({
       ...base,
       provider: {
@@ -483,23 +483,126 @@ describe("commercial candidate evaluation", () => {
       },
     });
     expect(lowFit.decision).toBe("ineligible");
+    expect(lowFit.total).toBeGreaterThanOrEqual(40);
+    expect(lowFit.total).toBeLessThan(50);
 
-    const batch = applyProgressiveCommercialCandidateAdmission([lowFit]);
+    const firstGeneration = applyProgressiveCommercialCandidateAdmission(
+      [lowFit],
+      { visiblePoolGeneration: 1 },
+    );
 
-    expect(batch.admission).toMatchObject({
+    expect(firstGeneration.admission).toMatchObject({
       baselineThreshold: 50,
       appliedThreshold: 50,
       fallbackApplied: false,
     });
-    expect(batch.scores[0]).toMatchObject({
+    expect(firstGeneration.scores[0]).toMatchObject({
       decision: "ineligible",
       details: {
         matchTier: "not_eligible",
       },
     });
-    expect(batch.scores[0]?.details.reasonCodes).not.toContain(
+    expect(firstGeneration.scores[0]?.details.reasonCodes).not.toContain(
       "PROGRESSIVE_SCORE_THRESHOLD",
     );
+
+    const secondGeneration = applyProgressiveCommercialCandidateAdmission(
+      [lowFit],
+      { visiblePoolGeneration: 2 },
+    );
+
+    expect(secondGeneration.admission).toMatchObject({
+      baselineThreshold: 50,
+      appliedThreshold: 40,
+      fallbackApplied: true,
+    });
+    expect(secondGeneration.scores[0]).toMatchObject({
+      decision: "eligible",
+      admission: {
+        baselineThreshold: 50,
+        appliedThreshold: 40,
+        fallbackApplied: true,
+      },
+      details: {
+        matchTier: "qualified_fit",
+      },
+    });
+    expect(secondGeneration.scores[0]?.details.reasonCodes).toEqual(
+      expect.arrayContaining([
+        "PROGRESSIVE_SCORE_THRESHOLD",
+        "ADMISSION_THRESHOLD_40",
+      ]),
+    );
+  });
+
+  it("keeps a second generation candidate below 50 ineligible without an explicit semantic match", () => {
+    const weakFit = evaluateCommercialCandidate({
+      ...base,
+      provider: {
+        ...base.provider,
+        rank: 0,
+        traffic: 0,
+        backlinkCount: 0,
+        referringDomainCount: 0,
+        spamScore: 50,
+      },
+      staticAssessment: {
+        ...assessment,
+        productRelevance: 0.45,
+        editorialQuality: 0.2,
+        matchedProducts: [],
+        matchedTopics: [],
+        matchedKeywords: [],
+        matchedTargetPages: [],
+        matchedAudiences: [],
+        matchedPartnershipGoals: [],
+        monetizationMethods: [],
+        cooperationPages: [],
+        outboundLinkDensity: 0.8,
+        technicalAccessibility: 0.8,
+      },
+    });
+
+    const batch = applyProgressiveCommercialCandidateAdmission(
+      [weakFit],
+      { visiblePoolGeneration: 2 },
+    );
+
+    expect(batch.admission.appliedThreshold).toBe(40);
+    expect(batch.scores[0]).toMatchObject({
+      decision: "ineligible",
+      admission: {
+        appliedThreshold: 50,
+        fallbackApplied: false,
+      },
+      details: {
+        matchTier: "not_eligible",
+      },
+    });
+  });
+
+  it("never relaxes a second generation hard-gated candidate", () => {
+    const hardGated = evaluateCommercialCandidate({
+      ...base,
+      staticAssessment: {
+        ...assessment,
+        unrelatedIndustry: true,
+      },
+    });
+
+    const batch = applyProgressiveCommercialCandidateAdmission(
+      [hardGated],
+      { visiblePoolGeneration: 2 },
+    );
+
+    expect(batch.scores[0]).toMatchObject({
+      decision: "ineligible",
+      admission: {
+        appliedThreshold: 50,
+        fallbackApplied: false,
+      },
+    });
+    expect(batch.scores[0]?.hitGates).toContain("unrelated_industry");
   });
 
   it("admits a non-safety manual-review assessment when the score qualifies", () => {

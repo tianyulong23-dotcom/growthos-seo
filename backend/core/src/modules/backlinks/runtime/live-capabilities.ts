@@ -371,6 +371,15 @@ const assertDataForSeoConfiguration = (
     10,
     100,
   );
+  for (
+    const name of [
+      "DATAFORSEO_DISCOVERY_CONCURRENCY",
+      "DATAFORSEO_QUALIFICATION_CONCURRENCY",
+    ] as const
+  ) {
+    if ((environment[name] ?? "").trim().length === 0) continue;
+    readDataForSeoInteger(environment, name, 1, 4);
+  }
 };
 
 export function readBacklinksLiveCapabilities(

@@ -77,6 +77,102 @@ describe("recommendation commands", () => {
     expect(sql).toContain("after_redacted");
   });
 
+  it("restores existing-evidence mode when rearming a durable refill", async () => {
+    const operationId = "018f0000-0000-7000-8000-000000000005";
+    const jobId = "018f0000-0000-7000-8000-000000000006";
+    const outboxEventId = "018f0000-0000-7000-8000-000000000009";
+    let authorizationRecoveryCalled = false;
+    let refillValues: readonly unknown[] | undefined;
+    const commands = createRecommendationCommands({
+      query: async (text, values) => {
+        if (text.includes("JOIN backlink_idempotency_records AS idempotency")) {
+          return {
+            rows: [{
+              refillWindowKey:
+                `commercial-existing:${websiteProjectId}:${contextVersionId}:g1:archive-prepared`,
+              idempotencyKey:
+                `recommendation-refill:commercial-existing:${websiteProjectId}:${contextVersionId}:g1:archive-prepared`,
+              requestHash: "historical-existing-evidence-request-hash",
+              triggerReason: "inventory_low",
+              lowWatermark: 0,
+              highWatermark: 10,
+              visiblePoolGeneration: 1,
+              jobId,
+              supplyMode: "existing_evidence",
+              outboxEventId,
+            }],
+          };
+        }
+        if (text.includes("WITH target AS MATERIALIZED")) {
+          authorizationRecoveryCalled = true;
+          return { rows: [] };
+        }
+        if (text.includes("INSERT INTO backlink_commercial_inventory_policies"))
+          return { rows: [] };
+        if (text.includes("WITH guard AS")) {
+          refillValues = values;
+          return {
+            rows: [{
+              state: "replay",
+              requestHash: values?.[7],
+              responseBody: {
+                operationId,
+                jobId,
+                workflowId: "workflow-1",
+                outboxEventId,
+                status: "queued",
+                version: 2,
+                visiblePoolGeneration: 1,
+                lifecycleEventId:
+                  "018f0000-0000-7000-8000-000000000007",
+                auditEventId:
+                  "018f0000-0000-7000-8000-000000000008",
+              },
+            }],
+          };
+        }
+        return { rows: [] };
+      },
+    }, {
+      persistentProviderBudgetGrant: {
+        provider: "dataforseo",
+        reasonCode: "user_authorized_persistent_discovery",
+        maxPaidCalls: 3,
+        maxCostMicros: 1_000_000,
+      },
+    });
+
+    await expect(commands.requestRefill({
+      context: {
+        actor: createActorContext({
+          userId: "local-product-operator",
+          sessionId: "session-1",
+          roles: ["member"],
+        }),
+        tenant: createTenantContext({ organizationId, workspaceId }),
+        project: createProjectContext({
+          websiteProjectId,
+          canonicalDomain: "example.com",
+          locale: "en-US",
+          countryCode: "US",
+          profileVersionId: "profile-1",
+          promotionTargetVersionId: "target-1",
+        }),
+      },
+      requestId: "existing-evidence-recovery-1",
+      expectedVersion: 0,
+      recommendationContextVersionId: contextVersionId,
+      visiblePoolGeneration: 1,
+      lowWatermark: 0,
+      highWatermark: 10,
+      operationId,
+    })).resolves.toMatchObject({ operationId, replayed: true });
+
+    expect(authorizationRecoveryCalled).toBe(false);
+    expect(refillValues?.[22]).toBeNull();
+    expect(refillValues?.[23]).toBe("existing_evidence");
+  });
+
   it("persists a reusable provider budget authorization for a new refill", async () => {
     let sql = "";
     let values: readonly unknown[] | undefined;
@@ -510,7 +606,7 @@ describe("recommendation commands", () => {
       "candidate.commercial_score->>'decision'='eligible'",
     );
     expect(sql).toContain(
-      "(candidate.commercial_score->>'total')::numeric>=50",
+      "(candidate.commercial_score->>'total')::numeric>=(candidate.commercial_score#>>'{admission,appliedThreshold}')::numeric",
     );
     expect(sql).toContain("qualification.decision='eligible'");
     expect(sql).toContain(
@@ -919,6 +1015,7 @@ describe("recommendation commands", () => {
               archivedGeneration: 1,
               nextGeneration: 2,
               archivedCount: 20,
+              preparedCandidateCount: 8,
               state: "awaiting_refresh",
               version: 4,
               lifecycleEventId: "018f0000-0000-7000-8000-000000000009",
@@ -956,6 +1053,7 @@ describe("recommendation commands", () => {
       archivedGeneration: 1,
       nextGeneration: 2,
       archivedCount: 20,
+      preparedCandidateCount: 8,
       state: "awaiting_refresh",
       replayed: false,
     });
@@ -983,6 +1081,19 @@ describe("recommendation commands", () => {
     );
     expect(sql).toContain("inventory.visible_pool_generation=$6");
     expect(sql).toContain("status='archived'");
+    expect(sql).toContain("prepared_candidates AS");
+    expect(sql).toContain("qualification.decision='eligible'");
+    expect(sql).toContain("candidate.recommendation_id IS NULL");
+    expect(sql).toContain("candidate.visible_pool_generation=$6");
+    expect(sql).toContain("candidate.commercial_score->>'decision'='eligible'");
+    expect(sql).toContain(
+      "jsonb_array_length(candidate.gate_decision->'hitGates')=0",
+    );
+    expect(sql).toContain(
+      "candidate.commercial_score->>'total')::numeric>=(candidate.commercial_score#>>'{admission,appliedThreshold}')::numeric",
+    );
+    expect(sql).toContain("candidate.project_context_version_id,$6+1");
+    expect(sql).toContain("LIMIT (SELECT visible_pool_target_count FROM pool)");
     expect(sql).toContain("visible_pool_state='awaiting_refresh'");
     expect(sql).toContain('pool.visible_pool_state "previousState"');
     expect(sql).toContain("'state',changed.\"previousState\"");

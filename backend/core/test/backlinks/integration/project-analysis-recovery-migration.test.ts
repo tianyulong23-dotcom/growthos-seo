@@ -4,6 +4,7 @@ import { basename } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -25,18 +26,15 @@ const require = createRequire(import.meta.url);
 const { Client: PgClient } = require("pg") as {
   readonly Client: new (config: unknown) => Client;
 };
-const rolesUrl = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
 const manifestUrl = new URL(
   "../../../../database/deployment-manifest.v1.json",
   import.meta.url,
 );
-const migrationUrl = (path: string) => new URL(
-  `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
-  import.meta.url,
-);
+const migrationUrl = (path: string) =>
+  new URL(
+    `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
+    import.meta.url,
+  );
 const uuid = (value: number) =>
   `99000000-0000-4000-8000-${value.toString().padStart(12, "0")}`;
 const organizationId = uuid(1);
@@ -54,32 +52,13 @@ describe("project-analysis recovery migration", () => {
     await harness.migrate();
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
-    await client.query(await readFile(rolesUrl, "utf8"));
-    await client.query(`
-      SET ROLE growthos_platform_owner;
-      SET search_path = platform, pg_catalog;
-      CREATE FUNCTION backlink_list_active_website_projects(text, text)
-      RETURNS TABLE (website_project_id text, context_version integer)
-      LANGUAGE sql STABLE SECURITY DEFINER
-      SET search_path = platform, pg_catalog
-      AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
-      REVOKE ALL
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        FROM PUBLIC;
-      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
-      GRANT EXECUTE
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        TO growthos_backlinks_owner;
-      RESET ROLE;
-      RESET search_path;
-    `);
     const manifest = JSON.parse(
       await readFile(manifestUrl, "utf8"),
     ) as DeploymentManifest;
     const backlinkSteps = manifest.steps.filter(
       ({ migrationId }) =>
-        migrationId.startsWith("backlinks-")
-        && migrationId !== "backlinks-0001",
+        migrationId.startsWith("backlinks-") &&
+        migrationId !== "backlinks-0001",
     );
     const migration0076 = backlinkSteps.find(
       ({ migrationId }) => migrationId === "backlinks-0076",
@@ -87,11 +66,7 @@ describe("project-analysis recovery migration", () => {
     if (migration0076 === undefined) {
       throw new Error("BACKLINKS_MIGRATION_0076_MISSING");
     }
-    for (const step of backlinkSteps.filter(
-      ({ migrationId }) => migrationId !== "backlinks-0076",
-    )) {
-      await client.query(await readFile(migrationUrl(step.path), "utf8"));
-    }
+    await installBacklinksManifestAfterFoundation(client, "0075");
     await seedProjectAnalysisJob({
       websiteProjectId: uuid(10),
       jobId: uuid(11),
@@ -114,7 +89,9 @@ describe("project-analysis recovery migration", () => {
       sourceSnapshotId: uuid(33),
       eventSnapshotVersion: 2,
     });
-    await client.query(await readFile(migrationUrl(migration0076.path), "utf8"));
+    await client.query(
+      await readFile(migrationUrl(migration0076.path), "utf8"),
+    );
   }, 180_000);
 
   afterAll(async () => {
@@ -122,16 +99,19 @@ describe("project-analysis recovery migration", () => {
     await harness?.stop();
   });
 
-  async function seedProjectAnalysisJob(input: Readonly<{
-    websiteProjectId: string;
-    jobId: string;
-    eventId: string;
-    sourceSnapshotId: string;
-    latestSnapshotId?: string;
-    eventSnapshotVersion: number;
-  }>) {
+  async function seedProjectAnalysisJob(
+    input: Readonly<{
+      websiteProjectId: string;
+      jobId: string;
+      eventId: string;
+      sourceSnapshotId: string;
+      latestSnapshotId?: string;
+      eventSnapshotVersion: number;
+    }>,
+  ) {
     const workflowId = `project-analysis:${input.jobId}`;
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO backlinks.backlink_project_context_snapshots (
         id,organization_id,workspace_id,website_project_id,snapshot_version,
         project_status,canonical_domain,locale,country_code,
@@ -140,15 +120,18 @@ describe("project-analysis recovery migration", () => {
         $1,$2,$3,$4,1,'ACTIVE','recovery.test','en-US','US',
         'profile-v1','target-v1',$5
       )
-    `, [
-      input.sourceSnapshotId,
-      organizationId,
-      workspaceId,
-      input.websiteProjectId,
-      actorId,
-    ]);
+    `,
+      [
+        input.sourceSnapshotId,
+        organizationId,
+        workspaceId,
+        input.websiteProjectId,
+        actorId,
+      ],
+    );
     if (input.latestSnapshotId !== undefined) {
-      await client.query(`
+      await client.query(
+        `
         INSERT INTO backlinks.backlink_project_context_snapshots (
           id,organization_id,workspace_id,website_project_id,snapshot_version,
           project_status,canonical_domain,locale,country_code,
@@ -157,15 +140,18 @@ describe("project-analysis recovery migration", () => {
           $1,$2,$3,$4,2,'ACTIVE','recovery.test','en-US','US',
           'profile-v2','target-v2',$5
         )
-      `, [
-        input.latestSnapshotId,
-        organizationId,
-        workspaceId,
-        input.websiteProjectId,
-        actorId,
-      ]);
+      `,
+        [
+          input.latestSnapshotId,
+          organizationId,
+          workspaceId,
+          input.websiteProjectId,
+          actorId,
+        ],
+      );
     }
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO backlinks.backlink_jobs (
         id,organization_id,workspace_id,website_project_id,job_type,
         source_object_type,source_object_id,status,workflow_id,correlation_id,
@@ -174,18 +160,21 @@ describe("project-analysis recovery migration", () => {
         $1,$2,$3,$4,'project-analysis','project-context-snapshot',$5,
         'queued',$6,$7,$8,$8,$9,$9
       )
-    `, [
-      input.jobId,
-      organizationId,
-      workspaceId,
-      input.websiteProjectId,
-      input.sourceSnapshotId,
-      workflowId,
-      `correlation:${input.jobId}`,
-      staleAt,
-      actorId,
-    ]);
-    await client.query(`
+    `,
+      [
+        input.jobId,
+        organizationId,
+        workspaceId,
+        input.websiteProjectId,
+        input.sourceSnapshotId,
+        workflowId,
+        `correlation:${input.jobId}`,
+        staleAt,
+        actorId,
+      ],
+    );
+    await client.query(
+      `
       INSERT INTO backlinks.backlink_outbox_events (
         id,organization_id,workspace_id,website_project_id,event_type,
         aggregate_id,aggregate_version,idempotency_key,payload,
@@ -195,34 +184,40 @@ describe("project-analysis recovery migration", () => {
         $1,$2,$3,$4,'backlinks.project-analysis.requested.v1',
         $5,$6,$7,$8::jsonb,1,'published',$9,$9,$9,$10,$10
       )
-    `, [
-      input.eventId,
-      organizationId,
-      workspaceId,
-      input.websiteProjectId,
-      input.sourceSnapshotId,
-      input.eventSnapshotVersion,
-      `project-analysis:${input.websiteProjectId}:${input.eventSnapshotVersion}`,
-      JSON.stringify({
+    `,
+      [
+        input.eventId,
         organizationId,
         workspaceId,
-        websiteProjectId: input.websiteProjectId,
-        jobId: input.jobId,
-        workflowId,
-        snapshotVersion: input.eventSnapshotVersion,
-      }),
-      staleAt,
-      actorId,
-    ]);
+        input.websiteProjectId,
+        input.sourceSnapshotId,
+        input.eventSnapshotVersion,
+        `project-analysis:${input.websiteProjectId}:${input.eventSnapshotVersion}`,
+        JSON.stringify({
+          organizationId,
+          workspaceId,
+          websiteProjectId: input.websiteProjectId,
+          jobId: input.jobId,
+          workflowId,
+          snapshotVersion: input.eventSnapshotVersion,
+        }),
+        staleAt,
+        actorId,
+      ],
+    );
   }
 
   it("closes superseded and invalid jobs during migration", async () => {
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(`
       SELECT website_project_id AS "websiteProjectId",status,step,
              progress,result_summary AS "resultSummary",error
         FROM backlinks.backlink_jobs
        ORDER BY website_project_id
-    `)).rows).toEqual([
+    `)
+      ).rows,
+    ).toEqual([
       expect.objectContaining({
         websiteProjectId: uuid(10),
         status: "cancelled",
@@ -255,36 +250,61 @@ describe("project-analysis recovery migration", () => {
   });
 
   it("rearms only the job pinned to the current authoritative snapshot", async () => {
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(
+          `
       SELECT active_jobs AS "activeJobs",
              recoverable_queued_project_analysis AS "recoverableQueued",
              unrecoverable_stale_queued_project_analysis AS
                "unrecoverableQueued"
         FROM backlinks.backlink_project_task_runtime_health($1)
-    `, [staleBefore])).rows).toEqual([{
-      activeJobs: 1,
-      recoverableQueued: 1,
-      unrecoverableQueued: 0,
-    }]);
+    `,
+          [staleBefore],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        activeJobs: 1,
+        recoverableQueued: 1,
+        unrecoverableQueued: 0,
+      },
+    ]);
 
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(
+          `
       SELECT backlinks.backlink_rearm_stale_project_analysis_events(
         $1,$2,$3
       ) AS "rearmedCount"
-    `, [actorId, staleBefore, 10])).rows).toEqual([{ rearmedCount: 1 }]);
-    expect((await client.query(`
+    `,
+          [actorId, staleBefore, 10],
+        )
+      ).rows,
+    ).toEqual([{ rearmedCount: 1 }]);
+    expect(
+      (
+        await client.query(
+          `
       SELECT job.status,job.step,job.retry_count AS "retryCount",
              event.status AS "eventStatus",event.published_at AS "publishedAt"
         FROM backlinks.backlink_jobs AS job
         JOIN backlinks.backlink_outbox_events AS event
           ON event.payload->>'jobId'=job.id::text
        WHERE job.website_project_id=$1
-    `, [uuid(20)])).rows).toEqual([{
-      status: "queued",
-      step: "recovery_queued",
-      retryCount: 1,
-      eventStatus: "pending",
-      publishedAt: null,
-    }]);
+    `,
+          [uuid(20)],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        status: "queued",
+        step: "recovery_queued",
+        retryCount: 1,
+        eventStatus: "pending",
+        publishedAt: null,
+      },
+    ]);
   });
 });

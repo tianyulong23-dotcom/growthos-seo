@@ -74,6 +74,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { BacklinkMonitoringWorkspace } from "@/features/performance/backlinks/backlink-monitoring-workspace"
+import { BacklinkReportsRouteWorkspace } from "@/features/performance/backlinks/backlink-reports-route-workspace"
 
 const ranges: PerformanceRange[] = [7, 28, 90]
 const chartConfig = {
@@ -578,7 +579,9 @@ function DetailSheet({
                 <section>
                   <h3 className="mb-3 font-medium">效果信号</h3>
                   {signalError && (
-                    <p className="mb-2 text-sm text-destructive">{signalError}</p>
+                    <p className="mb-2 text-sm text-destructive">
+                      {signalError}
+                    </p>
                   )}
                   <div className="divide-y rounded-md border">
                     {detail.signals.map((signal) => (
@@ -829,29 +832,39 @@ function ArticlePerformanceWorkspace({
   }, [days, page, projectId, sort, statusFilter])
 
   React.useEffect(() => {
-    void load()
+    let active = true
+    queueMicrotask(() => {
+      if (active) void load()
+    })
+    return () => {
+      active = false
+    }
   }, [load])
 
   React.useEffect(() => {
-    if (!selectedId) {
-      setDetail(null)
-      return
-    }
     let active = true
-    setDetailLoading(true)
-    setDetail(null)
-    setDetailError("")
-    setSignalError("")
-    void getPerformanceArticle(projectId, selectedId, days)
-      .then((result) => {
-        if (active) setDetail(result)
-      })
-      .catch((nextError) => {
-        if (active) setDetailError(errorMessage(nextError, "读取文章效果失败"))
-      })
-      .finally(() => {
-        if (active) setDetailLoading(false)
-      })
+    queueMicrotask(() => {
+      if (!active) return
+      if (!selectedId) {
+        setDetail(null)
+        return
+      }
+      setDetailLoading(true)
+      setDetail(null)
+      setDetailError("")
+      setSignalError("")
+      void getPerformanceArticle(projectId, selectedId, days)
+        .then((result) => {
+          if (active) setDetail(result)
+        })
+        .catch((nextError) => {
+          if (active)
+            setDetailError(errorMessage(nextError, "读取文章效果失败"))
+        })
+        .finally(() => {
+          if (active) setDetailLoading(false)
+        })
+    })
     return () => {
       active = false
     }
@@ -929,7 +942,8 @@ function ArticlePerformanceWorkspace({
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             数据截止 {formatDate(overview.sync.data_through)} · 最近同步{" "}
-            {formatDateTime(overview.sync.synced_at)} · GSC 数据通常延迟 2 至 3 天
+            {formatDateTime(overview.sync.synced_at)} · GSC 数据通常延迟 2 至 3
+            天
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -960,10 +974,14 @@ function ArticlePerformanceWorkspace({
           >
             <RefreshCw
               className={
-                syncing || overview.sync.status === "running" ? "animate-spin" : ""
+                syncing || overview.sync.status === "running"
+                  ? "animate-spin"
+                  : ""
               }
             />
-            {syncing || overview.sync.status === "running" ? "同步中" : "同步数据"}
+            {syncing || overview.sync.status === "running"
+              ? "同步中"
+              : "同步数据"}
           </Button>
         </div>
       </div>
@@ -1192,8 +1210,14 @@ export function PerformanceWorkspace({
   onOpenArticle: (articleId: string) => void
 }) {
   if (view === "backlinks") {
+    return <BacklinkMonitoringWorkspace key={projectId} projectId={projectId} />
+  }
+  if (view === "reports") {
     return (
-      <BacklinkMonitoringWorkspace key={projectId} projectId={projectId} />
+      <BacklinkReportsRouteWorkspace
+        key={projectId}
+        websiteProjectKey={projectId}
+      />
     )
   }
   return (

@@ -237,10 +237,14 @@ async def dispatch_backlinks_project_contexts(
 async def lifespan(application: FastAPI):
     settings = get_settings()
     configure_sensitive_logging(settings)
+    worker_launcher = get_crawler_worker_launcher()
+    if settings.crawler_worker_start_on_boot:
+        await worker_launcher.ensure_started()
     if not settings.platform_background_dispatch_enabled:
         try:
             yield
         finally:
+            await worker_launcher.stop()
             owned_gateway = getattr(
                 application.state,
                 "owned_backlinks_gateway",
@@ -267,7 +271,6 @@ async def lifespan(application: FastAPI):
     application.state.backlinks_project_context_dispatch_task = (
         projection_dispatch_task
     )
-    worker_launcher = get_crawler_worker_launcher()
     audit_service = build_audit_service()
     dispatch_task = asyncio.create_task(
         dispatch_site_understanding_workflows(

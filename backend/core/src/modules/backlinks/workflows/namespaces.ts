@@ -1,6 +1,6 @@
 const workflowKinds = [
   "project-analysis",
-  "recommendation-refill",
+  "recommendation-pool-v2",
   "contact-enrichment",
   "placement-initial-validation",
   "placement-monitoring",
@@ -22,9 +22,9 @@ export const backlinksRuntimeContract = Object.freeze({
       workflowType: "backlinksProjectAnalysisV1Workflow",
       workflow: "project-analysis",
     },
-    recommendationRefill: {
-      workflowType: "backlinksRecommendationRefillV1Workflow",
-      workflow: "recommendation-refill",
+    recommendationPoolV2: {
+      workflowType: "backlinksRecommendationPoolV2Workflow",
+      workflow: "recommendation-pool-v2",
     },
     contactEnrichment: {
       workflowType: "backlinksContactEnrichmentV1Workflow",
@@ -62,17 +62,18 @@ export const backlinksRuntimeContract = Object.freeze({
   },
   activities: {
     loadProjectAnalysisContext: "backlinksLoadProjectAnalysisContextV1",
-    reserveRecommendationRefill: "backlinksReserveRecommendationRefillV1",
-    executeRecommendationRefill: "backlinksExecuteRecommendationRefillV1",
-    storeReadyRecommendations: "backlinksStoreReadyRecommendationsV1",
-    planRecommendationRefillSupply:
-      "backlinksPlanRecommendationRefillSupplyV1",
-    completeRecommendationRefillSupply:
-      "backlinksCompleteRecommendationRefillSupplyV1",
-    completeRecommendationRefillSupersession:
-      "backlinksCompleteRecommendationRefillSupersessionV1",
-    recordRecommendationRefillFailure:
-      "backlinksRecordRecommendationRefillFailureV1",
+    executeRecommendationPoolV2DiscoveryRound:
+      "backlinksExecuteRecommendationPoolV2DiscoveryRound",
+    prepareRecommendationPoolV2CanonicalBatches:
+      "backlinksPrepareRecommendationPoolV2CanonicalBatches",
+    inspectRecommendationPoolV2CanonicalBatchPreparation:
+      "backlinksInspectRecommendationPoolV2CanonicalBatchPreparation",
+    convergeRecommendationPoolV2CanonicalBatchPreparation:
+      "backlinksConvergeRecommendationPoolV2CanonicalBatchPreparation",
+    completeRecommendationPoolV2GenerationSupersession:
+      "backlinksCompleteRecommendationPoolV2GenerationSupersession",
+    recoverRecommendationPoolV2CanonicalBatchPreparation:
+      "backlinksRecoverRecommendationPoolV2CanonicalBatchPreparation",
     runContactEnrichment: "backlinksRunContactEnrichmentV1",
     runPlacementInitialValidation:
       "backlinksRunPlacementInitialValidationV1",
@@ -92,12 +93,11 @@ export const backlinksRuntimeContract = Object.freeze({
     runGmailPollingSync: "backlinksRunGmailPollingSyncV1",
   },
   signals: {
-    recommendationRefillSuperseded:
-      "backlinksRecommendationRefillSupersededV1",
+    recommendationPoolV2Superseded: "backlinksRecommendationPoolV2Superseded",
   },
   queries: {
-    recommendationRefillSupersessionStatus:
-      "backlinksRecommendationRefillSupersessionStatusV1",
+    recommendationPoolV2SupersessionStatus:
+      "backlinksRecommendationPoolV2SupersessionStatus",
   },
   providers: {
     dataForSeo: {
@@ -111,7 +111,8 @@ type WorkflowIdInput = Readonly<{
   organizationId: string;
   workspaceId: string;
   websiteProjectId: string;
-  workflow: BacklinksWorkflowKind;
+  // Historical IDs remain reconstructible, but are not registered workflows.
+  workflow: BacklinksWorkflowKind | "recommendation-refill";
   instanceId: string;
 }>;
 
@@ -162,21 +163,5 @@ export function assertBacklinksWorkflowId(value: string): void {
 export function assertBacklinksTaskQueue(value: string): void {
   if (value !== backlinksRuntimeContract.taskQueue) {
     throw new Error("BACKLINKS_TASK_QUEUE_INVALID");
-  }
-}
-
-export function buildBacklinksRecoveryTaskQueue(jobId: string): string {
-  if (!validSegment(jobId)) {
-    throw new Error("BACKLINKS_RECOVERY_TASK_QUEUE_INVALID");
-  }
-  return `${backlinksRuntimeContract.taskQueue}.recovery.${jobId}`;
-}
-
-export function assertBacklinksRecoveryTaskQueue(
-  value: string,
-  jobId: string,
-): void {
-  if (value !== buildBacklinksRecoveryTaskQueue(jobId)) {
-    throw new Error("BACKLINKS_RECOVERY_TASK_QUEUE_INVALID");
   }
 }

@@ -1,12 +1,13 @@
-import { createHash, randomUUID } from "node:crypto";
+
+import { performance } from "node:perf_hooks";
 
 import { load } from "cheerio";
 import { z } from "zod";
 
 import { createCommercialOfficialDataForSeoRuntime } from "../adapters/dataforseo/commercial-official-runtime.js";
-import { createCommercialQualificationOfficialRuntime } from "../adapters/dataforseo/commercial-qualification-official-runtime.js";
+
 import { resolveDataForSeoProjectLocale } from "../adapters/dataforseo/project-locale.js";
-import { commercialPageParser } from "../adapters/html/commercial-page-parser.adapter.js";
+
 import { SafeFetchAdapter } from "../adapters/http/safe-fetch.adapter.js";
 import {
   LocalProductSecretStoreClient,
@@ -16,43 +17,29 @@ import {
   DataForSeoCallPolicy,
   type DataForSeoAvailabilityDecision,
 } from "../application/policies/dataforseo-call.policy.js";
-import { createGovernedCommercialQualificationRuntime } from "../application/services/commercial-qualification-request.service.js";
-import {
-  ensureReadyContactEnrichmentJobs,
-  type ContactEnrichmentJobOptions,
-} from "../application/commands/contact-enrichment.command.js";
-import {
-  executeCommercialQualificationProduction,
-  type CommercialQualificationMetricCollectionMode,
-  type CommercialQualificationProductionCandidate,
-} from "../application/services/commercial-qualification-production.service.js";
-import {
-  executeCommercialRecommendationDiscovery,
-  type CommercialReadyCandidate,
-} from "../application/services/commercial-recommendation-discovery.service.js";
-import {
-  prepareCurrentCommercialCandidateEnrichment,
-  type CurrentCommercialCandidateEnrichment,
-} from "../application/services/current-commercial-candidate-enrichment.service.js";
-import { recoverCurrentCommercialStaticAssessments } from "../application/services/current-commercial-static-assessment-recovery.service.js";
+import type {
+  RecommendationSeedCommands,
+  RecommendationSeedPersisted,
+} from "../application/commands/recommendation-seeds.command.js";
+
+import { type ContactEnrichmentJobOptions } from "../application/commands/contact-enrichment.command.js";
+import { type CommercialQualificationMetricCollectionMode } from "../application/services/commercial-qualification-production.service.js";
+import { executeCommercialRecommendationDiscovery, type CommercialRecommendationNativeV2RequestPort } from "../application/services/commercial-recommendation-discovery.service.js";
+import { type CurrentCommercialCandidateEnrichment } from "../application/services/current-commercial-candidate-enrichment.service.js";
+
 import type {
   BacklinkRecommendationRefillActivities,
   RecommendationProviderExecutionSummary,
 } from "../workflows/definitions/backlink-recommendation-refill.orchestration.js";
 import type { EvidenceValue } from "../domain/evidence/evidence.js";
 import {
-  finalizeCommercialCandidateEnrichment,
-  type CommercialCandidateEnrichmentState,
-} from "../domain/recommendations/commercial-candidate-enrichment.js";
+  createActorContext,
+  createProjectContext,
+  createTenantContext,
+} from "../domain/context/index.js";
+
 import { createRecommendationDomainKey } from "../domain/recommendations/domain-key.js";
-import {
-  commercialFitBaselineAdmissionThreshold,
-  commercialFitComponentIds,
-  commercialFitHardGateIds,
-  commercialFitProgressiveAdmissionPolicyVersion,
-  commercialRecommendationFitModelVersion,
-  commercialRecommendationFitRuleVersion,
-} from "../domain/recommendations/commercial-score-v4.js";
+
 import {
   applyProviderBudgetAutomaticOverage,
   parseProviderOperationBudgetAuthorization,
@@ -74,13 +61,12 @@ import {
   type RecommendationScoreComponentId,
   type RecommendationScoreComponentInput,
 } from "../domain/recommendations/scoring.js";
-import { createCommercialQualificationRequestRepository } from "../db/repositories/commercial-qualification-request.repository.js";
+import { isRecommendationPoolV2ProjectGeneratable } from "../domain/recommendations/recommendation-pool-v2-project-generation-eligibility.js";
+import { recommendationPoolV2AdmissionContractVersion } from "../domain/recommendations/recommendation-pool-v2-policy.js";
+
 import { createProjectInputPersistenceRepository } from "../db/repositories/project-input-persistence.repository.js";
 import { createProviderBudgetRepository } from "../db/repositories/provider-budget.repository.js";
-import {
-  createRecommendationContractRepository,
-  writeCorrectedRecommendationFactsInTransaction,
-} from "../db/repositories/recommendation-contract.repository.js";
+
 import {
   withBacklinkTenantTransaction,
   type BacklinkTenantContext,
@@ -89,11 +75,7 @@ import {
 } from "../db/tenant-transaction.js";
 import type { ReferringDomainEvidence } from "../ports/dataforseo.port.js";
 import type { AiCommercialDiscoveryBlueprintPort } from "../ports/ai-commercial-discovery-blueprint.port.js";
-import {
-  CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-  CORRECTED_SCORE_MODEL_VERSION,
-  CORRECTED_VISIBILITY_CONTRACT_VERSION,
-} from "../ports/recommendation-contract.port.js";
+import { CORRECTED_QUALIFICATION_CONTRACT_VERSION } from "../ports/recommendation-contract.port.js";
 import type { SafeFetchPort } from "../ports/safe-fetch.port.js";
 import { secretKinds } from "../ports/secret-store.port.js";
 import type {
@@ -118,39 +100,6 @@ const scoreNormalizationRuleVersion =
   "local-product-dataforseo-score-normalization.v1";
 const maxWebsiteEvidenceBytes = 512_000;
 const maxWebsiteRedirects = 4;
-const websiteFetchConcurrency = 8;
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
-  }
-  if (typeof value === "object" && value !== null) {
-    const object = value as Readonly<Record<string, unknown>>;
-    return `{${Object.keys(object).sort().map((key) =>
-      `${JSON.stringify(key)}:${canonicalJson(object[key])}`
-    ).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-function deterministicFactId(namespace: string, value: unknown): string {
-  const bytes = createHash("sha256")
-    .update(namespace)
-    .update("\0")
-    .update(canonicalJson(value))
-    .digest()
-    .subarray(0, 16);
-  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
-  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20),
-  ].join("-");
-}
 
 const jsonStringArraySchema = z
   .array(z.string().trim().min(1).max(2_048))
@@ -162,185 +111,7 @@ const dataForSeoCredentialSchema = z
     password: z.string().min(1).max(2_048),
   })
   .strict();
-const commercialFitEvidenceStateSchema = z.enum([
-  "observed",
-  "derived",
-  "unavailable",
-  "insufficient_data",
-  "manual_review",
-]);
-const storedCommercialBacklinkPageEvidenceSchema = z
-  .object({
-    sourceUrl: z.url(),
-    targetUrl: z.url(),
-    anchorText: z.string().nullable(),
-    linkStatus: z.enum(["active", "lost"]),
-    firstSeenAt: z.string().trim().min(1).nullable(),
-    lastSeenAt: z.string().trim().min(1).nullable(),
-    sourceHttpStatus: z.number().int().nullable(),
-    targetHttpStatus: z.number().int().nullable(),
-  })
-  .strict();
-const storedCommercialScoreSchema = z
-  .object({
-    decision: z.literal("eligible"),
-    scoreModelVersion: z.literal(commercialRecommendationFitModelVersion),
-    ruleVersion: z.literal(commercialRecommendationFitRuleVersion),
-    total: z.number().min(0).max(100),
-    components: z.array(
-      z
-        .object({
-          id: z.enum(commercialFitComponentIds),
-          state: commercialFitEvidenceStateSchema,
-          rawValue: z.union([
-            z.number(),
-            z.string(),
-            z.boolean(),
-            z.null(),
-          ]),
-          normalizedValue: z.number().min(0).max(1).nullable(),
-          weight: z.number().min(0).max(100),
-          points: z.number().min(0).max(100).nullable(),
-          evidenceRefs: z.array(z.string()),
-          normalizationRuleVersion: z.string().trim().min(1),
-          collectedAt: z.string().trim().min(1),
-        })
-        .strict(),
-    ),
-    hitGates: z.array(z.enum(commercialFitHardGateIds)),
-    missingEvidence: z.array(z.string()),
-    admission: z
-      .object({
-        policyVersion: z.literal(
-          commercialFitProgressiveAdmissionPolicyVersion,
-        ),
-        baselineThreshold: z.literal(
-          commercialFitBaselineAdmissionThreshold,
-        ),
-        appliedThreshold: z.literal(
-          commercialFitBaselineAdmissionThreshold,
-        ),
-        fallbackApplied: z.literal(false),
-      })
-      .strict(),
-    details: z
-      .object({
-        matchTier: z.enum(["high_fit", "qualified_fit", "not_eligible"]),
-        reasonCodes: z.array(z.string()),
-        matchedProducts: z.array(z.string()),
-        matchedTopics: z.array(z.string()),
-        matchedKeywords: z.array(z.string()),
-        matchedTargetPages: z.array(z.string()),
-        matchedAudiences: z.array(z.string()),
-        market: z
-          .object({
-            targetCountry: z.string(),
-            candidateCountry: z.string().nullable(),
-            targetLanguage: z.string(),
-            candidateLanguage: z.string().nullable(),
-            tier: z.enum([
-              "target_market",
-              "same_language_expansion",
-              "market_language_mismatch",
-            ]),
-            reasonCode: z.string(),
-          })
-          .strict(),
-        cooperationAngles: z.array(z.string()),
-        authority: z
-          .object({
-            projectAuthority: z.number().min(0).max(100),
-            candidateAuthority: z.number().min(0).max(100).nullable(),
-            confidence: z.enum(["observed", "neutral_default"]),
-            tier: z.enum([
-              "candidate_below_range",
-              "normal_relative_range",
-              "elevated_authority_gap",
-              "extreme_authority_gap",
-            ]),
-          })
-          .strict(),
-        dataForSeo: z
-          .object({
-            rank: z.number().nullable(),
-            traffic: z.number().nullable(),
-            backlinks: z.number().nullable(),
-            referringDomains: z.number().nullable(),
-            spamScore: z.number().nullable(),
-            backlinkPageEvidence: z
-              .array(storedCommercialBacklinkPageEvidenceSchema)
-              .default([]),
-            evidenceRefs: z.array(z.string()).default([]),
-            collectedAt: z.string().trim().min(1),
-          })
-          .strict(),
-        safeFetch: z
-          .object({
-            relatedContentPages: z.array(z.string()),
-            evidenceUrls: z.array(z.string()),
-            evidenceRefs: z.array(z.string()),
-            failedUrls: z.array(z.string()),
-            technicalAccessibility: z.number().min(0).max(1).nullable(),
-          })
-          .strict(),
-      })
-      .strict(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (
-      value.components.length !== commercialFitComponentIds.length ||
-      new Set(value.components.map(({ id }) => id)).size !==
-        commercialFitComponentIds.length
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["components"],
-        message: "Stored V4 score must contain every unique component.",
-      });
-    }
-    if (
-      value.admission.appliedThreshold % 5 !== 0 ||
-      value.admission.fallbackApplied !==
-        (value.admission.appliedThreshold <
-          commercialFitBaselineAdmissionThreshold)
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["admission"],
-        message: "Stored V4 admission metadata is inconsistent.",
-      });
-    }
-  });
-const storedCommercialQualificationFactSchema = z
-  .object({
-    qualificationFactId: z.string().uuid(),
-    generationContractId: z.string().uuid(),
-    metricScope: z.enum(["TARGET_MARKET", "GLOBAL"]),
-    trafficOrganicEtv: z.coerce.number().nonnegative().nullable(),
-    spamScore: z.coerce.number().min(0).max(100).nullable(),
-    authorityRank: z.coerce.number().min(0).max(100).nullable(),
-    accessibilityDecision: z.enum([
-      "accessible",
-      "inaccessible",
-      "insufficient_data",
-    ]),
-    semanticScore: z.coerce.number().min(0).max(100).nullable(),
-    decision: z.literal("eligible"),
-    decisionReasonCode: z.string().trim().min(1),
-    modelVersion: z.string().trim().min(1).nullable(),
-    promptVersion: z.string().trim().min(1).nullable(),
-    ruleVersion: z.string().trim().min(1),
-    requestFingerprints: z.record(z.string(), z.unknown()),
-    evidence: z.record(z.string(), z.unknown()),
-    observedAt: z.coerce.date(),
-  })
-  .strict();
-const storedCommercialBlueprintTopicsSchema = z
-  .object({
-    topicClusters: z.array(z.string().trim().min(1)).max(100),
-  })
-  .passthrough();
+
 const configurationSchema = z
   .object({
     credentialSecretRef: localProductDataForSeoCredentialReferenceSchema,
@@ -353,12 +124,14 @@ const configurationSchema = z
     estimatedCostMicros: z.number().int().positive().max(100_000_000),
     absoluteBudgetMicros: z.number().int().positive().max(100_000_000),
     maxPaidCalls: z.number().int().min(1).max(1_000),
+    executionCeiling: z.object({
+      startedAt: z.string().datetime({ offset: true }),
+      limitMicros: z.number().int().positive().max(100_000_000),
+    }).strict().optional(),
     candidateLimit: z.number().int().min(10).max(100),
-    externalAvailability: z.enum([
-      "not_checked",
-      "available",
-      "unavailable",
-    ]),
+    discoveryConcurrency: z.number().int().min(1).max(4).optional(),
+    qualificationConcurrency: z.number().int().min(1).max(4).optional(),
+    externalAvailability: z.enum(["not_checked", "available", "unavailable"]),
     externalReasonCode: providerReasonCodeSchema.nullable(),
     externalRecoveryAction: providerRecoveryActionSchema.nullable(),
   })
@@ -372,13 +145,11 @@ const configurationSchema = z
       });
     }
     if (
-      value.externalAvailability === "unavailable"
-      && (
-        value.externalReasonCode === null
-        || value.externalReasonCode === "provider_disabled"
-        || value.externalReasonCode === "provider_not_checked"
-        || value.externalRecoveryAction === null
-      )
+      value.externalAvailability === "unavailable" &&
+      (value.externalReasonCode === null ||
+        value.externalReasonCode === "provider_disabled" ||
+        value.externalReasonCode === "provider_not_checked" ||
+        value.externalRecoveryAction === null)
     ) {
       context.addIssue({
         code: "custom",
@@ -462,6 +233,23 @@ const projectRecommendationContextSchema = z
       }
     }
   });
+const projectRecommendationContextDatabaseRowSchema = z
+  .object({
+    poolContractVersion: z
+      .enum(["recommendation-pool.v1", "recommendation-pool.v2"])
+      .nullable(),
+    poolMigrationState: z
+      .enum([
+        "V1_ACTIVE",
+        "V2_READY",
+        "V2_ACTIVE",
+        "MIGRATION_BLOCKED",
+        "V2_MAINTENANCE_READ_ONLY",
+      ])
+      .nullable(),
+    poolRecommendationContextVersionId: z.string().uuid().nullable(),
+  })
+  .passthrough();
 
 export type LocalProductDataForSeoConfiguration = Readonly<
   z.output<typeof configurationSchema>
@@ -503,6 +291,35 @@ export function parseLocalProductRecommendationContext(
   });
 }
 
+export function parseLocalProductRecommendationContextDatabaseRow(
+  value: unknown,
+): Readonly<{
+  context: LocalProductRecommendationContext;
+  poolContractVersion:
+    "recommendation-pool.v1" | "recommendation-pool.v2" | null;
+  migrationState:
+    | "V1_ACTIVE"
+    | "V2_READY"
+    | "V2_ACTIVE"
+    | "MIGRATION_BLOCKED"
+    | "V2_MAINTENANCE_READ_ONLY"
+    | null;
+  contractRecommendationContextVersionId: string | null;
+}> {
+  const {
+    poolContractVersion,
+    poolMigrationState,
+    poolRecommendationContextVersionId,
+    ...projectContext
+  } = projectRecommendationContextDatabaseRowSchema.parse(value);
+  return Object.freeze({
+    context: parseLocalProductRecommendationContext(projectContext),
+    poolContractVersion,
+    migrationState: poolMigrationState,
+    contractRecommendationContextVersionId: poolRecommendationContextVersionId,
+  });
+}
+
 const optionalSourceModules = Object.freeze({
   KEYWORDS: "keywords",
   CONTENT: "content",
@@ -525,20 +342,18 @@ function isFreshPinnedEvidence(
   now: Date,
 ): boolean {
   const expiresAt = Date.parse(evidence.snapshot.expiresAt);
-  return evidence.snapshot.status === "ready"
-    && Number.isFinite(expiresAt)
-    && expiresAt > now.getTime();
+  return (
+    evidence.snapshot.status === "ready" &&
+    Number.isFinite(expiresAt) &&
+    expiresAt > now.getTime()
+  );
 }
 
-function isReadyPinnedEvidence(
-  evidence: PinnedSharedSeoEvidence,
-): boolean {
+function isReadyPinnedEvidence(evidence: PinnedSharedSeoEvidence): boolean {
   return evidence.snapshot.status !== "failed";
 }
 
-function normalizedStringArray(
-  value: unknown,
-): readonly string[] {
+function normalizedStringArray(value: unknown): readonly string[] {
   if (!Array.isArray(value)) return Object.freeze([]);
   return Object.freeze([
     ...new Set(
@@ -550,12 +365,229 @@ function normalizedStringArray(
   ]);
 }
 
+function eligiblePreparedSeeds(
+  prepared: RecommendationSeedPersisted | null | undefined,
+) {
+  return (
+    prepared?.seeds.filter(
+      (seed) =>
+        seed.validationStatus === "VERIFIED" ||
+        seed.validationStatus === "RETAINED_LOW_CONFIDENCE",
+    ) ?? []
+  );
+}
+
+function validatePreparedSeedBlueprintLineage(
+  prepared: RecommendationSeedPersisted,
+): void {
+  const eligible = eligiblePreparedSeeds(prepared);
+  if (
+    eligible.length === 0 ||
+    prepared.blueprintSeedReferences.length !== eligible.length
+  ) {
+    return discoveryInputRequired(
+      "WEBSITE_PROJECT",
+      "regenerate_recommendation_seeds",
+      "recommendation_seed_blueprint_lineage_invalid",
+    );
+  }
+  const eligibleById = new Map(
+    eligible.map((seed) => [seed.id, seed.seedFingerprint]),
+  );
+  const referenceIds = new Set<string>();
+  const referenceRecordIds = new Set<string>();
+  const referenceOrdinals = new Set<number>();
+  const blueprintIds = new Set<string>();
+  for (const reference of prepared.blueprintSeedReferences) {
+    if (
+      eligibleById.get(reference.seedId) !== reference.seedFingerprint ||
+      referenceIds.has(reference.seedId) ||
+      reference.id.length === 0 ||
+      referenceRecordIds.has(reference.id) ||
+      reference.blueprintId.length === 0 ||
+      referenceOrdinals.has(reference.seedOrdinal) ||
+      !Number.isInteger(reference.seedOrdinal) ||
+      reference.seedOrdinal < 1 ||
+      reference.seedOrdinal > eligible.length
+    ) {
+      return discoveryInputRequired(
+        "WEBSITE_PROJECT",
+        "regenerate_recommendation_seeds",
+        "recommendation_seed_blueprint_lineage_invalid",
+      );
+    }
+    referenceIds.add(reference.seedId);
+    referenceRecordIds.add(reference.id);
+    referenceOrdinals.add(reference.seedOrdinal);
+    blueprintIds.add(reference.blueprintId);
+  }
+  if (
+    referenceIds.size !== eligible.length ||
+    referenceOrdinals.size !== eligible.length ||
+    blueprintIds.size !== 1
+  ) {
+    return discoveryInputRequired(
+      "WEBSITE_PROJECT",
+      "regenerate_recommendation_seeds",
+      "recommendation_seed_blueprint_lineage_invalid",
+    );
+  }
+}
+
+const preTaskSeedProjectContextSchema = z.object({
+  canonicalDomain: z.string().trim().min(1),
+  locale: z.string().trim().min(1),
+  countryCode: z.string().trim().min(1),
+  profileVersionId: z.string().trim().min(1),
+  promotionTargetVersionId: z.string().trim().min(1),
+});
+
+export async function prepareRecommendationSeedsBeforeProjectReadiness(
+  input: Readonly<{
+    commands:
+      | Pick<
+          RecommendationSeedCommands,
+          "prepareBeforeTask" | "prepareForGeneration"
+        >
+      | undefined;
+    poolContractVersion: unknown;
+    migrationState: unknown;
+    contractRecommendationContextVersionId: unknown;
+    expectedRecommendationContextVersionId: string;
+    targetGenerationContractId?: string;
+    organizationId: string;
+    workspaceId: string;
+    websiteProjectId: string;
+    actorId: string;
+    jobId: string;
+    workflowId: string;
+    correlationId: string;
+    projectContext: unknown;
+  }>,
+): Promise<RecommendationSeedPersisted | null> {
+  if (input.poolContractVersion !== "recommendation-pool.v2") {
+    return null;
+  }
+  if (
+    input.migrationState !== "V2_READY" &&
+    input.migrationState !== "V2_ACTIVE"
+  ) {
+    return discoveryInputRequired(
+      "WEBSITE_PROJECT",
+      "complete_recommendation_pool_v2_migration",
+      "recommendation_seed_contract_not_writable",
+    );
+  }
+  if (
+    input.contractRecommendationContextVersionId !==
+    input.expectedRecommendationContextVersionId
+  ) {
+    return discoveryInputRequired(
+      "WEBSITE_PROJECT",
+      "reproject_current_website_project",
+      "recommendation_seed_context_mismatch",
+    );
+  }
+  if (input.commands === undefined) {
+    return discoveryInputRequired(
+      "WEBSITE_PROJECT",
+      "restore_recommendation_seed_service",
+      "recommendation_seed_service_unavailable",
+    );
+  }
+  const project = preTaskSeedProjectContextSchema.parse(input.projectContext);
+  const context = Object.freeze({
+    actor: createActorContext({
+      userId: input.actorId,
+      sessionId: `recommendation-seed-pre-task:${input.workflowId}`,
+      roles: ["member"],
+    }),
+    tenant: createTenantContext({
+      organizationId: input.organizationId,
+      workspaceId: input.workspaceId,
+    }),
+    project: createProjectContext({
+      websiteProjectId: input.websiteProjectId,
+      canonicalDomain: project.canonicalDomain,
+      locale: project.locale,
+      countryCode: project.countryCode,
+      profileVersionId: project.profileVersionId,
+      promotionTargetVersionId: project.promotionTargetVersionId,
+    }),
+  });
+  const commandInput = {
+    context,
+    idempotencyKey:
+      input.targetGenerationContractId === undefined
+        ? `recommendation-seeds:pre-task:${input.jobId}`
+        : [
+            "recommendation-seeds",
+            "generation",
+            input.targetGenerationContractId,
+          ].join(":"),
+    requestId: input.correlationId,
+    userSeeds: [],
+    systemCandidates: [],
+  } as const;
+  const prepared =
+    input.targetGenerationContractId === undefined
+      ? await input.commands.prepareBeforeTask(commandInput)
+      : await input.commands.prepareForGeneration({
+          ...commandInput,
+          targetGenerationContractId: input.targetGenerationContractId,
+        });
+  if (prepared.state !== "READY") {
+    return discoveryInputRequired(
+      "WEBSITE_PROJECT",
+      "add_or_verify_recommendation_seeds",
+      "recommendation_seeds_input_required",
+    );
+  }
+  validatePreparedSeedBlueprintLineage(prepared);
+  return prepared;
+}
+
+export function applyPreparedSeedsToProjectContext(
+  context: unknown,
+  prepared: RecommendationSeedPersisted | null,
+): unknown {
+  if (
+    prepared === null ||
+    typeof context !== "object" ||
+    context === null ||
+    Array.isArray(context)
+  ) {
+    return context;
+  }
+  const eligible = eligiblePreparedSeeds(prepared);
+  const topics = eligible
+    .filter((seed) => seed.kind === "KEYWORD" || seed.kind === "CATEGORY")
+    .map((seed) => seed.normalizedValue);
+  const competitors = eligible
+    .filter((seed) => seed.kind === "SEO_COMPETITOR")
+    .map((seed) => seed.normalizedValue);
+  const record = context as Readonly<Record<string, unknown>>;
+  return {
+    ...record,
+    keywords: normalizedStringArray([
+      ...normalizedStringArray(record.keywords),
+      ...topics,
+    ]),
+    explicitCompetitorDomains: normalizedStringArray([
+      ...normalizedStringArray(record.explicitCompetitorDomains),
+      ...competitors,
+    ]),
+  };
+}
+
 export function resolveLocalProductProjectDiscoveryInput(
   input: Readonly<{
     organizationId: string;
     websiteProjectId: string;
     context: LocalProductRecommendationContext;
     binding: GenerationInputBinding | null;
+    preparedSeeds?: RecommendationSeedPersisted | null;
+    qualificationContractVersion?: string;
     now: Date;
   }>,
 ): Readonly<{
@@ -571,25 +603,31 @@ export function resolveLocalProductProjectDiscoveryInput(
     );
   }
   const { pins, outreachProfile: profile } = binding;
+  const preparedTopics = eligiblePreparedSeeds(input.preparedSeeds)
+    .filter((seed) => seed.kind === "KEYWORD" || seed.kind === "CATEGORY")
+    .map((seed) => seed.normalizedValue);
+  const effectiveKeywords = normalizedStringArray([
+    ...profile.keywordsAndTopics,
+    ...preparedTopics,
+  ]);
   if (
-    pins.organizationId !== input.organizationId
-    || pins.websiteProjectId !== input.websiteProjectId
-    || pins.projectContextVersion !== input.context.snapshotVersion
-    || pins.siteProfileVersionId !== input.context.profileVersionId
-    || pins.outreachProfileVersionId !== profile.profileVersionId
-    || pins.promotionTargetVersionId
-      !== input.context.promotionTargetVersionId
-    || pins.qualificationContractVersion
-      !== CORRECTED_QUALIFICATION_CONTRACT_VERSION
-    || pins.market !== input.context.countryCode
-    || profile.organizationId !== input.organizationId
-    || profile.websiteProjectId !== input.websiteProjectId
-    || profile.profileVersionId !== input.context.profileVersionId
-    || profile.promotionTargetVersionId
-      !== input.context.promotionTargetVersionId
-    || profile.market !== input.context.countryCode
-    || profile.location !== input.context.countryCode
-    || profile.language !== input.context.locale
+    pins.organizationId !== input.organizationId ||
+    pins.websiteProjectId !== input.websiteProjectId ||
+    pins.projectContextVersion !== input.context.snapshotVersion ||
+    pins.siteProfileVersionId !== input.context.profileVersionId ||
+    pins.outreachProfileVersionId !== profile.profileVersionId ||
+    pins.promotionTargetVersionId !== input.context.promotionTargetVersionId ||
+    pins.qualificationContractVersion !==
+      (input.qualificationContractVersion ?? CORRECTED_QUALIFICATION_CONTRACT_VERSION) ||
+    pins.market !== input.context.countryCode ||
+    profile.organizationId !== input.organizationId ||
+    profile.websiteProjectId !== input.websiteProjectId ||
+    profile.profileVersionId !== input.context.profileVersionId ||
+    profile.promotionTargetVersionId !==
+      input.context.promotionTargetVersionId ||
+    profile.market !== input.context.countryCode ||
+    profile.location !== input.context.countryCode ||
+    profile.language !== input.context.locale
   ) {
     return discoveryInputRequired(
       "WEBSITE_PROJECT",
@@ -604,21 +642,16 @@ export function resolveLocalProductProjectDiscoveryInput(
       "missing_site_theme",
     );
   }
-  if (
-    profile.keywordsAndTopics.length === 0
-    && profile.targetUrls.length === 0
-  ) {
+  if (effectiveKeywords.length === 0 && profile.targetUrls.length === 0) {
     return discoveryInputRequired(
       "WEBSITE_PROJECT",
       "add_promotion_topic_or_publish_target",
       "missing_promotion_topic_or_published_target",
     );
   }
-  const readyEvidence = binding.sharedEvidence.filter(
-    isReadyPinnedEvidence,
-  );
+  const readyEvidence = binding.sharedEvidence.filter(isReadyPinnedEvidence);
   const freshEvidence = readyEvidence.filter((evidence) =>
-    isFreshPinnedEvidence(evidence, input.now)
+    isFreshPinnedEvidence(evidence, input.now),
   );
   const siteProfileEvidence = readyEvidence.find(
     ({ snapshot }) => snapshot.sourceModule === "site-profile",
@@ -631,10 +664,8 @@ export function resolveLocalProductProjectDiscoveryInput(
     );
   }
   if (
-    profile.keywordsAndTopics.length === 0
-    && !readyEvidence.some(
-      ({ snapshot }) => snapshot.sourceModule === "content",
-    )
+    effectiveKeywords.length === 0 &&
+    !readyEvidence.some(({ snapshot }) => snapshot.sourceModule === "content")
   ) {
     return discoveryInputRequired(
       "CONTENT",
@@ -642,14 +673,15 @@ export function resolveLocalProductProjectDiscoveryInput(
       "published_target_evidence_missing",
     );
   }
-  const canonicalDomain = siteProfileEvidence.snapshot
-    .normalizedParameters.canonicalDomain;
+  const canonicalDomain =
+    siteProfileEvidence.snapshot.normalizedParameters.canonicalDomain;
   let evidenceDomainKey: string;
   let contextDomainKey: string;
   try {
-    evidenceDomainKey = typeof canonicalDomain === "string"
-      ? createRecommendationDomainKey(canonicalDomain).registrableDomain
-      : "";
+    evidenceDomainKey =
+      typeof canonicalDomain === "string"
+        ? createRecommendationDomainKey(canonicalDomain).registrableDomain
+        : "";
     contextDomainKey = createRecommendationDomainKey(
       input.context.canonicalDomain,
     ).registrableDomain;
@@ -667,12 +699,10 @@ export function resolveLocalProductProjectDiscoveryInput(
       "canonical_domain_evidence_mismatch",
     );
   }
-  const authorizedSources = new Set(
-    profile.authorizedDiscoverySources,
-  );
+  const authorizedSources = new Set(profile.authorizedDiscoverySources);
   if (
-    !authorizedSources.has("WEBSITE_PROJECT")
-    || !authorizedSources.has("CURATED_RESOURCE_LIBRARY")
+    !authorizedSources.has("WEBSITE_PROJECT") ||
+    !authorizedSources.has("CURATED_RESOURCE_LIBRARY")
   ) {
     return discoveryInputRequired(
       "WEBSITE_PROJECT",
@@ -695,11 +725,15 @@ export function resolveLocalProductProjectDiscoveryInput(
   const competitorEvidence = freshEvidence.find(
     ({ snapshot }) => snapshot.sourceModule === "competitor-serp",
   );
-  const explicitCompetitorDomains = competitorEvidence === undefined
-    ? Object.freeze([] as string[])
-    : normalizedStringArray(
-        competitorEvidence.snapshot.normalizedParameters.domains,
-      );
+  const explicitCompetitorDomains =
+    competitorEvidence === undefined
+      ? Object.freeze([] as string[])
+      : normalizedStringArray(
+          competitorEvidence.snapshot.normalizedParameters.domains,
+        );
+  const preparedCompetitorDomains = eligiblePreparedSeeds(input.preparedSeeds)
+    .filter((seed) => seed.kind === "SEO_COMPETITOR")
+    .map((seed) => seed.normalizedValue);
   return Object.freeze({
     binding: Object.freeze({
       ...binding,
@@ -715,33 +749,86 @@ export function resolveLocalProductProjectDiscoveryInput(
       ...input.context,
       canonicalDomain: evidenceDomainKey,
       products: Object.freeze([...profile.productsAndServices]),
-      keywords: Object.freeze([...profile.keywordsAndTopics]),
+      keywords: Object.freeze([...effectiveKeywords]),
       targetUrls: Object.freeze([...profile.targetUrls]),
       targetAudiences: Object.freeze([...profile.targetAudiences]),
       partnershipGoals: Object.freeze([...profile.partnershipGoals]),
-      explicitCompetitorDomains: Object.freeze([
-        ...explicitCompetitorDomains,
-      ]),
+      explicitCompetitorDomains: Object.freeze(
+        normalizedStringArray([
+          ...explicitCompetitorDomains,
+          ...preparedCompetitorDomains,
+        ]),
+      ),
     }),
   });
 }
 
-function discoveredQualificationCandidate(
-  candidateId: string,
-  candidate: CommercialReadyCandidate,
-): CommercialQualificationProductionCandidate {
-  return Object.freeze({
-    candidateId: z.string().uuid().parse(candidateId),
-    hostnameAscii: candidate.hostnameAscii,
-    sourceTypes: candidate.sourceTypes,
-    provider: Object.freeze({
-      rank: candidate.provider.rank,
-      traffic: candidate.provider.traffic,
-      spamScore: candidate.provider.spamScore,
-      evidenceRefs: candidate.provider.evidenceRefs,
-    }),
-    staticAssessment: candidate.staticAssessment,
-    commercialScore: candidate.commercialScore,
+export async function executeRecommendationSeedReadinessGate<T>(
+  input: Parameters<
+    typeof prepareRecommendationSeedsBeforeProjectReadiness
+  >[0] &
+    Readonly<{
+      loadInputBinding(
+        context: LocalProductRecommendationContext,
+      ): Promise<GenerationInputBinding | null>;
+      onReady(
+        input: Readonly<{
+          context: LocalProductRecommendationContext;
+          binding: GenerationInputBinding;
+          preparedSeeds: RecommendationSeedPersisted | null;
+        }>,
+      ): Promise<T> | T;
+      now: Date;
+      seedPreparationMode?: "prepare_before_task" | "confirmed_native_v2";
+    }>,
+): Promise<T> {
+  const usesConfirmedNativeV2Seeds =
+    input.seedPreparationMode === "confirmed_native_v2";
+  if (
+    usesConfirmedNativeV2Seeds &&
+    (input.poolContractVersion !== "recommendation-pool.v2" ||
+      !["V2_READY", "V2_ACTIVE", "MIGRATION_BLOCKED"].includes(
+        String(input.migrationState),
+      ))
+  ) {
+    return discoveryInputRequired(
+      "WEBSITE_PROJECT",
+      "complete_recommendation_pool_v2_migration",
+      "recommendation_seed_contract_not_writable",
+    );
+  }
+  if (
+    usesConfirmedNativeV2Seeds &&
+    input.contractRecommendationContextVersionId !==
+      input.expectedRecommendationContextVersionId
+  ) {
+    return discoveryInputRequired(
+      "WEBSITE_PROJECT",
+      "reproject_current_website_project",
+      "recommendation_seed_context_mismatch",
+    );
+  }
+  const preparedSeeds = usesConfirmedNativeV2Seeds
+    ? null
+    : await prepareRecommendationSeedsBeforeProjectReadiness(input);
+  const context = parseLocalProductRecommendationContext(
+    applyPreparedSeedsToProjectContext(input.projectContext, preparedSeeds),
+  );
+  const binding = await input.loadInputBinding(context);
+  const resolved = resolveLocalProductProjectDiscoveryInput({
+    organizationId: input.organizationId,
+    websiteProjectId: input.websiteProjectId,
+    context,
+    binding,
+    preparedSeeds,
+    ...(usesConfirmedNativeV2Seeds
+      ? { qualificationContractVersion: recommendationPoolV2AdmissionContractVersion }
+      : {}),
+    now: input.now,
+  });
+  return input.onReady({
+    ...resolved,
+    preparedSeeds,
   });
 }
 
@@ -767,14 +854,16 @@ export function resolveLocalProductDataForSeoOperationBudget(
   dailyBudgetLimitMicros: number;
   authorization: ProviderOperationBudgetAuthorization | null;
 }> {
-  const approvedPaidCalls = input.authorization === null
-    ? applyProviderBudgetAutomaticOverage(input.configuration.maxPaidCalls)
-    : input.authorization.maxPaidCalls;
-  const approvedCostMicros = input.authorization === null
-    ? applyProviderBudgetAutomaticOverage(
-      input.configuration.absoluteBudgetMicros,
-    )
-    : input.authorization.maxCostMicros;
+  const approvedPaidCalls =
+    input.authorization === null
+      ? applyProviderBudgetAutomaticOverage(input.configuration.maxPaidCalls)
+      : input.authorization.maxPaidCalls;
+  const approvedCostMicros =
+    input.authorization === null
+      ? applyProviderBudgetAutomaticOverage(
+          input.configuration.absoluteBudgetMicros,
+        )
+      : input.authorization.maxCostMicros;
   return Object.freeze({
     maxPaidCalls: approvedPaidCalls,
     operationBudgetLimitMicros: approvedCostMicros,
@@ -806,6 +895,19 @@ function positiveIntegerEnvironmentValue(
   name: string,
 ): number {
   const value = requiredEnvironmentValue(environment, name);
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new Error(`INPUT_REQUIRED: ${name}`);
+  }
+  return Number(value);
+}
+
+function optionalPositiveIntegerEnvironmentValue(
+  environment: Environment,
+  name: string,
+  fallback: number,
+): number {
+  const value = environment[name]?.trim();
+  if (value === undefined || value.length === 0) return fallback;
   if (!/^[1-9][0-9]*$/u.test(value)) {
     throw new Error(`INPUT_REQUIRED: ${name}`);
   }
@@ -856,9 +958,32 @@ export function readLocalProductDataForSeoConfiguration(
       environment,
       "DATAFORSEO_MAX_PAID_CALLS",
     ),
+    ...(environment.DATAFORSEO_EXECUTION_STARTED_AT === undefined
+      && environment.DATAFORSEO_EXECUTION_LIMIT_MICROS === undefined
+      ? {}
+      : {
+          executionCeiling: {
+            startedAt: requiredEnvironmentValue(
+              environment, "DATAFORSEO_EXECUTION_STARTED_AT",
+            ),
+            limitMicros: positiveIntegerEnvironmentValue(
+              environment, "DATAFORSEO_EXECUTION_LIMIT_MICROS",
+            ),
+          },
+        }),
     candidateLimit: positiveIntegerEnvironmentValue(
       environment,
       "DATAFORSEO_CANDIDATE_LIMIT",
+    ),
+    discoveryConcurrency: optionalPositiveIntegerEnvironmentValue(
+      environment,
+      "DATAFORSEO_DISCOVERY_CONCURRENCY",
+      2,
+    ),
+    qualificationConcurrency: optionalPositiveIntegerEnvironmentValue(
+      environment,
+      "DATAFORSEO_QUALIFICATION_CONCURRENCY",
+      2,
     ),
     externalAvailability: providerHealth.externalAvailability,
     externalReasonCode: providerHealth.reasonCode,
@@ -904,9 +1029,9 @@ export async function assertLocalProductDataForSeoCredentialReady(
     dataForSeoCredentialSchema.parse(JSON.parse(plaintext) as unknown);
   } catch (error) {
     throw new Error(
-      "BACKLINKS_DATAFORSEO_CREDENTIAL_UNAVAILABLE"
-      + ` root=${options.secretStoreRoot}`
-      + ` reference=${configuration.credentialSecretRef}`,
+      "BACKLINKS_DATAFORSEO_CREDENTIAL_UNAVAILABLE" +
+        ` root=${options.secretStoreRoot}` +
+        ` reference=${configuration.credentialSecretRef}`,
       { cause: error },
     );
   }
@@ -1170,7 +1295,7 @@ export function buildStoredCommercialRecommendationEvidenceCandidate(
   const spamScore = input.candidate.provider.spamScore;
   const linkFarm =
     input.candidate.staticAssessment.highConfidenceLinkFarm === true ||
-      (spamScore !== null && spamScore >= 70)
+    (spamScore !== null && spamScore >= 70)
       ? true
       : spamScore !== null && spamScore >= 30
         ? null
@@ -1178,15 +1303,11 @@ export function buildStoredCommercialRecommendationEvidenceCandidate(
             spamScore !== null
           ? false
           : null;
-  const businessEvidence = (
-    value: boolean,
-    reason: string,
-  ) =>
-    booleanEvidence(
-      value,
-      "postgresql_business_truth",
-      [...sourceRefs, reason],
-    );
+  const businessEvidence = (value: boolean, reason: string) =>
+    booleanEvidence(value, "postgresql_business_truth", [
+      ...sourceRefs,
+      reason,
+    ]);
   const gates: RecommendationRuleFacts = Object.freeze({
     unsafe_or_malicious: gate(
       "unsafe_or_malicious",
@@ -1198,18 +1319,14 @@ export function buildStoredCommercialRecommendationEvidenceCandidate(
       "high_confidence_pbn_or_link_farm",
       linkFarm === null
         ? unavailableBoolean("commercial_static_and_provider_safety")
-        : booleanEvidence(
-            linkFarm,
-            "commercial_static_and_provider_safety",
-          ),
+        : booleanEvidence(linkFarm, "commercial_static_and_provider_safety"),
     ),
     crawl_not_permitted: gate(
       "crawl_not_permitted",
-      booleanEvidence(
-        false,
-        "commercial_fit_v4_admission",
-        [...sourceRefs, "commercial-fit-v4:technical-evidence-not-hard-gate"],
-      ),
+      booleanEvidence(false, "commercial_fit_v4_admission", [
+        ...sourceRefs,
+        "commercial-fit-v4:technical-evidence-not-hard-gate",
+      ]),
     ),
     user_suppressed: gate(
       "user_suppressed",
@@ -1246,11 +1363,10 @@ export function buildStoredCommercialRecommendationEvidenceCandidate(
     ),
     market_mismatch: gate(
       "market_mismatch",
-      booleanEvidence(
-        false,
-        "commercial_fit_v4_admission",
-        [...sourceRefs, "commercial-fit-v4:market-language-scored"],
-      ),
+      booleanEvidence(false, "commercial_fit_v4_admission", [
+        ...sourceRefs,
+        "commercial-fit-v4:market-language-scored",
+      ]),
     ),
     duplicate_domain: gate(
       "duplicate_domain",
@@ -1260,9 +1376,7 @@ export function buildStoredCommercialRecommendationEvidenceCandidate(
   const eligible =
     score.decision === "eligible" &&
     score.total !== null &&
-    score.total >= commercialFitBaselineAdmissionThreshold &&
-    score.admission.appliedThreshold ===
-      commercialFitBaselineAdmissionThreshold &&
+    score.total >= score.admission.appliedThreshold &&
     score.hitGates.length === 0;
   const aggregate = eligible ? normalizeScore(score.total / 100) : null;
   const components: readonly RecommendationScoreComponentInput[] =
@@ -1283,7 +1397,7 @@ export function buildStoredCommercialRecommendationEvidenceCandidate(
               observedAt,
               evidenceRefs: sourceRefs,
               reasonCode: "CURRENT_COMMERCIAL_V4_ADMISSION",
-            })
+            }),
       ),
     );
 
@@ -1546,23 +1660,29 @@ export async function buildLocalProductRecommendationEvidenceCandidate(
   }
 }
 
-type ExecuteInput = Parameters<
+type RefillExecuteInput = Parameters<
   BacklinkRecommendationRefillActivities["executeRecommendationRefill"]
 >[0];
-type StoreInput = Parameters<
-  BacklinkRecommendationRefillActivities["storeReadyRecommendations"]
->[0];
+
+export type LocalProductDataForSeoNativeV2Execution = Readonly<{
+  generationContractId: string;
+  discoveryBudgetPolicyVersion: string;
+  round: 1 | 2;
+  maxCostMicros: number;
+  requestFingerprint: string;
+  requestPort: CommercialRecommendationNativeV2RequestPort;
+}>;
+
+export type LocalProductDataForSeoExecuteInput = RefillExecuteInput &
+  Readonly<{
+    nativeV2: LocalProductDataForSeoNativeV2Execution;
+  }>;
 
 export type LocalProductDataForSeoRuntime = Readonly<{
   execute(
-    input: ExecuteInput,
+    input: LocalProductDataForSeoExecuteInput,
   ): ReturnType<
     BacklinkRecommendationRefillActivities["executeRecommendationRefill"]
-  >;
-  store(
-    input: StoreInput,
-  ): ReturnType<
-    BacklinkRecommendationRefillActivities["storeReadyRecommendations"]
   >;
 }>;
 
@@ -1571,15 +1691,23 @@ type RuntimeOptions = Readonly<{
   secretStoreRoot: string;
   configuration: LocalProductDataForSeoConfiguration;
   now?: () => Date;
+  monotonicNow?: () => number;
   safeFetch?: Pick<SafeFetchPort, "fetch">;
+  browserFetch?: Pick<SafeFetchPort, "fetch">;
   blueprintGenerator?: AiCommercialDiscoveryBlueprintPort | undefined;
+  recommendationSeedCommands?: Pick<
+    RecommendationSeedCommands,
+    "prepareBeforeTask" | "prepareForGeneration"
+  >;
   contactEnrichment?: Readonly<{
     limit: number;
     options: ContactEnrichmentJobOptions;
   }>;
 }>;
 
-function scopeFrom(input: ExecuteInput | StoreInput): BacklinkTenantContext {
+function scopeFrom(
+  input: LocalProductDataForSeoExecuteInput,
+): BacklinkTenantContext {
   return {
     organizationId: input.organizationId,
     workspaceId: input.workspaceId,
@@ -1604,9 +1732,7 @@ function createLocalProductDataForSeoGate(
   return (gateClient, operationPrefix) =>
     new DataForSeoCallPolicy({
       async checkAvailability() {
-        return localProductDataForSeoAvailabilityDecision(
-          input.configuration,
-        );
+        return localProductDataForSeoAvailabilityDecision(input.configuration);
       },
       async checkKillSwitch(gateInput) {
         const result = await gateClient.query(
@@ -1638,11 +1764,9 @@ function createLocalProductDataForSeoGate(
         );
         const providerDecision = result.rows.find(
           (row) =>
-            row.layer === "provider"
-            && row.provider === gateInput.providerId,
+            row.layer === "provider" && row.provider === gateInput.providerId,
         );
-        return project?.blocked === false
-            && providerDecision?.blocked === false
+        return project?.blocked === false && providerDecision?.blocked === false
           ? "allow"
           : "deny";
       },
@@ -1687,8 +1811,8 @@ function createLocalProductDataForSeoGate(
             operationPrefix === undefined
               ? null
               : operationPrefix.endsWith(":")
-              ? operationPrefix
-              : `${operationPrefix}:`,
+                ? operationPrefix
+                : `${operationPrefix}:`,
           ],
         );
         const paidCallCount = Number(result.rows[0]?.count ?? 0);
@@ -1699,8 +1823,7 @@ function createLocalProductDataForSeoGate(
                 authorization: input.operationBudget.authorization,
                 paidCallCount,
                 exposureMicros: 0,
-                requiredPaidCalls:
-                  1 + gateInput.requiredRemainingPaidCalls,
+                requiredPaidCalls: 1 + gateInput.requiredRemainingPaidCalls,
                 requiredCostMicros: 0,
               }).maxPaidCalls;
         return isLocalProductDataForSeoPaidCallAllowed(
@@ -1719,32 +1842,32 @@ function createLocalProductDataForSeoGate(
             const repository = createProviderBudgetRepository(
               transaction,
               input.now,
+              input.configuration.executionCeiling,
             );
             return operationPrefix === undefined
               ? repository.reserveBudgetWithinPaidCallCeiling(
-                gateInput,
-                input.operationBudget.maxPaidCalls,
-                input.operationBudget.operationBudgetLimitMicros,
-              )
+                  gateInput,
+                  input.operationBudget.maxPaidCalls,
+                  input.operationBudget.operationBudgetLimitMicros,
+                )
               : repository.reserveBudgetWithinOperationCeiling(
-                gateInput,
-                operationPrefix,
-                input.operationBudget.maxPaidCalls,
-                input.operationBudget.operationBudgetLimitMicros,
-                input.operationBudget.dailyBudgetLimitMicros,
-                {
-                  requiredRemainingPaidCalls:
-                    gateInput.requiredRemainingPaidCalls,
-                  requiredRemainingCostMicros:
-                    gateInput.requiredRemainingCostMicros,
-                  ...(input.operationBudget.authorization === null
-                    ? {}
-                    : {
-                        authorization:
-                          input.operationBudget.authorization,
-                      }),
-                },
-              );
+                  gateInput,
+                  operationPrefix,
+                  input.operationBudget.maxPaidCalls,
+                  input.operationBudget.operationBudgetLimitMicros,
+                  input.operationBudget.dailyBudgetLimitMicros,
+                  {
+                    requiredRemainingPaidCalls:
+                      gateInput.requiredRemainingPaidCalls,
+                    requiredRemainingCostMicros:
+                      gateInput.requiredRemainingCostMicros,
+                    ...(input.operationBudget.authorization === null
+                      ? {}
+                      : {
+                          authorization: input.operationBudget.authorization,
+                        }),
+                  },
+                );
           },
         );
       },
@@ -1863,26 +1986,8 @@ async function clearSessionTenant(
   );
 }
 
-async function mapConcurrent<T, R>(
-  values: readonly T[],
-  concurrency: number,
-  mapper: (value: T, index: number) => Promise<R>,
-): Promise<readonly R[]> {
-  const output: R[] = new Array<R>(values.length);
-  let nextIndex = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, values.length) }, async () => {
-      while (nextIndex < values.length) {
-        const index = nextIndex;
-        nextIndex += 1;
-        const value = values[index];
-        if (value !== undefined) {
-          output[index] = await mapper(value, index);
-        }
-      }
-    }),
-  );
-  return Object.freeze(output);
+function elapsedMilliseconds(startedAt: number, completedAt: number): number {
+  return Math.max(0, Math.round(completedAt - startedAt));
 }
 
 export function createLocalProductDataForSeoRuntime(
@@ -1890,6 +1995,7 @@ export function createLocalProductDataForSeoRuntime(
 ): LocalProductDataForSeoRuntime {
   const configuration = configurationSchema.parse(options.configuration);
   const now = options.now ?? (() => new Date());
+  const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const safeFetch =
     options.safeFetch ??
     new SafeFetchAdapter({
@@ -1902,15 +2008,15 @@ export function createLocalProductDataForSeoRuntime(
     configuration.credentialSecretRef,
     secretKinds.dataForSeoCredential,
   );
-  const qualificationInputRepository =
-    createProjectInputPersistenceRepository(options.pool);
-  const qualificationRecommendationRepository =
-    createRecommendationContractRepository(options.pool);
-  const qualificationRequestRepository =
-    createCommercialQualificationRequestRepository(options.pool, now);
+  const qualificationInputRepository = createProjectInputPersistenceRepository(
+    options.pool,
+  );
 
   return Object.freeze({
     async execute(input) {
+      if (input.nativeV2 === undefined) {
+        throw new Error("BACKLINKS_V1_RECOMMENDATION_PROVIDER_RETIRED");
+      }
       const scope = scopeFrom(input);
       const execution = await withBacklinkTenantTransaction(
         options.pool,
@@ -1918,11 +2024,12 @@ export function createLocalProductDataForSeoRuntime(
         async (client) => {
           const authorizationResult = await client.query(
             `SELECT result_summary->'providerBudgetAuthorization'
-                    AS "providerBudgetAuthorization"
+                    AS "providerBudgetAuthorization",
+                    created_at AS "createdAt"
                FROM backlink_jobs
               WHERE organization_id=$1 AND workspace_id=$2
                 AND website_project_id=$3 AND id=$4
-                AND source_object_type='recommendation_context'
+                AND source_object_type=$6
                 AND source_object_id=$5`,
             [
               scope.organizationId,
@@ -1930,210 +2037,148 @@ export function createLocalProductDataForSeoRuntime(
               scope.websiteProjectId,
               input.jobId,
               input.recommendationContextVersionId,
+              input.nativeV2 === undefined
+                ? "recommendation_context"
+                : "project-context-snapshot",
             ],
           );
+          if (
+            input.nativeV2 !== undefined &&
+            authorizationResult.rows[0] === undefined
+          ) {
+            throw new Error("RECOMMENDATION_POOL_V2_JOB_LINEAGE_INVALID");
+          }
           const authorizationValue =
             authorizationResult.rows[0]?.providerBudgetAuthorization;
           const providerBudgetAuthorization =
-            authorizationValue === undefined ||
-              authorizationValue === null
+            authorizationValue === undefined || authorizationValue === null
               ? null
-              : parseProviderOperationBudgetAuthorization(
-                authorizationValue,
-              );
-          if (input.source === "existing") {
-            await client.query(
-              `UPDATE backlink_jobs
-                  SET status='running',step='reusing_assessed_candidates',
-                      progress=25,error=NULL,finished_at=NULL,
-                      updated_at=now(),updated_by=$5,version=version+1
-                WHERE (organization_id,workspace_id,website_project_id,id)=
-                      ($1,$2,$3,$4)
-                  AND status IN ('queued','running','waiting_provider')`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.jobId,
-                input.actorId,
-              ],
-            );
-            return Object.freeze({
-              refillCycle: null,
-              providerBudgetAuthorization,
-            });
-          }
-          const state = await client.query(
-            `SELECT refill.trigger_reason AS "triggerReason",
-                    refill.visible_pool_generation AS "refillGeneration",
-                    policy.visible_pool_generation AS "policyGeneration",
-                    policy.visible_pool_state AS "visiblePoolState",
-                    policy.current_refill_tier AS "currentTier",
-                    policy.current_refill_round AS "currentRound",
-                    policy.termination_reason AS "terminationReason"
-               FROM backlink_recommendation_refills AS refill
-               JOIN backlink_commercial_inventory_policies AS policy
-                 ON (
-                   policy.organization_id,policy.workspace_id,
-                   policy.website_project_id,
-                   policy.project_context_version_id
-                 )=(
-                   refill.organization_id,refill.workspace_id,
-                   refill.website_project_id,
-                   refill.recommendation_context_version_id
-                 )
-              WHERE refill.organization_id=$1 AND refill.workspace_id=$2
-                AND refill.website_project_id=$3 AND refill.job_id=$4
-                 AND refill.recommendation_context_version_id=$5
-                 AND refill.visible_pool_generation=$6
-                 AND policy.visible_pool_generation=$6
-                 AND (
-                   policy.visible_pool_state='building'
-                   OR (
-                     policy.visible_pool_state='active'
-                     AND EXISTS (
-                       SELECT 1
-                         FROM backlink_recommendation_generation_contracts
-                              AS contract
-                        WHERE (
-                          contract.organization_id,contract.workspace_id,
-                          contract.website_project_id,
-                          contract.recommendation_context_version_id,
-                          contract.visible_pool_generation
-                        )=(
-                          policy.organization_id,policy.workspace_id,
-                          policy.website_project_id,
-                          policy.project_context_version_id,
-                          policy.visible_pool_generation
-                        )
-                          AND contract.qualification_contract_version=
-                            'recommendation-qualification.v1'
-                          AND contract.visibility_contract_version=
-                            'recommendation-visibility.v1'
-                          AND contract.score_model_version=
-                            'recommendation-commercial-fit.v4'
-                     )
-                   )
-                 )`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-              input.jobId,
-              input.recommendationContextVersionId,
-              input.visiblePoolGeneration,
-            ],
-          );
-          const row = state.rows[0];
-          if (row === undefined) {
-            throw new Error("COMMERCIAL_REFILL_CYCLE_KEY_INVALID");
-          }
-          const cycle = resolveLocalProductCommercialRefillCycle({
-            refillWindowKey: input.refillWindowKey,
-            triggerReason: String(row.triggerReason),
-            websiteProjectId: scope.websiteProjectId,
-            projectContextVersionId: input.recommendationContextVersionId,
-            visiblePoolGeneration: input.visiblePoolGeneration,
-            currentTier: row.currentTier,
-            currentRound: row.currentRound,
-            terminationReason: row.terminationReason,
-          });
-          if (row.triggerReason === "manual") {
-            const attempt = JSON.stringify([
-              {
-                tier: cycle.tier,
-                round: cycle.round,
-                window: cycle.window,
-              },
-            ]);
-            await client.query(
-              `UPDATE backlink_commercial_inventory_policies AS policy
-                  SET refill_state='running',
-                      current_refill_tier=$5,
-                      current_refill_round=$6,
-                      attempted_refill_tiers=CASE
-                        WHEN attempted_refill_tiers @> $7::jsonb
-                          THEN attempted_refill_tiers
-                        ELSE attempted_refill_tiers || $7::jsonb
-                      END,
-                      termination_reason=NULL,pause_reason=NULL,
-                      next_refill_at=NULL,updated_at=now(),
-                      updated_by=$8,version=version+1
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3
-                  AND project_context_version_id=$4
-                  AND visible_pool_generation=$9
+              : parseProviderOperationBudgetAuthorization(authorizationValue);
+          const createdAt = new Date(
+            String(authorizationResult.rows[0]?.createdAt ?? ""),
+          ).getTime();
+          const recommendationQueueMs = Number.isFinite(createdAt)
+            ? Math.max(0, now().getTime() - createdAt)
+            : 0;
+
+          const generation = await client.query(
+              `SELECT generation.input_pin_id "inputPinId",
+                      contract.pool_contract_version "poolContractVersion",
+                      contract.migration_state "migrationState",
+                      contract.state_reason_codes "stateReasonCodes",
+                      CASE
+                        WHEN contract.migration_state='MIGRATION_BLOCKED'
+                          THEN COALESCE((
+                            backlinks
+                              .backlink_recommendation_pool_v2_native_generation_verify()
+                              ->>'v1WritesFrozen'
+                          )::boolean,false)
+                        ELSE false
+                      END "v1WritesFrozen"
+                 FROM backlink_recommendation_generation_contracts AS generation
+                 JOIN backlink_recommendation_pool_project_contracts AS contract
+                   ON contract.organization_id=generation.organization_id
+                  AND contract.workspace_id=generation.workspace_id
+                  AND contract.website_project_id=generation.website_project_id
                   AND (
-                    policy.visible_pool_state='building'
+                    contract.recommendation_context_version_id=
+                      generation.recommendation_context_version_id
                     OR (
-                      policy.visible_pool_state='active'
-                      AND EXISTS (
-                        SELECT 1
-                          FROM backlink_recommendation_generation_contracts
-                               AS contract
-                         WHERE (
-                           contract.organization_id,contract.workspace_id,
-                           contract.website_project_id,
-                           contract.recommendation_context_version_id,
-                           contract.visible_pool_generation
-                         )=(
-                           policy.organization_id,policy.workspace_id,
-                           policy.website_project_id,
-                           policy.project_context_version_id,
-                           policy.visible_pool_generation
-                         )
-                           AND contract.qualification_contract_version=
-                             'recommendation-qualification.v1'
-                           AND contract.visibility_contract_version=
-                             'recommendation-visibility.v1'
-                           AND contract.score_model_version=
-                             'recommendation-commercial-fit.v4'
-                      )
+                      contract.migration_state='V2_READY'
+                      AND contract.generation_contract_id IS NULL
+                      AND contract.recommendation_context_version_id IS NULL
                     )
-                  )`,
+                  )
+                WHERE generation.organization_id=$1
+                  AND generation.workspace_id=$2
+                  AND generation.website_project_id=$3
+                  AND generation.recommendation_context_version_id=$4
+                  AND generation.visible_pool_generation=$5
+                  AND generation.id=$6
+                  AND generation.pool_contract_version='recommendation-pool.v2'
+                  AND generation.discovery_budget_policy_version=$7
+                  AND generation.discovery_completed_at IS NULL`,
               [
                 scope.organizationId,
                 scope.workspaceId,
                 scope.websiteProjectId,
                 input.recommendationContextVersionId,
-                cycle.tier,
-                cycle.round,
-                attempt,
-                input.actorId,
                 input.visiblePoolGeneration,
+                input.nativeV2.generationContractId,
+                input.nativeV2.discoveryBudgetPolicyVersion,
               ],
             );
-          }
-          await client.query(
-            `UPDATE backlink_jobs
-                SET status='waiting_provider',
-                    step='provider_request_authorizing',
-                    progress=10,updated_at=now(),version=version+1
-              WHERE organization_id=$1 AND workspace_id=$2
-                AND website_project_id=$3 AND id=$4`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-              input.jobId,
-            ],
-          );
-          return Object.freeze({
-            refillCycle: cycle,
-            providerBudgetAuthorization,
-          });
+if (
+              generation.rows[0] === undefined ||
+              !isRecommendationPoolV2ProjectGeneratable(generation.rows[0])
+            ) {
+              throw new Error("RECOMMENDATION_POOL_V2_PROJECT_NOT_GENERATABLE");
+            }
+await client.query(
+              `UPDATE backlink_jobs
+                  SET status='waiting_provider',
+                      step='provider_request_authorizing',
+                      progress=10,updated_at=now(),version=version+1
+                WHERE organization_id=$1 AND workspace_id=$2
+                  AND website_project_id=$3 AND id=$4`,
+              [
+                scope.organizationId,
+                scope.workspaceId,
+                scope.websiteProjectId,
+                input.jobId,
+              ],
+            );
+return Object.freeze({
+              refillCycle: Object.freeze({
+                tier: "exact_product_target_market" as const,
+                round: input.nativeV2.round,
+                window: 1,
+              }),
+              providerBudgetAuthorization,
+              recommendationQueueMs,
+              inputPinId: String(generation.rows[0].inputPinId),
+            });
         },
       );
-      const { refillCycle, providerBudgetAuthorization } = execution;
-      const operationBudget =
-        resolveLocalProductDataForSeoOperationBudget({
-          configuration,
-          authorization: providerBudgetAuthorization,
-        });
+      const {
+        refillCycle,
+        providerBudgetAuthorization,
+        recommendationQueueMs,
+      } = execution;
+      const operationBudget = resolveLocalProductDataForSeoOperationBudget({
+        configuration,
+        authorization: providerBudgetAuthorization,
+      });
 
       const providerClient = await options.pool.connect();
+      let tenantReady = false;
+      let recommendationDiscoveryMs = 0;
+      const recommendationQualificationMs = 0;
+      const persistExecutionStageTimings = async () => {
+        if (!tenantReady) return;
+        await providerClient.query(
+          `UPDATE backlink_jobs
+              SET result_summary=COALESCE(result_summary,'{}'::jsonb)
+                    || $5::jsonb,
+                  updated_at=now(),version=version+1
+            WHERE organization_id=$1 AND workspace_id=$2
+              AND website_project_id=$3 AND id=$4`,
+          [
+            scope.organizationId,
+            scope.workspaceId,
+            scope.websiteProjectId,
+            input.jobId,
+            JSON.stringify({
+              recommendationQueueMs,
+              recommendationDiscoveryMs,
+              recommendationQualificationMs,
+            }),
+          ],
+        );
+      };
       try {
         await setSessionTenant(providerClient, scope);
+        tenantReady = true;
         const contextResult = await providerClient.query(
           `SELECT context.snapshot_version AS "snapshotVersion",
                   context.profile_version_id AS "profileVersionId",
@@ -2146,6 +2191,16 @@ export function createLocalProductDataForSeoRuntime(
                   context.locale, context.country_code AS "countryCode",
                   context.products, context.keywords,
                   context.target_urls AS "targetUrls",
+                  contract.pool_contract_version AS "poolContractVersion",
+                  contract.migration_state AS "poolMigrationState",
+                  CASE
+                    WHEN contract.migration_state='V2_READY'
+                      AND contract.generation_contract_id IS NULL
+                      AND contract.recommendation_context_version_id IS NULL
+                    THEN context.id
+                    ELSE contract.recommendation_context_version_id
+                  END
+                    AS "poolRecommendationContextVersionId",
                   COALESCE(
                     settings.settings_values->'discoveryTargetAudiences',
                     '[]'::jsonb
@@ -2168,8 +2223,13 @@ export function createLocalProductDataForSeoRuntime(
                   AND website_project_id=context.website_project_id
                 ORDER BY version DESC
                 LIMIT 1
-             ) AS settings ON true
-            WHERE context.organization_id=$1 AND context.workspace_id=$2
+              ) AS settings ON true
+             LEFT JOIN backlink_recommendation_pool_project_contracts
+               AS contract
+               ON contract.organization_id=context.organization_id
+              AND contract.workspace_id=context.workspace_id
+              AND contract.website_project_id=context.website_project_id
+             WHERE context.organization_id=$1 AND context.workspace_id=$2
               AND context.website_project_id=$3 AND context.id=$4`,
           [
             scope.organizationId,
@@ -2182,30 +2242,44 @@ export function createLocalProductDataForSeoRuntime(
         if (contextRow === undefined) {
           throw new Error("BACKLINK_RECOMMENDATION_CONTEXT_NOT_FOUND");
         }
-        const parsedRecommendationContext =
-          parseLocalProductRecommendationContext(contextRow);
-        const inputBinding =
-          await qualificationInputRepository
-            .readGenerationInputBindingForContext({
-              organizationId: scope.organizationId,
-              workspaceId: scope.workspaceId,
-              websiteProjectId: scope.websiteProjectId,
-              projectContextVersion:
-                parsedRecommendationContext.snapshotVersion,
-              siteProfileVersionId:
-                parsedRecommendationContext.profileVersionId,
-              promotionTargetVersionId:
-                parsedRecommendationContext.promotionTargetVersionId,
-              qualificationContractVersion:
-                CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-              market: parsedRecommendationContext.countryCode,
-            });
+        const parsedContextRow =
+          parseLocalProductRecommendationContextDatabaseRow(contextRow);
         const resolvedProjectInput =
-          resolveLocalProductProjectDiscoveryInput({
+          await executeRecommendationSeedReadinessGate({
+            commands: options.recommendationSeedCommands,
+            poolContractVersion: parsedContextRow.poolContractVersion,
+            migrationState: parsedContextRow.migrationState,
+            contractRecommendationContextVersionId:
+              parsedContextRow.contractRecommendationContextVersionId,
+            expectedRecommendationContextVersionId:
+              input.recommendationContextVersionId,
+            ...(input.nativeV2 === undefined
+              ? {}
+              : {
+                  seedPreparationMode: "confirmed_native_v2" as const,
+                }),
             organizationId: scope.organizationId,
+            workspaceId: scope.workspaceId,
             websiteProjectId: scope.websiteProjectId,
-            context: parsedRecommendationContext,
-            binding: inputBinding,
+            actorId: input.actorId,
+            jobId: input.jobId,
+            workflowId: input.workflowId,
+            correlationId: input.correlationId,
+            projectContext: parsedContextRow.context,
+            loadInputBinding: (parsedRecommendationContext) =>
+              qualificationInputRepository.readGenerationInputBinding(
+                {
+                  organizationId: scope.organizationId,
+                  workspaceId: scope.workspaceId,
+                  websiteProjectId: scope.websiteProjectId,
+                  inputPinId: execution.inputPinId,
+                  qualificationContractVersion:
+                    recommendationPoolV2AdmissionContractVersion,
+                  market: parsedRecommendationContext.countryCode,
+                },
+              ),
+            onReady: ({ context, binding }) =>
+              Object.freeze({ context, binding }),
             now: now(),
           });
         const recommendationContext = resolvedProjectInput.context;
@@ -2217,6 +2291,7 @@ export function createLocalProductDataForSeoRuntime(
           ...configuration,
           locationCode: projectLocale.locationCode,
           languageCode: projectLocale.languageCode,
+          providerRequestConcurrency: configuration.discoveryConcurrency ?? 2,
         });
         const createGate = createLocalProductDataForSeoGate({
           pool: options.pool,
@@ -2243,272 +2318,13 @@ export function createLocalProductDataForSeoRuntime(
             ))();
           return credentialsPromise;
         };
-        let qualificationProviderRuntime: Promise<
-          ReturnType<typeof createCommercialQualificationOfficialRuntime>
-        > | null = null;
-        const qualificationProvider = Object.freeze({
-          async execute(
-            call: Parameters<
-              ReturnType<
-                typeof createCommercialQualificationOfficialRuntime
-              >["execute"]
-            >[0],
-          ) {
-            qualificationProviderRuntime ??= (async () =>
-              createCommercialQualificationOfficialRuntime({
-                credentials: await resolveCredentials(),
-                endpointAllowlist: configuration.endpointAllowlist,
-                timeoutMs: configuration.timeoutMs,
-              }))();
-            return (await qualificationProviderRuntime).execute(call);
-          },
-        });
-        const providerBudgetOperationPrefix =
-          `commercial-refill-operation:${input.jobId}`;
-        const loadBlueprintTopics = async (): Promise<readonly string[]> => {
-          const blueprintResult = await providerClient.query(
-            `SELECT blueprint
-               FROM backlink_commercial_discovery_blueprints
-              WHERE organization_id=$1 AND workspace_id=$2
-                AND website_project_id=$3
-                AND project_context_version_id=$4
-              ORDER BY generated_at DESC,id DESC
-              LIMIT 1`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-              input.recommendationContextVersionId,
-            ],
-          );
-          const blueprint = storedCommercialBlueprintTopicsSchema.safeParse(
-            blueprintResult.rows[0]?.blueprint,
-          );
-          return blueprint.success
-            ? Object.freeze([...blueprint.data.topicClusters])
-            : Object.freeze([]);
-        };
-        const runQualification = async (
-          candidates: readonly CommercialQualificationProductionCandidate[],
-          metricCollectionMode:
-            CommercialQualificationMetricCollectionMode = "provider",
-        ) => {
-          const topics = await loadBlueprintTopics();
-          const metricRuntime =
-            createGovernedCommercialQualificationRuntime({
-              context: scope,
-              operationId: input.jobId,
-              budgetReservationPrefix: providerBudgetOperationPrefix,
-              estimatedCostMicros: configuration.estimatedCostMicros,
-              provider: qualificationProvider,
-              gate: createGate(
-                providerClient,
-                providerBudgetOperationPrefix,
-              ),
-              store: qualificationRequestRepository,
-              now,
-            });
-          return executeCommercialQualificationProduction({
-            scope: {
-              ...scope,
-              recommendationContextVersionId:
-                input.recommendationContextVersionId,
-            },
-            context: recommendationContext,
-            topics,
-            candidates: Object.freeze(candidates.slice(0, 25)),
-            visiblePoolGeneration: input.visiblePoolGeneration,
-            locationCode: Number(projectConfiguration.locationCode),
-            languageCode: projectConfiguration.languageCode,
-            endpointAllowlist: configuration.endpointAllowlist,
-            metricCollectionMode,
-            metricRuntime,
-            inputBinding: resolvedProjectInput.binding,
-            recommendationRepository:
-              qualificationRecommendationRepository,
-            createdBy: input.actorId,
-            observedAt: now(),
-          });
-        };
-        if (input.source === "existing") {
-          await recoverCurrentCommercialStaticAssessments(providerClient, {
-            ...scope,
-            projectContextVersionId:
-              input.recommendationContextVersionId,
-            visiblePoolGeneration: input.visiblePoolGeneration,
-            operationId: input.jobId,
-            actorId: input.actorId,
-            maximumCandidates: Math.min(
-              Math.max(input.requestedCount * 2, 10),
-              25,
-            ),
-            project: {
-              products: recommendationContext.products,
-              topics: await loadBlueprintTopics(),
-              keywords: recommendationContext.keywords,
-              targetPages: recommendationContext.targetUrls,
-              targetAudiences: recommendationContext.targetAudiences,
-              partnershipGoals: recommendationContext.partnershipGoals,
-            },
-            safeFetch,
-            pageParser: commercialPageParser,
-            now: now(),
-          });
-          const existing = await prepareCurrentCommercialCandidateEnrichment(
-            providerClient,
-            {
-              ...scope,
-              projectContextVersionId:
-                input.recommendationContextVersionId,
-              visiblePoolGeneration: input.visiblePoolGeneration,
-              actorId: input.actorId,
-              now: now(),
-              generationInputFingerprint:
-                resolvedProjectInput.binding.immutableFingerprint,
-              maximumCandidates: Math.min(input.requestedCount, 25),
-              apply: true,
-            },
-          );
-          const qualificationPlan =
-            resolveExistingCandidateQualificationPlan({
-              ...(input.supplyMode === undefined
-                ? {}
-                : { supplyMode: input.supplyMode }),
-              publishableCandidates: existing.publishableCandidates,
-              enrichmentCandidates: existing.candidates,
-            });
-          const useExistingEvidence =
-            qualificationPlan.metricCollectionMode === "existing_evidence";
-          const qualificationCandidates = qualificationPlan.candidates;
-          const existingQualification = await runQualification(
-            qualificationCandidates.map((candidate) =>
-              discoveredQualificationCandidate(
-                candidate.candidateId,
-                candidate,
-              )
-            ),
-            qualificationPlan.metricCollectionMode,
-          );
-          const qualificationByDomain = new Map(
-            existingQualification.qualifications.map((item) => [
-              item.hostnameAscii,
-              item,
-            ]),
-          );
-          const finalizedCandidates = await mapConcurrent(
-            qualificationCandidates,
-            1,
-            async (candidate) => {
-              const metrics = qualificationByDomain.get(
-                candidate.hostnameAscii,
-              );
-              if (metrics === undefined) {
-                throw new Error(
-                  "COMMERCIAL_QUALIFICATION_RESULT_NOT_PERSISTED",
-                );
-              }
-              const finalized = finalizeCommercialCandidateEnrichment({
-                candidate,
-                metrics,
-                qualificationDecision: metrics.decision,
-              });
-              await providerClient.query(
-                `UPDATE backlink_commercial_candidates
-                    SET commercial_score=$6::jsonb,
-                        state=$7,
-                        gate_decision=
-                          COALESCE(gate_decision,'{}'::jsonb)
-                          || $8::jsonb,
-                        provider_collected_at=$9,
-                        updated_at=now(),updated_by=$10,
-                        version=version+1
-                  WHERE organization_id=$1 AND workspace_id=$2
-                    AND website_project_id=$3
-                    AND project_context_version_id=$4
-                    AND id=$5
-                    AND visible_pool_generation=$11
-                    AND score_model_version=
-                      'recommendation-commercial-fit.v4'
-                    AND (
-                      ($12::boolean AND state IS DISTINCT FROM $7)
-                      OR (
-                        NOT $12::boolean
-                        AND state='enrichment_eligible'
-                      )
-                    )`,
-                [
-                  scope.organizationId,
-                  scope.workspaceId,
-                  scope.websiteProjectId,
-                  input.recommendationContextVersionId,
-                  candidate.candidateId,
-                  JSON.stringify(finalized.commercialScore),
-                  finalized.state,
-                  JSON.stringify({
-                    enrichment: {
-                      decision: "completed",
-                      qualificationDecision: metrics.decision,
-                      qualificationReasonCode:
-                        metrics.decisionReasonCode,
-                      trafficState: metrics.trafficState,
-                      spamState: metrics.spamState,
-                      rankState: metrics.rankState,
-                      inputPinId:
-                        resolvedProjectInput.binding.inputPinId,
-                      generationInputFingerprint:
-                        resolvedProjectInput.binding.immutableFingerprint,
-                      requestFingerprints: metrics.requestFingerprints,
-                    },
-                  }),
-                  useExistingEvidence
-                    ? new Date(candidate.provider.collectedAt)
-                    : now(),
-                  input.actorId,
-                  input.visiblePoolGeneration,
-                  useExistingEvidence,
-                ],
-              );
-              return Object.freeze({
-                candidate: Object.freeze({
-                  ...candidate,
-                  provider: Object.freeze({
-                    ...candidate.provider,
-                    ...finalized.provider,
-                  }),
-                  commercialScore: finalized.commercialScore,
-                }),
-                state: finalized.state,
-              });
-            },
-          );
-          const sourceReleaseId = input.refillWindowKey;
-          const candidates = Object.freeze(
-            finalizedCandidates
-              .filter(({ state }) => state === "candidate_ready")
-              .map(({ candidate }) =>
-                buildStoredCommercialRecommendationEvidenceCandidate({
-                  candidate,
-                  sourceReleaseId,
-                })
-              ),
-          );
-          return Object.freeze({
-            candidates,
-            provider: Object.freeze({
-              source: "cache",
-              acquiredAt: now().toISOString(),
-              costMicros: 0,
-              requestFingerprint: sourceReleaseId,
-            } satisfies RecommendationProviderExecutionSummary),
-          });
-        }
+
+        const providerBudgetOperationPrefix = `commercial-refill-operation:${input.jobId}`;
+
         if (refillCycle === null) {
           throw new Error("COMMERCIAL_REFILL_CYCLE_KEY_INVALID");
         }
-        const gate = createGate(
-          providerClient,
-          providerBudgetOperationPrefix,
-        );
+        const gate = createGate(providerClient, providerBudgetOperationPrefix);
         let providerRuntime: Promise<
           ReturnType<typeof createCommercialOfficialDataForSeoRuntime>
         > | null = null;
@@ -2549,9 +2365,7 @@ export function createLocalProductDataForSeoRuntime(
           ) {
             const runtime = await resolveProviderRuntime();
             if (runtime.recoverAcceptedTask === undefined) {
-              throw new Error(
-                "DATAFORSEO_ACCEPTED_TASK_RECOVERY_UNAVAILABLE",
-              );
+              throw new Error("DATAFORSEO_ACCEPTED_TASK_RECOVERY_UNAVAILABLE");
             }
             return runtime.recoverAcceptedTask(call, providerTaskId);
           },
@@ -2573,957 +2387,80 @@ export function createLocalProductDataForSeoRuntime(
           ) {
             const runtime = await resolveProviderRuntime();
             if (runtime.reconcileDispatchedTask === undefined) {
-              throw new Error(
-                "DATAFORSEO_DISPATCH_RECONCILIATION_UNAVAILABLE",
-              );
+              throw new Error("DATAFORSEO_DISPATCH_RECONCILIATION_UNAVAILABLE");
             }
             return runtime.reconcileDispatchedTask(call, reconciliation);
           },
         });
-        const commercial = await executeCommercialRecommendationDiscovery({
-          client: providerClient,
-          provider,
-          gate,
-          safeFetch,
-          scope,
-          contextVersionId: input.recommendationContextVersionId,
-          context: recommendationContext,
-          inputBinding: resolvedProjectInput.binding,
-          configuration: projectConfiguration,
-          blueprintGenerator: options.blueprintGenerator,
-          providerBudgetOperationPrefix,
-          requestClientFactory: async () => {
-            const client = await options.pool.connect();
-            try {
-              await setSessionTenant(client, scope);
-            } catch (error) {
-              client.release();
-              throw error;
-            }
-            return Object.freeze({
-              client,
-              gate: createGate(client, providerBudgetOperationPrefix),
-              async release() {
-                await clearSessionTenant(client).catch(() => undefined);
-                client.release();
-              },
-            });
-          },
-          requestedCount: input.requestedCount,
-          jobId: input.jobId,
-          visiblePoolGeneration: input.visiblePoolGeneration,
-          refillTier: refillCycle.tier,
-          refillRound: refillCycle.round,
-          refillWindow: refillCycle.window,
-          actorId: input.actorId,
-          now,
-        });
-        await recoverCurrentCommercialStaticAssessments(providerClient, {
-          ...scope,
-          projectContextVersionId: input.recommendationContextVersionId,
-          visiblePoolGeneration: input.visiblePoolGeneration,
-          operationId: input.jobId,
-          actorId: input.actorId,
-          maximumCandidates: Math.min(
-            Math.max(input.requestedCount * 2, 10),
-            25,
-          ),
-          project: {
-            products: recommendationContext.products,
-            topics: await loadBlueprintTopics(),
-            keywords: recommendationContext.keywords,
-            targetPages: recommendationContext.targetUrls,
-            targetAudiences: recommendationContext.targetAudiences,
-            partnershipGoals: recommendationContext.partnershipGoals,
-          },
-          safeFetch,
-          pageParser: commercialPageParser,
-          now: now(),
-        });
-        const current = await prepareCurrentCommercialCandidateEnrichment(
-          providerClient,
-          {
-            ...scope,
-            projectContextVersionId: input.recommendationContextVersionId,
-            visiblePoolGeneration: input.visiblePoolGeneration,
-            actorId: input.actorId,
-            now: now(),
-            generationInputFingerprint:
-              resolvedProjectInput.binding.immutableFingerprint,
-            maximumCandidates: Math.min(input.requestedCount, 25),
-            apply: true,
-          },
-        );
-        const qualificationPlan =
-          resolveExistingCandidateQualificationPlan({
-            publishableCandidates: current.publishableCandidates,
-            enrichmentCandidates: current.candidates,
-          });
-        const useExistingEvidence =
-          qualificationPlan.metricCollectionMode === "existing_evidence";
-        const qualificationCandidates = qualificationPlan.candidates;
-        let finalizedCandidates: Array<Readonly<{
-          candidate: CommercialReadyCandidate;
-          state: CommercialCandidateEnrichmentState;
-        }>> = [];
-        if (qualificationCandidates.length === 0) {
-          await runQualification(
-            [],
-            qualificationPlan.metricCollectionMode,
-          );
-        } else {
-          const candidateIds = new Map(
-            qualificationCandidates.map((candidate) => [
-              candidate.hostnameAscii,
-              candidate.candidateId,
-            ]),
-          );
-          const qualification = await runQualification(
-            qualificationCandidates.map((candidate) => {
-              const candidateId = candidateIds.get(candidate.hostnameAscii);
-              if (candidateId === undefined) {
-                throw new Error(
-                  "COMMERCIAL_QUALIFICATION_CANDIDATE_NOT_PERSISTED",
-                );
-              }
-              return discoveredQualificationCandidate(candidateId, candidate);
-            }),
-            qualificationPlan.metricCollectionMode,
-          );
-          const qualificationByDomain = new Map(
-            qualification.qualifications.map((item) => [
-              item.hostnameAscii,
-              item,
-            ]),
-          );
-          finalizedCandidates = [
-            ...await mapConcurrent(
-              qualificationCandidates,
-              1,
-              async (candidate) => {
-                const candidateId = candidateIds.get(candidate.hostnameAscii);
-                const metrics = qualificationByDomain.get(
-                  candidate.hostnameAscii,
-                );
-                if (candidateId === undefined || metrics === undefined) {
-                  throw new Error(
-                    "COMMERCIAL_QUALIFICATION_RESULT_NOT_PERSISTED",
-                  );
-                }
-                const finalized = finalizeCommercialCandidateEnrichment({
-                  candidate,
-                  metrics,
-                  qualificationDecision: metrics.decision,
-                });
-                await providerClient.query(
-                  `UPDATE backlink_commercial_candidates
-                      SET commercial_score=$6::jsonb,
-                          state=$7,
-                          gate_decision=
-                            COALESCE(gate_decision,'{}'::jsonb)
-                            || $8::jsonb,
-                          provider_collected_at=$9,
-                          updated_at=now(),updated_by=$10,
-                          version=version+1
-                    WHERE organization_id=$1 AND workspace_id=$2
-                      AND website_project_id=$3
-                      AND project_context_version_id=$4
-                      AND id=$5
-                      AND visible_pool_generation=$11
-                      AND score_model_version=
-                        'recommendation-commercial-fit.v4'
-                      AND (
-                        ($12::boolean AND state IS DISTINCT FROM $7)
-                        OR (
-                          NOT $12::boolean
-                          AND state='enrichment_eligible'
-                        )
-                      )`,
-                  [
-                    scope.organizationId,
-                    scope.workspaceId,
-                    scope.websiteProjectId,
-                    input.recommendationContextVersionId,
-                    candidateId,
-                    JSON.stringify(finalized.commercialScore),
-                    finalized.state,
-                    JSON.stringify({
-                      enrichment: {
-                        decision: "completed",
-                        qualificationDecision: metrics.decision,
-                        qualificationReasonCode:
-                          metrics.decisionReasonCode,
-                        trafficState: metrics.trafficState,
-                        spamState: metrics.spamState,
-                        rankState: metrics.rankState,
-                        inputPinId:
-                          resolvedProjectInput.binding.inputPinId,
-                        generationInputFingerprint:
-                          resolvedProjectInput.binding.immutableFingerprint,
-                        requestFingerprints: metrics.requestFingerprints,
-                      },
-                    }),
-                    useExistingEvidence
-                      ? new Date(candidate.provider.collectedAt)
-                      : now(),
-                    input.actorId,
-                    input.visiblePoolGeneration,
-                    useExistingEvidence,
-                  ],
-                );
-                return Object.freeze({
-                  candidate: Object.freeze({
-                    ...candidate,
-                    provider: Object.freeze({
-                      ...candidate.provider,
-                      ...finalized.provider,
-                    }),
-                    commercialScore: finalized.commercialScore,
-                  }),
-                  state: finalized.state,
-                });
-              },
-            ),
-          ];
-        }
-        const finalCandidates = finalizedCandidates.filter(
-          ({ state }) => state === "candidate_ready",
-        ).map(({ candidate }) => candidate);
-        const sourceReleaseId = `commercial-dataforseo:${commercial.provider.requestFingerprint}`;
-        const projectTerms = Object.freeze([
-          ...recommendationContext.keywords,
-          ...recommendationContext.products,
-        ]);
-        const candidates = await mapConcurrent(
-          finalCandidates,
-          websiteFetchConcurrency,
-          async (candidate) =>
-            buildLocalProductRecommendationEvidenceCandidate({
-              context: scope,
-              evidence: {
-                domain: candidate.hostnameAscii,
-                backlinkCount: candidate.provider.backlinkCount ?? 0,
-                rank: candidate.provider.rank,
-                spamScore: candidate.provider.spamScore,
-                countryCode: null,
-              },
-              sourceReleaseId,
-              acquiredAt: commercial.provider.acquiredAt,
-              locationCode: recommendationContext.countryCode,
-              languageCode: recommendationContext.locale,
-              projectTerms,
-              existingHostname: false,
-              existingBacklink: false,
-              previouslyExcluded: false,
-              duplicateDomain: false,
+        const discoveryStartedAt = monotonicNow();
+        const commercial = await (async () => {
+          try {
+            return await executeCommercialRecommendationDiscovery({
+              client: providerClient,
+              provider,
+              gate,
               safeFetch,
-            }),
-        );
-        return Object.freeze({
-          candidates,
-          provider: Object.freeze(
-            commercial.provider satisfies RecommendationProviderExecutionSummary,
-          ),
-        });
+              ...(options.browserFetch === undefined
+                ? {}
+                : { browserFetch: options.browserFetch }),
+              scope,
+              contextVersionId: input.recommendationContextVersionId,
+              context: recommendationContext,
+              inputBinding: resolvedProjectInput.binding,
+              configuration: projectConfiguration,
+              blueprintGenerator: options.blueprintGenerator,
+              providerBudgetOperationPrefix,
+              requestClientFactory: async () => {
+                const client = await options.pool.connect();
+                try {
+                  await setSessionTenant(client, scope);
+                } catch (error) {
+                  client.release();
+                  throw error;
+                }
+                return Object.freeze({
+                  client,
+                  gate: createGate(client, providerBudgetOperationPrefix),
+                  async release() {
+                    await clearSessionTenant(client).catch(() => undefined);
+                    client.release();
+                  },
+                });
+              },
+              requestedCount: input.requestedCount,
+              jobId: input.jobId,
+              visiblePoolGeneration: input.visiblePoolGeneration,
+              refillTier: refillCycle.tier,
+              refillRound: refillCycle.round,
+              refillWindow: refillCycle.window,
+              actorId: input.actorId,
+              now,
+              ...(input.nativeV2 === undefined
+                ? {}
+                : { nativeV2: input.nativeV2.requestPort }),
+            });
+          } finally {
+            recommendationDiscoveryMs += elapsedMilliseconds(
+              discoveryStartedAt,
+              monotonicNow(),
+            );
+          }
+        })();
+        await persistExecutionStageTimings();
+return Object.freeze({
+            candidates: Object.freeze([]),
+            provider: Object.freeze(
+              commercial.provider satisfies RecommendationProviderExecutionSummary,
+            ),
+          });
+      } catch (error) {
+        await persistExecutionStageTimings().catch(() => undefined);
+        throw error;
       } finally {
         await clearSessionTenant(providerClient).catch(() => undefined);
         providerClient.release();
       }
     },
 
-    async store(input) {
-      const scope = scopeFrom(input);
-      return withBacklinkTenantTransaction(
-        options.pool,
-        scope,
-        async (client) => {
-          const activePool = await client.query(
-            `SELECT 1
-               FROM backlink_commercial_inventory_policies AS policy
-              WHERE organization_id=$1 AND workspace_id=$2
-                AND website_project_id=$3
-                AND project_context_version_id=$4
-                AND visible_pool_generation=$5
-                AND (
-                  policy.visible_pool_state='building'
-                  OR (
-                    policy.visible_pool_state='active'
-                    AND EXISTS (
-                      SELECT 1
-                        FROM backlink_recommendation_generation_contracts
-                             AS contract
-                       WHERE (
-                         contract.organization_id,contract.workspace_id,
-                         contract.website_project_id,
-                         contract.recommendation_context_version_id,
-                         contract.visible_pool_generation
-                       )=(
-                         policy.organization_id,policy.workspace_id,
-                         policy.website_project_id,
-                         policy.project_context_version_id,
-                         policy.visible_pool_generation
-                       )
-                         AND contract.qualification_contract_version=
-                           'recommendation-qualification.v1'
-                         AND contract.visibility_contract_version=
-                           'recommendation-visibility.v1'
-                         AND contract.score_model_version=
-                           'recommendation-commercial-fit.v4'
-                    )
-                  )
-                )
-              FOR SHARE`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-              input.recommendationContextVersionId,
-              input.visiblePoolGeneration,
-            ],
-          );
-          if (activePool.rows[0] === undefined) {
-            throw new Error("COMMERCIAL_VISIBLE_POOL_GENERATION_STALE");
-          }
-          const current = await client.query(
-            `SELECT id
-               FROM backlink_project_context_snapshots
-              WHERE organization_id=$1 AND workspace_id=$2
-                AND website_project_id=$3
-              ORDER BY snapshot_version DESC LIMIT 1`,
-            [scope.organizationId, scope.workspaceId, scope.websiteProjectId],
-          );
-          if (current.rows[0]?.id !== input.recommendationContextVersionId) {
-            await client.query(
-              `UPDATE backlink_recommendations
-                  SET status='stale_context',updated_at=now(),
-                      updated_by=$5,version=version+1
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3
-                  AND recommendation_context_version_id=$4
-                  AND status IN (
-                    'candidate_raw','evaluating','ready','shown'
-                  )`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.recommendationContextVersionId,
-                input.actorId,
-              ],
-            );
-            await client.query(
-              `UPDATE backlink_recommendation_inventory
-                  SET status='stale_context',updated_at=now(),
-                      updated_by=$5,version=version+1
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3
-                  AND recommendation_context_version_id=$4
-                  AND status IN ('ready','claimed','shown')`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.recommendationContextVersionId,
-                input.actorId,
-              ],
-            );
-            await client.query(
-              `UPDATE backlink_commercial_discovery_blueprints
-                  SET status='stale_context'
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3
-                  AND project_context_version_id=$4
-                  AND status='active'`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.recommendationContextVersionId,
-              ],
-            );
-            await client.query(
-              `UPDATE backlink_commercial_discovery_batches
-                  SET status='stale_context',
-                      pause_reason='stale_context',
-                      finished_at=COALESCE(finished_at,now())
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3
-                  AND project_context_version_id=$4
-                  AND status IN (
-                    'running','completed','paused','unavailable'
-                  )`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.recommendationContextVersionId,
-              ],
-            );
-            await client.query(
-              `UPDATE backlink_commercial_candidates
-                  SET state='stale_context',updated_at=now(),
-                      updated_by=$5,version=version+1
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3
-                  AND project_context_version_id=$4
-                  AND state NOT IN ('published','stale_context')`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.recommendationContextVersionId,
-                input.actorId,
-              ],
-            );
-            await client.query(
-              `UPDATE backlink_jobs
-                  SET status='success',step='stale_context',
-                      progress=100,
-                      result_summary=
-                        COALESCE(result_summary,'{}'::jsonb)
-                        || $5::jsonb,
-                      finished_at=now(),updated_at=now(),version=version+1
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3 AND id=$4`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.jobId,
-                JSON.stringify({
-                  addedCount: 0,
-                  staleContext: true,
-                  provider: input.provider,
-                  evaluation: input.evaluationSummary,
-                }),
-              ],
-            );
-            return { addedCount: 0 };
-          }
-
-          let addedCount = 0;
-          for (const recommendation of input.recommendations) {
-            const domain = createRecommendationDomainKey(
-              recommendation.hostnameAscii,
-            );
-            const commercialCandidate = await client.query(
-              `SELECT id,source_types AS "sourceTypes",
-                      static_assessment AS "staticAssessment",
-                      gate_decision AS "gateDecision",
-                      commercial_score AS "commercialScore",
-                      provider_collected_at AS "providerCollectedAt"
-                 FROM backlink_commercial_candidates
-                WHERE organization_id=$1 AND workspace_id=$2
-                  AND website_project_id=$3
-                  AND project_context_version_id=$4
-                  AND visible_pool_generation=$6
-                  AND canonical_domain=$5
-                  AND score_model_version=
-                    'recommendation-commercial-fit.v4'
-                  AND state='candidate_ready'
-                ORDER BY updated_at DESC,id DESC
-                LIMIT 1`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.recommendationContextVersionId,
-                domain.registrableDomain,
-                input.visiblePoolGeneration,
-              ],
-            );
-            const commercialRow = commercialCandidate.rows[0];
-            const parsedCommercialScore = storedCommercialScoreSchema.safeParse(
-              commercialRow?.commercialScore,
-            );
-            if (!parsedCommercialScore.success) continue;
-            const qualificationFact = await client.query(
-              `SELECT qualification.id::text AS "qualificationFactId",
-                      qualification.generation_contract_id::text
-                        AS "generationContractId",
-                      qualification.metric_scope AS "metricScope",
-                      qualification.traffic_organic_etv
-                        AS "trafficOrganicEtv",
-                      qualification.spam_score AS "spamScore",
-                      qualification.authority_rank AS "authorityRank",
-                      qualification.accessibility_decision
-                        AS "accessibilityDecision",
-                      qualification.semantic_score AS "semanticScore",
-                      qualification.decision,
-                      qualification.decision_reason_code
-                        AS "decisionReasonCode",
-                      qualification.model_version AS "modelVersion",
-                      qualification.prompt_version AS "promptVersion",
-                      qualification.rule_version AS "ruleVersion",
-                      qualification.request_fingerprints
-                        AS "requestFingerprints",
-                      qualification.evidence,
-                      qualification.observed_at AS "observedAt"
-                 FROM backlinks.backlink_recommendation_qualification_facts
-                        qualification
-                 JOIN backlinks.backlink_recommendation_generation_contracts
-                        generation
-                   ON generation.id=qualification.generation_contract_id
-                  AND generation.organization_id=
-                        qualification.organization_id
-                  AND generation.workspace_id=qualification.workspace_id
-                  AND generation.website_project_id=
-                        qualification.website_project_id
-                WHERE qualification.organization_id=$1
-                  AND qualification.workspace_id=$2
-                  AND qualification.website_project_id=$3
-                  AND qualification.recommendation_context_version_id=$4
-                  AND qualification.candidate_id=$5
-                  AND qualification.recommendation_id IS NULL
-                  AND qualification.prospect_id IS NULL
-                  AND qualification.decision='eligible'
-                  AND qualification.fact_contract_version=$7
-                  AND qualification.score_model_version=$8
-                  AND generation.visible_pool_generation=$6
-                  AND generation.qualification_contract_version=$7
-                  AND generation.visibility_contract_version=$9
-                  AND generation.score_model_version=$8
-                ORDER BY qualification.attempt DESC,
-                         qualification.observed_at DESC,
-                         qualification.id DESC
-                LIMIT 1`,
-              [
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.recommendationContextVersionId,
-                commercialRow?.id,
-                input.visiblePoolGeneration,
-                CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-                CORRECTED_SCORE_MODEL_VERSION,
-                CORRECTED_VISIBILITY_CONTRACT_VERSION,
-              ],
-            );
-            const parsedQualification =
-              storedCommercialQualificationFactSchema.safeParse(
-                qualificationFact.rows[0],
-              );
-            if (!parsedQualification.success) continue;
-            const prospectId = randomUUID();
-            const recommendationId = randomUUID();
-            const scoreId = randomUUID();
-            const inventoryId = randomUUID();
-            const prospect = await client.query(
-              `WITH inserted AS (
-                 INSERT INTO backlink_prospects (
-                   id,organization_id,workspace_id,website_project_id,
-                   recommendation_context_version_id,hostname_ascii,
-                   registrable_domain,normalization_version,
-                   created_by,updated_by
-                 ) VALUES (
-                   $1,$2,$3,$4,$5,$6,$7,$8,$9,$9
-                 )
-                 ON CONFLICT (
-                   organization_id,workspace_id,website_project_id,
-                   recommendation_context_version_id,hostname_ascii
-                 ) DO NOTHING
-                 RETURNING id
-               )
-               SELECT id FROM inserted
-               UNION ALL
-               SELECT id FROM backlink_prospects
-                WHERE organization_id=$2 AND workspace_id=$3
-                  AND website_project_id=$4
-                  AND recommendation_context_version_id=$5
-                  AND hostname_ascii=$6
-               LIMIT 1`,
-              [
-                prospectId,
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                input.recommendationContextVersionId,
-                domain.hostnameAscii,
-                domain.registrableDomain,
-                domain.normalizationVersion,
-                input.actorId,
-              ],
-            );
-            const storedProspectId = prospect.rows[0]?.id;
-            if (storedProspectId === undefined) continue;
-            const recommendationRow = await client.query(
-              `WITH inserted AS (
-                 INSERT INTO backlink_recommendations (
-                   id,organization_id,workspace_id,website_project_id,
-                   prospect_id,recommendation_context_version_id,status,
-                   created_by,updated_by
-                 ) VALUES ($1,$2,$3,$4,$5,$6,'ready',$7,$7)
-                 ON CONFLICT (
-                   organization_id,workspace_id,website_project_id,
-                   prospect_id,recommendation_context_version_id
-                 ) DO NOTHING
-                 RETURNING id,status
-               )
-               SELECT id,status FROM inserted
-               UNION ALL
-               SELECT id,status FROM backlink_recommendations
-                WHERE organization_id=$2 AND workspace_id=$3
-                  AND website_project_id=$4 AND prospect_id=$5
-                  AND recommendation_context_version_id=$6
-               LIMIT 1`,
-              [
-                recommendationId,
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                storedProspectId,
-                input.recommendationContextVersionId,
-                input.actorId,
-              ],
-            );
-            const storedRecommendation = recommendationRow.rows[0];
-            if (
-              storedRecommendation === undefined ||
-              !["ready", "shown"].includes(String(storedRecommendation.status))
-            ) {
-              continue;
-            }
-            const storedRecommendationId = String(storedRecommendation.id);
-            const commercialScore = parsedCommercialScore.data;
-            const score = commercialScore;
-            const weights = Object.fromEntries(
-              commercialScore.components.map((component) => [
-                component.id,
-                component.weight,
-              ]),
-            );
-            const scoreEvidence = {
-              sourceReleaseId: recommendation.sourceReleaseId,
-              evidencePolicyVersion: recommendation.evidencePolicyVersion,
-              provider: {
-                providerId: "dataforseo",
-                source: input.provider.source,
-                acquiredAt: input.provider.acquiredAt,
-                costMicros: input.provider.costMicros,
-                requestFingerprint: input.provider.requestFingerprint,
-              },
-              gateDecision: recommendation.gateDecision,
-              missingEvidenceKeys: recommendation.missingEvidenceKeys,
-              commercial: {
-                sourceTypes: commercialRow?.sourceTypes,
-                staticAssessment: commercialRow?.staticAssessment,
-                gateDecision: commercialRow?.gateDecision,
-                hitGates: commercialScore.hitGates,
-                missingEvidence: commercialScore.missingEvidence,
-              },
-            };
-            await client.query(
-              `INSERT INTO backlink_recommendation_scores (
-                 id,organization_id,workspace_id,website_project_id,
-                 recommendation_id,prospect_id,
-                 recommendation_context_version_id,score_model_version,
-                 rule_version,total_score,components,weights,evidence,
-                 generated_at,created_by
-               )
-               SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,
-                      $12::jsonb,$13::jsonb,$14,$15
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM backlink_recommendation_scores
-                   WHERE organization_id=$2 AND workspace_id=$3
-                     AND website_project_id=$4
-                     AND recommendation_id=$5
-                     AND score_model_version=$8
-                     AND evidence->>'sourceReleaseId'=$16
-                )`,
-              [
-                scoreId,
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                storedRecommendationId,
-                storedProspectId,
-                input.recommendationContextVersionId,
-                score.scoreModelVersion,
-                score.ruleVersion,
-                score.total,
-                JSON.stringify(score.components),
-                JSON.stringify(weights),
-                JSON.stringify(scoreEvidence),
-                commercialRow?.providerCollectedAt ?? input.provider.acquiredAt,
-                input.actorId,
-                recommendation.sourceReleaseId,
-              ],
-            );
-            const inventory = await client.query(
-              `INSERT INTO backlink_recommendation_inventory (
-                 id,organization_id,workspace_id,website_project_id,
-                 recommendation_id,prospect_id,
-                 recommendation_context_version_id,visible_pool_generation,
-                 status,fit_decision,
-                 contact_decision,contact_reason_code,
-                 fit_score_model_version,publication_status,
-                 created_by,updated_by
-               ) VALUES (
-                 $1,$2,$3,$4,$5,$6,$7,$8,'ready','eligible','pending',
-                 'CONTACT_PENDING','recommendation-commercial-fit.v4',
-                 'CONTACT_PENDING',$9,$9
-               )
-               ON CONFLICT (
-                 organization_id,workspace_id,website_project_id,
-                 recommendation_id,recommendation_context_version_id,
-                 visible_pool_generation
-               ) DO UPDATE SET
-                 fit_decision='eligible',
-                 fit_score_model_version=
-                   'recommendation-commercial-fit.v4',
-                 contact_decision=CASE
-                   WHEN backlink_recommendation_inventory
-                          .contact_evidence_snapshot_id IS NOT NULL
-                     AND backlink_recommendation_inventory
-                          .verified_public_email_count>=1
-                     THEN 'eligible'
-                   ELSE 'pending'
-                 END,
-                 contact_reason_code=CASE
-                   WHEN backlink_recommendation_inventory
-                          .contact_evidence_snapshot_id IS NOT NULL
-                     AND backlink_recommendation_inventory
-                          .verified_public_email_count>=1
-                     THEN 'PUBLIC_EMAIL_FOUND'
-                   ELSE 'CONTACT_PENDING'
-                 END,
-                 publication_status=CASE
-                   WHEN backlink_recommendation_inventory
-                          .contact_evidence_snapshot_id IS NOT NULL
-                     AND backlink_recommendation_inventory
-                          .verified_public_email_count>=1
-                     THEN 'PUBLISHED'
-                   ELSE 'CONTACT_PENDING'
-                 END,
-                 updated_at=now(),updated_by=EXCLUDED.updated_by,
-                 version=backlink_recommendation_inventory.version+1
-               RETURNING id`,
-              [
-                inventoryId,
-                scope.organizationId,
-                scope.workspaceId,
-                scope.websiteProjectId,
-                storedRecommendationId,
-                storedProspectId,
-                input.recommendationContextVersionId,
-                input.visiblePoolGeneration,
-                input.actorId,
-              ],
-            );
-            const qualification = parsedQualification.data;
-            const publicationFactIdentity = {
-              organizationId: scope.organizationId,
-              workspaceId: scope.workspaceId,
-              websiteProjectId: scope.websiteProjectId,
-              recommendationContextVersionId:
-                input.recommendationContextVersionId,
-              generationContractId: qualification.generationContractId,
-              recommendationId: storedRecommendationId,
-              prospectId: String(storedProspectId),
-              canonicalDomain: domain.registrableDomain,
-            };
-            const publicationQualification = {
-              metricScope: qualification.metricScope,
-              trafficOrganicEtv: qualification.trafficOrganicEtv,
-              spamScore: qualification.spamScore,
-              authorityRank: qualification.authorityRank,
-              accessibilityDecision: qualification.accessibilityDecision,
-              semanticScore: qualification.semanticScore,
-              decision: qualification.decision,
-              decisionReasonCode: qualification.decisionReasonCode,
-              modelVersion: qualification.modelVersion,
-              promptVersion: qualification.promptVersion,
-              ruleVersion: qualification.ruleVersion,
-              requestFingerprints: qualification.requestFingerprints,
-              evidence: {
-                ...qualification.evidence,
-                sourceQualificationFactId:
-                  qualification.qualificationFactId,
-                publicationScore: {
-                  scoreModelVersion: score.scoreModelVersion,
-                  ruleVersion: score.ruleVersion,
-                  total: score.total,
-                  admission: score.admission,
-                },
-              },
-            } as const;
-            const publicationVisibility = {
-              decision: "visible",
-              decisionReasonCode: "QUALIFIED_VISIBLE",
-              ruleVersion: "visibility-rules-v1",
-              evidence: {
-                sourceQualificationFactId:
-                  qualification.qualificationFactId,
-                qualificationDecision: qualification.decision,
-                qualificationReasonCode:
-                  qualification.decisionReasonCode,
-                scoreModelVersion: score.scoreModelVersion,
-                totalScore: score.total,
-                admissionThreshold: score.admission.appliedThreshold,
-              },
-            } as const;
-            const publicationContact = {
-              decision: "pending",
-              decisionReasonCode: "CONTACT_NOT_EVALUATED",
-              evidence: {
-                source: "commercial-qualification-publication",
-              },
-            } as const;
-            const publicationCooperationPath = {
-              decision: "pending",
-              decisionReasonCode: "PATH_NOT_EVALUATED",
-              pathType: null,
-              evidence: {
-                source: "commercial-qualification-publication",
-              },
-            } as const;
-            await writeCorrectedRecommendationFactsInTransaction(client, {
-              organizationId: scope.organizationId,
-              workspaceId: scope.workspaceId,
-              websiteProjectId: scope.websiteProjectId,
-              recommendationContextVersionId:
-                input.recommendationContextVersionId,
-              generationContractId: qualification.generationContractId,
-              visiblePoolGeneration: input.visiblePoolGeneration,
-              workerContractVersion:
-                CORRECTED_QUALIFICATION_CONTRACT_VERSION,
-              prospectId: String(storedProspectId),
-              recommendationId: storedRecommendationId,
-              scoreId,
-              inventoryId: String(inventory.rows[0]?.id ?? inventoryId),
-              canonicalDomain: domain.registrableDomain,
-              normalizationVersion: domain.normalizationVersion,
-              totalScore: score.total,
-              scoreComponents: score.components.map((component) => ({
-                ...component,
-              })),
-              scoreWeights: weights,
-              scoreEvidence,
-              qualification: {
-                factId: deterministicFactId(
-                  "recommendation-publication:qualification",
-                  {
-                    ...publicationFactIdentity,
-                    ...publicationQualification,
-                  },
-                ),
-                attempt: 2,
-                ...publicationQualification,
-              },
-              visibility: {
-                factId: deterministicFactId(
-                  "recommendation-publication:visibility",
-                  {
-                    ...publicationFactIdentity,
-                    ...publicationVisibility,
-                  },
-                ),
-                attempt: 2,
-                ...publicationVisibility,
-              },
-              contact: {
-                factId: deterministicFactId(
-                  "recommendation-publication:contact",
-                  {
-                    ...publicationFactIdentity,
-                    ...publicationContact,
-                  },
-                ),
-                attempt: 2,
-                ...publicationContact,
-              },
-              cooperationPath: {
-                factId: deterministicFactId(
-                  "recommendation-publication:cooperation-path",
-                  {
-                    ...publicationFactIdentity,
-                    ...publicationCooperationPath,
-                  },
-                ),
-                attempt: 2,
-                ...publicationCooperationPath,
-              },
-              observedAt: qualification.observedAt,
-              createdBy: input.actorId,
-            });
-            if (inventory.rows[0] !== undefined) addedCount += 1;
-            if (commercialRow?.id !== undefined) {
-              await client.query(
-                `UPDATE backlink_commercial_candidates
-                    SET recommendation_id=$5,prospect_id=$6,
-                        state='contact_enrichment',updated_at=now(),
-                        updated_by=$7,version=version+1
-                  WHERE organization_id=$1 AND workspace_id=$2
-                    AND website_project_id=$3 AND id=$4
-                    AND visible_pool_generation=$8
-                    AND score_model_version=
-                      'recommendation-commercial-fit.v4'
-                    AND state='candidate_ready'`,
-                [
-                  scope.organizationId,
-                  scope.workspaceId,
-                  scope.websiteProjectId,
-                  commercialRow.id,
-                  storedRecommendationId,
-                  storedProspectId,
-                  input.actorId,
-                  input.visiblePoolGeneration,
-                ],
-              );
-            }
-          }
-          const contactJobsQueued =
-            options.contactEnrichment === undefined
-              ? 0
-              : await ensureReadyContactEnrichmentJobs(client, {
-                  scope,
-                  actorId: input.actorId,
-                  limit: options.contactEnrichment.limit,
-                  options: options.contactEnrichment.options,
-                });
-          await client.query(
-            input.finalizeJob === false
-              ? `UPDATE backlink_jobs
-                     SET status='running',step=$5,progress=60,
-                         result_summary=
-                           COALESCE(result_summary,'{}'::jsonb)
-                           || $6::jsonb,
-                         error=NULL,
-                         finished_at=NULL,updated_at=now(),version=version+1
-                   WHERE organization_id=$1 AND workspace_id=$2
-                     AND website_project_id=$3 AND id=$4`
-              : `UPDATE backlink_jobs
-                    SET status='success',step=$5,progress=100,
-                        result_summary=$6::jsonb,error=NULL,
-                        finished_at=now(),updated_at=now(),version=version+1
-                  WHERE organization_id=$1 AND workspace_id=$2
-                    AND website_project_id=$3 AND id=$4`,
-            [
-              scope.organizationId,
-              scope.workspaceId,
-              scope.websiteProjectId,
-              input.jobId,
-              input.finalizeJob === false
-                ? "supply_window_stored"
-                : addedCount > 0
-                  ? "ready_inventory_stored"
-                  : "no_evaluable_recommendations",
-              JSON.stringify({
-                addedCount,
-                contactJobsQueued,
-                provider: input.provider,
-                evaluation: input.evaluationSummary,
-                refillWindowKey: input.refillWindowKey,
-                final: input.finalizeJob !== false,
-                ...(input.refillWindowKey.startsWith("commercial-existing:")
-                  ? { existingCandidatesCompleted: true }
-                  : {}),
-              }),
-            ],
-          );
-          return { addedCount };
-        },
-      );
-    },
   });
 }

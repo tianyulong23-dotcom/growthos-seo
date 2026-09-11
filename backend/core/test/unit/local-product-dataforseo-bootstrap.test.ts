@@ -42,6 +42,8 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
       DATAFORSEO_ABSOLUTE_BUDGET_MICROS: "5000",
       DATAFORSEO_MAX_PAID_CALLS: "25",
       DATAFORSEO_CANDIDATE_LIMIT: "25",
+      DATAFORSEO_DISCOVERY_CONCURRENCY: "2",
+      DATAFORSEO_QUALIFICATION_CONCURRENCY: "2",
     });
     expect(JSON.stringify(environment)).not.toContain(input.login);
     expect(JSON.stringify(environment)).not.toContain(input.password);
@@ -66,6 +68,8 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
         credentialSecretRef:
           "secret://growthos/local-product/dataforseo/provider-credential/v7",
         maxCalls: 25,
+        discoveryConcurrency: 2,
+        qualificationConcurrency: 2,
         currency: "USD_MICROS",
         absoluteBudgetMicros: 5_000,
         configuredAt: "2026-08-04T10:00:00.000Z",
@@ -104,6 +108,14 @@ describe("LOCAL_PRODUCT DataForSEO bootstrap", () => {
     expect(() => localProductDataForSeoBootstrapInputSchema.parse({
       ...input,
       maxPaidCalls: 1_001,
+    })).toThrow();
+    expect(() => localProductDataForSeoBootstrapInputSchema.parse({
+      ...input,
+      discoveryConcurrency: 5,
+    })).toThrow();
+    expect(() => localProductDataForSeoBootstrapInputSchema.parse({
+      ...input,
+      qualificationConcurrency: 0,
     })).toThrow();
     expect(() => localProductDataForSeoBootstrapInputSchema.parse({
       ...input,

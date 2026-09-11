@@ -164,6 +164,7 @@ function ConnectionStatus({
       <GmailReadinessBlockers
         controller={controller}
         className="mt-4 border-t pt-3"
+        scope="mail-center"
       />
     </div>
   )

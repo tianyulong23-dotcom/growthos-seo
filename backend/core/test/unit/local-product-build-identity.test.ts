@@ -18,6 +18,9 @@ function createFixture(): string {
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(root, "scripts"), { recursive: true });
   mkdirSync(join(root, "dist"), { recursive: true });
+  mkdirSync(join(root, "resources/resource-library/bundled"), { recursive: true });
+  writeFileSync(join(root, "resources/resource-library/bundled/manifest.json"), "{}\n");
+  writeFileSync(join(root, "resources/resource-library/bundled/publishers.sqlite"), "fixture\n");
   writeFileSync(join(root, "src", "index.ts"), "export const value = 1;\n");
   writeFileSync(join(root, "dist", "index.js"), "export const value = 1;\n");
   writeFileSync(join(root, "package.json"), "{}\n");
@@ -54,6 +57,16 @@ describe("LOCAL_PRODUCT build identity", () => {
     expect(checkLocalProductBuildIdentity(root)).toMatchObject({
       ok: false,
       code: "LOCAL_PRODUCT_STALE_BUILD",
+      reasons: ["SOURCE_FINGERPRINT_MISMATCH"],
+    });
+  });
+
+  it("rejects a changed publisher bundle without a rebuild", () => {
+    const root = createFixture();
+    writeLocalProductBuildIdentity(root);
+    writeFileSync(join(root, "resources/resource-library/bundled/publishers.sqlite"), "changed\n");
+    expect(checkLocalProductBuildIdentity(root)).toMatchObject({
+      ok: false,
       reasons: ["SOURCE_FINGERPRINT_MISMATCH"],
     });
   });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   GoogleAuthLibraryClient,
@@ -14,11 +14,14 @@ const redirectUri =
   "http://localhost:7200/api/v1/backlinks/gmail-connections/callback";
 
 describe("Google Auth official client", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("generates an offline consent URL with exact redirect, scopes, state, and PKCE", async () => {
     const client = new GoogleAuthLibraryClient({
       clientId: "canary.apps.googleusercontent.com",
       clientSecret: "not-a-real-secret",
-      providerConnectivityProbe: async () => {},
     });
     const result = await client.createAuthorizationUrl({
       redirectUri,
@@ -41,27 +44,27 @@ describe("Google Auth official client", () => {
     );
   });
 
-  it("fails before redirecting the user when the Google token endpoint is unreachable", async () => {
+  it("does not block authorization URL generation on token endpoint connectivity", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
+    );
     const client = new GoogleAuthLibraryClient({
       clientId: "canary.apps.googleusercontent.com",
       clientSecret: "not-a-real-secret",
-      providerConnectivityProbe: async () => {
-        throw Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
-      },
     });
 
-    await expect(client.createAuthorizationUrl({
+    const result = await client.createAuthorizationUrl({
       redirectUri,
       state: "state-value",
       codeChallenge: "pkce-challenge",
       codeChallengeMethod: "S256",
       requestedScopes: gmailOAuthScopes,
-    })).rejects.toMatchObject({
-      operation: "authorize",
-      code: googleAuthFailureCodes.temporaryFailure,
-      retryable: true,
-      transportCode: "ECONNRESET",
     });
+
+    const url = new URL(result.authorizationUrl);
+    expect(url.origin).toBe("https://accounts.google.com");
+    expect(url.searchParams.get("state")).toBe("state-value");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("rejects missing client credentials before any network operation", () => {

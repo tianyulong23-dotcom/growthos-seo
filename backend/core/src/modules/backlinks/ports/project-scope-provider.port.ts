@@ -5,6 +5,7 @@ import type {
 export const projectScopeLanes = [
   "project-analysis",
   "recommendation-refill",
+  "recommendation-pool-v2",
   "contact-enrichment",
   "draft-generation",
   "gmail-sync",

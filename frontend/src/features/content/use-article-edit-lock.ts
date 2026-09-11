@@ -23,11 +23,7 @@ const LOCK_CONFLICT_CODES = new Set([
 ])
 
 export type ArticleEditLockStatus =
-  | "idle"
-  | "acquiring"
-  | "held"
-  | "blocked"
-  | "lost"
+  "idle" | "acquiring" | "held" | "blocked" | "lost"
 
 function lockCredential(lock: ArticleLock): ArticleLockCredential | null {
   if (!lock.token) return null
@@ -129,27 +125,33 @@ export function useArticleEditLock(input: {
   React.useEffect(() => {
     if (!enabled) {
       generationRef.current += 1
-      applyCredential(null)
-      setLock(null)
-      setStatus("idle")
-      setError("")
-      return
+      let active = true
+      queueMicrotask(() => {
+        if (!active) return
+        applyCredential(null)
+        setLock(null)
+        setStatus("idle")
+        setError("")
+      })
+      return () => {
+        active = false
+      }
     }
-    void acquire()
+    let active = true
+    queueMicrotask(() => {
+      if (active) void acquire()
+    })
     const releaseCurrentLock = () => {
       const current = credentialRef.current
       if (!current) return
       applyCredential(null)
-      void releaseArticleLock(
-        projectId,
-        articleId,
-        current,
-        "editor_closed",
-        { keepalive: true }
-      ).catch(() => undefined)
+      void releaseArticleLock(projectId, articleId, current, "editor_closed", {
+        keepalive: true,
+      }).catch(() => undefined)
     }
     window.addEventListener("pagehide", releaseCurrentLock)
     return () => {
+      active = false
       generationRef.current += 1
       window.removeEventListener("pagehide", releaseCurrentLock)
       releaseCurrentLock()
@@ -183,12 +185,7 @@ export function useArticleEditLock(input: {
     const renew = () => {
       const current = credentialRef.current
       if (!current || cancelled) return
-      void renewArticleLock(
-        projectId,
-        articleId,
-        current,
-        LEASE_SECONDS
-      )
+      void renewArticleLock(projectId, articleId, current, LEASE_SECONDS)
         .then((renewed) => {
           if (cancelled || credentialRef.current !== current) return
           setLock(renewed)
@@ -223,7 +220,15 @@ export function useArticleEditLock(input: {
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [applyCredential, articleId, credential, lock, markLost, projectId, status])
+  }, [
+    applyCredential,
+    articleId,
+    credential,
+    lock,
+    markLost,
+    projectId,
+    status,
+  ])
 
   const forceRelease = React.useCallback(
     async (reason: string) => {

@@ -36,6 +36,7 @@ import {
   assertLocalProductRuntimeBuildIdentity,
   type LocalProductRuntimeBuildIdentity,
 } from "./runtime-build-identity.js";
+import { assertBacklinksOutboundProxyReady } from "./runtime-outbound-proxy.js";
 
 export * from "./modules/backlinks/api/index.js";
 
@@ -551,6 +552,7 @@ export async function runBacklinksProcess(
 ): Promise<void> {
   const environment = readRuntimeEnvironment();
   assertProcessConfiguration(runtimeProcess, environment);
+  await assertBacklinksOutboundProxyReady(process.env);
   const buildIdentity = assertLocalProductRuntimeBuildIdentity(
     environment.TEMPORAL_BUILD_ID,
   );

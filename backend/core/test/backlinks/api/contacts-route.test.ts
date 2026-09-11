@@ -128,6 +128,7 @@ describe("BL-AI-073 contact candidate APIs", () => {
   });
 
   it("enforces project scope, permissions, ExpectedVersion, and audit", async () => {
+    let inferredPurpose = "editorial";
     const calls: { text: string; values?: readonly unknown[] }[] = [];
     const commands = createContactCommands({ query: async (text, values) => {
       calls.push({ text, values });
@@ -150,7 +151,7 @@ describe("BL-AI-073 contact candidate APIs", () => {
         id: candidateId, prospectId, recommendationContextVersionId:
           "018f0000-0000-7000-8000-000000000076",
         normalizedEmail: "editor@example.com", domainRelation: "same_registrable_domain",
-        confidence: 90, observedRole: "editor", inferredPurpose: "editorial",
+        confidence: 90, observedRole: "editor", inferredPurpose,
         purposeConfidence: 98, purposeRuleVersion: "contact-purpose-rules.v1",
         purposeEvidence: [{ tier: "high", field: "email_local_part", value: "editor",
           matchedToken: "editor", ruleId: "editorial.editor" }],
@@ -198,6 +199,15 @@ describe("BL-AI-073 contact candidate APIs", () => {
       meta: { websiteProjectId: "project-1", requestId: "request-73" } });
     expect(calls[0]?.values).toEqual(["org-1", "workspace-1", "project-1", prospectId, 25]);
     expect(calls[0]?.text).toContain("backlink_contact_evidence");
+    for (const purpose of ["business", "marketing", "site_owner"]) {
+      inferredPurpose = purpose;
+      const response = await app.inject({ method: "GET",
+        url: `/api/v1/projects/project-key/backlinks/contacts/candidates?prospectId=${prospectId}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().items[0].inferredPurpose).toBe(purpose);
+    }
+    inferredPurpose = "editorial";
+    calls.splice(1);
     const create = (email: string, role?: string, idempotencyKey = "contact-create-once") =>
       app.inject({
         method: "POST",

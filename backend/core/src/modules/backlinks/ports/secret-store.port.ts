@@ -11,6 +11,7 @@ export const secretKinds = {
   gmailCanaryRecipient: "GMAIL_CANARY_RECIPIENT",
   aiProviderCredential: "AI_PROVIDER_CREDENTIAL",
   dataForSeoCredential: "DATAFORSEO_CREDENTIAL",
+  ahrefsCredential: "AHREFS_CREDENTIAL",
 } as const;
 
 export const secretKindSchema = z.enum(Object.values(secretKinds));
@@ -18,7 +19,7 @@ export type SecretKind = z.output<typeof secretKindSchema>;
 
 export const secretEncryptionContextSchema = z.object({
   organizationId: nonBlankSchema,
-  subjectProvider: z.enum(["google", "ai", "dataforseo"]),
+  subjectProvider: z.enum(["google", "ai", "dataforseo", "ahrefs"]),
   workspaceId: nonBlankSchema.optional(),
   connectionId: nonBlankSchema.optional(),
   oauthAttemptId: nonBlankSchema.optional(),

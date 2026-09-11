@@ -85,6 +85,8 @@ const settings = {
 } satisfies ContentPlanSettings
 
 beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  vi.setSystemTime(new Date("2026-08-18T00:00:00+08:00"))
   vi.clearAllMocks()
   contentPlanApi.listContentPlanItems.mockResolvedValue({
     items: [summary],
@@ -95,15 +97,16 @@ beforeEach(() => {
   contentPlanApi.updateContentPlanSettings.mockResolvedValue(settings)
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 describe("ContentPlan", () => {
   it("shows only persisted plans and has no manual generation controls", async () => {
     render(<ContentPlan projectId="project-1" onOpenArticle={vi.fn()} />)
 
-    expect(
-      (await screen.findAllByText("test-title")).length
-    ).toBeGreaterThan(0)
+    expect((await screen.findAllByText("test-title")).length).toBeGreaterThan(0)
     expect(contentPlanApi.listContentPlanItems).toHaveBeenCalledWith(
       "project-1",
       expect.objectContaining({
@@ -147,9 +150,7 @@ describe("ContentPlan", () => {
   it("reads full detail separately and explains automatic article generation", async () => {
     render(<ContentPlan projectId="project-1" onOpenArticle={vi.fn()} />)
 
-    fireEvent.click(
-      await screen.findByLabelText("test-title，待生成")
-    )
+    fireEvent.click(await screen.findByLabelText("test-title，待生成"))
 
     await waitFor(() => {
       expect(contentPlanApi.getContentPlanItem).toHaveBeenCalledWith(
@@ -171,9 +172,7 @@ describe("ContentPlan", () => {
     )
     render(<ContentPlan projectId="project-1" onOpenArticle={vi.fn()} />)
 
-    fireEvent.click(
-      await screen.findByLabelText("test-title，待生成")
-    )
+    fireEvent.click(await screen.findByLabelText("test-title，待生成"))
     const dateInput = await screen.findByLabelText("目标上稿日期")
     fireEvent.change(dateInput, { target: { value: "2026-08-19" } })
     fireEvent.click(screen.getByRole("button", { name: "保存修改" }))

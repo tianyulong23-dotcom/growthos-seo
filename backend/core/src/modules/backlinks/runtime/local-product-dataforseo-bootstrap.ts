@@ -86,6 +86,8 @@ export const localProductDataForSeoBootstrapInputSchema = z.object({
     .max(maximumBudgetMicros),
   maxPaidCalls: z.coerce.number().int().min(1).max(1_000),
   candidateLimit: z.coerce.number().int().min(10).max(100),
+  discoveryConcurrency: z.coerce.number().int().min(1).max(4).optional(),
+  qualificationConcurrency: z.coerce.number().int().min(1).max(4).optional(),
 }).strict().superRefine((input, context) => {
   if (input.absoluteBudgetMicros < input.estimatedCostMicros) {
     context.addIssue({
@@ -113,6 +115,8 @@ export const localProductDataForSeoEnvironmentNames = Object.freeze([
   "DATAFORSEO_ABSOLUTE_BUDGET_MICROS",
   "DATAFORSEO_MAX_PAID_CALLS",
   "DATAFORSEO_CANDIDATE_LIMIT",
+  "DATAFORSEO_DISCOVERY_CONCURRENCY",
+  "DATAFORSEO_QUALIFICATION_CONCURRENCY",
 ] as const);
 
 export function buildLocalProductDataForSeoEnvironment(
@@ -130,6 +134,12 @@ export function buildLocalProductDataForSeoEnvironment(
     DATAFORSEO_ABSOLUTE_BUDGET_MICROS: String(input.absoluteBudgetMicros),
     DATAFORSEO_MAX_PAID_CALLS: String(input.maxPaidCalls),
     DATAFORSEO_CANDIDATE_LIMIT: String(input.candidateLimit),
+    DATAFORSEO_DISCOVERY_CONCURRENCY: String(
+      input.discoveryConcurrency ?? 2,
+    ),
+    DATAFORSEO_QUALIFICATION_CONCURRENCY: String(
+      input.qualificationConcurrency ?? 2,
+    ),
   });
 }
 
@@ -151,6 +161,8 @@ export function updateLocalProductDataForSeoManifest(
       credentialSecretRef: input.credentialSecretRef,
       maxCalls: input.maxPaidCalls,
       candidateLimit: input.candidateLimit,
+      discoveryConcurrency: input.discoveryConcurrency ?? 2,
+      qualificationConcurrency: input.qualificationConcurrency ?? 2,
       estimatedCostMicros: input.estimatedCostMicros,
       currency: "USD_MICROS",
       absoluteBudgetMicros: input.absoluteBudgetMicros,

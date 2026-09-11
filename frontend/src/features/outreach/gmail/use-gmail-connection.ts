@@ -83,7 +83,10 @@ export function useGmailConnection(
     null
   )
   const activeProjectKeyRef = React.useRef(websiteProjectKey)
-  activeProjectKeyRef.current = websiteProjectKey
+
+  React.useLayoutEffect(() => {
+    activeProjectKeyRef.current = websiteProjectKey
+  }, [websiteProjectKey])
 
   const currentProjectLoaded = loadedProjectKey === websiteProjectKey
   const visibleConnection = currentProjectLoaded ? connection : null
@@ -167,9 +170,7 @@ export function useGmailConnection(
               setLoadedProjectKey(websiteProjectKey)
               setStatus("error")
             }
-            setErrorMessage(
-              "无法读取 Gmail 连接状态；界面不会推断为已连接。"
-            )
+            setErrorMessage("无法读取 Gmail 连接状态；界面不会推断为已连接。")
           }
         )
     }

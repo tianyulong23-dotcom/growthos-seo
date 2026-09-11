@@ -4,6 +4,7 @@ import { basename } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { installBacklinksManifestAfterFoundation } from "./harness/deployment-manifest.js";
 import {
   startBacklinksPostgresHarness,
   type BacklinksPostgresHarness,
@@ -26,18 +27,15 @@ const require = createRequire(import.meta.url);
 const { Client: PgClient } = require("pg") as {
   readonly Client: new (config: unknown) => Client;
 };
-const rolesUrl = new URL(
-  "../../../../database/roles/0001_growthos_schema_roles.sql",
-  import.meta.url,
-);
 const manifestUrl = new URL(
   "../../../../database/deployment-manifest.v1.json",
   import.meta.url,
 );
-const migrationUrl = (path: string) => new URL(
-  `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
-  import.meta.url,
-);
+const migrationUrl = (path: string) =>
+  new URL(
+    `../../../src/modules/backlinks/db/migrations/${basename(path)}`,
+    import.meta.url,
+  );
 const organizationId = "85000000-0000-4000-8000-000000000001";
 const workspaceId = "85000000-0000-4000-8000-000000000002";
 const projectIds = [
@@ -61,46 +59,24 @@ describe("LOCAL-PRODUCT-035 reassessment cursor migration", () => {
     await harness.migrate();
     client = new PgClient({ connectionString: harness.connectionString });
     await client.connect();
-    await client.query(await readFile(rolesUrl, "utf8"));
-    await client.query(`
-      SET ROLE growthos_platform_owner;
-      SET search_path = platform, pg_catalog;
-      CREATE FUNCTION backlink_list_active_website_projects(text, text)
-      RETURNS TABLE (website_project_id text, context_version integer)
-      LANGUAGE sql STABLE SECURITY DEFINER
-      SET search_path = platform, pg_catalog
-      AS $function$ SELECT NULL::text, NULL::integer WHERE false; $function$;
-      REVOKE ALL
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        FROM PUBLIC;
-      GRANT USAGE ON SCHEMA platform TO growthos_backlinks_owner;
-      GRANT EXECUTE
-        ON FUNCTION backlink_list_active_website_projects(text, text)
-        TO growthos_backlinks_owner;
-      RESET ROLE;
-      RESET search_path;
-    `);
     const manifest = JSON.parse(
       await readFile(manifestUrl, "utf8"),
     ) as DeploymentManifest;
     const backlinkSteps = manifest.steps.filter(
       ({ migrationId }) =>
-        migrationId.startsWith("backlinks-")
-        && migrationId !== "backlinks-0001",
+        migrationId.startsWith("backlinks-") &&
+        migrationId !== "backlinks-0001",
     );
-    for (const step of backlinkSteps.filter(
-      ({ migrationId }) => migrationId !== "backlinks-0058",
-    )) {
-      await client.query(await readFile(migrationUrl(step.path), "utf8"));
-    }
     const step0058 = backlinkSteps.find(
       ({ migrationId }) => migrationId === "backlinks-0058",
     );
     if (step0058 === undefined) {
       throw new Error("BACKLINKS_MIGRATION_0058_MISSING");
     }
+    await installBacklinksManifestAfterFoundation(client, "0057");
     migration0058 = await readFile(migrationUrl(step0058.path), "utf8");
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO backlinks.backlink_commercial_inventory_policies (
         organization_id,workspace_id,website_project_id,
         project_context_version_id,current_refill_tier,
@@ -128,12 +104,9 @@ describe("LOCAL-PRODUCT-035 reassessment cursor migration", () => {
         'paused','PROVIDER_UNAVAILABLE','2026-08-03T00:00:00Z',
         'local-product-035-fixture',9
       )
-    `, [
-      organizationId,
-      workspaceId,
-      ...projectIds,
-      ...contextIds,
-    ]);
+    `,
+      [organizationId, workspaceId, ...projectIds, ...contextIds],
+    );
     await client.query(migration0058);
   }, 180_000);
 
@@ -143,7 +116,10 @@ describe("LOCAL-PRODUCT-035 reassessment cursor migration", () => {
   });
 
   it("preserves policy history while separating paid and resource cursors", async () => {
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(
+          `
       SELECT website_project_id AS "websiteProjectId",
              paid_refill_tier AS "paidTier",
              paid_refill_round AS "paidRound",
@@ -159,7 +135,11 @@ describe("LOCAL-PRODUCT-035 reassessment cursor migration", () => {
         FROM backlinks.backlink_commercial_inventory_policies
        WHERE organization_id=$1 AND workspace_id=$2
        ORDER BY website_project_id
-    `, [organizationId, workspaceId])).rows).toEqual([
+    `,
+          [organizationId, workspaceId],
+        )
+      ).rows,
+    ).toEqual([
       {
         websiteProjectId: projectIds[0],
         paidTier: "exact_product_target_market",
@@ -206,15 +186,21 @@ describe("LOCAL-PRODUCT-035 reassessment cursor migration", () => {
   });
 
   it("keeps forced RLS and isolates arbitrary Website Projects", async () => {
-    expect((await client.query(`
+    expect(
+      (
+        await client.query(`
       SELECT relrowsecurity,relforcerowsecurity
         FROM pg_class
        WHERE oid=
          'backlinks.backlink_commercial_inventory_policies'::regclass
-    `)).rows).toEqual([{
-      relrowsecurity: true,
-      relforcerowsecurity: true,
-    }]);
+    `)
+      ).rows,
+    ).toEqual([
+      {
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+      },
+    ]);
 
     await client.query("BEGIN");
     try {
@@ -226,17 +212,23 @@ describe("LOCAL-PRODUCT-035 reassessment cursor migration", () => {
                 set_config('app.current_project_id',$3,true)`,
         [organizationId, workspaceId, projectIds[1]],
       );
-      expect((await client.query(`
+      expect(
+        (
+          await client.query(`
         SELECT website_project_id AS "websiteProjectId",
                paid_refill_tier AS "paidTier",
                resource_refill_tier AS "resourceTier"
           FROM backlinks.backlink_commercial_inventory_policies
          ORDER BY website_project_id
-      `)).rows).toEqual([{
-        websiteProjectId: projectIds[1],
-        paidTier: "same_language_expansion",
-        resourceTier: "curated_resource_library",
-      }]);
+      `)
+        ).rows,
+      ).toEqual([
+        {
+          websiteProjectId: projectIds[1],
+          paidTier: "same_language_expansion",
+          resourceTier: "curated_resource_library",
+        },
+      ]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -245,7 +237,8 @@ describe("LOCAL-PRODUCT-035 reassessment cursor migration", () => {
   });
 
   it("keeps both cursor constraints fail-closed", async () => {
-    const constraints = (await client.query(`
+    const constraints = (
+      await client.query(`
       SELECT conname
         FROM pg_constraint
        WHERE conrelid=
@@ -255,16 +248,19 @@ describe("LOCAL-PRODUCT-035 reassessment cursor migration", () => {
            'backlink_commercial_resource_refill_cursor_check'
          )
        ORDER BY conname
-    `)).rows;
+    `)
+    ).rows;
     expect(constraints).toEqual([
       { conname: "backlink_commercial_paid_refill_cursor_check" },
       { conname: "backlink_commercial_resource_refill_cursor_check" },
     ]);
-    await expect(client.query(`
+    await expect(
+      client.query(`
       UPDATE backlinks.backlink_commercial_inventory_policies
          SET resource_refill_tier='same_language_expansion',
              resource_refill_round=1
        WHERE website_project_id='${projectIds[0]}'
-    `)).rejects.toThrow();
+    `),
+    ).rejects.toThrow();
   });
 });

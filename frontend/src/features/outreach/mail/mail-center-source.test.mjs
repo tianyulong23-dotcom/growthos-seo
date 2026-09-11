@@ -147,6 +147,7 @@ test("BL-AI-140 exposes resilient list, thread, pagination, and manual match sta
   assert.match(panel, /Gmail 已连接/)
   assert.doesNotMatch(panel, /Connection：|Send Ready：|Sync Ready：/)
   assert.match(panel, /GmailReadinessBlockers/)
+  assert.match(panel, /scope="mail-center"/)
   assert.match(panel, /WAITING_FOR_ACCEPTED_SEND/)
   assert.match(panel, /WAITING_FOR_SEND_CONTEXT/)
   assert.match(panel, /已保存邮件仍可读取/)
@@ -191,10 +192,7 @@ test("Mail Center does not report sync available while Gmail readiness is blocke
     /gmailSyncReady=\{controller\.readiness\?\.sync\.ready === true\}/
   )
   assert.match(center, /gmailSyncReady: boolean/)
-  assert.match(
-    center,
-    /businessConsumersRunning === true && gmailSyncReady/
-  )
+  assert.match(center, /businessConsumersRunning === true && gmailSyncReady/)
   assert.match(center, /Gmail 凭据需要重新连接；已保存邮件仍可读取/)
   assert.match(center, /!gmailSyncReady/)
 })

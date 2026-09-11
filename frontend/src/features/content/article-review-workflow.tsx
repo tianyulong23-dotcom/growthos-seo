@@ -67,7 +67,9 @@ function taskLabel(task: ArticleReviewTask) {
   return `版本 ${task.version_number} · ${STATUS_LABELS[task.status]}`
 }
 
-function validDocument(value: ArticleReviewSnapshot["version"]["document"]): value is ArticleDocument {
+function validDocument(
+  value: ArticleReviewSnapshot["version"]["document"]
+): value is ArticleDocument {
   return (
     value.type === "doc" &&
     typeof value.schema_version === "number" &&
@@ -91,7 +93,9 @@ function TaskList({
   working: string
 }) {
   if (items.length === 0) {
-    return <p className="py-4 text-center text-xs text-muted-foreground">{empty}</p>
+    return (
+      <p className="py-4 text-center text-xs text-muted-foreground">{empty}</p>
+    )
   }
   return (
     <div className="divide-y rounded-md border">
@@ -178,14 +182,20 @@ export function ArticleReviewWorkflow({
   const [notice, setNotice] = React.useState("")
   const [assignedTo, setAssignedTo] = React.useState("")
   const [assignedGroup, setAssignedGroup] = React.useState("")
-  const [snapshot, setSnapshot] = React.useState<ArticleReviewSnapshot | null>(null)
+  const [snapshot, setSnapshot] = React.useState<ArticleReviewSnapshot | null>(
+    null
+  )
   const [snapshotOpen, setSnapshotOpen] = React.useState(false)
   const [snapshotLoading, setSnapshotLoading] = React.useState(false)
   const [comment, setComment] = React.useState("")
   const [decisionComment, setDecisionComment] = React.useState("")
-  const [cancelTask, setCancelTask] = React.useState<ArticleReviewTask | null>(null)
+  const [cancelTask, setCancelTask] = React.useState<ArticleReviewTask | null>(
+    null
+  )
   const [cancelReason, setCancelReason] = React.useState("")
-  const submitKeyRef = React.useRef<{ signature: string; key: string } | null>(null)
+  const submitKeyRef = React.useRef<{ signature: string; key: string } | null>(
+    null
+  )
   const decisionKeyRef = React.useRef<Record<string, string>>({})
 
   const loadTasks = React.useCallback(async () => {
@@ -221,7 +231,13 @@ export function ArticleReviewWorkflow({
   }, [article.id, projectId])
 
   React.useEffect(() => {
-    void loadTasks()
+    let active = true
+    queueMicrotask(() => {
+      if (active) void loadTasks()
+    })
+    return () => {
+      active = false
+    }
   }, [loadTasks])
 
   async function run(name: string, action: () => Promise<void>) {
@@ -232,7 +248,9 @@ export function ArticleReviewWorkflow({
     try {
       await action()
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "操作失败")
+      setError(
+        requestError instanceof Error ? requestError.message : "操作失败"
+      )
     } finally {
       setWorking("")
     }
@@ -250,7 +268,8 @@ export function ArticleReviewWorkflow({
         assignedGroup.trim(),
       ])
       const prior = submitKeyRef.current
-      const key = prior?.signature === signature ? prior.key : crypto.randomUUID()
+      const key =
+        prior?.signature === signature ? prior.key : crypto.randomUUID()
       submitKeyRef.current = { signature, key }
       await submitArticleReview(
         projectId,
@@ -290,7 +309,9 @@ export function ArticleReviewWorkflow({
     } catch (requestError) {
       setSnapshotOpen(false)
       setError(
-        requestError instanceof Error ? requestError.message : "读取审核快照失败"
+        requestError instanceof Error
+          ? requestError.message
+          : "读取审核快照失败"
       )
     } finally {
       setSnapshotLoading(false)
@@ -339,7 +360,11 @@ export function ArticleReviewWorkflow({
       return
     }
     await run(`cancel:${cancelTask?.id}`, async () => {
-      await cancelArticleReviewTask(projectId, cancelTask!.id, cancelReason.trim())
+      await cancelArticleReviewTask(
+        projectId,
+        cancelTask!.id,
+        cancelReason.trim()
+      )
       setCancelTask(null)
       setCancelReason("")
       setNotice("审核任务已取消。")
@@ -371,7 +396,9 @@ export function ArticleReviewWorkflow({
       <div className="grid grid-cols-2 gap-3 text-xs">
         <div>
           <p className="text-muted-foreground">当前草稿</p>
-          <p className="mt-1 font-medium">版本 {article.current_version_number}</p>
+          <p className="mt-1 font-medium">
+            版本 {article.current_version_number}
+          </p>
         </div>
         <div>
           <p className="text-muted-foreground">已批准版本</p>
@@ -385,11 +412,21 @@ export function ArticleReviewWorkflow({
 
       {approvedDiffers && (
         <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
-          当前草稿版本 {article.current_version_number} 与批准版本 {article.approved_version_number} 不同。发布将严格使用批准版本，不会发布当前未批准草稿。
+          当前草稿版本 {article.current_version_number} 与批准版本{" "}
+          {article.approved_version_number}{" "}
+          不同。发布将严格使用批准版本，不会发布当前未批准草稿。
         </p>
       )}
-      {notice && <p className="text-sm text-emerald-700 dark:text-emerald-300">{notice}</p>}
-      {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+      {notice && (
+        <p className="text-sm text-emerald-700 dark:text-emerald-300">
+          {notice}
+        </p>
+      )}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
 
       <ArticlePublicationPanel
         projectId={projectId}
@@ -422,10 +459,18 @@ export function ArticleReviewWorkflow({
           disabled={dirty || Boolean(working) || parentWorking}
           onClick={() => void submit()}
         >
-          {working === "submit" ? <LoaderCircle className="animate-spin" /> : <Send />}
+          {working === "submit" ? (
+            <LoaderCircle className="animate-spin" />
+          ) : (
+            <Send />
+          )}
           提交版本 {article.current_version_number} 审核
         </Button>
-        {dirty && <p className="text-xs text-muted-foreground">保存当前修改后才能提交审核。</p>}
+        {dirty && (
+          <p className="text-xs text-muted-foreground">
+            保存当前修改后才能提交审核。
+          </p>
+        )}
       </section>
 
       <section className="space-y-2">
@@ -475,9 +520,12 @@ export function ArticleReviewWorkflow({
             </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-              {snapshot.current_draft_version_number !== snapshot.task.version_number && (
+              {snapshot.current_draft_version_number !==
+                snapshot.task.version_number && (
                 <p className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
-                  正在审核版本 {snapshot.task.version_number}；当前草稿已经是版本 {snapshot.current_draft_version_number}。审核操作不会修改当前草稿。
+                  正在审核版本 {snapshot.task.version_number}
+                  ；当前草稿已经是版本 {snapshot.current_draft_version_number}
+                  。审核操作不会修改当前草稿。
                 </p>
               )}
               <div className="grid gap-6 lg:grid-cols-2">
@@ -590,7 +638,10 @@ export function ArticleReviewWorkflow({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(cancelTask)} onOpenChange={(open) => !open && setCancelTask(null)}>
+      <Dialog
+        open={Boolean(cancelTask)}
+        onOpenChange={(open) => !open && setCancelTask(null)}
+      >
         <DialogContent className="rounded-md sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>取消审核任务</DialogTitle>
@@ -607,14 +658,15 @@ export function ArticleReviewWorkflow({
             aria-label="取消审核原因"
           />
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCancelTask(null)}>返回</Button>
+            <Button variant="outline" onClick={() => setCancelTask(null)}>
+              返回
+            </Button>
             <Button disabled={Boolean(working)} onClick={() => void cancel()}>
               <X /> 确认取消任务
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
     </section>
   )
 }

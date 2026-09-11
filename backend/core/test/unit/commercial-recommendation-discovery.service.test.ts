@@ -5,6 +5,8 @@ import {
   claimPausedCommercialDiscoveryBatch,
   executeCommercialRecommendationDiscovery,
   scoreCuratedResourceForProject,
+  selectCommercialNativeV2RequestPlan,
+  orderCommercialNativeV2DiscoveryCalls,
 } from "../../src/modules/backlinks/application/services/commercial-recommendation-discovery.service.js";
 import {
   buildCommercialDiscoveryBlueprint,
@@ -16,6 +18,8 @@ import {
 import {
   createCommercialDiscoveryPlan,
   fingerprintCommercialDiscoveryCall,
+  fingerprintCommercialDiscoverySemanticRequest,
+  normalizeCommercialDiscoveryResponse,
   serializeCommercialDiscoveryRequestPayload,
   type CommercialDiscoveryCall,
 } from "../../src/modules/backlinks/domain/recommendations/commercial-discovery-source.js";
@@ -75,6 +79,11 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
     freshUntil: Date;
     staleUntil: Date;
   }>>();
+  private succeededRequestReplay: Readonly<Record<string, unknown>> | null =
+    null;
+  private completedDiscoveryBatchId: string | null = null;
+  private candidateHistory:
+    readonly Readonly<Record<string, unknown>>[] = [];
 
   constructor(
     private readonly reconciledFingerprint: string | null = null,
@@ -106,6 +115,22 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
     this.blueprint = { id, value };
   }
 
+  seedSucceededRequestReplay(
+    value: Readonly<Record<string, unknown>>,
+  ): void {
+    this.succeededRequestReplay = value;
+  }
+
+  seedCompletedDiscoveryBatch(id: string): void {
+    this.completedDiscoveryBatchId = id;
+  }
+
+  seedCandidateHistory(
+    rows: readonly Readonly<Record<string, unknown>>[],
+  ): void {
+    this.candidateHistory = rows;
+  }
+
   async query(
     text: string,
     values: readonly unknown[] = [],
@@ -118,6 +143,12 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
       || sql.includes("FROM backlink_opportunities")
     ) {
       return { rows: [] };
+    }
+    if (
+      sql.includes("FROM backlink_commercial_candidates")
+      && sql.includes('recommendation_id AS "recommendationId"')
+    ) {
+      return { rows: this.candidateHistory };
     }
     if (
       sql.includes("FROM backlink_commercial_inventory_policies")
@@ -175,6 +206,13 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
         rows: artifact === undefined ? [] : [artifact],
       };
     }
+    if (sql.includes("RECOMMENDATION_POOL_V2_SUCCEEDED_REQUEST_REPLAY")) {
+      return {
+        rows: this.succeededRequestReplay === null
+          ? []
+          : [this.succeededRequestReplay],
+      };
+    }
     if (
       sql.includes("DATAFORSEO_RECONCILED_ASSUMED_CHARGE_NO_RESULT")
       && this.reconciledFingerprint !== null
@@ -230,6 +268,21 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
       return { rows: [{ id: String(values[0]) }] };
     }
     if (
+      sql.includes('AS "providerUsageLedgerId"')
+      && sql.includes("usage.status='settled'")
+    ) {
+      return {
+        rows: [{
+          providerRequestId: String(values[0]),
+          providerBatchRequestId: String(values[0]),
+          providerUsageLedgerId:
+            "99999999-9999-4999-8999-999999999999",
+          providerTaskId: null,
+          actualCostMicros: 0,
+        }],
+      };
+    }
+    if (
       sql.includes("UPDATE provider_batch_requests")
       && sql.includes("SET provider_task_id=$2")
     ) {
@@ -253,6 +306,11 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
       sql.includes("INSERT INTO backlink_commercial_discovery_batches")
       && sql.includes("RETURNING id")
     ) {
+      if (this.completedDiscoveryBatchId !== null) {
+        return sql.includes("completed_replay") && values[13] === true
+          ? { rows: [{ id: this.completedDiscoveryBatchId }] }
+          : { rows: [] };
+      }
       return { rows: [{ id: String(values[0]) }] };
     }
     return { rows: [] };
@@ -260,6 +318,32 @@ class MemoryDiscoveryClient implements CommercialDiscoveryQueryClient {
 }
 
 describe("commercial recommendation discovery service", () => {
+  it("keeps semantic request history stable across cost estimate changes", () => {
+    const [call] = createCommercialDiscoveryPlan({
+      blueprintId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      searchQueries: ["South Africa streaming service review sites"],
+      verifiedCompetitorDomains: [],
+      userDomain: "elephtv.com",
+      locationCode: "2710",
+      languageCode: "en",
+      endpointAllowlist: ["/v3/serp/google/organic/task_post"],
+      estimatedCostMicros: 27_600,
+      remainingBudgetMicros: 27_600,
+    });
+    if (call === undefined) throw new Error("Missing semantic request");
+    const repricedCall = Object.freeze({
+      ...call,
+      estimatedCostMicros: 25_000,
+    });
+
+    expect(fingerprintCommercialDiscoveryCall(call)).not.toBe(
+      fingerprintCommercialDiscoveryCall(repricedCall),
+    );
+    expect(fingerprintCommercialDiscoverySemanticRequest(call)).toBe(
+      fingerprintCommercialDiscoverySemanticRequest(repricedCall),
+    );
+  });
+
   it("settles a deterministic zero-plan window without reporting provider downtime", async () => {
     const client = new MemoryDiscoveryClient();
     const providerExecute = vi.fn(async () => ({ tasks: [] }));
@@ -339,6 +423,272 @@ describe("commercial recommendation discovery service", () => {
     expect(batchUpdate?.values[9]).toBe(
       "semantic_discovery_not_planned_endpoint_allowlist",
     );
+  });
+
+  it("does not reopen a completed legacy discovery batch for native V2", async () => {
+    const client = new MemoryDiscoveryClient();
+    client.seedCompletedDiscoveryBatch(
+      "77777777-7777-4777-8777-777777777777",
+    );
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const authorize = vi.fn(async () => {});
+    const prepareRequest = vi.fn();
+    const recordRequestSuccess = vi.fn();
+    const recordRequestFailure = vi.fn();
+
+    await expect(executeCommercialRecommendationDiscovery({
+      client,
+      provider: { execute: providerExecute },
+      gate: { preflight: async () => {}, authorize },
+      safeFetch: {
+        fetch: async () => ({
+          requestedUrl: "https://aiper.com/",
+          finalUrl: "https://aiper.com/",
+          status: 200,
+          contentType: "text/html",
+          body: new Uint8Array(),
+          redirectChain: [],
+          resolvedIps: ["203.0.113.10"],
+          fetchedAt: "2026-09-02T11:00:00.000Z",
+        }),
+      },
+      scope: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+      },
+      contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
+      context: {
+        snapshotVersion: 2,
+        profileVersionId,
+        promotionTargetVersionId,
+        projectSettingsVersionId:
+          "55555555-5555-4555-8555-555555555555",
+        projectSettingsVersion: 1,
+        canonicalDomain: "aiper.com",
+        locale: "en-US",
+        countryCode: "US",
+        products: ["robotic pool cleaner"],
+        keywords: ["pool cleaning"],
+        targetUrls: ["https://aiper.com/"],
+        targetAudiences: ["pool owners"],
+        partnershipGoals: ["editorial review"],
+        explicitCompetitorDomains: [],
+      },
+      configuration: {
+        endpointAllowlist: [],
+        estimatedCostMicros: 1_000,
+        absoluteBudgetMicros: 10_000,
+        candidateLimit: 25,
+        locationCode: "2840",
+        languageCode: "en",
+      },
+      nativeV2: {
+        authoritativeBlueprintId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        maxRequests: 1,
+        maxAuthorizedCostMicros: 10_000,
+        prepareRequest,
+        recordRequestSuccess,
+        recordRequestFailure,
+      },
+      requestedCount: 5,
+      visiblePoolGeneration: 3,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      refillWindow: 1,
+      jobId: "66666666-6666-4666-8666-666666666666",
+      actorId: "recommendation-pool-v2-test",
+      now: () => new Date("2026-09-02T11:00:00.000Z"),
+    })).resolves.toMatchObject({
+      discovery: {
+        semanticStatus: "not_required",
+      },
+    });
+
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(prepareRequest).not.toHaveBeenCalled();
+    expect(recordRequestSuccess).not.toHaveBeenCalled();
+    expect(recordRequestFailure).not.toHaveBeenCalled();
+    expect(client.calls.some(({ text }) =>
+      text.includes("INSERT INTO backlink_commercial_discovery_batches")
+      || (
+        text.includes("backlink_commercial_discovery_batches")
+        && text.includes("status='running'")
+      )
+    )).toBe(false);
+  });
+
+  it("injects reusable native V2 evidence without invoking the provider", async () => {
+    const client = new MemoryDiscoveryClient();
+    client.seedCandidateHistory([{
+      hostname: "publisher.co.za",
+      state: "insufficient_data",
+      recommendationId: null,
+      prospectId: null,
+    }]);
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const authorize = vi.fn(async () => {});
+    const safeFetch = vi.fn(async (
+      request: Readonly<{ url: string }>,
+    ) => ({
+      requestedUrl: request.url,
+      finalUrl: request.url,
+      status: 200,
+      contentType: "text/html",
+      body: new TextEncoder().encode(
+        "<html><body><h1>Streaming reviews</h1></body></html>",
+      ),
+      redirectChain: [] as string[],
+      resolvedIps: ["203.0.113.10"],
+      fetchedAt: "2026-09-02T11:00:00.000Z",
+    }));
+    const sourceRequestFingerprint = "e".repeat(64);
+    const authoritativeBlueprintId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const prepareRequest = vi.fn(async (
+      request: Readonly<{
+        call: CommercialDiscoveryCall;
+        index: number;
+        requestFingerprint: string;
+      }>,
+    ) => ({
+      context: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+        requestId: "88888888-8888-4888-8888-888888888888",
+        idempotencyKey: "recommendation-pool-v2-evidence-replay",
+        budgetReservationId: "88888888-8888-4888-8888-888888888888",
+      },
+      actorId: "recommendation-pool-v2-evidence-replay",
+      refreshMode: "CACHE_PREFERRED" as const,
+      replayResult: {
+        source: "cache" as const,
+        artifact: {
+          sourceType: request.call.sourceType,
+          endpoint: request.call.endpoint,
+          requestFingerprint: sourceRequestFingerprint,
+          responseSchemaVersion: request.call.responseSchemaVersion,
+          collectedAt: "2026-09-02T10:47:20.000Z",
+          costMicros: 600,
+          providerTaskIds: [
+            "09021047-1594-0066-0000-946311258027",
+          ],
+          plannerLineage: request.call.plannerLineage,
+          candidates: [{
+            canonicalDomain: "publisher.co.za",
+            discoveryUrls: ["https://publisher.co.za/reviews"],
+            backlinkPageEvidence: [],
+            rank: 1,
+            traffic: null,
+            backlinkCount: null,
+            referringDomainCount: null,
+            spamScore: null,
+            countryCode: "ZA",
+            evidenceRefs: [
+              `dataforseo:${request.call.endpoint}:`
+              + `${sourceRequestFingerprint}:publisher.co.za`,
+            ],
+          }],
+        },
+      },
+    }));
+    const recordRequestSuccess = vi.fn(async () => {});
+    const recordRequestFailure = vi.fn(async () => {});
+    const recordRequestPlan = vi.fn(async () => {});
+
+    await executeCommercialRecommendationDiscovery({
+      client,
+      provider: { execute: providerExecute },
+      gate: { preflight: async () => {}, authorize },
+      safeFetch: { fetch: safeFetch },
+      scope: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+      },
+      contextVersionId: "44444444-4444-4444-8444-444444444444",
+      inputBinding,
+      context: {
+        snapshotVersion: 2,
+        profileVersionId,
+        promotionTargetVersionId,
+        projectSettingsVersionId:
+          "55555555-5555-4555-8555-555555555555",
+        projectSettingsVersion: 1,
+        canonicalDomain: "elephtv.com",
+        locale: "en-ZA",
+        countryCode: "ZA",
+        products: ["streaming", "film"],
+        keywords: ["streaming service in SA"],
+        targetUrls: ["https://elephtv.com/"],
+        targetAudiences: ["South African viewers"],
+        partnershipGoals: ["authoritative film review websites"],
+        explicitCompetitorDomains: [],
+      },
+      configuration: {
+        endpointAllowlist: [
+          "/v3/serp/google/organic/task_post",
+        ],
+        estimatedCostMicros: 25_000,
+        absoluteBudgetMicros: 25_000,
+        candidateLimit: 25,
+        locationCode: "2710",
+        languageCode: "en",
+      },
+      nativeV2: {
+        authoritativeBlueprintId,
+        maxRequests: 1,
+        maxAuthorizedCostMicros: 25_000,
+        requestOffset: 1,
+        recordRequestPlan,
+        prepareRequest,
+        recordRequestSuccess,
+        recordRequestFailure,
+      },
+      requestedCount: 5,
+      visiblePoolGeneration: 5,
+      refillTier: "exact_product_target_market",
+      refillRound: 1,
+      refillWindow: 1,
+      jobId: "99999999-9999-4999-8999-999999999999",
+      actorId: "recommendation-pool-v2-test",
+      now: () => new Date("2026-09-02T11:00:00.000Z"),
+    });
+
+    expect(prepareRequest).toHaveBeenCalledOnce();
+    expect(recordRequestPlan).toHaveBeenCalledOnce();
+    const plannedCalls = recordRequestPlan.mock.calls[0]?.[0].calls;
+    const selectedCalls = recordRequestPlan.mock.calls[0]?.[0].selectedCalls;
+    expect(plannedCalls?.length).toBeGreaterThan(1);
+    expect(
+      plannedCalls?.every(
+        ({ plannerLineage }) =>
+          plannerLineage?.blueprintId === authoritativeBlueprintId,
+      ),
+    ).toBe(true);
+    expect(selectedCalls).toEqual([plannedCalls?.[1]]);
+    expect(prepareRequest.mock.calls[0]?.[0].call).toEqual(plannedCalls?.[1]);
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(recordRequestFailure).not.toHaveBeenCalled();
+    expect(safeFetch).not.toHaveBeenCalled();
+    expect(recordRequestSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: expect.objectContaining({
+          source: "cache",
+          artifact: expect.objectContaining({
+            requestFingerprint: sourceRequestFingerprint,
+          }),
+        }),
+      }),
+    );
+    expect(client.calls.some(({ text }) =>
+      text.includes("INSERT INTO provider_batch_requests")
+      || text.includes("INSERT INTO backlink_provider_requests")
+      || text.includes("WITH attempted AS")
+    )).toBe(false);
   });
 
   it("only transfers a paused batch from a terminal job without provider risk", async () => {
@@ -711,6 +1061,109 @@ describe("commercial recommendation discovery service", () => {
     expect(client.calls.some(({ text }) =>
       text.includes("INSERT INTO provider_batch_requests")
     )).toBe(false);
+  });
+
+  it("replays an exact settled native V2 request without provider work", async () => {
+    const call: CommercialDiscoveryCall = {
+      endpoint: "/v3/serp/google/organic/task_post",
+      intent: "DISCOVERY",
+      sourceType: "BLUEPRINT_SERP_STANDARD_QUEUE",
+      request: {
+        keyword: "South Africa streaming service review sites",
+        location_code: 2710,
+        language_code: "en",
+        depth: 10,
+        device: "desktop",
+        os: "windows",
+      },
+      responseSchemaVersion: "dataforseo.serp-google-organic-task-post.v2",
+      estimatedCostMicros: 27_600,
+      plannerLineage: {
+        blueprintId: "88888888-8888-4888-8888-888888888888",
+        queryId: "99999999-9999-4999-8999-999999999999",
+      },
+    };
+    const requestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const reservationId = requestId;
+    const artifact = normalizeCommercialDiscoveryResponse({
+      call,
+      response: {
+        tasks: [{
+          id: "09021047-1594-0066-0000-946311258027",
+          status_code: 20_000,
+          cost: 0.0006,
+          result: [],
+        }],
+      },
+      collectedAt: "2026-09-02T10:47:20.000Z",
+    });
+    const client = new MemoryDiscoveryClient();
+    client.seedSucceededRequestReplay({
+      normalizedPayload: artifact,
+      providerRequestId: requestId,
+      providerBatchRequestId: requestId,
+      providerUsageLedgerId:
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      providerTaskId: "09021047-1594-0066-0000-946311258027",
+      actualCostMicros: 600,
+    });
+    const providerExecute = vi.fn(async () => ({ tasks: [] }));
+    const preflight = vi.fn(async () => {});
+    const authorize = vi.fn(async () => {});
+    const request = new CommercialDiscoveryRequestService({
+      client,
+      provider: { execute: providerExecute },
+      gate: { preflight, authorize },
+      now: () => new Date("2026-09-02T11:00:00.000Z"),
+    });
+
+    await expect(request.execute({
+      context: {
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        websiteProjectId: "33333333-3333-4333-8333-333333333333",
+        requestId,
+        idempotencyKey: "recommendation-pool-v2-replay",
+        budgetReservationId: reservationId,
+      },
+      projectContextVersionId: "44444444-4444-4444-8444-444444444444",
+      call,
+      locationCode: "2710",
+      languageCode: "en",
+      refreshMode: "FORCE_LIVE",
+      actorId: "recommendation-pool-v2-test",
+      preserveBudgetReservationId: true,
+      allowSucceededRequestReplay: true,
+    })).resolves.toMatchObject({
+      source: "provider",
+      artifact: {
+        costMicros: 600,
+        providerTaskIds: ["09021047-1594-0066-0000-946311258027"],
+      },
+      providerTrace: {
+        providerRequestId: requestId,
+        providerBatchRequestId: requestId,
+        providerUsageLedgerId:
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        providerTaskId: "09021047-1594-0066-0000-946311258027",
+        actualCostMicros: 600,
+      },
+    });
+
+    expect(preflight).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(providerExecute).not.toHaveBeenCalled();
+    expect(client.calls.some(({ text }) =>
+      text.includes("INSERT INTO provider_batch_requests")
+      || text.includes("WITH attempted AS")
+    )).toBe(false);
+    const replay = client.calls.find(({ text }) =>
+      text.includes("RECOMMENDATION_POOL_V2_SUCCEEDED_REQUEST_REPLAY")
+    );
+    expect(replay?.text).toContain("usage.status='settled'");
+    expect(replay?.text).toContain("lease.status='completed'");
+    expect(replay?.values[7]).toBe(requestId);
+    expect(replay?.values[8]).toBe(reservationId);
   });
 
   it("fails closed when an interrupted request has no accepted task id", async () => {
@@ -1214,6 +1667,11 @@ describe("commercial recommendation discovery service", () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(providerExecute).toHaveBeenCalledTimes(4);
     expect(authorize).toHaveBeenCalledTimes(4);
+    const persistedArtifact = client.calls.find(({ text }) =>
+      text.includes("INSERT INTO backlink_commercial_discovery_artifacts")
+    );
+    expect(JSON.parse(String(persistedArtifact?.values[9])).rawResponse)
+      .toEqual({ tasks: [] });
     expect(client.calls.some(({ text, values }) =>
       text.includes("SET provider_task_id=$2")
       && values[1] === "provider-task-persisted"
@@ -1603,7 +2061,7 @@ describe("commercial recommendation discovery service", () => {
     )).toBe(true);
   });
 
-  it("uses an AI blueprint as the exclusive semantic query plan", () => {
+  it("keeps AI queries exclusive by default and expands native V2 planning", () => {
     const aiQueries = [
       "South Africa streaming television blogs",
       "South Africa independent film publications",
@@ -1683,6 +2141,17 @@ describe("commercial recommendation discovery service", () => {
       refillWindow: 2,
       languageCode: "en",
     });
+    const nativeV2Plan = buildCommercialTierSearchQueries({
+      tier: "exact_product_target_market",
+      blueprint,
+      context,
+      refillRound: 1,
+      refillWindow: 1,
+      languageCode: "en",
+      queryOffset: 0,
+      queryLimit: 64,
+      includeDeterministicExpansion: true,
+    });
 
     expect(blueprint.generator).toBe("AI");
     expect(firstWindow).toEqual(aiQueries);
@@ -1691,6 +2160,174 @@ describe("commercial recommendation discovery service", () => {
       !query.includes("local or regional publication")
       && !query.includes("adjacent industry publication")
     )).toBe(true);
+    expect(nativeV2Plan.slice(0, aiQueries.length)).toEqual(aiQueries);
+    expect(nativeV2Plan.length).toBeGreaterThan(aiQueries.length);
+    expect(nativeV2Plan.some((query) =>
+      !aiQueries.includes(query) && query.includes("blogs")
+    )).toBe(true);
+    expect(nativeV2Plan.every((query) =>
+      !query.includes("elephtv.com")
+      && !query.toLowerCase().includes("editorial review backlinks")
+    )).toBe(true);
+
+    const candidatePlan = createCommercialDiscoveryPlan({
+      blueprintId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      searchQueries: nativeV2Plan,
+      verifiedCompetitorDomains: [],
+      userDomain: context.canonicalDomain,
+      locationCode: "2710",
+      languageCode: "en",
+      endpointAllowlist: ["/v3/serp/google/organic/task_post"],
+      estimatedCostMicros: 1_000,
+      remainingBudgetMicros: Number.MAX_SAFE_INTEGER,
+    });
+    const exhaustedAiFingerprints = new Set(
+      candidatePlan
+        .filter(({ request }) =>
+          aiQueries.includes(String(request.keyword))
+        )
+        .map(fingerprintCommercialDiscoverySemanticRequest),
+    );
+    const freshCalls = candidatePlan.filter((call) =>
+      !exhaustedAiFingerprints.has(
+        fingerprintCommercialDiscoverySemanticRequest(call),
+      )
+    );
+
+    expect(exhaustedAiFingerprints.size).toBe(aiQueries.length);
+    expect(freshCalls.length).toBeGreaterThan(0);
+    expect(aiQueries).not.toContain(freshCalls[0]?.request.keyword);
+  });
+
+  it("interleaves project, category, competitor, and audience seeds deterministically", () => {
+    const context = {
+      snapshotVersion: 2 as const,
+      profileVersionId,
+      promotionTargetVersionId,
+      projectSettingsVersionId: "settings-balanced-plan",
+      projectSettingsVersion: 1,
+      canonicalDomain: "project.com",
+      locale: "en-US",
+      countryCode: "US",
+      products: ["product alpha"],
+      keywords: ["keyword alpha"],
+      targetUrls: ["https://project.com/"],
+      targetAudiences: ["audience alpha"],
+      partnershipGoals: ["editorial review"],
+      explicitCompetitorDomains: ["competitor.com"],
+    };
+    const generated = buildCommercialDiscoveryBlueprint({
+      context: {
+        projectContextVersionId: "context-balanced-plan",
+        projectSettingsVersionId: context.projectSettingsVersionId,
+        projectSettingsVersion: context.projectSettingsVersion,
+        canonicalDomain: context.canonicalDomain,
+        countries: ["US"],
+        languages: ["en"],
+        products: context.products,
+        keywords: context.keywords,
+        promotionTargetUrls: context.targetUrls,
+        declaredTargetAudiences: context.targetAudiences,
+        partnershipGoals: context.partnershipGoals,
+        explicitCompetitorDomains: context.explicitCompetitorDomains,
+        historicalFeedbackDomains: [],
+        evidenceRefs: ["project-context:balanced-plan"],
+      },
+    });
+    const blueprint = Object.freeze({
+      ...generated,
+      searchQueryClusters: Object.freeze([]),
+      topicClusters: Object.freeze(["category alpha"]),
+      discoveredCompetitorSeeds: Object.freeze(["competitor.com"]),
+    });
+    const build = () =>
+      buildCommercialTierSearchQueries({
+        tier: "exact_product_target_market",
+        blueprint,
+        context,
+        refillRound: 1,
+        refillWindow: 1,
+        languageCode: "en",
+        queryOffset: 0,
+        queryLimit: 10,
+        includeDeterministicExpansion: true,
+      });
+
+    const first = build();
+    expect(build()).toEqual(first);
+    expect(first.slice(0, 5).every((query) => query.endsWith("blogs"))).toBe(
+      true,
+    );
+    expect(first.slice(0, 5)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("keyword alpha"),
+        expect.stringContaining("product alpha"),
+        expect.stringContaining("category alpha"),
+        expect.stringContaining("competitor.com"),
+        expect.stringContaining("audience alpha"),
+      ]),
+    );
+  });
+
+  it("interleaves confirmed competitor backlinks and search within the existing budget", () => {
+    const calls = createCommercialDiscoveryPlan({
+      blueprintId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      searchQueries: ["pool cleaner reviews", "robotic pool maintenance"],
+      verifiedCompetitorDomains: ["competitor.com", "second.com"],
+      userDomain: "project.com", locationCode: "2840", languageCode: "en",
+      endpointAllowlist: ["/v3/serp/google/organic/task_post", "/v3/backlinks/backlinks/live",
+        "/v3/backlinks/referring_domains/live"],
+      estimatedCostMicros: 250_000, remainingBudgetMicros: Number.MAX_SAFE_INTEGER,
+    });
+    const ordered = orderCommercialNativeV2DiscoveryCalls(calls);
+    expect(ordered.map((call) => call.sourceType)).toEqual([
+      "VERIFIED_COMPETITOR_REFERRING_DOMAINS", "BLUEPRINT_SERP_STANDARD_QUEUE",
+      "VERIFIED_COMPETITOR_REFERRING_DOMAINS", "BLUEPRINT_SERP_STANDARD_QUEUE",
+    ]);
+    expect(ordered[0]?.request).toMatchObject({
+      target: "competitor.com", limit: 100, mode: "one_per_domain",
+      backlinks_status_type: "live",
+    });
+    expect(ordered[0]?.plannerLineage?.blueprintId).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(ordered[0]?.plannerLineage?.queryId).not.toBe(ordered[2]?.plannerLineage?.queryId);
+    expect(selectCommercialNativeV2RequestPlan({
+      calls: ordered, maxRequests: 4, maxAuthorizedCostMicros: 500_000,
+    })).toEqual(ordered.slice(0, 2));
+  });
+
+  it("selects multiple native V2 requests without exceeding the round authorization", () => {
+    const calls = createCommercialDiscoveryPlan({
+      blueprintId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      searchQueries: [
+        "query one",
+        "query two",
+        "query three",
+        "query four",
+        "query five",
+      ],
+      verifiedCompetitorDomains: [],
+      userDomain: "project.com",
+      locationCode: "2840",
+      languageCode: "en",
+      endpointAllowlist: ["/v3/serp/google/organic/task_post"],
+      estimatedCostMicros: 400_000,
+      remainingBudgetMicros: Number.MAX_SAFE_INTEGER,
+    });
+
+    const selected = selectCommercialNativeV2RequestPlan({
+      calls,
+      requestOffset: 1,
+      maxRequests: 4,
+      maxAuthorizedCostMicros: 1_000_000,
+    });
+
+    expect(selected).toEqual(calls.slice(1, 3));
+    expect(
+      selected.reduce(
+        (total, call) => total + call.estimatedCostMicros,
+        0,
+      ),
+    ).toBe(800_000);
   });
 
   it("lets Terra normalize stored project facts into target-language queries", async () => {
@@ -1843,7 +2480,7 @@ describe("commercial recommendation discovery service", () => {
     expect(persistedSemanticArtifacts.length).toBeGreaterThan(0);
   });
 
-  it("serializes independent provider request clients", async () => {
+  it("uses bounded concurrency with independent provider request clients", async () => {
     const client = new MemoryDiscoveryClient();
     let inFlight = 0;
     let maximumInFlight = 0;
@@ -1911,6 +2548,7 @@ describe("commercial recommendation discovery service", () => {
         candidateLimit: 25,
         locationCode: "2840",
         languageCode: "en",
+        providerRequestConcurrency: 2,
       },
       requestClientFactory: async () => ({
         client: new MemoryDiscoveryClient(),
@@ -1935,7 +2573,7 @@ describe("commercial recommendation discovery service", () => {
     });
 
     expect(providerExecute).toHaveBeenCalledTimes(4);
-    expect(maximumInFlight).toBe(1);
+    expect(maximumInFlight).toBe(2);
     expect(requestGateCalls).toBe(4);
     expect(released).toBe(4);
   });

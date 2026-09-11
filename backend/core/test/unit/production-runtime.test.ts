@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 import type { BacklinksRuntimeFactoryContext } from "../../src/index.js";
-import { runtime } from "../../src/modules/backlinks/runtime/production-runtime.js";
+import { automaticProfileSyncEnabled, runtime } from "../../src/modules/backlinks/runtime/production-runtime.js";
 import {
   createActorContext,
   createProjectContext,
@@ -49,6 +49,21 @@ function enableCanaryEnvironment(): void {
 }
 
 describe("production Backlinks runtime", () => {
+  it("disables background profile synchronization in manual mode", async () => {
+    expect(automaticProfileSyncEnabled("manual")).toBe(false);
+    expect(automaticProfileSyncEnabled(undefined)).toBe(true);
+    expect(automaticProfileSyncEnabled("automatic")).toBe(true);
+    expect(() => automaticProfileSyncEnabled("invalid")).toThrow(
+      "BACKLINKS_PROFILE_SYNC_MODE_INVALID",
+    );
+    const source = await readFile(
+      new URL("../../src/modules/backlinks/runtime/production-runtime.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("process.env.BACKLINKS_PROFILE_SYNC_MODE");
+    expect(source).toMatch(/automaticProfileSync &&\s*!projectRecommendationWorkPending/);
+    expect(source).toMatch(/automaticProfileSync &&\s*projectRecommendationWorkPending/);
+  });
   it("contains no test-only or in-memory composition references", async () => {
     const source = await readFile(
       new URL(
@@ -71,7 +86,7 @@ describe("production Backlinks runtime", () => {
     );
   });
 
-  it("queues a governed recommendation refill after project analysis", async () => {
+  it("loads project analysis without an implicit V1 refill", async () => {
     const source = await readFile(
       new URL(
         "../../src/modules/backlinks/runtime/production-runtime.ts",
@@ -84,14 +99,9 @@ describe("production Backlinks runtime", () => {
       source.match(/createBacklinkProjectAnalysisActivities\(/g),
     ).toHaveLength(1);
     expect(source).toMatch(
-      /createBacklinkProjectAnalysisActivities\(\s*createProjectContextSnapshotRepository\(client\),\s*undefined,\s*createProjectAnalysisJobWriter\(client\),\s*\{\s*ensure: async \(refillInput\) => \{\s*await ensureCommercialRecommendationRefill\(client,/,
+      /createBacklinkProjectAnalysisActivities\(\s*createProjectContextSnapshotRepository\(client\),\s*undefined,\s*createProjectAnalysisJobWriter\(client\),\s*undefined,/,
     );
-    expect(source).toContain(
-      "absoluteBudgetMicros:\n                    persistentProviderBudgetGrant.maxCostMicros",
-    );
-    expect(source).toContain(
-      "providerBudgetGrant: persistentProviderBudgetGrant",
-    );
+    expect(source.includes("ensureCommercialRecommendationRefill")).toBe(false);
   });
 
   it("persists the stable recommendation refill failure contract", async () => {
@@ -104,14 +114,14 @@ describe("production Backlinks runtime", () => {
     );
     const arbitrationSource = await readFile(
       new URL(
-        "../../src/modules/backlinks/application/services/"
-          + "recommendation-refill-supersession.service.ts",
+        "../../src/modules/backlinks/application/services/" +
+          "recommendation-refill-supersession.service.ts",
         import.meta.url,
       ),
       "utf8",
     );
 
-    expect(runtimeSource).toContain("arbitrateRecommendationRefillFailure");
+    expect(runtimeSource.includes("arbitrateRecommendationRefillFailure")).toBe(false);
     expect(arbitrationSource).toContain("'rootCause',$7::text");
     expect(arbitrationSource).toContain("'recovery',$8::text");
     expect(arbitrationSource).toContain(
@@ -122,7 +132,7 @@ describe("production Backlinks runtime", () => {
       "JOIN backlink_recommendation_refills AS refill",
     );
     expect(arbitrationSource).toContain(
-      "refill.refill_window_key \"refillWindowKey\"",
+      'refill.refill_window_key "refillWindowKey"',
     );
     expect(arbitrationSource).toMatch(
       /usage\.reservation_key LIKE\s+failed_refill\."refillWindowKey"\|\|':%'/,
@@ -131,7 +141,7 @@ describe("production Backlinks runtime", () => {
       /request\.request_id LIKE\s+failed_refill\."refillWindowKey"\|\|':%'/,
     );
     expect(arbitrationSource).not.toContain(
-      "batch.started_at>=failed_job.\"startedAt\"",
+      'batch.started_at>=failed_job."startedAt"',
     );
     expect(arbitrationSource).toContain(
       "website_project_id=$3 AND job.id=$4::uuid",
@@ -144,7 +154,7 @@ describe("production Backlinks runtime", () => {
     expect(arbitrationSource).not.toContain("'detail',input.message");
   });
 
-  it("isolates recovery Worker registration to refill recovery work", async () => {
+  it("rejects the retired V1 recovery Worker before registering work", async () => {
     enableCanaryEnvironment();
     process.env.BACKLINKS_RUNTIME_MODE = "LOCAL_PRODUCT";
     process.env.BACKLINKS_WORKER_EXECUTION_MODE = "recovery";
@@ -152,8 +162,7 @@ describe("production Backlinks runtime", () => {
       "00000000-0000-4000-8000-000000000001";
     process.env.LOCAL_PRODUCT_WORKSPACE_ID =
       "00000000-0000-4000-8000-000000000002";
-    process.env.LOCAL_PRODUCT_USER_ID =
-      "00000000-0000-4000-8000-000000000003";
+    process.env.LOCAL_PRODUCT_USER_ID = "00000000-0000-4000-8000-000000000003";
     process.env.BACKLINKS_RECOVERY_WEBSITE_PROJECT_ID =
       "00000000-0000-4000-8000-000000000006";
     process.env.BACKLINKS_RECOVERY_REFILL_JOB_ID =
@@ -161,25 +170,9 @@ describe("production Backlinks runtime", () => {
     process.env.BACKLINKS_RECOVERY_REFILL_OUTBOX_EVENT_ID =
       "00000000-0000-4000-8000-000000000005";
     try {
-      const worker = await runtime.createWorkerRegistrations?.(
-        runtimeContext("worker"),
-      );
-      expect(worker?.workflowsPath).toContain(
-        "workflows\\definitions\\recovery.js",
-      );
-      expect(Object.keys(worker?.activities ?? {}).sort()).toEqual([
-        "backlinksCompleteRecommendationRefillSupersessionV1",
-        "backlinksCompleteRecommendationRefillSupplyV1",
-        "backlinksExecuteRecommendationRefillV1",
-        "backlinksPlanRecommendationRefillSupplyV1",
-        "backlinksRecordRecommendationRefillFailureV1",
-        "backlinksReserveRecommendationRefillV1",
-        "backlinksStoreReadyRecommendationsV1",
-      ]);
-      expect(worker?.taskQueue).toBe(
-        "growthos.backlinks.v1.recovery.00000000-0000-4000-8000-000000000004",
-      );
-      expect(worker?.backgroundServices).toHaveLength(1);
+      await expect(
+        runtime.createWorkerRegistrations?.(runtimeContext("worker")),
+      ).rejects.toThrow("BACKLINKS_V1_RECOMMENDATION_RECOVERY_RETIRED");
     } finally {
       delete process.env.BACKLINKS_RUNTIME_MODE;
       delete process.env.BACKLINKS_WORKER_EXECUTION_MODE;
@@ -192,7 +185,7 @@ describe("production Backlinks runtime", () => {
     }
   });
 
-  it("attaches recovery Worker to an exact already-published workflow", async () => {
+  it("does not reopen V1 recovery for an already-published workflow", async () => {
     enableCanaryEnvironment();
     process.env.BACKLINKS_RUNTIME_MODE = "LOCAL_PRODUCT";
     process.env.BACKLINKS_WORKER_EXECUTION_MODE = "recovery";
@@ -200,8 +193,7 @@ describe("production Backlinks runtime", () => {
       "00000000-0000-4000-8000-000000000001";
     process.env.LOCAL_PRODUCT_WORKSPACE_ID =
       "00000000-0000-4000-8000-000000000002";
-    process.env.LOCAL_PRODUCT_USER_ID =
-      "00000000-0000-4000-8000-000000000003";
+    process.env.LOCAL_PRODUCT_USER_ID = "00000000-0000-4000-8000-000000000003";
     process.env.BACKLINKS_RECOVERY_WEBSITE_PROJECT_ID =
       "00000000-0000-4000-8000-000000000006";
     process.env.BACKLINKS_RECOVERY_REFILL_JOB_ID =
@@ -226,10 +218,9 @@ describe("production Backlinks runtime", () => {
       },
     };
     try {
-      const worker = await runtime.createWorkerRegistrations?.(context);
       await expect(
-        worker?.backgroundServices?.[0]?.start(),
-      ).resolves.toBeUndefined();
+        runtime.createWorkerRegistrations?.(context),
+      ).rejects.toThrow("BACKLINKS_V1_RECOMMENDATION_RECOVERY_RETIRED");
     } finally {
       delete process.env.BACKLINKS_RUNTIME_MODE;
       delete process.env.BACKLINKS_WORKER_EXECUTION_MODE;
@@ -242,7 +233,7 @@ describe("production Backlinks runtime", () => {
     }
   });
 
-  it("gates provider execution on external availability, not internal limits", async () => {
+  it("keeps Gmail runtimes mounted while provider diagnostics are pending", async () => {
     const source = await readFile(
       new URL(
         "../../src/modules/backlinks/runtime/production-runtime.ts",
@@ -259,18 +250,32 @@ describe("production Backlinks runtime", () => {
       'providerHealth.browser.externalAvailability === "available"',
     );
     expect(source).toContain(
-      "browserAllowed: browserProviderAvailable",
+      'providerHealth.ai.externalAvailability === "available"',
+    );
+    expect(source).toContain(
+      'providerHealth.gmail.externalAvailability === "available"',
+    );
+    expect(source).toContain("browserAllowed: browserProviderAvailable");
+    expect(source.match(/const aiRuntime = aiProviderAvailable/g)).toHaveLength(
+      2,
     );
     expect(source).toMatch(
-      /const recommendationRefillRelay =\s+workerAuthority === null/,
+      /const gmailSendRuntime = capabilities\.gmailSendEnabled/,
     );
     expect(source).toMatch(
-      /dataForSeoRuntime === null\s+\|\|\s+\(!dataForSeoAvailable && input\.source === "paid"\)/,
+      /const gmailSyncRuntime = capabilities\.gmailSyncEnabled/,
     );
+    expect(source).not.toContain(
+      "capabilities.gmailSendEnabled && gmailProviderAvailable",
+    );
+    expect(source).not.toContain(
+      "capabilities.gmailSyncEnabled && gmailProviderAvailable",
+    );
+    expect(source.includes("recommendationRefillRelay")).toBe(false);
     expect(source).not.toContain("calls.count+2 <= $5");
   });
 
-  it("keeps zero-cost recommendation refill sources independent from provider availability", async () => {
+  it("gates DataForSEO composition without retaining V1 source execution", async () => {
     const source = await readFile(
       new URL(
         "../../src/modules/backlinks/runtime/production-runtime.ts",
@@ -283,11 +288,9 @@ describe("production Backlinks runtime", () => {
       "dataForSeoConfiguration === null || !dataForSeoAvailable",
     );
     expect(source).toMatch(
-      /dataForSeoConfiguration !== null\s+&& dataForSeoSecretStoreRoot !== null\s+&& dataForSeoAvailable/,
+      /dataForSeoConfiguration !== null\s+&&\s+dataForSeoSecretStoreRoot !== null\s+&&\s+dataForSeoAvailable/,
     );
-    expect(source).toMatch(
-      /dataForSeoRuntime === null\s+\|\|\s+\(!dataForSeoAvailable && input\.source === "paid"\)/,
-    );
+    expect(source.includes("backlinksExecuteRecommendationRefillV1")).toBe(false);
   });
 
   it("releases an AI Draft reservation when recovery creates a basic draft", async () => {
@@ -311,27 +314,11 @@ describe("production Backlinks runtime", () => {
     );
   });
 
-  it("bounds each recommendation provider activity to 15 minutes", async () => {
-    const source = await readFile(
-      new URL(
-        "../../src/modules/backlinks/workflows/definitions/"
-          + "backlink-recommendation-refill.workflow.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-
-    expect(source).toContain('startToCloseTimeout: "15 minutes"');
-    expect(source).not.toContain('startToCloseTimeout: "2 hours"');
-    expect(source).toContain("retry: { maximumAttempts: 2 }");
-    expect(source).toContain("continueAsNew");
-  });
-
   it("allows contact enrichment to finish before stale-job recovery", async () => {
     const source = await readFile(
       new URL(
-        "../../src/modules/backlinks/workflows/definitions/"
-          + "contact-enrichment.workflow.ts",
+        "../../src/modules/backlinks/workflows/definitions/" +
+          "contact-enrichment.workflow.ts",
         import.meta.url,
       ),
       "utf8",
@@ -341,7 +328,7 @@ describe("production Backlinks runtime", () => {
     expect(source).toContain("retry: { maximumAttempts: 1 }");
   });
 
-  it("auto-queues from analysis and durably recovers provider and static work", async () => {
+  it("removes periodic V1 refill and static recovery producers", async () => {
     const source = await readFile(
       new URL(
         "../../src/modules/backlinks/runtime/production-runtime.ts",
@@ -350,29 +337,16 @@ describe("production Backlinks runtime", () => {
       "utf8",
     );
 
-    expect(source).toContain("reserveRecommendationRefillJob(client,");
-    expect(source).toContain("recommendationContextVersionId:");
-    expect(source).toContain("ensureCommercialRecommendationRefill(client,");
-    expect(source).not.toContain("shouldScanRecommendationInventory");
-    expect(source).not.toContain("nextRecommendationInventoryScanAt");
-    expect(source).toContain(
-      "hasRecoverableAcceptedCommercialRecommendationRefill(",
-    );
-    expect(source).not.toContain("if (!recoverable) return null");
-    expect(source).toContain(
-      "ensureCurrentCommercialStaticAssessmentRecovery(",
-    );
-    expect(source).toContain(
-      "backlinks.recommendation-refill.static-assessment-recovery-queued",
-    );
-    expect(source).toContain("nextRecommendationRecoveryScanAt");
-    expect(source).toContain(
-      "backlinks.recommendation-refill.accepted-provider-recovered",
-    );
-    expect(source).toContain(
-      "backlinks.recommendation-refill.inventory-refill-queued",
-    );
-    expect(source).toContain("createRecommendationRefillOutboxRelay({");
+    for (const retired of [
+      "reserveRecommendationRefillJob",
+      "ensureCommercialRecommendationRefill",
+      "hasRecoverableAcceptedCommercialRecommendationRefill",
+      "ensureCurrentCommercialStaticAssessmentRecovery",
+      "nextRecommendationRecoveryScanAt",
+      "createRecommendationRefillOutboxRelay",
+    ]) {
+      expect(source.includes(retired), retired).toBe(false);
+    }
   });
 
   it("recovers contact work globally through tenant-scoped commands", async () => {
@@ -388,8 +362,73 @@ describe("production Backlinks runtime", () => {
       "backlink_list_contact_enrichment_recovery_scopes($1)",
     );
     expect(source).toContain("listContactEnrichmentRecoveryScopes(");
-    expect(source).toMatch(
-      /withBacklinkTenantTransaction\(\s*pool,\s*scope,\s*\(client\) => ensureReadyContactEnrichmentJobs\(client,/,
+    const scopeStart = source.indexOf(
+      "async function listContactEnrichmentRecoveryScopes(",
+    );
+    const scopeEnd = source.indexOf(
+      "function localProductWorkerAuthority(",
+      scopeStart,
+    );
+    const scopeSource = source.slice(scopeStart, scopeEnd);
+    expect(scopeSource).not.toContain("UNION");
+    expect(scopeSource).not.toContain(
+      "backlink_recommendation_pool_project_contracts",
+    );
+    expect(scopeSource).not.toContain(
+      "backlink_recommendation_pool_v2_native_generation_verify",
+    );
+    const recoveryStart = source.indexOf(
+      "const scopes = await listContactEnrichmentRecoveryScopes(",
+    );
+    const recoveryEnd = source.indexOf(
+      "const contactOutcome = await contactEnrichmentRelay.runOnce(",
+      recoveryStart,
+    );
+    const recoverySource = source.slice(recoveryStart, recoveryEnd);
+    expect(recoverySource).toContain("withBacklinkTenantTransaction(");
+    expect(recoverySource).toContain(
+      "await recoverRecommendationPoolV2CanonicalBatchPreparation(",
+    );
+    expect(recoverySource).not.toContain(
+      'if (recovery.status !== "contract_not_applicable")',
+    );
+    expect(recoverySource).toContain(
+      "const created = await ensureReadyContactEnrichmentJobs(",
+    );
+    expect(recoverySource).toMatch(
+      /createNewJobs:\s+recovery\.status === "contract_not_applicable"/,
+    );
+    expect(
+      recoverySource.indexOf(
+        "await recoverRecommendationPoolV2CanonicalBatchPreparation(",
+      ),
+    ).toBeLessThan(
+      recoverySource.indexOf(
+        "const created = await ensureReadyContactEnrichmentJobs(",
+      ),
+    );
+    const localRecoveryStart = source.indexOf(
+      'await runLocalProjectLane("contact-enrichment"',
+    );
+    const localRecoveryEnd = source.indexOf(
+      "contactScopes.sort(",
+      localRecoveryStart,
+    );
+    const localRecoverySource = source.slice(
+      localRecoveryStart,
+      localRecoveryEnd,
+    );
+    expect(localRecoverySource).toContain(
+      "await recoverRecommendationPoolV2CanonicalBatchPreparation(",
+    );
+    expect(localRecoverySource).toContain(
+      "await ensureReadyContactEnrichmentJobs(client, {",
+    );
+    expect(localRecoverySource).toMatch(
+      /createNewJobs:\s+recommendationPoolV2Recovery\?\.status ===\s+"contract_not_applicable"/,
+    );
+    expect(localRecoverySource).not.toMatch(
+      /workerAuthority !== null &&\s+recommendationPoolV2Recovery\?\.status ===/,
     );
     expect(source).toContain(
       'event: "backlinks.contact-enrichment.jobs.recovered"',
@@ -413,9 +452,7 @@ describe("production Backlinks runtime", () => {
     expect(source).toMatch(
       /providerRequestId:\s+authError\?\.providerRequestId \?\? null/,
     );
-    expect(source).toContain(
-      "transportCode: authError?.transportCode ?? null",
-    );
+    expect(source).toContain("transportCode: authError?.transportCode ?? null");
     expect(source).toContain("gmailTokenHealthRetryByConnection");
     expect(source).toContain("calculateGmailTokenHealthRetryDelaySeconds(");
     expect(source).toContain("const nextAttemptAt = Date.now() + 86_400_000");
@@ -443,15 +480,10 @@ describe("production Backlinks runtime", () => {
     expect(source).toContain("projectRecommendationWorkPending");
     expect(source).not.toContain("projectAnalysisPending");
     expect(source).not.toContain("job_type='project-analysis'");
-    expect(source).toContain("recommendationScopes.sort");
-    expect(source).toMatch(
-      /right\.contextCreatedAtEpoch - left\.contextCreatedAtEpoch \|\|\s+left\.inventoryCount - right\.inventoryCount/,
-    );
-    expect(source).toContain("if (scopeWorkPending) break;");
-    expect(source).not.toContain("if (scopeWorkPending) continue;");
-    expect(source).toContain("job_type='recommendation_refill'");
-    expect(source).toContain("refill_state='running'");
-    expect(source).not.toContain("refill_state IN ('running','waiting_contact')");
+    expect(source).toContain('runLocalProjectLane("recommendation-pool-v2"');
+    expect(source).toContain("job_type='recommendation_pool_v2_generation'");
+    expect(source).toContain("status IN ('queued','running','waiting_provider')");
+    expect(source.includes("job_type='recommendation_refill'")).toBe(false);
     expect(source).toContain('event: "backlinks.backlink-profile.deferred"');
     expect(source).toContain("const maxConcurrentContactEnrichmentJobs = 2");
     expect(source).toContain("contactScopes.sort");
@@ -481,9 +513,7 @@ describe("production Backlinks runtime", () => {
     );
 
     expect(api?.draftCommands.create).toBeTypeOf("function");
-    await expect(
-      api?.recommendationCommands.requestRefill({} as never),
-    ).rejects.toThrow("invalid scope");
+    expect(api).not.toHaveProperty("recommendationCommands");
     await expect(
       api?.sendIntentCommands.preflight({
         context: {
@@ -543,8 +573,8 @@ describe("production Backlinks runtime", () => {
     ).rejects.toMatchObject({
       code: "BACKLINK_CONFLICT",
     });
-    await expect(
-      worker?.activities.backlinksExecuteRecommendationRefillV1({} as never),
-    ).rejects.toThrow("INPUT_REQUIRED");
+    expect(worker?.activities).not.toHaveProperty(
+      "backlinksExecuteRecommendationRefillV1",
+    );
   });
 });

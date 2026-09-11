@@ -902,7 +902,7 @@ class ProjectContextProjector:
                         ],
                         "market": target_market,
                         "qualificationContractVersion": (
-                            "recommendation-qualification.v1"
+                            "recommendation-pool-admission.v2"
                         ),
                     }
                 )
@@ -965,7 +965,7 @@ class ProjectContextProjector:
                             ],
                             "market": target_market,
                             "qualificationContractVersion": (
-                                "recommendation-qualification.v1"
+                                "recommendation-pool-admission.v2"
                             ),
                         },
                     },

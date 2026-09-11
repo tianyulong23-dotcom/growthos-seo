@@ -1,0 +1,52 @@
+name: growthos-provider-archive
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: provider_archive
+      POSTGRES_USER: archive_owner
+      POSTGRES_PASSWORD: "${ARCHIVE_POSTGRES_PASSWORD:?Set a unique password}"
+    volumes:
+      - archive-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archive_owner -d provider_archive"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/provider-archive/Dockerfile
+    environment:
+      PROVIDER_ARCHIVE_DATABASE_URL: "${PROVIDER_ARCHIVE_DATABASE_URL:?Set archive database URL}"
+    command: ["node", "dist/modules/provider-archive/cli.js", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+  center:
+    build:
+      context: ../..
+      dockerfile: deploy/provider-archive/Dockerfile
+    environment:
+      PROVIDER_ARCHIVE_DATABASE_URL: "${PROVIDER_ARCHIVE_DATABASE_URL:?Set archive database URL}"
+      PROVIDER_ARCHIVE_CREDENTIALS_FILE: /run/secrets/credentials.json
+      PROVIDER_ARCHIVE_HOST: 0.0.0.0
+      PROVIDER_ARCHIVE_PORT: "7400"
+      PROVIDER_ARCHIVE_HTTP_BODY_LIMIT: "${PROVIDER_ARCHIVE_HTTP_BODY_LIMIT:-50331648}"
+    volumes:
+      - "${PROVIDER_ARCHIVE_CREDENTIALS_FILE:?Set credentials file}:/run/secrets/credentials.json:ro"
+    ports:
+      - "127.0.0.1:${PROVIDER_ARCHIVE_PORT:-7400}:7400"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7400/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+volumes:
+  archive-data:

@@ -27,7 +27,9 @@ export const dataForSeoCommercialDiscoveryEndpoints = [
 export type DataForSeoCommercialDiscoveryEndpoint =
   (typeof dataForSeoCommercialDiscoveryEndpoints)[number];
 
-type CommercialDiscoveryCandidate = Readonly<{
+export const commercialDiscoverySemanticPlanningQueryLimit = 64;
+
+export type CommercialDiscoveryCandidate = Readonly<{
   canonicalDomain: string;
   discoveryUrls: readonly string[];
   backlinkPageEvidence: readonly CommercialBacklinkPageEvidence[];
@@ -38,6 +40,14 @@ type CommercialDiscoveryCandidate = Readonly<{
   spamScore: number | null;
   countryCode: string | null;
   evidenceRefs: readonly string[];
+  resourceLibrary?: Readonly<{
+    releaseBatchOrdinal?: number;
+    ahrefsDr: number | null;
+    monthlyTraffic: number | null;
+    language: string;
+    categories: readonly string[];
+    categoryMatch: "RELATED" | "ADJACENT" | "UNCONFIRMED";
+  }>;
 }>;
 
 export type CommercialBacklinkPageEvidence = Readonly<{
@@ -78,6 +88,7 @@ export type CommercialDiscoveryArtifact = Readonly<{
   costMicros: number;
   providerTaskIds: readonly string[];
   candidates: readonly CommercialDiscoveryCandidate[];
+  rawResponse?: Readonly<Record<string, unknown>>;
   plannerLineage?: CommercialDiscoveryPlannerLineage;
 }>;
 
@@ -286,6 +297,7 @@ function parseCommercialDiscoveryArtifact(
     [
       ...requiredKeys,
       "plannerLineage",
+      "rawResponse",
     ],
     "commercialDiscoveryArtifact",
   );
@@ -317,6 +329,7 @@ function parseCommercialDiscoveryArtifact(
         "spamScore",
         "countryCode",
         "evidenceRefs",
+        "resourceLibrary",
       ],
       `candidates[${index}]`,
     );
@@ -385,6 +398,9 @@ function parseCommercialDiscoveryArtifact(
         1,
         20,
       ),
+      ...(candidate.resourceLibrary === undefined ? {} : {
+        resourceLibrary: parseResourceLibraryEvidence(candidate.resourceLibrary),
+      }),
     });
   });
   return Object.freeze({
@@ -418,6 +434,9 @@ function parseCommercialDiscoveryArtifact(
       100,
     ),
     candidates: Object.freeze(candidates),
+    ...(input.rawResponse === undefined
+      ? {}
+      : { rawResponse: Object.freeze(record(input.rawResponse, "rawResponse")) }),
     ...(input.plannerLineage === undefined
       ? {}
       : {
@@ -426,6 +445,27 @@ function parseCommercialDiscoveryArtifact(
             "plannerLineage",
           ),
         }),
+  });
+}
+
+function parseResourceLibraryEvidence(value: unknown): NonNullable<CommercialDiscoveryCandidate["resourceLibrary"]> {
+  const input = record(value, "resourceLibrary");
+  assertStrictKeys(input, [
+    "ahrefsDr", "monthlyTraffic", "language", "categories", "categoryMatch",
+    ...("releaseBatchOrdinal" in input ? ["releaseBatchOrdinal"] : []),
+  ], "resourceLibrary");
+  if (input.releaseBatchOrdinal !== undefined
+    && (!Number.isSafeInteger(input.releaseBatchOrdinal)
+      || Number(input.releaseBatchOrdinal) < 1 || Number(input.releaseBatchOrdinal) > 10)) {
+    throw new TypeError("resourceLibrary.releaseBatchOrdinal is invalid");
+  }
+  return Object.freeze({
+    ...(input.releaseBatchOrdinal === undefined ? {} : { releaseBatchOrdinal: Number(input.releaseBatchOrdinal) }),
+    ahrefsDr: nullableFinite(input.ahrefsDr, "resourceLibrary.ahrefsDr", 0, 100),
+    monthlyTraffic: nullableFinite(input.monthlyTraffic, "resourceLibrary.monthlyTraffic", 0),
+    language: nonBlank(input.language, "resourceLibrary.language"),
+    categories: nonBlankList(input.categories, "resourceLibrary.categories", 0, 100),
+    categoryMatch: member(["RELATED", "ADJACENT", "UNCONFIRMED"] as const, input.categoryMatch, "resourceLibrary.categoryMatch"),
   });
 }
 
@@ -517,6 +557,25 @@ export function fingerprintCommercialDiscoveryCall(
   return createHash("sha256").update(stableJson(parsed)).digest("hex");
 }
 
+export function fingerprintCommercialDiscoverySemanticRequest(
+  call: CommercialDiscoveryCall,
+): string {
+  const parsed = commercialDiscoveryCallSchema.parse(call);
+  const semanticRequest = Object.freeze({
+    endpoint: parsed.endpoint,
+    intent: parsed.intent,
+    sourceType: parsed.sourceType,
+    request: parsed.request,
+    ...(parsed.plannerLineage === undefined
+      ? {}
+      : { plannerLineage: parsed.plannerLineage }),
+    responseSchemaVersion: parsed.responseSchemaVersion,
+  });
+  return createHash("sha256")
+    .update(stableJson(semanticRequest))
+    .digest("hex");
+}
+
 export function assertCommercialDiscoveryCallAllowed(
   input: Readonly<{
     call: CommercialDiscoveryCall;
@@ -577,7 +636,7 @@ export function createCommercialDiscoveryPlan(
     ...new Set(
       input.searchQueries.map((value) => value.trim()).filter(Boolean),
     ),
-  ].slice(0, 20);
+  ].slice(0, commercialDiscoverySemanticPlanningQueryLimit);
   const blueprintId = input.blueprintId === undefined
     ? null
     : nonBlank(input.blueprintId, "blueprintId");
@@ -623,6 +682,14 @@ export function createCommercialDiscoveryPlan(
       },
       responseSchemaVersion:
         "dataforseo.backlinks-page-evidence-commercial.v1",
+      ...(blueprintId === null ? {} : {
+        plannerLineage: Object.freeze({
+          blueprintId,
+          queryId: createHash("sha256")
+            .update(`${blueprintId}\0competitor-backlinks\0${competitor}`, "utf8")
+            .digest("hex"),
+        }),
+      }),
       estimatedCostMicros: input.estimatedCostMicros,
     }));
   const userReferringDomainCandidates: CommercialDiscoveryCall[] = [{
@@ -973,6 +1040,13 @@ export function normalizeCommercialDiscoveryResponse(
     const targetUrl = pageEvidenceEndpoint ? httpUrl(item.url_to) : null;
     const linkStatus: CommercialBacklinkPageEvidence["linkStatus"] =
       item.is_lost === true ? "lost" : "active";
+    if (pageEvidenceEndpoint && call.request.backlinks_status_type === "live") {
+      // A competitor discovery result must retain an observed, active source link.
+      const target = domainFrom(call.request.target);
+      if (sourceUrl === null || targetUrl === null || linkStatus === "lost"
+        || target === null || domainFrom(targetUrl) !== target
+        || domainFrom(sourceUrl) !== domain) continue;
+    }
     const pageEvidence =
       sourceUrl === null || targetUrl === null
         ? null
@@ -1014,7 +1088,9 @@ export function normalizeCommercialDiscoveryResponse(
       referringDomainCount: integer(
         item.referring_domains ?? item.referring_domains_count,
       ),
-      spamScore: finiteNumber(item.spam_score ?? item.backlink_spam_score),
+      spamScore: finiteNumber(
+        item.backlinks_spam_score ?? item.spam_score ?? item.backlink_spam_score,
+      ),
       countryCode:
         typeof (
           item.domain_from_country ?? item.country_code ?? item.country
@@ -1060,13 +1136,16 @@ export function normalizeCommercialDiscoveryResponse(
     candidate.backlinkPageEvidence.forEach((evidence, key) =>
       previous.backlinkPageEvidence.set(key, evidence)
     );
-    if ((candidate.rank ?? -1) > (previous.rank ?? -1)) {
-      byDomain.set(domain, {
-        ...candidate,
-        discoveryUrls: previous.discoveryUrls,
-        backlinkPageEvidence: previous.backlinkPageEvidence,
-      });
+    // Duplicate domain rows can carry complementary metrics.
+    for (const key of [
+      "rank", "traffic", "backlinkCount", "referringDomainCount", "spamScore",
+    ] as const) {
+      const value = candidate[key];
+      if (value !== null && (previous[key] === null || value > previous[key])) {
+        previous[key] = value;
+      }
     }
+    previous.countryCode ??= candidate.countryCode;
   }
   return commercialDiscoveryArtifactSchema.parse({
     sourceType: call.sourceType,
@@ -1076,6 +1155,7 @@ export function normalizeCommercialDiscoveryResponse(
     collectedAt: input.collectedAt,
     costMicros,
     providerTaskIds: taskIds,
+    rawResponse: response,
     ...(call.plannerLineage === undefined
       ? {}
       : { plannerLineage: call.plannerLineage }),

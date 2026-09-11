@@ -67,7 +67,7 @@ export async function hasRecoverableAcceptedCommercialRecommendationRefill(
              refill.organization_id,refill.workspace_id,
              refill.website_project_id,
              refill.recommendation_context_version_id
-           )
+          )
           AND policy.visible_pool_generation=refill.visible_pool_generation
          JOIN backlink_commercial_discovery_batches AS batch
            ON (
@@ -357,9 +357,10 @@ export async function ensureCommercialRecommendationRefill(
     estimatedCostMicros: number;
     absoluteBudgetMicros: number;
     maxPaidCalls: number;
-    providerBudgetGrant: ProviderOperationBudgetGrant;
+    providerBudgetGrant?: ProviderOperationBudgetGrant;
     candidateLimit: number;
     now: Date;
+    providerAvailable?: boolean;
   }>,
 ): Promise<CommercialInventoryRefillResult> {
   if (
@@ -369,9 +370,14 @@ export async function ensureCommercialRecommendationRefill(
     || input.absoluteBudgetMicros < input.estimatedCostMicros
     || !Number.isSafeInteger(input.maxPaidCalls)
     || input.maxPaidCalls < 1
-    || input.providerBudgetGrant.provider !== "dataforseo"
-    || input.providerBudgetGrant.maxCostMicros !== input.absoluteBudgetMicros
-    || input.providerBudgetGrant.maxPaidCalls !== input.maxPaidCalls
+    || (
+      input.providerBudgetGrant !== undefined
+      && (
+        input.providerBudgetGrant.provider !== "dataforseo"
+        || input.providerBudgetGrant.maxCostMicros !== input.absoluteBudgetMicros
+        || input.providerBudgetGrant.maxPaidCalls !== input.maxPaidCalls
+      )
+    )
     || !Number.isSafeInteger(input.candidateLimit)
     || input.candidateLimit < 2
   ) {
@@ -395,7 +401,7 @@ export async function ensureCommercialRecommendationRefill(
             minimum_email_hit_rate::double precision "minimumEmailHitRate",
             current_refill_tier "currentRefillTier",
             current_refill_round "currentRefillRound"
-       FROM backlink_commercial_inventory_policies
+      FROM backlink_commercial_inventory_policies
       WHERE (organization_id,workspace_id,website_project_id,
              project_context_version_id)=($1,$2,$3,$4)
       FOR UPDATE`,
@@ -445,6 +451,28 @@ export async function ensureCommercialRecommendationRefill(
              AND score_model_version='recommendation-commercial-fit.v4'
              AND commercial_score->>'decision'='eligible'
          )::integer candidate_ready_count,
+         count(*) FILTER (
+           WHERE state='candidate_ready'
+             AND recommendation_id IS NULL
+             AND prospect_id IS NULL
+             AND score_model_version='recommendation-commercial-fit.v4'
+             AND gate_decision->>'decision'='eligible'
+             AND jsonb_typeof(gate_decision->'hitGates')='array'
+             AND jsonb_array_length(gate_decision->'hitGates')=0
+              AND commercial_score->>'decision'='eligible'
+              AND CASE
+                   WHEN jsonb_typeof(commercial_score->'total')='number'
+                     AND jsonb_typeof(
+                       commercial_score#>'{admission,appliedThreshold}'
+                     )='number'
+                     THEN (commercial_score->>'total')::numeric >=
+                       (
+                         commercial_score
+                           #>>'{admission,appliedThreshold}'
+                       )::numeric
+                   ELSE false
+                 END
+         )::integer prepared_candidate_count,
          count(*) FILTER (
            WHERE state<>'stale_context'
              AND score_model_version='recommendation-commercial-fit.v4'
@@ -858,6 +886,8 @@ export async function ensureCommercialRecommendationRefill(
        END "contractKind",
        COALESCE(candidate_counts.candidate_ready_count,0)
          "candidateReadyCount",
+       COALESCE(candidate_counts.prepared_candidate_count,0)
+         "preparedCandidateCount",
        COALESCE(candidate_counts.historical_candidate_count,0)
          "historicalCandidateCount",
        COALESCE(candidate_counts.raw_candidate_count,0)
@@ -990,6 +1020,8 @@ export async function ensureCommercialRecommendationRefill(
       // while the paid provider is paused.
       budgetAvailable: true,
     });
+  const persistedTermination = terminationReason(row.terminationReason);
+  const operationAlreadyExists = row.inflight === true;
 
   if (row.projectContextReady !== true) {
     const decision = effectiveDecision(false, false);
@@ -1052,19 +1084,90 @@ export async function ensureCommercialRecommendationRefill(
   }
 
   if (row.visiblePoolState === "awaiting_refresh") {
-    const decision = effectiveDecision(false, false);
-    return Object.freeze({
-      status: "idle",
-      pauseReason: null,
-      requestedCandidateCount: 0,
-      effectiveEmailHitRate: decision.effectiveEmailHitRate,
-      currentTier: tier,
-      currentRound: round,
-      terminationReason: null,
-    });
+    const decision = effectiveDecision(true, operationAlreadyExists);
+    if (operationAlreadyExists) {
+      return Object.freeze({
+        status: "paused",
+        pauseReason: "inflight",
+        requestedCandidateCount: decision.requestedCandidateCount,
+        effectiveEmailHitRate: decision.effectiveEmailHitRate,
+        currentTier: tier,
+        currentRound: round,
+        terminationReason: null,
+      });
+    }
+    const preparedCandidateCount = integer(row.preparedCandidateCount);
+    if (preparedCandidateCount > 0) {
+      const refillWindowKey = [
+        "commercial-existing",
+        input.websiteProjectId,
+        input.projectContextVersionId,
+        `g${visiblePoolGeneration}`,
+        "archive-prepared",
+      ].join(":");
+      const requestedCandidateCount = Math.min(
+        input.candidateLimit,
+        visiblePoolTargetCount,
+        preparedCandidateCount,
+      );
+      const command = await createRecommendationCommands(client).requestRefill({
+        context: {
+          actor: createActorContext({
+            userId: input.actorId,
+            sessionId: "product-commercial-inventory",
+            roles: ["member"],
+          }),
+          tenant: createTenantContext({
+            organizationId: input.organizationId,
+            workspaceId: input.workspaceId,
+          }),
+          project: createProjectContext({
+            websiteProjectId: input.websiteProjectId,
+            canonicalDomain: String(row.canonicalDomain),
+            locale: String(row.locale),
+            countryCode: String(row.countryCode),
+            profileVersionId: String(row.profileVersionId),
+            promotionTargetVersionId: String(row.promotionTargetVersionId),
+          }),
+        },
+        requestId: `recommendation-refill:${refillWindowKey}`,
+        expectedVersion: 0,
+        recommendationContextVersionId: input.projectContextVersionId,
+        visiblePoolGeneration,
+        lowWatermark: 0,
+        highWatermark: visiblePoolTargetCount,
+        refillWindowKey,
+        triggerReason: "inventory_low",
+        supplyMode: "existing_evidence",
+      });
+      await updateCycleState(client, {
+        scopeValues,
+        state: "running",
+        tier,
+        round,
+        attempts,
+        terminationReason: null,
+        pauseReason: null,
+        publishableCount,
+        rawCandidateCount,
+        eliminationReasonCounts,
+        now: input.now,
+        actorId: input.actorId,
+        visiblePoolGeneration,
+        visiblePoolState: "building",
+      });
+      return Object.freeze({
+        status: "queued",
+        jobId: command.jobId,
+        requestedCandidateCount,
+        effectiveEmailHitRate: decision.effectiveEmailHitRate,
+        currentTier: tier,
+        currentRound: round,
+        terminationReason: null,
+      });
+    }
   }
 
-  const persistedTermination = terminationReason(row.terminationReason);
   const existingEvidenceTermination =
     persistedTermination === "TIERS_EXHAUSTED"
     && ["existing_evidence_completed", "existing_evidence_no_progress"]
@@ -1073,7 +1176,6 @@ export async function ensureCommercialRecommendationRefill(
       "EXISTING_EVIDENCE_WINDOW_COMPLETED",
       "EXISTING_EVIDENCE_NO_PROGRESS",
     ].includes(String(row.latestRefillTerminalReason));
-  const operationAlreadyExists = row.inflight === true;
   if (
     row.visiblePoolState === "building"
     && row.contractKind === "incompatible_generation"
@@ -1119,6 +1221,41 @@ export async function ensureCommercialRecommendationRefill(
       currentTier: tier,
       currentRound: round,
       terminationReason: null,
+    });
+  }
+  if (input.providerAvailable === false) {
+    const decision = effectiveDecision(true, false);
+    if (
+      persistedTermination !== "PROVIDER_UNAVAILABLE"
+      || row.refillState !== "paused"
+    ) {
+      await updateCycleState(client, {
+        scopeValues,
+        state: "paused",
+        tier,
+        round,
+        attempts,
+        terminationReason: "PROVIDER_UNAVAILABLE",
+        pauseReason: "provider_unavailable",
+        publishableCount,
+        rawCandidateCount,
+        eliminationReasonCounts,
+        now: input.now,
+        actorId: input.actorId,
+        visiblePoolGeneration,
+      });
+    }
+    return Object.freeze({
+      status: "paused",
+      pauseReason: "provider_unavailable",
+      requestedCandidateCount: Math.min(
+        input.candidateLimit,
+        decision.requestedCandidateCount,
+      ),
+      effectiveEmailHitRate: decision.effectiveEmailHitRate,
+      currentTier: tier,
+      currentRound: round,
+      terminationReason: "PROVIDER_UNAVAILABLE",
     });
   }
   const acceptedProviderRecoveryAvailable =
@@ -1594,9 +1731,12 @@ export async function ensureCommercialRecommendationRefill(
   ) {
     throw new Error("BACKLINK_PROVIDER_RECOVERY_STATE_CHANGED");
   }
-  const command = await createRecommendationCommands(client, {
-    persistentProviderBudgetGrant: input.providerBudgetGrant,
-  }).requestRefill({
+  const command = await createRecommendationCommands(
+    client,
+    input.providerBudgetGrant === undefined
+      ? undefined
+      : { persistentProviderBudgetGrant: input.providerBudgetGrant },
+  ).requestRefill({
     context: {
       actor: createActorContext({
         userId: input.actorId,

@@ -38,6 +38,20 @@ async function arrowToTab(page: Page, locator: Locator, maxArrows = 10) {
 }
 
 async function expectNoSeriousA11yViolations(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          document
+            .getAnimations()
+            .filter(
+              (animation) =>
+                animation.playState === "running" &&
+                animation.effect?.getComputedTiming().iterations !== Infinity
+            ).length
+      )
+    )
+    .toBe(0)
   const results = await new AxeBuilder({ page }).analyze()
   const severe = results.violations.filter(
     (violation) =>
@@ -62,9 +76,20 @@ test("critical Outreach commands are keyboard operable with no serious a11y viol
 
   await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
   await expectNoSeriousA11yViolations(page)
-  await tabTo(page, page.getByRole("button", { name: "加入 Opportunity" }))
+  const firstRecommendation = page.locator("article").filter({
+    has: page.getByRole("link", {
+      name: "publisher.example.test",
+      exact: true,
+    }),
+  })
+  await tabTo(
+    page,
+    firstRecommendation.getByRole("button", { name: "加入", exact: true })
+  )
   await page.keyboard.press("Enter")
-  await expect(page.getByRole("button", { name: "已加入" })).toBeVisible()
+  await expect(
+    firstRecommendation.getByText("你已加入 Opportunity", { exact: true })
+  ).toBeVisible()
   await expect(page).toHaveURL(
     new RegExp(`/projects/${projectKey}/backlinks/recommendations$`)
   )
@@ -89,7 +114,7 @@ test("critical Outreach commands are keyboard operable with no serious a11y viol
     page.getByRole("heading", { name: "publisher.example.test" })
   ).toBeVisible()
   await expectNoSeriousA11yViolations(page)
-  await tabTo(page, page.getByRole("link", { name: "撰写邮件" }))
+  await tabTo(page, page.getByRole("link", { name: "创建邮件草稿" }))
   await page.keyboard.press("Enter")
   await expect(page).toHaveURL(
     new RegExp(
@@ -104,11 +129,21 @@ test("critical Outreach commands are keyboard operable with no serious a11y viol
   await tabTo(page, page.getByRole("button", { name: "人工批准" }))
   await page.keyboard.press("Enter")
   await expect(page.getByText("当前草稿版本已人工批准。")).toBeVisible()
-  await tabTo(page, page.getByRole("checkbox"))
+  const sendConfirmation = page.getByRole("checkbox", {
+    name: "我已核对发件账号、收件人和已批准版本，并确认立即发送。",
+  })
+  await expect(sendConfirmation).toBeEnabled()
+  await tabTo(page, sendConfirmation)
   await page.keyboard.press("Space")
-  await tabTo(page, page.getByRole("button", { name: "最终确认并发送" }))
+  await expect(sendConfirmation).toBeChecked()
+  const sendButton = page.getByRole("button", {
+    name: "确认并发送",
+    exact: true,
+  })
+  await expect(sendButton).toBeEnabled()
+  await tabTo(page, sendButton)
   await page.keyboard.press("Enter")
-  await expect(page.getByText("Gmail Provider 已接受")).toBeVisible()
+  await expect(page.getByText("邮件发送成功")).toBeVisible()
   await expectNoSeriousA11yViolations(page)
 
   await page.goto(`/projects/${projectKey}/backlinks/email`)
@@ -129,7 +164,7 @@ test("critical Outreach commands are keyboard operable with no serious a11y viol
   await expect(page.getByText("已关联到外链机会")).toBeVisible()
   await expectNoSeriousA11yViolations(page)
 
-  await page.goto(`/projects/${projectKey}/performance/links`)
+  await page.goto(`/projects/${projectKey}/backlinks/links`)
   await tabTo(page, page.getByRole("tab", { name: "Confirmed" }), 180)
   await page.keyboard.press("Enter")
   await expect(

@@ -6,6 +6,7 @@ import {
   createAiSdkProviderModel,
   defaultGenerateProviderText,
   mapAiSdkProviderError,
+  normalizeOpenAiCompatibleRequestBody,
   selectAiSdkResponseMode,
 } from "../../src/modules/backlinks/adapters/ai/ai-sdk-draft.transport.js";
 import type {
@@ -59,6 +60,25 @@ const input = {
 } as const;
 
 describe("ai@7 structured Draft Transport", () => {
+  it("bounds reasoning for compatible GPT-5 draft requests while preserving explicit settings", () => {
+    expect(normalizeOpenAiCompatibleRequestBody({ model: "gpt-5.6-terra" }))
+      .toMatchObject({ reasoning_effort: "low" });
+    expect(normalizeOpenAiCompatibleRequestBody({ model: "gpt-5.6-terra", reasoning_effort: "minimal" }))
+      .toMatchObject({ reasoning_effort: "minimal" });
+    expect(normalizeOpenAiCompatibleRequestBody({ model: "other" }))
+      .not.toHaveProperty("reasoning_effort");
+  });
+  it("identifies unsupported account models without retrying or exposing provider details", () => {
+    const error = mapAiSdkProviderError({
+      statusCode: 400,
+      message: "The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account.",
+    });
+    expect(error).toMatchObject({
+      code: "MISCONFIGURED",
+      retryable: false,
+      diagnosticCode: "PROVIDER_MODEL_UNSUPPORTED",
+    });
+  });
   it("uses no SDK retries and rechecks the gate for one schema repair", async () => {
     const beforeProviderCall = vi.fn(async () => {});
     const createModel = vi.fn(() => ({ model: true }));

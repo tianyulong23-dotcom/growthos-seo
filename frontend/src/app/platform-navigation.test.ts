@@ -53,8 +53,6 @@ describe("backlinks navigation", () => {
       ["recommendations", "推荐池"],
       ["opportunities", "外链机会"],
       ["email", "邮件中心"],
-      ["links", "外链监控"],
-      ["reports", "指标报告"],
     ])
   })
 })
@@ -70,6 +68,7 @@ describe("performance navigation", () => {
       ["overview", "总览"],
       ["articles", "文章效果"],
       ["backlinks", "外链监控"],
+      ["reports", "指标报告"],
     ])
   })
 })

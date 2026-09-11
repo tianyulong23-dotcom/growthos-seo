@@ -57,17 +57,103 @@ test("Performance Backlinks preserves lineage and historical evidence without re
     "aria-selected",
     "true"
   )
-  await expect(page.getByText("项目级 Placement 成效")).toBeVisible()
+  const profileSummary = page
+    .getByRole("heading", { name: "外链表现" })
+    .locator("..")
+  await expect(profileSummary).toBeVisible()
+  await expect(
+    profileSummary.getByText("owner.example.test", { exact: true })
+  ).toBeVisible()
+  await expect(page.getByText("净变化", { exact: true })).toBeVisible()
+  await expect(page.getByText("+1", { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "已确认外链", exact: true })
+  ).toBeVisible()
   await expect(
     page.getByText("最近一次 Direct Monitor 尝试失败", { exact: false })
   ).toBeVisible()
-  await expect(page.getByText("计入外链成效 KPI")).toBeVisible()
-  await expect(page.getByText("不计入成效 KPI").first()).toBeVisible()
-  await expect(page.getByText("DataForSEO", { exact: true })).toBeVisible()
+  await expect(page.getByText("全部外链", { exact: true })).toBeVisible()
+  await expect(page.getByText("数据口径")).toBeVisible()
+  const inventoryTable = page.getByRole("table", {
+    name: "全部外链列表",
+  })
+  await expect(inventoryTable).toBeVisible()
+  expect(
+    await inventoryTable.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth
+    )
+  ).toBe(true)
+  const firstInventorySource = page.getByRole("link", {
+    name: /source-1\.publisher\.example\.test/,
+  })
+  await expect(firstInventorySource).toBeVisible()
   await expect(
-    page.getByText("Direct Monitor", { exact: true }).first()
+    firstInventorySource.getByText("/article", { exact: true })
   ).toBeVisible()
-  await expect(page.getByText("Indexification / 索引")).toBeVisible()
+
+  let inventoryRequests = session.capturedRequests.filter(
+    (request) =>
+      request.method === "GET" &&
+      request.pathname === `/api/v1/projects/${projectKey}/backlinks/inventory`
+  )
+  expect(inventoryRequests.length).toBeGreaterThan(0)
+  expect(
+    new URLSearchParams(inventoryRequests.at(-1)?.search).get("view")
+  ).toBeNull()
+
+  await page.getByRole("button", { name: "查看引用域" }).click()
+  await expect(
+    page.getByRole("heading", { name: "引用域明细", exact: true })
+  ).toBeVisible()
+  await expect(page.getByRole("table", { name: "引用域列表" })).toBeVisible()
+  await expect(page.getByText("已采集 41 个引用域")).toBeVisible()
+  inventoryRequests = session.capturedRequests.filter(
+    (request) =>
+      request.method === "GET" &&
+      request.pathname === `/api/v1/projects/${projectKey}/backlinks/inventory`
+  )
+  expect(
+    new URLSearchParams(inventoryRequests.at(-1)?.search).get("view")
+  ).toBe("referring_domains")
+
+  await page.getByRole("button", { name: "查看新增外链" }).click()
+  await expect(
+    page.getByRole("heading", { name: "新增外链", exact: true })
+  ).toBeVisible()
+  await expect(page.getByRole("table", { name: "新增外链列表" })).toBeVisible()
+  await expect(page.getByText("本次新增 7 条")).toBeVisible()
+  inventoryRequests = session.capturedRequests.filter(
+    (request) =>
+      request.method === "GET" &&
+      request.pathname === `/api/v1/projects/${projectKey}/backlinks/inventory`
+  )
+  expect(
+    new URLSearchParams(inventoryRequests.at(-1)?.search).get("view")
+  ).toBe("new")
+
+  await page.getByRole("button", { name: "查看丢失外链" }).click()
+  await expect(
+    page.getByRole("heading", { name: "丢失外链", exact: true })
+  ).toBeVisible()
+  await expect(page.getByRole("table", { name: "丢失外链列表" })).toBeVisible()
+  await expect(page.getByText("本次丢失 6 条")).toBeVisible()
+  inventoryRequests = session.capturedRequests.filter(
+    (request) =>
+      request.method === "GET" &&
+      request.pathname === `/api/v1/projects/${projectKey}/backlinks/inventory`
+  )
+  expect(
+    new URLSearchParams(inventoryRequests.at(-1)?.search).get("view")
+  ).toBe("lost")
+
+  await page.getByRole("button", { name: "查看全部外链" }).click()
+  await expect(page.getByRole("table", { name: "全部外链列表" })).toBeVisible()
+  const profileRequests = session.capturedRequests.filter(
+    (request) =>
+      request.method === "GET" &&
+      request.pathname === `/api/v1/projects/${projectKey}/backlinks/profile`
+  )
+  expect(profileRequests.length).toBeGreaterThan(0)
 
   const openDetail = page.getByRole("button", {
     name: "查看 https://publisher.example.test/article 监控详情",
@@ -131,4 +217,31 @@ test("Performance Backlinks preserves lineage and historical evidence without re
     body: screenshot,
     contentType: "image/png",
   })
+})
+
+test("Backlink monitoring and reports are grouped under Performance", async ({
+  page,
+}) => {
+  const session = await installOutreachApiFixtures(page)
+
+  await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
+  await expect(page.getByRole("tab", { name: "推荐池" })).toBeVisible()
+  await expect(page.getByRole("tab", { name: "外链监控" })).toHaveCount(0)
+  await expect(page.getByRole("tab", { name: "指标报告" })).toHaveCount(0)
+
+  await page.goto(`/projects/${projectKey}/performance/reports`)
+  await expect(
+    page.getByRole("heading", { name: "效果", exact: true })
+  ).toBeVisible()
+  await expect(page.getByRole("tab", { name: "指标报告" })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
+  await expect(
+    page.getByRole("heading", { name: "外链事实指标", exact: true })
+  ).toBeVisible()
+  await expect(
+    page.getByText("Active Placement", { exact: true })
+  ).toBeVisible()
+  expect(session.unexpectedNetwork).toEqual([])
 })

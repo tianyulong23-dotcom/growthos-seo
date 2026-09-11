@@ -518,9 +518,14 @@ export function createOpportunitiesQuery(
                  selection.score_model_version
                ) "selectionScoreModelVersion",
                COALESCE(
-                 NULLIF(
-                   created_event.after_state->>'projectContextVersion',''
-                 )::integer,
+                 CASE
+                   WHEN created_event.after_state->>'projectContextVersion'
+                     ~ '^[1-9][0-9]*$'
+                     THEN (
+                       created_event.after_state->>'projectContextVersion'
+                     )::integer
+                   ELSE NULL
+                 END,
                  selection.project_context_version
                )
                  "selectionProjectContextVersion",

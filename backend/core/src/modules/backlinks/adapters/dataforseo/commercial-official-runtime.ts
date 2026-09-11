@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { archiveDataForSeoFetch } from "../../../provider-archive/capture-fetch.js";
 
 import {
   assertCommercialDiscoveryCallAllowed,
@@ -344,7 +345,9 @@ export function createCommercialOfficialDataForSeoRuntime(input: Readonly<{
   pollIntervalMs?: number;
   maximumPollIntervalMs?: number;
 }>): CommercialDataForSeoRuntime {
-  const fetchImplementation = input.fetchImplementation ?? globalThis.fetch;
+  const fetchImplementation = archiveDataForSeoFetch(
+    input.fetchImplementation ?? globalThis.fetch, "backlinks-discovery",
+  );
   const sleep = input.sleep
     ?? ((milliseconds: number) =>
       new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
