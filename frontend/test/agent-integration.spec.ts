@@ -105,13 +105,15 @@ function event(
 async function openAgent(page: Page) {
   await page.goto(`/projects/${projectId}/backlinks/recommendations`)
   const mobileButton = page.getByRole("button", { name: "打开 AI Agent" })
+  const desktopAgent = page
+    .locator("aside")
+    .filter({ has: page.getByRole("button", { name: "对话操作" }) })
+  await expect(mobileButton.or(desktopAgent)).toBeVisible()
   if (await mobileButton.isVisible()) {
     await mobileButton.click()
     return page.getByRole("dialog", { name: "AI Agent", exact: true })
   }
-  return page
-    .locator("aside")
-    .filter({ has: page.getByRole("button", { name: "对话操作" }) })
+  return desktopAgent
 }
 
 test("persisted welcome, profile action, and retry remain usable", async ({

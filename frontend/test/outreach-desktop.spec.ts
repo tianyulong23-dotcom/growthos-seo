@@ -326,7 +326,8 @@ test("recommendation details hide unavailable website metrics", async ({
       exact: true,
     }),
   })
-  await expect(recommendation.getByText("未知", { exact: true })).toHaveCount(3)
+  await expect(recommendation.getByText("暂无数据", { exact: true })).toHaveCount(3)
+  await expect(recommendation.getByText("0", { exact: true })).toHaveCount(0)
   await expect(page.getByText("高适合度")).toHaveCount(0)
   await expect(page.getByText("推荐依据", { exact: true })).toHaveCount(0)
 })
@@ -348,8 +349,15 @@ test("recommendation feed uses V2 Opportunity, archive, undo, and get-more contr
   })
   await firstRecommendation.getByRole("button", { name: "加入" }).click()
   await expect(
-    firstRecommendation.getByText("你已加入 Opportunity", { exact: true })
+    firstRecommendation.getByText("已加入外链机会", { exact: true })
   ).toBeVisible()
+  const joinButton = firstRecommendation.getByRole("button", {
+    name: "加入",
+    exact: true,
+  })
+  await expect(joinButton).toBeDisabled()
+  await page.reload()
+  await expect(joinButton).toBeDisabled()
   const opportunityRequest = session.capturedRequests.find(
     (request) =>
       request.method === "POST" &&
@@ -358,6 +366,13 @@ test("recommendation feed uses V2 Opportunity, archive, undo, and get-more contr
   expect(opportunityRequest?.body).toEqual({
     recommendationFeedItemId: "018f0000-0000-7000-8000-000000000801",
   })
+  expect(
+    session.capturedRequests.filter(
+      (request) =>
+        request.method === "POST" &&
+        request.pathname.endsWith("/backlinks/opportunities")
+    )
+  ).toHaveLength(1)
 
   await firstRecommendation.getByRole("button", { name: "归档" }).click()
   await expect(page.getByText("publisher.example.test 已归档")).toBeVisible()
@@ -595,15 +610,29 @@ test("an opportunity with no contact requires review and explicit confirmation",
   await page.goto(
     `/projects/${projectKey}/backlinks/drafts/new?opportunityId=${opportunityId}`
   )
-  await expect(page.getByText("当前机会没有可用的已确认联系人。")).toBeVisible()
+  await expect(page.getByText("暂无带有效网页证据的待确认邮箱。")).toBeVisible()
+  const generateButton = page.getByRole("button", { name: "生成草稿", exact: true })
+  await expect(generateButton).toBeDisabled()
+  await page.getByText("手动添加其他邮箱", { exact: true }).click()
 
   await page.getByLabel("联系人邮箱").fill("confirmed@publisher.example.test")
+  await page
+    .getByLabel("确认依据")
+    .fill("已人工核对该邮箱属于当前机会的 Prospect，并确认可用于本次外联。")
   await page.getByRole("button", { name: "核对联系人" }).click()
   await expect(page.getByText("请最终确认联系人")).toBeVisible()
+  await expect(generateButton).toBeDisabled()
+  expect(
+    session.capturedRequests.filter(
+      (request) =>
+        request.method === "POST" &&
+        /\/contacts\/candidates|\/draft-jobs/.test(request.pathname)
+    )
+  ).toHaveLength(0)
   await page.getByRole("button", { name: "确认并保存联系人" }).click()
 
   await expect(page.getByText("confirmed@publisher.example.test")).toBeVisible()
-  await expect(page.getByText("editorial · 已自动选中")).toBeVisible()
+  await expect(page.getByText("编辑 · 已选中")).toBeVisible()
   await expect(page.getByRole("button", { name: "生成草稿" })).toBeEnabled()
 
   const createCandidateRequest = session.capturedRequests.find(
@@ -632,6 +661,10 @@ test("an opportunity with no contact requires review and explicit confirmation",
     contactRole: "editorial",
     reason: "已人工核对该邮箱属于当前机会的 Prospect，并确认可用于本次外联。",
   })
+  await generateButton.click()
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/${projectKey}/backlinks/drafts/${draftId}$`)
+  )
   expect(session.unexpectedNetwork).toEqual([])
 })
 

@@ -30,7 +30,7 @@ export default defineConfig({
     video: "off",
   },
   webServer: {
-    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+    command: `node scripts/playwright-server.mjs ${port}`,
     url: `http://127.0.0.1:${port}`,
     reuseExistingServer: false,
     timeout: 120_000,

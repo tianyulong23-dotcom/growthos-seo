@@ -88,7 +88,7 @@ test("critical Outreach commands are keyboard operable with no serious a11y viol
   )
   await page.keyboard.press("Enter")
   await expect(
-    firstRecommendation.getByText("你已加入 Opportunity", { exact: true })
+    firstRecommendation.getByText("已加入外链机会", { exact: true })
   ).toBeVisible()
   await expect(page).toHaveURL(
     new RegExp(`/projects/${projectKey}/backlinks/recommendations$`)

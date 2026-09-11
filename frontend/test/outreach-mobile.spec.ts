@@ -56,9 +56,9 @@ async function expectNoSeriousA11yViolations(page: Page) {
   ).toEqual([])
 }
 
-test("mobile key pages remain visible without page-level overflow", async ({
+test("outreach composition and sending remain visible without page-level overflow", async ({
   page,
-}, testInfo) => {
+}) => {
   const session = await installOutreachApiFixtures(page)
 
   await page.goto(`/projects/${projectKey}/backlinks/recommendations`)
@@ -109,6 +109,13 @@ test("mobile key pages remain visible without page-level overflow", async ({
   await expect(page.getByText("邮件发送成功")).toBeVisible()
   await expectNoPageOverflow(page)
   await expectNoSeriousA11yViolations(page)
+  expect(session.unexpectedNetwork).toEqual([])
+})
+
+test("reply review and link details remain visible without page-level overflow", async ({
+  page,
+}, testInfo) => {
+  const session = await installOutreachApiFixtures(page)
 
   await page.goto(`/projects/${projectKey}/backlinks/email`)
   await page.getByText("Re: E2E collaboration", { exact: true }).click()
