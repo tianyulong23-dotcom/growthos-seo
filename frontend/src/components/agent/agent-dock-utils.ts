@@ -16,6 +16,15 @@ export type ConversationTimelineItem =
   | { type: "message"; id: string; createdAt: string; message: AgentMessage }
   | { type: "event"; id: string; createdAt: string; event: AgentTimelineEvent }
 
+export function cleanAgentMessageContent(content: string) {
+  return content
+    .split("\n")
+    .filter(
+      (line) => !/^(?:(?:\\)|(?:&#x20;)|(?:&nbsp;)|\s)+$/i.test(line.trim())
+    )
+    .join("\n")
+}
+
 function messageBusinessProgress(
   metadata: AgentMessage["metadata"]
 ): BusinessProgressItem[] {
@@ -53,7 +62,8 @@ export function messageDisplayParts(message: AgentMessage): AgentDisplayPart[] {
       if (!item || typeof item !== "object") return []
       const entry = item as Record<string, unknown>
       if (entry.type === "text" && typeof entry.text === "string") {
-        return entry.text.trim() ? [{ type: "text", text: entry.text }] : []
+        const text = cleanAgentMessageContent(entry.text)
+        return text.trim() ? [{ type: "text", text }] : []
       }
       const status = String(entry.status)
       if (
@@ -79,12 +89,13 @@ export function messageDisplayParts(message: AgentMessage): AgentDisplayPart[] {
     })
     if (parts.length > 0) return parts
   }
+  const content = cleanAgentMessageContent(message.content)
   return [
     ...messageBusinessProgress(message.metadata).map(
       (item): AgentDisplayPart => ({ type: "tool", ...item })
     ),
-    ...(message.content.trim()
-      ? ([{ type: "text", text: message.content }] satisfies AgentDisplayPart[])
+    ...(content.trim()
+      ? ([{ type: "text", text: content }] satisfies AgentDisplayPart[])
       : []),
   ]
 }

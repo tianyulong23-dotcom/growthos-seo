@@ -159,23 +159,24 @@ function timelineEvent(
           }
         : {},
     metadata: {
-      source:
-        status === "waiting" ? "site_profile" : "site_understanding",
+      source: status === "waiting" ? "site_profile" : "site_understanding",
     },
     createdAt: `2026-08-12T08:00:0${sequence}Z`,
     updatedAt: `2026-08-12T08:00:0${sequence}Z`,
   }
 }
 
-function agentDetail(timeline = [
-  timelineEvent(
-    "onboarding:site-entry:understanding-run",
-    "检查网站入口",
-    "running",
-    "我正在检查首页、Sitemap 和导航结构，先确定从哪里理解这个网站。",
-    1
-  ),
-]) {
+function agentDetail(
+  timeline = [
+    timelineEvent(
+      "onboarding:site-entry:understanding-run",
+      "检查网站入口",
+      "running",
+      "我正在检查首页、Sitemap 和导航结构，先确定从哪里理解这个网站。",
+      1
+    ),
+  ]
+) {
   return {
     conversation,
     messages: [],
@@ -346,8 +347,9 @@ describe("BusinessProfileOnboardingController", () => {
       </MemoryRouter>
     )
 
-    expect(await screen.findByText("理解业务")).toBeTruthy()
-    expect(screen.getByText(/网站结构已经清楚了/)).toBeTruthy()
+    const businessProgress = await screen.findByText("理解业务…")
+    expect(businessProgress.closest('[data-slot="badge"]')).toBeTruthy()
+    expect(screen.queryByText(/网站结构已经清楚了/)).toBeNull()
     expect(screen.queryByText("生成业务资料")).toBeNull()
     expect(screen.queryByText("整理目标客户")).toBeNull()
     expect(screen.queryByText("整理产品与服务")).toBeNull()
@@ -384,9 +386,10 @@ describe("BusinessProfileOnboardingController", () => {
       </MemoryRouter>
     )
 
-    expect(await screen.findByText("寻找核心页面")).toBeTruthy()
-    expect(screen.getByText(/我正在从站内页面中寻找/)).toBeTruthy()
-    expect(screen.getByText("进行中")).toBeTruthy()
+    const pageDiscoveryProgress = await screen.findByText("寻找核心页面…")
+    expect(pageDiscoveryProgress.closest('[data-slot="badge"]')).toBeTruthy()
+    expect(screen.queryByText(/我正在从站内页面中寻找/)).toBeNull()
+    expect(screen.queryByText("进行中")).toBeNull()
   })
 
   it("treats partial recognition as usable instead of failed", async () => {
@@ -420,10 +423,11 @@ describe("BusinessProfileOnboardingController", () => {
       </MemoryRouter>
     )
 
-    expect(await screen.findByText("理解业务")).toBeTruthy()
     expect(
-      screen.getByRole("button", { name: "确认业务资料" })
+      await screen.findByText("这是我目前对 Example 的理解。")
     ).toBeTruthy()
+    expect(screen.queryByText("理解业务")).toBeNull()
+    expect(screen.getByRole("button", { name: "确认业务资料" })).toBeTruthy()
     expect(screen.queryByRole("button", { name: "重新识别" })).toBeNull()
   })
 
@@ -457,7 +461,7 @@ describe("BusinessProfileOnboardingController", () => {
     expect(screen.getByTestId("current-path").textContent).toBe(
       "/projects/project-1/audit/overview"
     )
-    expect(await screen.findByText("检查网站入口")).toBeTruthy()
+    expect(await screen.findByText("检查网站入口…")).toBeTruthy()
     expect(screen.queryByText("网站业务识别")).toBeNull()
     expect(screen.queryByText("优先问题分析")).toBeNull()
 
