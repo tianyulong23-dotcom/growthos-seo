@@ -7,6 +7,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  ExternalLink,
+  Compass,
   Play,
   Plus,
   RefreshCw,
@@ -14,6 +16,7 @@ import {
   Trash2,
   WandSparkles,
 } from "lucide-react"
+import "../shared/discovery-workspace.css"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -123,6 +126,9 @@ function recommendationReasonLabel(value: string) {
   const labels: Record<string, string> = {
     RELEVANCE_TARGET_MARKET_SEARCH_TOPIC: "与目标市场和主题相关",
     EVIDENCE_VERIFIED_SOURCE_RELATION: "已验证推荐来源",
+    RELEVANCE_EVIDENCE_MISSING: "尚未确认与项目的相关性",
+    INDEPENDENT_POSITIVE_EVIDENCE_MISSING: "尚缺独立推荐依据",
+    REQUIRED_EXCLUSION_FAILED: "未通过推荐条件检查",
   }
   return labels[value] ?? (/^[A-Z][A-Z0-9_]+$/.test(value) ? "其他推荐依据" : value)
 }
@@ -133,18 +139,59 @@ function optionalNumber(value: string) {
 
 function contactOutcome(item: RecommendationFeedItem) {
   if (item.contact.email) return item.contact.email
-  if (item.contact.contactPage) return "打开联系页面"
   return (
     {
       NO_PUBLIC_CONTACT: "未找到公开邮箱",
-      COMPLETED_PARTIAL: "未找到公开邮箱",
+      NO_PUBLIC_EMAIL: "未找到公开邮箱",
+      CONTACT_FORM_ONLY: "仅找到联系表单",
+      CONTACT_PAGE_FOUND: "已找到联系页面",
+      COMPLETED_PARTIAL: "联系信息检查未完整完成",
+      MANUAL_REVIEW_REQUIRED: "联系信息需要人工核查",
+      LOGIN_REQUIRED: "需要登录才能查看",
+      UNSUPPORTED_CONTENT: "暂不支持此网站内容格式",
       ACCESS_DENIED: "网站拒绝访问",
       CAPTCHA_OR_BOT_CHALLENGE: "网站访问验证受限",
       ROBOTS_DISALLOWED: "网站限制自动采集",
       SITE_UNREACHABLE: "暂时无法访问网站",
       UNREACHABLE: "网站不可达",
       UNSUPPORTED: "暂不支持",
-    }[item.contact.outcome] ?? "未找到公开邮箱"
+    }[item.contact.outcome] ?? "联系信息状态待确认"
+  )
+}
+
+function safeContactUrl(value: string | null | undefined) {
+  if (!value) return null
+  try {
+    const url = new URL(value)
+    return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password
+      ? url.href : null
+  } catch {
+    return null
+  }
+}
+
+function ContactDestination({ item }: { item: RecommendationFeedItem }) {
+  if (item.contact.email) return <>{item.contact.email}</>
+  const observed = safeContactUrl(item.contact.contactPage)
+  const href = observed ?? safeContactUrl(item.displayUrl)
+  const label = !observed ? "访问网站" : (
+    {
+      CONTACT_FORM_ONLY: "打开联系表单",
+      LOGIN_REQUIRED: "打开登录受限页面",
+      CAPTCHA_OR_BOT_CHALLENGE: "打开验证页面",
+      ACCESS_DENIED: "打开受限页面",
+    }[item.contact.outcome] ?? "打开联系页面"
+  )
+  return (
+    <span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1">
+      <span>{contactOutcome(item)}</span>
+      {href && (
+        <a href={href} target="_blank" rel="noopener noreferrer" title={href}
+          className="inline-flex items-center gap-1 underline underline-offset-4">
+          {label}<ExternalLink aria-hidden="true" className="size-3" />
+        </a>
+      )}
+    </span>
   )
 }
 
@@ -560,10 +607,10 @@ function RecommendationFeedWorkspaceScope({
   const hasNoGeneration = feed.response !== null && !latestGeneration
 
   return (
-    <div className="min-w-0 space-y-5 p-4 sm:p-6">
-      <header className="flex flex-col gap-4 border-b border-border pb-5 lg:flex-row lg:items-end lg:justify-between">
+    <div className="discovery-workspace recommendation-workspace">
+      <header className="discovery-heading">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold text-foreground">外链推荐</h1>
+          <h1><Compass aria-hidden="true" />外链推荐</h1>
           <p className="mt-1 truncate text-sm text-muted-foreground">
             {project.name} · {project.domain}
           </p>
@@ -610,10 +657,10 @@ function RecommendationFeedWorkspaceScope({
       </header>
 
       <section
-        className="space-y-4 border-b border-border pb-4"
+        className="recommendation-generation space-y-4"
         aria-label="新推荐池生成"
       >
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_15rem]">
+        <div className="recommendation-generation-summary">
           <div className="min-w-0">
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h2 className="text-base font-semibold text-foreground">
@@ -654,7 +701,7 @@ function RecommendationFeedWorkspaceScope({
                     style={{ width: `${latestGeneration.progress}%` }}
                   />
                 </div> : null}
-                <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
+                <dl className="recommendation-generation-metrics mt-4 grid grid-cols-3 gap-3 text-sm">
                   <div className="min-w-0 border-l-2 border-border pl-3">
                     <dt className="text-xs text-muted-foreground">发现网站</dt>
                     <dd className="mt-1 text-xl font-semibold tabular-nums">
@@ -663,7 +710,7 @@ function RecommendationFeedWorkspaceScope({
                     <dd className="mt-1 text-xs text-muted-foreground">{stageLabels[latestGeneration.discoveryResult] ?? "状态待确认"}</dd>
                   </div>
                   <div className="min-w-0 border-l-2 border-border pl-3">
-                    <dt className="text-xs text-muted-foreground">已入推荐池</dt>
+                    <dt className="text-xs text-muted-foreground">候选网站</dt>
                     <dd className="mt-1 text-xl font-semibold tabular-nums">
                       {latestGeneration.admittedCount}
                     </dd>
@@ -713,6 +760,22 @@ function RecommendationFeedWorkspaceScope({
             <p className="mt-1 text-xs text-muted-foreground">{releasedPoolLabel(feed.response)}</p>
           </div>
         </div>
+
+        {generationActive && latestGeneration && latestGeneration.releasedCount === 0 ? (
+          <div role="status" aria-label="本轮推荐发布状态" className="border-l-2 border-primary bg-accent/40 px-4 py-3 text-sm">
+            <p className="font-medium">
+              第 {latestGeneration.visiblePoolGeneration} 轮尚未发布
+              {latestGeneration.contactPreparation === "IN_PROGRESS" ? " · 正在整理联系信息" : " · 正在生成"}
+            </p>
+            {feed.response && feed.response.items.length > 0 ? (
+              <p className="mt-1 text-muted-foreground">
+                下方仍是历史已发布结果，不代表本轮生成结果。新一轮网站及其 SEO 数据、联系方式尚未进入列表。
+              </p>
+            ) : (
+              <p className="mt-1 text-muted-foreground">本轮网站及其 SEO 数据、联系方式尚未进入列表。</p>
+            )}
+          </div>
+        ) : null}
 
         {seedEditorOpen ? <div id="recommendation-seed-editor" className="space-y-3 border-t border-border pt-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -859,7 +922,7 @@ function RecommendationFeedWorkspaceScope({
 
       {release.status && !hasNoGeneration ? (
         <section
-          className="border-b border-border pb-4"
+          className="recommendation-supply"
           aria-label="推荐池供应状态"
         >
           <div>
@@ -870,10 +933,12 @@ function RecommendationFeedWorkspaceScope({
         </section>
       ) : null}
 
+      <div className="recommendation-browser">
       <section
-        className="grid grid-cols-2 gap-3 border-b border-border pb-5 xl:grid-cols-6 [&_select]:rounded-md [&_input]:rounded-md"
+        className="recommendation-filters"
         aria-label="推荐筛选"
       >
+        <h2>筛选网站</h2>
         <label className="col-span-2 min-w-0 space-y-1">
           <span className="text-xs font-medium text-muted-foreground">
             推荐池批次
@@ -1001,6 +1066,7 @@ function RecommendationFeedWorkspaceScope({
         </div>
       </section>
 
+      <div className="recommendation-content">
       {recentlyArchived ? (
         <div className="flex flex-wrap items-center justify-between gap-3 border border-border bg-muted/40 px-3 py-2 text-sm">
           <span>{recentlyArchived.domain} 已归档</span>
@@ -1053,8 +1119,8 @@ function RecommendationFeedWorkspaceScope({
           推荐加载失败，请重试。
         </p>
       ) : (
-        <section aria-label="已发布推荐" className="space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
+        <section aria-label="已发布推荐" className="recommendation-results space-y-2">
+          <div className="recommendation-results-heading flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
             <span>
               {selectedBatch
                 ? `第 ${selectedBatch.visiblePoolGeneration} 轮 · 第 ${selectedBatch.batchOrdinal} 批`
@@ -1063,16 +1129,17 @@ function RecommendationFeedWorkspaceScope({
             </span>
             <span>{selectedIds.size} 条已选择</span>
           </div>
-          <div className="grid gap-3">
+          <div className="recommendation-items">
             {feed.response?.items.map((item) => {
               const selected = selectedIds.has(item.itemId)
               const busy = pendingItem?.id === item.itemId
               return (
                 <article
                   key={item.itemId}
-                  className="grid min-w-0 items-start gap-4 rounded-md border border-border p-4 lg:grid-cols-[minmax(12rem,1.3fr)_minmax(14rem,1fr)_minmax(11rem,1fr)_auto]"
+                  className="recommendation-item"
+                  data-selected={selected}
                 >
-                  <div className="min-w-0">
+                  <div className="recommendation-identity min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
                       <input
                         type="checkbox"
@@ -1115,7 +1182,7 @@ function RecommendationFeedWorkspaceScope({
                       </ul>
                     ) : null}
                   </div>
-                  <dl className="grid grid-cols-3 gap-3 text-sm [&_dd]:mt-2 [&_dd]:tabular-nums">
+                  <dl className="recommendation-metrics grid grid-cols-3 gap-3 text-sm [&_dd]:mt-2 [&_dd]:tabular-nums">
                     <div>
                       <dt className="text-xs text-muted-foreground">自然搜索 ETV</dt>
                       <dd>{metric(item.metrics.targetMarketOrganicTraffic)}</dd>
@@ -1143,15 +1210,10 @@ function RecommendationFeedWorkspaceScope({
                       </>
                     ) : null}
                   </dl>
-                  <div className="min-w-0 text-sm">
+                  <div className="recommendation-contact min-w-0 text-sm">
                     <p className="text-xs text-muted-foreground">联系方式</p>
                     <p className="mt-1 break-words">
-                      {!item.contact.email && item.contact.contactPage &&
-                      /^https?:\/\//i.test(item.contact.contactPage) ? (
-                        <a href={item.contact.contactPage} target="_blank" rel="noopener noreferrer" className="underline underline-offset-4">
-                          {contactOutcome(item)}
-                        </a>
-                      ) : contactOutcome(item)}
+                      <ContactDestination item={item} />
                     </p>
                     <p className="mt-3 text-xs text-muted-foreground">
                       外链机会
@@ -1160,7 +1222,7 @@ function RecommendationFeedWorkspaceScope({
                       {recommendationOpportunityLabel(item)}
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-start gap-2 lg:flex-col">
+                  <div className="recommendation-actions">
                     <Button
                       type="button"
                       size="sm"
@@ -1193,7 +1255,7 @@ function RecommendationFeedWorkspaceScope({
         </section>
       )}
 
-      <footer className="flex items-center justify-between border-t border-border pt-4">
+      <footer className="recommendation-pagination flex items-center justify-between border-t border-border pt-4">
         <Button
           type="button"
           variant="outline"
@@ -1225,6 +1287,8 @@ function RecommendationFeedWorkspaceScope({
           <ChevronRight className="size-4" />
         </Button>
       </footer>
+      </div>
+      </div>
     </div>
   )
 }

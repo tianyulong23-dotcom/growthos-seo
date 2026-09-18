@@ -214,6 +214,35 @@ describe("ai@7 structured Draft Transport", () => {
     });
   });
 
+  it("preserves a repair timeout without requesting a third budgeted call", async () => {
+    const beforeProviderCall = vi.fn(async () => {});
+    const generateProviderText = vi.fn()
+      .mockResolvedValueOnce({
+        text: '{"subject":',
+        finishReason: "stop",
+        usage: { inputTokens: 20, outputTokens: 10 },
+      })
+      .mockRejectedValueOnce(Object.assign(new Error("private provider details"), {
+        name: "TimeoutError",
+      }));
+    const transport = createAiSdkDraftTransport({
+      providerBaseUrl: "https://ai-gateway.vercel.sh/v1",
+      resolveSecret: async () => "PROTECTED_API_KEY",
+      inputCostUsdPerMillionTokens: 1,
+      outputCostUsdPerMillionTokens: 2,
+      createModel: () => ({ model: true }),
+      generateProviderText,
+      beforeProviderCall,
+    });
+
+    await expect(transport.generate(input)).rejects.toMatchObject({
+      code: "TIMEOUT",
+      retryable: false,
+    });
+    expect(generateProviderText).toHaveBeenCalledTimes(2);
+    expect(beforeProviderCall).toHaveBeenCalledTimes(2);
+  });
+
   it("repairs recipient-visible internal Evidence metadata", async () => {
     const generateProviderText = vi.fn()
       .mockResolvedValueOnce({

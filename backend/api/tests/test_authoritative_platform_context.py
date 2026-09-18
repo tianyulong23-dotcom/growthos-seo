@@ -157,6 +157,27 @@ def resolve(
     )
 
 
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_gmail_rejects_archived_project_before_issuing_context(local, method) -> None:
+    import asyncio
+
+    project = AuthoritativeWebsiteProject(
+        website_project_id="project-1",
+        website_project_key="project-1",
+        organization_id="11111111-1111-4111-8111-111111111111" if local else "org-1",
+        workspace_id="22222222-2222-4222-8222-222222222222" if local else "workspace-1",
+        status="ARCHIVED",
+    )
+    resolver = local_resolver_for([project]) if local else resolver_for([project])
+    token = "" if local else issue_access_token(memberships=[membership()])
+    request = request_for(token, method=method)
+    request.scope["path"] = "/api/v1/projects/project-1/backlinks/gmail-connections/status"
+    with pytest.raises(PlatformContextResolutionError) as error:
+        asyncio.run(resolver.resolve(request=request, website_project_key="project-1"))
+    assert error.value.status == 404
+
+
 def test_local_context_requires_the_persisted_project_tenant_to_match() -> None:
     project = AuthoritativeWebsiteProject(
         website_project_id="project-1",

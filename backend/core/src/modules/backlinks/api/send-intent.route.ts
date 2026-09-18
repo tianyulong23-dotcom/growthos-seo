@@ -5,6 +5,8 @@ import type {
   FastifyRequest,
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { z } from "zod";
+import { preflightSendBatch } from "../application/commands/send-batch-preflight.js";
 
 import type { BacklinksModule } from "../application/backlinks.module.js";
 import type {
@@ -75,6 +77,36 @@ export function registerBacklinksSendIntentRoute(
     commands: Commands;
   }>,
 ): void {
+  app.withTypeProvider<ZodTypeProvider>().post(
+    "/api/v1/projects/:websiteProjectKey/backlinks/send-batch-preflight",
+    {
+      schema: {
+        params: z.object({ websiteProjectKey: z.string().trim().min(1) }).strict(),
+        body: z.object({
+          items: z.array(preflightSendIntentBodySchema.safeExtend({ draftId: z.uuid() })).min(1).max(20),
+        }).strict(),
+      },
+      errorHandler: sendError,
+    },
+    async (request) => {
+      const context = await options.module.projectContext.resolve({
+        actor: request.actor, websiteProjectKey: request.params.websiteProjectKey,
+      });
+      const items = await preflightSendBatch(
+        options.commands, request.body.items.map((item) => ({ ...item, context })),
+      );
+      return {
+        items,
+        meta: {
+          organizationId: context.tenant.organizationId,
+          workspaceId: context.tenant.workspaceId,
+          websiteProjectId: context.project.websiteProjectId,
+          requestId: request.id, schemaVersion: "backlinks.v1", generatedAt: new Date().toISOString(),
+        },
+      };
+    },
+  );
+
   app.withTypeProvider<ZodTypeProvider>().get(
     "/api/v1/projects/:websiteProjectKey/backlinks/send-intents/:sendIntentId",
     {

@@ -107,12 +107,13 @@ export function createCommercialQualificationRequestRepository(
              endpoint,request_intent,refresh_mode,location_code,language_code,
              request_schema_version,response_schema_version,
              normalized_request_hash,request_count,estimated_cost_micros,
-             status,started_at,request_id,budget_reservation_id,created_by
+             status,started_at,request_id,budget_reservation_id,created_by,
+             recommendation_generation_contract_id,recommendation_job_id
            ) VALUES (
              $1::uuid,$2::uuid,$3::uuid,$4::uuid,'dataforseo',$5,
              'DEEP_ASSESSMENT','FORCE_LIVE',$6,$7,1,
              'commercial-qualification-bulk.v1',$8,$9,$10,'running',
-             $11,$12,$13,$12
+             $11,$12,$13,$12,$14::uuid,$15::uuid
            )`,
           [
             batchRequestId,
@@ -128,6 +129,8 @@ export function createCommercialQualificationRequestRepository(
             input.startedAt,
             input.context.requestId,
             input.context.budgetReservationId,
+            input.recommendationLineage?.generationContractId ?? null,
+            input.recommendationLineage?.jobId ?? null,
           ],
         );
         await createProviderBudgetRepository(client, now).recordRequest({
@@ -136,7 +139,7 @@ export function createCommercialQualificationRequestRepository(
           endpoint: input.call.endpoint,
           requestFingerprint: input.call.requestFingerprint,
           requestSchemaVersion: 1,
-          requestPayload: input.call.body,
+          requestPayload: { requestIntent: "DEEP_ASSESSMENT", body: input.call.body },
           startedAt: input.startedAt,
         });
         return Object.freeze({

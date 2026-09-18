@@ -1593,6 +1593,10 @@ class SQLAlchemyProjectRepository:
             project.archive_reason = (
                 archive_reason if lifecycle_status == "ARCHIVED" else None
             )
+            await session.flush()
+            await self._project_if_enabled(
+                session, project, actor_id="website-project-service",
+            )
             await session.commit()
 
         updated = await self.get(

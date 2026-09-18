@@ -106,6 +106,7 @@ export interface SendAttemptRepository {
 type PostgresqlSendAttemptRepositoryDependencies = Readonly<{
   pool: BacklinkTenantPool;
   newId?: () => string;
+  minimumIntervalSeconds?: number;
 }>;
 
 type AttemptRow = Readonly<{
@@ -232,8 +233,7 @@ const setConnectionAndLock = async (
   await transaction.query(
     `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
     [
-      `gmail-send:${input.organizationId}:${input.gmailConnectionId}:`
-      + input.websiteProjectId,
+      `gmail-send:${input.organizationId}:${input.gmailConnectionId}`,
     ],
   );
 };
@@ -312,12 +312,17 @@ export class PostgresqlSendAttemptRepository
 implements SendAttemptRepository {
   readonly #pool: BacklinkTenantPool;
   readonly #newId: () => string;
+  readonly #minimumIntervalSeconds: number;
 
   constructor(
     dependencies: PostgresqlSendAttemptRepositoryDependencies,
   ) {
     this.#pool = dependencies.pool;
     this.#newId = dependencies.newId ?? randomUUID;
+    this.#minimumIntervalSeconds = dependencies.minimumIntervalSeconds ?? 300;
+    if (!Number.isSafeInteger(this.#minimumIntervalSeconds) || this.#minimumIntervalSeconds < 1) {
+      throw new TypeError("Send Attempt minimumIntervalSeconds must be positive.");
+    }
   }
 
   async claim(
@@ -501,6 +506,41 @@ implements SendAttemptRepository {
           ],
         );
         return { state: "failed_final", errorCode };
+      }
+
+      // Reservation SELECT policy exposes mailbox quota across bound projects,
+      // without exposing their drafts. Never bypass an unresolved earlier slot.
+      const lane = await transaction.query(
+        `SELECT
+           EXISTS (
+             SELECT 1 FROM backlinks.backlink_rate_limit_reservations prior
+              WHERE prior.organization_id = $1 AND prior.gmail_connection_id = $2
+                AND prior.status = 'RESERVED'
+                AND prior.lane_sequence < (
+                  SELECT current_slot.lane_sequence
+                    FROM backlinks.backlink_rate_limit_reservations current_slot
+                   WHERE current_slot.id = $3
+                )
+           ) AS "earlierReserved",
+           max(consumed_at) AS "lastConsumedAt"
+         FROM backlinks.backlink_rate_limit_reservations
+        WHERE organization_id = $1 AND gmail_connection_id = $2
+          AND status = 'CONSUMED'`,
+        [input.organizationId, input.gmailConnectionId, aggregateRow.reservationId],
+      );
+      const laneRow = lane.rows[0];
+      if (laneRow === undefined || typeof laneRow.earlierReserved !== "boolean") {
+        throw new TypeError("Send Attempt persistence returned invalid mailbox state.");
+      }
+      if (laneRow.earlierReserved) {
+        return { state: "wait", retryAfterSeconds: 30 };
+      }
+      if (laneRow.lastConsumedAt !== null) {
+        const remaining = asDate(laneRow.lastConsumedAt, "mailbox consumed_at").getTime()
+          + this.#minimumIntervalSeconds * 1_000 - input.claimedAt.getTime();
+        if (remaining > 0) {
+          return { state: "wait", retryAfterSeconds: Math.ceil(remaining / 1_000) };
+        }
       }
 
       const attemptId = this.#newId();

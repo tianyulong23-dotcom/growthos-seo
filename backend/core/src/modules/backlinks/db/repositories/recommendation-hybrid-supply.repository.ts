@@ -63,6 +63,17 @@ export function createRecommendationHybridSupplyRepository(client: BacklinkTrans
         WHERE c.organization_id=$1 AND c.workspace_id=$2 AND c.website_project_id=$3
           AND c.generation_contract_id=$4 AND c.admission_state='ADMITTED'`,
       [...scopeValues(input), input.generationContractId]);
+      const libraryCounts = await client.query(`
+        SELECT (source.evidence_payload->'resourceLibrary'->>'releaseBatchOrdinal')::int AS ordinal,
+               count(DISTINCT c.id)::int AS count
+        FROM backlinks.backlink_recommendation_generation_candidates c
+        JOIN backlinks.backlink_recommendation_generation_candidate_sources source
+          ON (source.organization_id,source.workspace_id,source.website_project_id,source.generation_candidate_id)=
+             (c.organization_id,c.workspace_id,c.website_project_id,c.id)
+        WHERE c.organization_id=$1 AND c.workspace_id=$2 AND c.website_project_id=$3
+          AND c.generation_contract_id=$4 AND c.admission_state='ADMITTED'
+          AND source.source_type='CURATED_RESOURCE_LIBRARY'
+        GROUP BY 1`, [...scopeValues(input), input.generationContractId]);
       const history = await client.query(`
         SELECT canonical_domain AS domain FROM backlinks.backlink_recommendation_generation_candidates
           WHERE organization_id=$1 AND workspace_id=$2 AND website_project_id=$3
@@ -79,6 +90,9 @@ export function createRecommendationHybridSupplyRepository(client: BacklinkTrans
         excludedDomains: history.rows.map((item) => String(item.domain)),
         admittedCount: Number(counts.rows[0]?.admitted ?? 0),
         dataForSeoCount: Number(counts.rows[0]?.dfs ?? 0),
+        libraryBatchCounts: Object.fromEntries(
+          libraryCounts.rows.map((item) => [Number(item.ordinal), Number(item.count)]),
+        ),
         discoveryStarted: row.discoveryStarted === true,
       };
     },

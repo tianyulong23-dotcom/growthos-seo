@@ -782,6 +782,43 @@ describe("BL-AI-109 PostgreSQL Gmail daily quota repository", () => {
     )).rejects.toMatchObject({ code: "55000" });
   });
 
+  it("serializes overdue mailbox slots and spaces them after actual completion", async () => {
+    const now = new Date();
+    await repository().reserve(reserveInput(16, 5, now));
+    await repository().reserve(reserveInput(18, 5, now));
+    const attempts = new PostgresqlSendAttemptRepository({
+      pool: tenantPool, minimumIntervalSeconds: 120,
+    });
+    const context = {
+      ...firstContext, gmailConnectionId, maxAttempts: 3, actorId: "serial-test",
+    };
+    const delayed = new Date(now.getTime() + 180_000);
+    await expect(attempts.claim({
+      ...context, sendIntentId: intentIds[18] ?? "", claimedAt: delayed,
+    })).resolves.toEqual({ state: "wait", retryAfterSeconds: 30 });
+    const first = await attempts.claim({
+      ...context, sendIntentId: intentIds[16] ?? "", claimedAt: delayed,
+    });
+    expect(first).toMatchObject({ state: "claimed" });
+    if (first.state !== "claimed") throw new Error("Expected first mailbox slot");
+    await expect(attempts.claim({
+      ...context, sendIntentId: intentIds[18] ?? "", claimedAt: delayed,
+    })).resolves.toEqual({ state: "wait", retryAfterSeconds: 30 });
+    await attempts.settle({
+      ...context, ...first.attempt, status: "PROVIDER_ACCEPTED",
+      providerMessageId: "serial-message", providerThreadId: null, errorCode: null,
+      completedAt: delayed, retryEligibleAt: null,
+    });
+    await expect(attempts.claim({
+      ...context, sendIntentId: intentIds[18] ?? "",
+      claimedAt: new Date(delayed.getTime() + 1_000),
+    })).resolves.toEqual({ state: "wait", retryAfterSeconds: 119 });
+    await expect(attempts.claim({
+      ...context, sendIntentId: intentIds[18] ?? "",
+      claimedAt: new Date(delayed.getTime() + 120_000),
+    })).resolves.toMatchObject({ state: "claimed" });
+  });
+
   it("persists retry eligibility and never retries an unknown acceptance", async () => {
     const now = new Date();
     const retryIntentId = intentIds[21] ?? "";

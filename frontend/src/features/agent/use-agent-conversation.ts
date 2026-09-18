@@ -320,8 +320,17 @@ function upsertRuntimeTool(
 
 export function useAgentConversation(
   projectId: string,
-  understandingStatus?: Project["understandingStatus"]
+  understandingStatus?: Project["understandingStatus"],
+  requestedConversationId?: string
 ) {
+  const selection = React.useRef({ projectId, conversationId: "" })
+  const [selectionVersion, advanceSelection] = React.useReducer((value) => value + 1, 0)
+  React.useLayoutEffect(() => {
+    selection.current = { projectId, conversationId: "" }
+    return () => {
+      selection.current = { projectId: "", conversationId: "" }
+    }
+  }, [projectId])
   const [detail, setDetail] = React.useState<AgentConversationDetail | null>(
     null
   )
@@ -399,32 +408,53 @@ export function useAgentConversation(
 
   const refresh = React.useCallback(async () => {
     if (!projectId || !conversationId) return
+    const view = selection.current
+    if (view.projectId !== projectId || view.conversationId !== conversationId) return
     const next = await getAgentConversation(projectId, conversationId)
+    if (selection.current !== view) return
     settlePendingRun(next)
-    setDetail(next)
+    setDetail((current) => mergeAgentStreamEvent(current, {
+      type: "snapshot", detail: next, eventId: "",
+    }))
   }, [conversationId, projectId, settlePendingRun])
 
   const create = React.useCallback(async () => {
     if (!projectId) return
     setError("")
     setPendingRun(null)
-    const conversation = await createAgentConversation(projectId)
-    const next = await getAgentConversation(projectId, conversation.id)
-    setConversations((current) => [
-      conversation,
-      ...current.filter((item) => item.id !== conversation.id),
-    ])
-    setDetail(next)
+    const previous = selection.current
+    const view = { projectId, conversationId: "" }
+    selection.current = view
+    try {
+      const conversation = await createAgentConversation(projectId)
+      if (selection.current !== view) return
+      view.conversationId = conversation.id
+      const next = await getAgentConversation(projectId, conversation.id)
+      if (selection.current !== view) return
+      rememberConversation(projectId, conversation.id)
+      advanceSelection()
+      setConversations((current) => [
+        conversation,
+        ...current.filter((item) => item.id !== conversation.id),
+      ])
+      setDetail(next)
+    } catch (error) {
+      if (selection.current !== view) return
+      selection.current = previous
+      throw error
+    }
   }, [projectId, setError])
 
   const loadConversations = React.useCallback(async () => {
     if (!projectId) return
     setHistoryState({ projectId, loading: true })
     setError("")
+    const view = selection.current
     try {
-      setConversations(await listAgentConversations(projectId))
+      const next = await listAgentConversations(projectId)
+      if (selection.current === view) setConversations(next)
     } catch (reason) {
-      setError(errorMessage(reason))
+      if (selection.current === view) setError(errorMessage(reason))
     } finally {
       setHistoryState({ projectId, loading: false })
     }
@@ -432,10 +462,24 @@ export function useAgentConversation(
 
   const selectConversation = React.useCallback(
     async (nextConversationId: string) => {
-      if (!projectId || nextConversationId === conversationId) return
+      if (!projectId || (nextConversationId === conversationId &&
+        selection.current.conversationId === conversationId)) return
       setError("")
       setPendingRun(null)
-      setDetail(await getAgentConversation(projectId, nextConversationId))
+      const previous = selection.current
+      const view = { projectId, conversationId: nextConversationId }
+      selection.current = view
+      try {
+        const next = await getAgentConversation(projectId, nextConversationId)
+        if (selection.current !== view) return
+        rememberConversation(projectId, nextConversationId)
+        advanceSelection()
+        setDetail(next)
+      } catch (error) {
+        if (selection.current !== view) return
+        selection.current = previous
+        throw error
+      }
     },
     [conversationId, projectId, setError]
   )
@@ -447,37 +491,58 @@ export function useAgentConversation(
     if (!projectId) {
       return
     }
+    const view = { projectId, conversationId: "" }
+    selection.current = view
     void syncProjectOnboarding(projectId)
       .catch(() => undefined)
       .then(() => listAgentConversations(projectId))
       .then(async (conversations) => {
-        if (!active) return null
+        if (!active || selection.current !== view) return null
         setConversations(conversations)
-        const conversation =
-          conversations[0] ?? (await createAgentConversation(projectId))
+        const remembered = requestedConversationId || rememberedConversation(projectId)
+        if (remembered) {
+          try {
+            const next = await getAgentConversation(projectId, remembered)
+            if (selection.current === view) view.conversationId = remembered
+            return next
+          } catch (error) {
+            if (!(error instanceof ApiError) || error.status !== 404 || requestedConversationId) throw error
+          }
+        }
+        if (!active || selection.current !== view) return null
+        const conversation = conversations[0] ?? (await createAgentConversation(projectId))
+        if (!active || selection.current !== view) return null
+        view.conversationId = conversation.id
         return getAgentConversation(projectId, conversation.id)
       })
       .then((next) => {
-        if (!active || !next) return
+        if (!active || !next || selection.current !== view) return
+        rememberConversation(projectId, next.conversation.id)
+        advanceSelection()
         setError("")
         setDetail(next)
       })
-      .catch((reason) => active && setError(errorMessage(reason)))
+      .catch((reason) => active && selection.current === view && setError(errorMessage(reason)))
       .finally(() => active && setLoadedProjectId(projectId))
     return () => {
       active = false
     }
-  }, [projectId, setError])
+  }, [projectId, requestedConversationId, setError])
 
   React.useEffect(() => {
     if (!projectId || !conversationId) return
+    const view = selection.current
+    let active = true
     streamFailures.current = { key: streamKey, count: 0 }
     seenStreamEvents.current.clear()
-    return subscribeAgentConversation(
+    const unsubscribe = subscribeAgentConversation(
       projectId,
       conversationId,
       (event) => {
-        if (streamFailures.current.key !== streamKey) return
+        if (!active || selection.current !== view || view.conversationId !== conversationId) return
+        if (event.type === "snapshot" &&
+          (event.detail.conversation.projectId !== projectId ||
+            event.detail.conversation.id !== conversationId)) return
         streamFailures.current.count = 0
         setStreamFallbackKey((current) =>
           current === streamKey ? "" : current
@@ -495,27 +560,36 @@ export function useAgentConversation(
         ) {
           void getAgentConversation(projectId, conversationId)
             .then((next) => {
+              if (!active || selection.current !== view) return
               settlePendingRun(next)
               setDetail(next)
             })
-            .catch((reason) => setError(errorMessage(reason)))
+            .catch((reason) => active && selection.current === view && setError(errorMessage(reason)))
         }
       },
       () => {
-        if (streamFailures.current.key !== streamKey) return
+        if (!active || selection.current !== view) return
         streamFailures.current.count += 1
         if (streamFailures.current.count >= 3) setStreamFallbackKey(streamKey)
       }
     )
-  }, [conversationId, projectId, setError, settlePendingRun, streamKey])
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [conversationId, projectId, setError, settlePendingRun, streamKey, selectionVersion])
 
   React.useEffect(() => {
     if (!streamFallback) return
-    const timer = window.setInterval(() => {
-      void refresh().catch((reason) => setError(errorMessage(reason)))
-    }, 1000)
-    return () => window.clearInterval(timer)
+    return observeConversation(refresh, setError)
   }, [refresh, setError, streamFallback])
+
+  const runIsActive = activeStatuses.has(currentDetail?.run?.status ?? "")
+  React.useEffect(() => {
+    if (!runIsActive || streamFallback) return
+    // A connected stream may miss its terminal event without reporting an error.
+    return observeConversation(refresh, setError, 10_000)
+  }, [refresh, runIsActive, setError, streamFallback])
 
   React.useEffect(() => {
     const onboardingIsActive =
@@ -537,12 +611,13 @@ export function useAgentConversation(
 
     let active = true
     let timer = 0
+    const view = selection.current
 
     async function reconcile() {
       try {
         await syncProjectOnboarding(projectId)
         const next = await getAgentConversation(projectId, conversationId)
-        if (active) setDetail(next)
+        if (active && selection.current === view) setDetail(next)
       } catch {
         // Keep the current timeline visible and retry on the next project poll.
       }
@@ -583,11 +658,9 @@ export function useAgentConversation(
       return
     }
     if (pendingRun.runId === runId) return
-    const timer = window.setInterval(() => {
-      void refresh().catch((reason) => setError(errorMessage(reason)))
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [conversationId, pendingRun, projectId, refresh, runId, setError])
+    if (streamFallback) return
+    return observeConversation(refresh, setError)
+  }, [conversationId, pendingRun, projectId, refresh, runId, setError, streamFallback])
 
   const send = React.useCallback(
     async (
@@ -595,6 +668,8 @@ export function useAgentConversation(
       pageContext?: { module: string; view?: string }
     ) => {
       if (!projectId || !currentDetail) return
+      const view = selection.current
+      if (view.projectId !== projectId || view.conversationId !== currentDetail.conversation.id) return
       setError("")
       setPendingRun(null)
       const clientRequestId = crypto.randomUUID()
@@ -617,6 +692,7 @@ export function useAgentConversation(
           clientRequestId
         )
       }
+      if (selection.current !== view) return
       setPendingRun({
         projectId,
         conversationId: currentDetail.conversation.id,
@@ -627,10 +703,11 @@ export function useAgentConversation(
           projectId,
           currentDetail.conversation.id
         )
+        if (selection.current !== view) return
         settlePendingRun(next)
         setDetail(next)
       } catch (reason) {
-        setError(errorMessage(reason))
+        if (selection.current === view) setError(errorMessage(reason))
       }
     },
     [currentDetail, projectId, setError, settlePendingRun]
@@ -656,12 +733,14 @@ export function useAgentConversation(
   const rewind = React.useCallback(
     async (messageId: string) => {
       if (!projectId || !conversationId) return
+      const view = selection.current
       setError("")
       const next = await rewindAgentConversation(
         projectId,
         conversationId,
         messageId
       )
+      if (selection.current !== view) return
       setDetail(next)
     },
     [conversationId, projectId, setError]
@@ -670,6 +749,7 @@ export function useAgentConversation(
   const edit = React.useCallback(
     async (messageId: string, content: string) => {
       if (!projectId || !conversationId) return
+      const view = selection.current
       setError("")
       setPendingRun(null)
       const clientRequestId = crypto.randomUUID()
@@ -692,13 +772,15 @@ export function useAgentConversation(
           clientRequestId
         )
       }
+      if (selection.current !== view) return
       setPendingRun({ projectId, conversationId, runId: accepted.runId })
       try {
         const next = await getAgentConversation(projectId, conversationId)
+        if (selection.current !== view) return
         settlePendingRun(next)
         setDetail(next)
       } catch (reason) {
-        setError(errorMessage(reason))
+        if (selection.current === view) setError(errorMessage(reason))
       }
     },
     [conversationId, projectId, setError, settlePendingRun]
@@ -726,4 +808,43 @@ export function useAgentConversation(
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Agent 请求失败"
+}
+
+function rememberedConversation(projectId: string) {
+  try {
+    return sessionStorage.getItem(`agent-selection:${projectId}`) ?? ""
+  } catch {
+    return ""
+  }
+}
+
+function rememberConversation(projectId: string, conversationId: string) {
+  try {
+    sessionStorage.setItem(`agent-selection:${projectId}`, conversationId)
+  } catch {
+    // Persisted server conversations remain available when local storage is disabled.
+  }
+}
+
+function observeConversation(
+  refresh: () => Promise<void>,
+  onError: (message: string) => void,
+  interval = 1000
+) {
+  let active = true
+  let timer = 0
+  async function poll() {
+    try {
+      await refresh()
+    } catch (error) {
+      if (active) onError(errorMessage(error))
+    } finally {
+      if (active) timer = window.setTimeout(() => void poll(), interval)
+    }
+  }
+  timer = window.setTimeout(() => void poll(), interval)
+  return () => {
+    active = false
+    window.clearTimeout(timer)
+  }
 }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -12,22 +12,30 @@ from uuid import NAMESPACE_URL, uuid5
 from temporalio import activity
 from temporalio.exceptions import ApplicationError, is_cancelled_exception
 
+from app.core.backlinks_gateway import PlatformContextResolutionError
 from app.core.config import get_settings
 from app.db.retry import is_transient_database_error
 from app.db.session import session_factory
+from app.modules.agent.backlinks_read import (
+    BACKLINK_READ_MODELS,
+    BacklinksReader,
+    BacklinksReadError,
+)
+from app.modules.agent.backlinks_pipeline import PIPELINE_WRITE_MODELS
+from app.modules.agent.backlinks_consent import ConsentError
 from app.modules.agent.context_tokens import (
     estimate_json_tokens,
     estimate_text_tokens,
     truncate_text_to_tokens,
 )
+from app.modules.agent.events import build_agent_event_store
 from app.modules.agent.lease import (
     TOOL_HEARTBEAT_INTERVAL_SECONDS,
     tool_lease_renewal_interval_seconds,
 )
-from app.modules.agent.events import build_agent_event_store
 from app.modules.agent.model_gateway import (
-    AgentModelRequestError,
     AgentModelOutputError,
+    AgentModelRequestError,
     ModelGateway,
     compact_tool_result,
     merge_usage,
@@ -52,6 +60,7 @@ from app.modules.content_plan.batch_service import build_content_plan_batch_serv
 from app.modules.keywords.service import build_keyword_service
 from app.modules.onboarding.service import SQLAlchemyOnboardingRepository
 from app.modules.performance.service import build_performance_service
+from app.modules.projects.authority import SQLAlchemyWebsiteProjectAuthority
 from app.modules.projects.service import build_project_service
 from app.modules.settings.service import (
     AIProviderNotConfiguredError,
@@ -115,6 +124,9 @@ def registry() -> ToolRegistry:
         content=build_content_service(),
         performance=build_performance_service(),
         onboarding=SQLAlchemyOnboardingRepository(session_factory),
+        backlinks=BacklinksReader(
+            get_settings(), SQLAlchemyWebsiteProjectAuthority(session_factory)
+        ),
     )
 
 
@@ -249,6 +261,12 @@ def research_update_for_run(
 
 
 def error_details(exc: Exception) -> tuple[str, str, bool]:
+    if isinstance(exc, ConsentError):
+        return exc.code, "外联授权校验未通过，未启动新的发送；请检查当前身份、会话归属及授权状态", False
+    if isinstance(exc, BacklinksReadError):
+        return exc.code, str(exc), exc.retryable
+    if isinstance(exc, PlatformContextResolutionError):
+        return exc.code, "外链项目授权校验未通过，未读取数据", False
     if isinstance(exc, AgentModelRequestError):
         return exc.error_code, str(exc), exc.retryable
     if isinstance(exc, AIProviderNotConfiguredError):
@@ -388,6 +406,31 @@ def project_context(context: dict[str, Any]) -> dict[str, Any]:
 
 
 WRITE_INTENT_PATTERNS = {
+    "start_backlink_recommendations": (
+        r"(?:启动|开始|运行|生成|跑).{0,16}(?:外链推荐|推荐池)",
+        r"(?:start|run|generate).{0,24}(?:backlinkrecommendations|recommendationpool)",
+    ),
+    "join_backlink_recommendations": (
+        r"(?:加入|添加|转入).{0,24}(?:项目机会|外链机会)",
+        r"(?:add|join).{0,24}(?:recommendations|feeditems).{0,16}(?:opportunities|project)",
+    ),
+    "create_backlink_drafts": (
+        r"批量.{0,8}(?:生成|创建|撰写|写|起草).{0,12}(?:草稿|开发信|邮件)",
+        r"(?:生成|创建|撰写|写|起草).{0,8}(?:一批|多封).{0,12}(?:草稿|开发信|邮件)",
+        r"(?:create|generate|write|draft).{0,12}(?:batch|multiple).{0,20}(?:drafts|emails)",
+    ),
+    "submit_backlink_email": (
+        r"(?:提交|发送|发出).{0,16}(?:外链邮件|开发信|合作邮件|邮件)",
+        r"(?:send|submit).{0,24}(?:email|outreach|backlink)",
+    ),
+    "preflight_backlink_email": (
+        r"(?:检查|执行|进行|运行|做).{0,16}(?:发送预检|邮件预检)",
+        r"(?:run|perform|check).{0,20}(?:email|send).{0,12}preflight",
+    ),
+    "create_backlink_draft": (
+        r"(?:创建|生成|起草|撰写).{0,20}(?:外链|邮件|合作|联系).{0,12}草稿",
+        r"(?:create|generate|write).{0,30}(?:email|outreach|backlink).{0,15}draft",
+    ),
     "update_business_profile": (
         r"(?:请|帮我|直接)?(?:修改|更新|调整|设置|改成|补充|删除).{0,24}(?:业务资料|网站资料|项目资料|业务名称|业务类型|业务简介|目标客户|目标受众|产品|服务|价值主张|内容规则)",
         r"(?:业务资料|网站资料|项目资料|业务名称|业务类型|业务简介|目标客户|目标受众|产品|服务|价值主张|内容规则).{0,24}(?:修改|更新|调整|设置|改成|补充|删除)",
@@ -440,6 +483,61 @@ def user_explicitly_requested_write(name: str, messages: list[dict[str, Any]]) -
         "",
     )
     normalized = re.sub(r"\s+", "", user_message)
+    if name == "start_backlink_campaign":
+        from app.modules.agent.backlinks_chat_campaign import explicit_campaign
+        return explicit_campaign(user_message)
+    if name == "initialize_backlink_project":
+        if re.search(
+            r"(?:不要|不用|无需|别|禁止|不允许|先不|暂不|不能|do.?not|don't|never)"
+            r".{0,24}(?:初始化|确认|保存|推荐|推广|initializ|confirm|save|recommendation)"
+            r"|(?:能不能|能否|是否|怎么|如何|吗|么|canyou|couldyou|howdo|howto|dry.?run|模拟|测试|[?？])",
+            normalized, re.IGNORECASE,
+        ):
+            return False
+        return bool(re.search(
+            r"(?:初始化|确认|保存|启动|开始|运行|生成|跑).{0,24}(?:外链推荐|推荐池|推广目标)"
+            r"|(?:外链推荐|推荐池).{0,12}(?:跑出来|跑起来|启动|生成)"
+            r"|(?:initialize|confirm|save|start|run|generate).{0,24}"
+            r"(?:backlinkrecommendations|recommendationpool|promotiontarget)",
+            normalized, re.IGNORECASE,
+        ))
+    if name == "cancel_project_task":
+        if re.search(
+            r"(?:不要|不用|别|禁止|先不|暂不|不能|do.?not|don't|never).{0,16}(?:取消|停止|cancel|stop)"
+            r"|(?:怎么|如何|能否|是否|吗|howto|canyou|couldyou|[?？])",
+            normalized, re.IGNORECASE,
+        ):
+            return False
+        return bool(re.search(r"(?:取消|停止|cancel|stop)", normalized, re.IGNORECASE))
+    if name == "send_backlink_drafts":
+        from app.modules.agent.backlinks_chat_send import explicit_chat_send
+        return explicit_chat_send(user_message)
+    if name in PIPELINE_WRITE_MODELS and re.search(
+        r"(?:不要|不用|不允许|禁止|别|无需|先不|暂不|不能|do.?not|don't|never)"
+        r".{0,24}(?:推荐|机会|草稿|开发信|邮件|recommendation|opportunit|draft|email)"
+        r"|(?:能不能|能否|是否|怎么|如何|吗|么|canyou|couldyou|howdo|howto|dry.?run|模拟|测试)",
+        normalized, flags=re.IGNORECASE,
+    ):
+        return False
+    if name == "submit_backlink_email" and re.search(
+        r"(?:不要|不用|不允许|禁止|别|无需|先不|暂不|不能|do.?not|don't|never|notyet)"
+        r".{0,20}(?:发送|发出|提交|send|submit)"
+        r"|(?:能不能|能否|是否|怎么|如何|吗|么|canyou|couldyou|howdo|howto|dry.?run|模拟|测试)",
+        normalized, flags=re.IGNORECASE,
+    ):
+        return False
+    if name == "preflight_backlink_email" and re.search(
+        r"(?:不要|不允许|禁止|别|无需|先不|do.?not|don't).{0,20}(?:预检|preflight)"
+        r"|(?:能不能|能否|是否|怎么|如何|吗|can you|could you|how do|how to)",
+        user_message, flags=re.IGNORECASE,
+    ):
+        return False
+    if name == "create_backlink_draft" and re.search(
+        r"(?:不要|不允许|禁止|别|无需|先不|do.?not|don't).{0,15}(?:草稿|draft)"
+        r"|(?:能不能|能否|是否|怎么|如何|吗|么|can you|could you|how do|how to)",
+        user_message, flags=re.IGNORECASE,
+    ):
+        return False
     if name == "create_article":
         normalized = NEGATED_CONTENT_PLAN_INTENT.sub("", normalized)
     if not normalized or NEGATED_WRITE_INTENT.search(normalized):
@@ -688,7 +786,7 @@ def bound_tool_result_batch(
         item["data"] = {
             key: item.get("data", {}).get(key)
             for key in (
-                "id", "run_id", "status", "verified", "already_completed",
+                "id", "run_id", "status", "verified", "already_completed", "background_tasks",
                 "operation_id", "requested_count", "completed_count", "failed_count",
                 "record_ids", "completion", "articles",
             )
@@ -900,6 +998,7 @@ async def model_decide(payload: dict[str, Any]) -> dict[str, Any]:
         return {"type": "tool_calls", "tool_calls": registered}
     try:
         gateway = activity_model_gateway(payload)
+        gateway.organization_id = context["organization_id"]
         tool_context = await repo.tool_model_context(
             payload["run_id"], int(payload["round"])
         )
@@ -1536,6 +1635,23 @@ async def execute_tool(payload: dict[str, Any]) -> dict[str, Any]:
                 context["project_id"], **validated.model_dump(mode="json")
             )
         if name in READ_MODELS:
+            if name == "get_project_profile":
+                return await registry().execute_read(
+                    context["project_id"], name, arguments,
+                    organization_id=context["organization_id"],
+                    **({"delegation": context["limits"]["backlinks_delegation"]}
+                       if context["limits"].get("backlinks_delegation") else {}),
+                )
+            if name in BACKLINK_READ_MODELS or name in {
+                "get_backlink_readiness",
+                "get_backlink_draft_job", "get_backlink_draft", "get_backlink_campaign",
+            }:
+                return await registry().execute_read(
+                    context["project_id"], name, arguments,
+                    organization_id=context["organization_id"],
+                    **({"delegation": context["limits"]["backlinks_delegation"]}
+                       if context["limits"].get("backlinks_delegation") else {}),
+                )
             return await registry().execute_read(context["project_id"], name, arguments)
         if name in MEMORY_MODELS:
             validated = MEMORY_MODELS[name].model_validate(arguments).model_dump(mode="json")
@@ -1571,7 +1687,19 @@ async def execute_tool(payload: dict[str, Any]) -> dict[str, Any]:
                 prepared_hash = execution.parameters_hash
             else:
                 prepared = await registry().prepare_write(
-                    context["project_id"], name, arguments, operation_id
+                    context["project_id"], name, arguments, operation_id,
+                    **({
+                        "organization_id": context["organization_id"],
+                        "delegation": context["limits"].get("backlinks_delegation"),
+                    } if name in {
+                        "initialize_backlink_project",
+                        "create_backlink_draft", "preflight_backlink_email", "submit_backlink_email",
+                        "send_backlink_drafts",
+                        "start_backlink_campaign",
+                    } | PIPELINE_WRITE_MODELS.keys() else {}),
+                    **({"run_id": payload["run_id"]} if name in {
+                        "send_backlink_drafts", "start_backlink_campaign",
+                    } else {}),
                 )
                 prepared_arguments = prepared.arguments
                 prepared_before = prepared.before
@@ -1596,6 +1724,18 @@ async def execute_tool(payload: dict[str, Any]) -> dict[str, Any]:
             result = await registry().execute_write(
                 context["project_id"], name, prepared_arguments,
                 prepared_before, prepared_hash,
+                **({
+                    "organization_id": context["organization_id"],
+                    "delegation": context["limits"].get("backlinks_delegation"),
+                } if name in {
+                    "initialize_backlink_project",
+                    "create_backlink_draft", "preflight_backlink_email", "submit_backlink_email",
+                    "send_backlink_drafts",
+                    "start_backlink_campaign",
+                } | PIPELINE_WRITE_MODELS.keys() else {}),
+                **({"run_id": payload["run_id"]} if name in {
+                    "send_backlink_drafts", "start_backlink_campaign",
+                } else {}),
             )
             await repo.set_tool_verifying(tool_call_id, worker_id)
             await publish_runtime_event(
@@ -1611,7 +1751,10 @@ async def execute_tool(payload: dict[str, Any]) -> dict[str, Any]:
                     ),
                 },
             )
-            if not result.get("verified"):
+            if not result.get("verified") and not (
+                name in PIPELINE_WRITE_MODELS
+                and result.get("verification") == "per_item_persisted_evidence_only"
+            ):
                 raise RuntimeError("操作可能已完成，但执行结果校验失败")
             return result
         raise ValueError("不允许调用这个工具")
@@ -1664,6 +1807,10 @@ async def execute_tool(payload: dict[str, Any]) -> dict[str, Any]:
             },
         )
         return dict(model_views["long_term"])
+    from app.modules.agent.task_handoff import task_references
+    references = task_references(name, result)
+    if references:
+        result = {**result, "background_tasks": references}
     output = {
         "tool_call_id": execution.model_tool_call_id,
         "tool": name, "arguments": arguments,
@@ -1756,7 +1903,7 @@ def bound_tool_result_data(
     minimal = {
         key: bounded[key]
         for key in (
-            "id", "run_id", "status", "verified", "already_completed",
+            "id", "run_id", "status", "verified", "already_completed", "background_tasks",
             "operation_id", "requested_count", "completed_count", "failed_count",
             "record_ids", "completion",
         )
@@ -1871,6 +2018,25 @@ async def record_rejected_tool(
 
 
 def tool_summary(name: str, result: dict[str, Any]) -> str:
+    if name == "start_backlink_campaign":
+        return f"推荐到草稿持续任务状态：{result.get('status', 'unknown')}，尚不代表完成或发送"
+    if name == "start_backlink_recommendations":
+        return f"推荐任务状态：{result.get('state', 'UNKNOWN')}，尚不代表推荐完成"
+    if name in {"join_backlink_recommendations", "create_backlink_drafts"}:
+        outcomes = result.get("results", [])
+        accepted = sum(item.get("state") in {"JOINED", "JOB_ACCEPTED"} for item in outcomes)
+        uncertain = sum(item.get("state") == "UNVERIFIED" for item in outcomes)
+        skipped = len(outcomes) - accepted - uncertain
+        return (
+            f"批量请求已处理：受理 {accepted} 项，跳过或已存在 {skipped} 项，"
+            f"结果待核验 {uncertain} 项，未处理 {len(result.get('remainingIds', []))} 项；未发送邮件"
+        )
+    if name == "send_backlink_drafts":
+        if not (result.get("batch") or {}).get("run_id"):
+            return "草稿质量处理已完成，未创建发送队列，请查看逐封结果"
+        return "合格草稿已进入逐封发送队列，尚不代表已发送或送达"
+    if name == "submit_backlink_email":
+        return "邮件发送任务已受理，实际发送状态待查询"
     if name == "search_project_memory":
         return f"找到 {result.get('total', 0)} 条项目记忆"
     if name == "update_project_memory":
@@ -1938,6 +2104,8 @@ async def finish(payload: dict[str, Any]) -> None:
         else payload["answer"]
     )
     metadata = {"evidence": payload.get("evidence", [])}
+    if payload.get("background_tasks"):
+        metadata["background_tasks"] = payload["background_tasks"]
     if progress:
         metadata["business_progress"] = progress
     metadata["display_parts"] = display_parts_from_evidence(completion, answer)
@@ -1980,7 +2148,23 @@ async def finish(payload: dict[str, Any]) -> None:
     )
 
 
+@activity.defn(name="agent_backlinks_continue")
+async def backlinks_continue(payload: dict) -> dict:
+    from app.modules.agent.backlinks_continuation_store import BacklinksContinuationStore
+
+    return await BacklinksContinuationStore(session_factory).tick(
+        str(payload["run_id"]), get_settings(),
+    )
+
+
+@activity.defn(name="agent_backlinks_send_batch")
+async def backlinks_send_batch(payload: dict) -> dict:
+    from app.modules.agent.backlinks_send_batch import BacklinksSendBatchStore
+
+    return await BacklinksSendBatchStore(session_factory, get_settings()).tick(str(payload["run_id"]))
+
+
 AGENT_ACTIVITIES = [
     set_status, finish_turn, check_run, model_decide,
-    execute_tool, skip_tool_calls, finish,
+    execute_tool, skip_tool_calls, finish, backlinks_continue, backlinks_send_batch,
 ]

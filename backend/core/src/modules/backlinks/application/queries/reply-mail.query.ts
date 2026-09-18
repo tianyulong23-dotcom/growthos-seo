@@ -27,6 +27,7 @@ export type SanitizedReplyMailHtml = Readonly<{
 export type SafeReplyMailBody = Readonly<{
   plainText: string | null;
   sanitizedHtml: SanitizedReplyMailHtml | null;
+  replyToAddresses?: readonly string[];
 }>;
 
 export type ReplyMailListItem = Readonly<{

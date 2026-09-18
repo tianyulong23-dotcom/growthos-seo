@@ -33,6 +33,17 @@ const draftEvidencePolicySource = await readFile(
   "utf8",
 );
 
+test("local startup registers an Agent worker after the Platform API", () => {
+  const start = devUpSource.indexOf("$agentWorkerProcess = Start-Process");
+  assert.ok(start > devUpSource.indexOf("$platformApiProcess = Start-Process"));
+  const worker = devUpSource.slice(start, start + 1000);
+  assert.ok(worker.includes('"-m", "app.workflows.agent_worker"'));
+  assert.ok(worker.includes('-Name "Agent Worker"'));
+  assert.ok(worker.includes("-WindowStyle Hidden"));
+  assert.ok(worker.includes("Register-ManagedProcess"));
+  assert.ok(worker.includes("Assert-ManagedProcessRunning"));
+});
+
 test("watchdog requires the complete PRODUCT process chain", () => {
   for (const required of [
     "runtime.mode",

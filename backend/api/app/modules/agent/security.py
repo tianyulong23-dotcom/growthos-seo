@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 
 SENSITIVE_KEYS = {
+    "backlinksdelegation",
     "apikey", "authorization", "authtoken", "cookie", "setcookie", "password",
     "secret", "databaseurl", "token", "accesstoken", "refreshtoken", "privatekey",
     "clientsecret", "sessionid", "connectionstring",

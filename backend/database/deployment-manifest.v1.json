@@ -14,7 +14,7 @@
   },
   "heads": {
     "alembic": "20260825_0066",
-    "backlinks": "0100"
+    "backlinks": "0103"
   },
   "steps": [
     {
@@ -2178,6 +2178,42 @@
       "path": "backend/core/src/modules/backlinks/db/migrations/0100_backlink_hybrid_batch_release.sql",
       "sha256": "cc0dc7eda81ce872f86560babcb9a227ea14f2da045010fb8db1e54610205ef9",
       "prerequisites": ["backlinks-0099"]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": ["backlinks"],
+      "recovery": "forward-only",
+      "recoveryNote": "Admits bounded V2 bulk metric receipts with scoped immutable generation/job lineage; preserves all existing V1 freeze rules.",
+      "order": 292,
+      "migrationId": "backlinks-0101",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0101_backlink_v2_metric_request_lineage.sql",
+      "sha256": "7a589d7675950f98719c3e92f6bef383c3d708a2308a6cd4cab9d84285395fc9",
+      "prerequisites": ["backlinks-0100"]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": ["backlinks"],
+      "recovery": "forward-only",
+      "recoveryNote": "Adds immutable scoped reply draft lineage and exact approved-version Gmail thread binding; no existing messages or send intents are modified.",
+      "order": 293,
+      "migrationId": "backlinks-0102",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0102_backlink_mail_reply_drafts.sql",
+      "sha256": "20268244715815495146a98f2b6396d933dabdce19863cfb0accba5591fafbc8",
+      "prerequisites": ["backlinks-0101"]
+    },
+    {
+      "executionOwner": "ROLE-BACKLINKS-DATABASE-OPERATIONS",
+      "schemas": ["backlinks"],
+      "recovery": "forward-only",
+      "recoveryNote": "Adds nullable observed contact-page evidence under existing forced RLS; no guessed URLs or historical release rewrites.",
+      "order": 294,
+      "migrationId": "backlinks-0103",
+      "tool": "psql",
+      "path": "backend/core/src/modules/backlinks/db/migrations/0103_backlink_contact_page_evidence.sql",
+      "sha256": "4b0b10aec4a5e5a264e16371db3de4b6fc2efe1d79a5d2cf068c1b1db83c691f",
+      "prerequisites": ["backlinks-0102"]
     }
   ]
 }

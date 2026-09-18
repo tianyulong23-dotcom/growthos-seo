@@ -126,7 +126,10 @@ class AuthoritativePlatformContextResolver:
         actor = self._authenticate(request)
 
         project = await self._projects.get_by_key(website_project_key)
-        if project is None:
+        if project is None or (
+            "/backlinks/gmail-connections" in request.url.path
+            and project.status != "ACTIVE"
+        ):
             raise PlatformContextResolutionError(
                 status=404,
                 code="PLATFORM_PROJECT_NOT_FOUND",
@@ -200,6 +203,7 @@ class AuthoritativePlatformContextResolver:
             ),
             permissions=membership.permissions,
             correlation_id=correlation_id,
+            authentication_expires_at=actor.expires_at,
         )
 
 
@@ -274,7 +278,10 @@ class LocalDevelopmentPlatformContextResolver:
         required_permission: str | None = None,
     ) -> ResolvedPlatformRequestContext:
         project = await self._projects.get_by_key(website_project_key)
-        if project is None:
+        if project is None or (
+            "/backlinks/gmail-connections" in request.url.path
+            and project.status != "ACTIVE"
+        ):
             raise PlatformContextResolutionError(
                 status=404,
                 code="PLATFORM_PROJECT_NOT_FOUND",

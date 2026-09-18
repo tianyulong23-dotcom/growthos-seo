@@ -13,7 +13,7 @@ import {
   type GoogleAuthPort,
   type GoogleAuthTokenSet,
 } from "../../ports/google-auth.port.js";
-import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
+import type { ResolvedMailboxContext } from "../../ports/project-context.port.js";
 import {
   secretKinds,
   type SecretEncryptionContext,
@@ -126,7 +126,7 @@ type SecretBackedGmailConnectionRepositoryDependencies = Readonly<{
 }>;
 
 export type RefreshGmailConnectionInput = Readonly<{
-  context: ResolvedProjectContext;
+  context: ResolvedMailboxContext;
   connectionId: string;
   expectedVersion: number;
 }>;
@@ -138,7 +138,7 @@ export type RefreshGmailConnectionResult = Readonly<{
 }>;
 
 export type ResolveGmailAccessTokenInput = Readonly<{
-  context: ResolvedProjectContext;
+  context: ResolvedMailboxContext;
   connectionId: string;
 }>;
 
@@ -174,7 +174,7 @@ const decodeTokens = (plaintext: string): GoogleAuthTokenSet => {
 };
 
 const lookupInput = (
-  context: ResolvedProjectContext,
+  context: ResolvedMailboxContext,
   connectionId: string,
 ): GmailConnectionSecretPersistenceLookupInput => ({
   organizationId: context.tenant.organizationId,

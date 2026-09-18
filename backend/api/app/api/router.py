@@ -19,6 +19,8 @@ from app.api.routes.publications import router as publications_router
 from app.api.routes.performance import router as performance_router
 from app.api.routes.settings import router as settings_router
 from app.api.routes.service_connections import router as service_connections_router
+from app.api.routes.tasks import router as tasks_router
+from app.api.routes.mail_reply import router as mail_reply_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -38,3 +40,5 @@ api_router.include_router(publications_router)
 api_router.include_router(article_preview_router)
 api_router.include_router(assets_router)
 api_router.include_router(performance_router)
+api_router.include_router(tasks_router)
+api_router.include_router(mail_reply_router)

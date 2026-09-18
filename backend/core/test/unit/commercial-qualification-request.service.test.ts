@@ -60,6 +60,16 @@ function dependencies(
 }
 
 describe("commercial qualification governed request service", () => {
+  it.each(["dispatch", "settlement"])("quarantines %s exceptions after dispatch instead of allowing a paid retry", async stage => {
+    const items = dependencies(async () => ({
+      state: "started",
+      batchRequestId: "00000000-0000-4000-8000-000000000014",
+    }));
+    if (stage === "dispatch") items.provider.execute.mockRejectedValueOnce(new Error("network interrupted"));
+    else vi.mocked(items.store.complete).mockRejectedValueOnce(new Error("receipt write interrupted"));
+    await expect(items.runtime.execute(call)).rejects.toThrow("interrupted");
+    expect(items.store.fail).toHaveBeenCalledWith(expect.objectContaining({ status: "unknown_charge" }));
+  });
   it("authorizes, dispatches and settles one new paid request", async () => {
     const items = dependencies(async () => ({
       state: "started",

@@ -25,6 +25,9 @@ type ProductionRecommendationPoolV2Dependencies = Readonly<{
   pool: BacklinkTenantPool;
   discoveryRoundExecutor: RecommendationPoolV2DiscoveryRoundExecutor;
   contactEnrichmentOptions: ContactEnrichmentJobOptions;
+  enrichMetrics?: (
+    input: Parameters<RecommendationPoolV2WorkflowActivities["finalizeGeneration"]>[0],
+  ) => Promise<void>;
   prepareResourceSupply?: (
     input: Parameters<RecommendationPoolV2WorkflowActivities["finalizeGeneration"]>[0],
   ) => Promise<(client: BacklinkTransactionClient) =>
@@ -284,7 +287,7 @@ export function createRecommendationPoolV2Activities(
       const existingSupply = await transact(input, (_repository, _timing, client) =>
         createRecommendationHybridSupplyRepository(client).load(input));
       // Resumed discovery must retain its settled-cost ledger and finalization path.
-      if (existingSupply.admittedCount > 0 || existingSupply.discoveryStarted) return start;
+      if (existingSupply.dataForSeoCount > 0 || existingSupply.discoveryStarted) return start;
       const supplyInput = {
         ...input, terminalReason: "SAFE_SUPPLY_REACHED" as const,
         totalSettledCostMicros: 0, hardCandidateLimit: 1_000, rounds: [],
@@ -292,22 +295,29 @@ export function createRecommendationPoolV2Activities(
       const prepare = await dependencies.prepareResourceSupply(supplyInput);
       const insufficient = new Error("HYBRID_SUPPLY_INSUFFICIENT");
       try {
-        return await transact(input, async (repository, timing, client) => {
+        const resourceSupply = await transact(input, async (_repository, _timing, client) => {
           const supply = await prepare(client);
           if (supply.status === "BLOCKED") {
             throw new Error(supply.reason ?? "RESOURCE_LIBRARY_UNAVAILABLE");
           }
           // Roll back partial reservations before the existing bounded discovery
           // path. Its finalizer will select those rows again with the final mix.
-          if (supply.status !== "ALREADY_FINALIZED" && supply.admittedCount < 100) {
+          if (supply.status !== "ALREADY_FINALIZED"
+            && existingSupply.admittedCount + supply.admittedCount < 100) {
             throw insufficient;
           }
+          return supply;
+        });
+        // Persist candidates before network I/O; retries reuse source counts and
+        // governed metric receipts before immutable release snapshots are made.
+        await dependencies.enrichMetrics?.(supplyInput);
+        return await transact(input, async (repository, timing) => {
           const finalization = await repository.finalizeGeneration(supplyInput);
           await timing.record({
             ...input, eventType: "SEED_SNAPSHOT_LOADED",
             idempotencyKey: `resource-supply-ready:${input.workflowId}`,
             observedState: "READY",
-            details: { resourceSupply: supply, paidDiscoverySkipped: true },
+            details: { resourceSupply, paidDiscoverySkipped: true },
           });
           return { status: "already_completed" as const, finalization };
         });
@@ -319,8 +329,10 @@ export function createRecommendationPoolV2Activities(
     executeDiscoveryRound: generation.executeDiscoveryRound,
     finalizeGeneration: async (input) => {
       const prepareResourceSupply = await dependencies.prepareResourceSupply?.(input);
-      return transact(input, async (repository, timing, client) => {
-        const resourceSupply = await prepareResourceSupply?.(client);
+      const resourceSupply = prepareResourceSupply === undefined ? undefined
+        : await transact(input, (_repository, _timing, client) => prepareResourceSupply(client));
+      await dependencies.enrichMetrics?.(input);
+      return transact(input, async (repository, timing) => {
         const result = await repository.finalizeGeneration(input);
         for (const batch of result.batches) {
           await timing.record({

@@ -3635,7 +3635,8 @@ class ContentRepository:
             )
 
     async def cancel_article(
-        self, organization_id: str, project_id: str, article_id: str
+        self, organization_id: str, project_id: str, article_id: str,
+        *, expected_run_id: str | None = None,
     ) -> tuple[Article, ArticleRun | None] | None:
         async with self.sessions() as session:
             article = await session.scalar(
@@ -3649,6 +3650,8 @@ class ContentRepository:
             )
             if article is None:
                 return None
+            if expected_run_id is not None and article.current_run_id != expected_run_id:
+                raise ValueError("TASK_RUN_CHANGED")
             run = (
                 await session.scalar(
                     select(ArticleRun)

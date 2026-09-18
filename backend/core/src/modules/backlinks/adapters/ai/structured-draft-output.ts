@@ -50,6 +50,7 @@ function parseAttempt(
     throw new AiDraftError({
       code: "POLICY_VIOLATION",
       message: "AI Draft output attempted to bypass human confirmation.",
+      diagnosticCode: "DRAFT_APPROVAL_POLICY",
       retryable: false,
     });
   }
@@ -72,6 +73,7 @@ function parseAttempt(
 const malformed = () => new AiDraftError({
   code: "MALFORMED_OUTPUT",
   message: "AI Draft output failed schema validation after one repair.",
+  diagnosticCode: "DRAFT_OUTPUT_INVALID_AFTER_REPAIR",
   retryable: false,
 });
 

@@ -42,6 +42,17 @@ BASE_LIMITS = {
 }
 
 
+def test_consent_failure_is_not_reported_as_invalid_tool_arguments() -> None:
+    from app.modules.agent.backlinks_consent import ConsentError
+
+    code, message, retryable = activities.error_details(
+        ConsentError("BACKLINKS_CHAT_SEND_EXPLICIT_USER_COMMAND_REQUIRED"),
+    )
+    assert code == "BACKLINKS_CHAT_SEND_EXPLICIT_USER_COMMAND_REQUIRED"
+    assert "授权" in message
+    assert retryable is False
+
+
 def test_missing_ai_encryption_key_is_a_permanent_configuration_error() -> None:
     code, message, retryable = activities.error_details(
         AISettingsEncryptionUnavailableError()
@@ -449,6 +460,62 @@ def test_project_memory_tool_is_claimed_saved_verified_and_recorded(
     assert repo.events[3][1]["operations"] == operations
     assert repo.events[3][1]["tool_call_id"] == "memory-call-1"
     assert repo.events[0][1]["lease_seconds"] == 60
+
+
+@pytest.mark.parametrize(("name", "arguments"), [
+    ("list_backlink_opportunities", {"limit": 1}),
+    ("get_backlink_gmail_status", {}),
+    ("get_backlink_gmail_sync_status", {"connectionId": "55555555-5555-4555-8555-555555555555"}),
+    ("list_backlink_send_intents", {"limit": 1}),
+    ("get_backlink_send_intent", {"sendIntentId": "55555555-5555-4555-8555-555555555555"}),
+    ("get_backlink_mail_message", {"messageId": "55555555-5555-4555-8555-555555555555"}),
+    ("get_backlink_mail_thread", {"threadId": "55555555-5555-4555-8555-555555555555"}),
+])
+def test_backlink_read_uses_persisted_run_scope_without_write_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str, arguments: dict,
+) -> None:
+    class ReadRepository(ProjectMemoryRepository):
+        async def get_run_context(self, run_id: str) -> dict[str, Any]:
+            context = await super().get_run_context(run_id)
+            return {
+                **context, "organization_id": "server-org",
+                "limits": {**context["limits"], "backlinks_delegation": {"signed": "test-grant"}},
+            }
+
+        async def claim_registered_tool(self, *args: Any) -> tuple[str, Any]:
+            return "claimed", SimpleNamespace(
+                tool_name=name,
+                arguments_json=arguments,
+                parameters_hash="a" * 64,
+                model_tool_call_id="read-provider-call",
+            )
+
+    calls = []
+
+    class ReadRegistry:
+        async def execute_read(
+            self, project_id: str, name: str, arguments: dict, *, organization_id: str,
+            delegation: dict,
+        ) -> dict:
+            calls.append((project_id, name, arguments, organization_id))
+            assert delegation == {"signed": "test-grant"}
+            return {"items": [], "nextCursor": None}
+
+    repo = ReadRepository()
+    monkeypatch.setattr(activities, "repository", lambda: repo)
+    monkeypatch.setattr(activities, "registry", ReadRegistry)
+    result = asyncio.run(activities.execute_tool({
+        "run_id": "run-1", "tool_call_id": "read-call",
+        "project_id": "untrusted-project", "organization_id": "untrusted-org",
+    }))
+    assert result["ok"] is True
+    assert calls == [
+        ("project-1", name, arguments, "server-org"),
+    ]
+    assert [event for event, _ in repo.events] == [
+        "step_started", "completed", "step_finished",
+    ]
 
 
 class BusyToolRepository:
@@ -998,6 +1065,7 @@ class FailedModelDecisionRepository:
 
     async def get_run_context(self, run_id: str) -> dict[str, Any]:
         return {
+            "organization_id": "test-org",
             "status": "running",
             "messages": [{"role": "user", "content": "检查项目"}],
             "project": {},
@@ -1377,6 +1445,7 @@ def context_for_messages(
         "status": "running",
         "conversation_id": "conversation-1",
         "active_message_id": "message-current",
+        "organization_id": "test-org",
         "messages": messages,
         "compactable_messages": messages[:compactable_count],
         "compactable_through_count": compactable_count,
@@ -1431,6 +1500,32 @@ def test_model_activity_compacts_when_full_request_crosses_budget(
         "conversation-1", 2, "压缩后的历史摘要", "message-current"
     )
     assert Gateway.decided_messages == compacted
+
+
+def test_model_activity_uses_repository_organization_not_payload(monkeypatch) -> None:
+    context = context_for_messages(
+        [{"role": "user", "content": "Read project state"}], 0,
+        trigger_tokens=20_000,
+    )
+    repo = ContextDecisionRepository([context])
+
+    class Gateway:
+        async def decision_request_tokens(self, *args, **kwargs):
+            assert self.organization_id == "test-org"
+            return 10
+
+        async def decide(self, *args, **kwargs):
+            assert self.organization_id == "test-org"
+            return ContextResult()
+
+    monkeypatch.setattr(activities, "repository", lambda: repo)
+    monkeypatch.setattr(activities, "ModelGateway", Gateway)
+
+    result = asyncio.run(activities.model_decide({
+        "run_id": "run-1", "round": 1, "organization_id": "forged-org",
+    }))
+
+    assert result["type"] == "final"
 
 
 def test_model_activity_keeps_original_messages_when_summary_fails(

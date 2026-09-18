@@ -6,6 +6,66 @@ from app.modules.agent.security import sanitize_text
 
 
 BUSINESS_PROGRESS_LABELS = {
+    "send_backlink_drafts": {
+        "completed": "草稿质量与发送请求已处理，请查看逐封结果",
+        "failed": "草稿质量与发送请求未完成，请核对已保存结果",
+    },
+    "start_backlink_recommendations": {
+        "completed": "推荐任务请求已处理，请查看实际状态",
+        "failed": "推荐任务请求未完成",
+    },
+    "join_backlink_recommendations": {
+        "completed": "加入机会操作已处理，请查看逐项结果",
+        "failed": "加入机会操作未完成",
+    },
+    "create_backlink_drafts": {
+        "completed": "批量草稿请求已处理，请查看逐项结果",
+        "failed": "批量草稿请求未完成",
+    },
+    "submit_backlink_email": {
+        "completed": "邮件发送任务已受理，实际发送状态待查询",
+        "failed": "邮件发送任务受理未完成",
+    },
+    "preflight_backlink_email": {
+        "completed": "发送预检通过，邮件尚未发送",
+        "failed": "发送预检未通过",
+    },
+    "get_backlink_gmail_status": {
+        "completed": "发件账号就绪状态已读取",
+        "failed": "发件账号就绪状态读取未完成",
+    },
+    "get_backlink_gmail_sync_status": {
+        "completed": "邮件同步状态已读取",
+        "failed": "邮件同步状态读取未完成",
+    },
+    "list_backlink_send_intents": {
+        "completed": "邮件发送记录已读取",
+        "failed": "邮件发送记录读取未完成",
+    },
+    "get_backlink_send_intent": {
+        "completed": "邮件发送任务状态已读取",
+        "failed": "邮件发送任务状态读取未完成",
+    },
+    "get_backlink_mail_message": {
+        "completed": "邮件正文已读取",
+        "failed": "邮件正文读取未完成",
+    },
+    "get_backlink_mail_thread": {
+        "completed": "邮件会话已读取",
+        "failed": "邮件会话读取未完成",
+    },
+    "create_backlink_draft": {
+        "completed": "邮件草稿任务已受理",
+        "failed": "邮件草稿任务受理未完成",
+    },
+    "get_backlink_draft_job": {
+        "completed": "邮件草稿任务状态已读取",
+        "failed": "邮件草稿任务状态读取未完成",
+    },
+    "get_backlink_draft": {
+        "completed": "邮件草稿证据已读取",
+        "failed": "邮件草稿证据读取未完成",
+    },
     "get_project_profile": {
         "completed": "项目资料已读取",
         "failed": "项目资料读取未完成",
@@ -279,7 +339,11 @@ def failure_answer(
         ),
         None,
     )
-    stopped = failed_progress or "回答整理中断"
+    authorization_rejected = error_code == "write_not_explicitly_requested"
+    stopped = (
+        "执行授权校验未通过（write_not_explicitly_requested），请求的操作已被阻止"
+        if authorization_rejected else failed_progress or "回答整理中断"
+    )
     if completed:
         intro = (
             "本次任务已达到平台运行上限，已完成的步骤和业务操作已经保留。"
@@ -304,6 +368,11 @@ def failure_answer(
         "",
         "**下一步**",
         "",
-        "请重新发起未完成的工作。系统会先读取当前项目状态，再继续执行。",
+        (
+            "平台未能将原始消息识别为该操作的执行授权。若你已经明确授权，"
+            "需要检查授权识别规则；请勿连续重复提交。"
+            if authorization_rejected
+            else "请重新发起未完成的工作。系统会先读取当前项目状态，再继续执行。"
+        ),
     ])
     return "\n".join(lines)

@@ -116,7 +116,10 @@ export class SafeFetchAdapter implements SafeFetchPort {
       }, this.#timeoutMs);
     });
     try {
-      return await Promise.race([this.#execute(parsed.data, controller.signal), timeout]);
+      return await Promise.race([
+        this.#execute(parsed.data, controller.signal, Date.now() + this.#timeoutMs),
+        timeout,
+      ]);
     } catch (cause) {
       if (cause instanceof SafeFetchError) throw cause;
       throw fail(requestedUrl, safeFetchFailureCodes.transportFailed, cause);
@@ -124,7 +127,31 @@ export class SafeFetchAdapter implements SafeFetchPort {
       if (timer !== undefined) clearTimeout(timer);
     }
   }
-  async #execute(request: SafeFetchRequest, signal: AbortSignal) {
+  async #connect(request: SafeHttpTransportRequest, timeoutMs: number) {
+    const attempt = new AbortController();
+    const signal = AbortSignal.any([request.signal, attempt.signal]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.#transport({ ...request, signal }).then(response => {
+          if (signal.aborted) {
+            response.close();
+            throw fail(request.url.requestedUrl, safeFetchFailureCodes.timeout);
+          }
+          return response;
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            attempt.abort();
+            reject(fail(request.url.requestedUrl, safeFetchFailureCodes.timeout));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+  async #execute(request: SafeFetchRequest, signal: AbortSignal, deadline: number) {
     let url = enforceUrlPolicy(request.url);
     const redirectChain: string[] = [];
     const resolvedIps: string[] = [];
@@ -132,10 +159,14 @@ export class SafeFetchAdapter implements SafeFetchPort {
       const network = await enforceNetworkPolicy(url, this.#resolver);
       let response: SafeHttpResponse | undefined;
       let transportFailure: unknown;
-      for (const address of network.addresses) {
+      for (const [index, address] of network.addresses.entries()) {
+        if (signal.aborted) throw fail(request.url, safeFetchFailureCodes.timeout);
         resolvedIps.push(address.address);
         try {
-          response = await this.#transport({ url, address, signal });
+          // Reserve time for the other approved IPs when an address silently stalls.
+          response = await this.#connect({ url, address, signal }, Math.max(
+            1, Math.floor((deadline - Date.now()) / (network.addresses.length - index)),
+          ));
           break;
         } catch (cause) {
           transportFailure = cause;

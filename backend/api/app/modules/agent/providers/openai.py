@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import logging
 import random
+import re
 import socket
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -37,6 +39,64 @@ CONTEXT_OVERFLOW_MARKERS = (
     "context window",
 )
 MAX_RESPONSE_BYTES = 1024 * 1024
+logger = logging.getLogger(__name__)
+
+
+def http_error_diagnostic(
+    status_code: int, response_body: bytes, headers: Message | None = None,
+) -> dict[str, Any]:
+    """Keep troubleshooting metadata without logging echoed prompts or credentials."""
+    result: dict[str, Any] = {"status": status_code}
+    try:
+        payload = json.loads(response_body[:65_536])
+    except (ValueError, UnicodeError):
+        payload = None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        allowed_codes = {
+            "invalid_request_error", "invalid_value", "invalid_type",
+            "unsupported_parameter", "unsupported_value", "unknown_parameter",
+            "invalid_json_schema", "invalid_function_parameters",
+            "model_not_found", "rate_limit_error", "rate_limit_exceeded",
+            "insufficient_quota", "authentication_error", "server_error",
+        }
+        for key in ("type", "code"):
+            value = error.get(key)
+            if isinstance(value, str) and value in allowed_codes:
+                result[key] = value
+        param = error.get("param")
+        if isinstance(param, str) and re.fullmatch(
+            r"(?:model|messages|tools|tool_choice|parallel_tool_calls|stream|"
+            r"stream_options|response_format|reasoning_effort|max_completion_tokens|"
+            r"max_output_tokens|max_tokens|temperature)"
+            r"(?:\[\d{1,3}\]|\.(?:function|name|parameters|properties|required|"
+            r"additionalProperties|type|role|content|include_usage)){0,8}", param
+        ):
+            result["param"] = param
+        message = error.get("message")
+        if isinstance(message, str):
+            text = message[:65_536].lower()
+            for marker, reason in (
+                ("all available accounts are currently rate-limited", "relay_accounts_rate_limited"),
+                ("unsupported parameter", "unsupported_parameter"),
+                ("unsupported value", "unsupported_value"),
+                ("invalid schema", "invalid_tool_or_response_schema"),
+                ("does not support", "unsupported_capability"),
+                ("model not found", "model_not_found"),
+                ("insufficient quota", "insufficient_quota"),
+            ):
+                if marker in text:
+                    result["reason"] = reason
+                    break
+    if headers is not None:
+        request_id = headers.get("x-request-id", "")
+        if isinstance(request_id, str) and re.fullmatch(
+            r"(?:req[_-][a-fA-F0-9]{16,64}|"
+            r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})",
+            request_id,
+        ):
+            result["request_id"] = request_id
+    return result
 
 
 def request_not_submitted(error: BaseException) -> bool:
@@ -71,6 +131,10 @@ def classify_http_error(
     response_body: bytes,
     headers: Message | None = None,
 ) -> ProviderError:
+    logger.warning(
+        "agent_provider_http_error %s",
+        json.dumps(http_error_diagnostic(status_code, response_body, headers)),
+    )
     text = response_body[:65_536].decode("utf-8", errors="replace").lower()
     if any(marker in text for marker in CONTEXT_OVERFLOW_MARKERS):
         return ProviderError(

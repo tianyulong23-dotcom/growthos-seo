@@ -736,6 +736,7 @@ export function createRecommendationPoolV2GenerationLaunchRepository(
                   generation.input_pin_id "inputPinId",
                   job.id "jobId",job.workflow_id "workflowId",
                   job.status "jobStatus",job.step "jobStep",
+                  job.error->>'retryable' "failureRetryable",
                   job.result_summary->>'workflowLaunchIdempotencyHash'
                     "workflowLaunchIdempotencyHash"
              FROM backlinks.backlink_recommendation_generation_contracts
@@ -836,6 +837,35 @@ export function createRecommendationPoolV2GenerationLaunchRepository(
         ) {
           return conflict(
             "Recommendation generation is no longer awaiting confirmation.",
+          );
+        }
+        if (row.jobStatus === "failed") {
+          if (priorHash === null || row.failureRetryable !== "true") {
+            return conflict("Recommendation generation failure requires review before retry.");
+          }
+          // Resume the same job without resetting provider receipts, candidates,
+          // or the original bounded authorization.
+          await client.query(
+            `UPDATE backlinks.backlink_jobs
+                SET status='queued',step='generation_staged',progress=0,
+                    finished_at=NULL,error=NULL,
+                    result_summary=(
+                      COALESCE(result_summary,'{}'::jsonb)
+                      - 'final' - 'outcome' - 'terminalReason'
+                      - 'failureCode' - 'failureMessage' - 'failureRetryable'
+                    ) || jsonb_build_object(
+                      'previousFailure',error,
+                      'recoveryCount',COALESCE((result_summary->>'recoveryCount')::int,0)+1
+                    ),
+                    updated_at=statement_timestamp(),updated_by=$5,
+                    version=version+1
+              WHERE organization_id=$1 AND workspace_id=$2
+                AND website_project_id=$3 AND id=$4
+                AND status='failed' AND error->>'retryable'='true'`,
+            [
+              input.organizationId, input.workspaceId, input.websiteProjectId,
+              row.jobId, input.actorId,
+            ],
           );
         }
         if (priorHash === null) {

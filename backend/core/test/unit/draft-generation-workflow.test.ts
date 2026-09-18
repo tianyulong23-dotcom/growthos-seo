@@ -221,7 +221,7 @@ describe("BACKLINKS-CORE-REMEDIATION-PHASE-7 Draft recovery workflow", () => {
     expect(fake.failed).toHaveLength(0);
   });
 
-  it("retries malformed output once, then preserves the provider failure", async () => {
+  it("does not restart an exhausted schema repair or overwrite its failure", async () => {
     const fake = createRepository();
     const prompts: unknown[] = [];
 
@@ -243,9 +243,9 @@ describe("BACKLINKS-CORE-REMEDIATION-PHASE-7 Draft recovery workflow", () => {
       code: "MALFORMED_OUTPUT",
       diagnosticCode: "PROVIDER_OUTPUT_SCHEMA_INVALID",
     });
-    expect(prompts).toEqual([context.prompt, context.prompt]);
-    expect(fake.claims()).toBe(2);
-    expect(fake.retries).toHaveLength(1);
+    expect(prompts).toEqual([context.prompt]);
+    expect(fake.claims()).toBe(1);
+    expect(fake.retries).toHaveLength(0);
     expect(fake.completed).toHaveLength(0);
     expect(fake.failed).toMatchObject([{
       errorCode: "MALFORMED_OUTPUT",
@@ -360,6 +360,7 @@ describe("BACKLINKS-CORE-REMEDIATION-PHASE-7 Draft recovery workflow", () => {
     });
     expect(fake.completed).toHaveLength(0);
     expect(fake.failed[0]?.errorCode).toBe("POLICY_VIOLATION");
+    expect(fake.failed[0]?.diagnosticCode).toBe("DRAFT_SUBJECT_MISMATCH");
   });
 
   it("does not use a basic draft to bypass a provider refusal", async () => {

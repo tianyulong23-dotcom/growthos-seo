@@ -137,7 +137,7 @@ func LoadConfig() Config {
 		BusinessProfileAIAPIKey: os.Getenv("BUSINESS_PROFILE_AI_API_KEY"),
 		BusinessProfileAIModel: envString(
 			"BUSINESS_PROFILE_AI_MODEL",
-			"gpt-5.4-mini",
+			"gpt-5.5",
 		),
 		BusinessProfileAIProvider: envString("BUSINESS_PROFILE_AI_PROVIDER", "openai"),
 		BusinessProfileAIReasoningEffort: envString(

@@ -138,10 +138,9 @@ test("BL-AI-140 exposes resilient list, thread, pagination, and manual match sta
   assert.match(center, /邮件往来/)
   assert.match(center, /同步详情/)
   assert.match(center, /<details/)
-  assert.ok(
-    center.indexOf("邮件往来") <
-      center.indexOf("<SendIntentQueue websiteProjectKey={websiteProjectKey}")
-  )
+  const sendQueue = center.search(/<SendIntentQueue\b/)
+  assert.ok(sendQueue >= 0 && center.indexOf("邮件往来") < sendQueue)
+  assert.match(center, /<SendIntentQueue\b[^>]*websiteProjectKey=\{websiteProjectKey\}/)
   assert.match(panel, /MailCenter/)
   assert.match(panel, /重新授权/)
   assert.match(panel, /Gmail 已连接/)

@@ -278,6 +278,14 @@ export async function createLocalProductGmailSendRuntime(
                snapshot.recipient,
                snapshot.subject_text AS "subjectText",
                snapshot.body_text AS "bodyText",
+               reply.provider_thread_id AS "replyThreadId",
+               reply.in_reply_to AS "replyMessageId",
+               reply.reference_ids AS "replyReferences",
+               reply.gmail_connection_id AS "replyConnectionId",
+               reply.recipient AS "replyRecipient",
+               reply.draft_version_id AS "replyVersionId",
+               intent.approved_draft_version_id AS "intentVersionId",
+               intent.message_purpose AS "messagePurpose",
                identity.id AS "identityId",
                identity.organization_id AS "identityOrganizationId",
                identity.gmail_connection_id AS "identityGmailConnectionId",
@@ -309,6 +317,9 @@ export async function createLocalProductGmailSendRuntime(
              JOIN backlinks.backlink_gmail_connections AS connection
                ON connection.organization_id=intent.organization_id
               AND connection.id=snapshot.gmail_connection_id
+             LEFT JOIN backlinks.backlink_mail_reply_drafts AS reply
+               ON (reply.organization_id,reply.workspace_id,reply.website_project_id,reply.draft_id)=
+                  (intent.organization_id,intent.workspace_id,intent.website_project_id,intent.draft_id)
              JOIN backlinks.backlink_gmail_send_identities AS identity
                ON identity.organization_id=snapshot.organization_id
               AND identity.gmail_connection_id=snapshot.gmail_connection_id
@@ -407,7 +418,17 @@ export async function createLocalProductGmailSendRuntime(
         rfcMessageId: input.attempt.rfcMessageId,
         subject: String(row.subjectText),
         bodyText: String(row.bodyText),
+        ...(row.replyThreadId == null ? {} : {
+          inReplyTo: String(row.replyMessageId),
+          references: row.replyReferences as string[],
+        }),
       });
+      if (row.replyThreadId != null && (
+        row.replyConnectionId !== input.context.gmailConnectionId
+        || row.replyRecipient !== row.recipient
+        || row.messagePurpose !== "NEGOTIATION_REPLY"
+        || row.replyVersionId !== row.intentVersionId
+      )) throw new Error("MAIL_REPLY_SEND_BINDING_CHANGED");
       const gmailConnectionVersion = Number(row.gmailConnectionVersion);
       if (!Number.isSafeInteger(gmailConnectionVersion)) {
         throw new Error(
@@ -423,6 +444,7 @@ export async function createLocalProductGmailSendRuntime(
         rawBase64Url: mime.rawBase64Url,
         rfcMessageId: input.attempt.rfcMessageId,
         requestId: input.attempt.attemptId,
+        ...(row.replyThreadId == null ? {} : { gmailThreadId: String(row.replyThreadId) }),
       };
     },
   };
@@ -646,7 +668,9 @@ export async function createLocalProductGmailSendRuntime(
   };
 
   const activity = new GmailSendActivity({
-    repository: new PostgresqlSendAttemptRepository({ pool }),
+    repository: new PostgresqlSendAttemptRepository({
+      pool, minimumIntervalSeconds: capabilities.gmailMinimumIntervalSeconds,
+    }),
     commandLoader,
     connectionHealthCheck,
     policyInputLoader,

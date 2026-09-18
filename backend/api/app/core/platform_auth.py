@@ -57,6 +57,7 @@ class AuthenticatedPlatformActor:
     user_id: str
     session_id: str
     memberships: tuple[AuthenticatedPlatformMembership, ...]
+    expires_at: datetime | None = None
 
 
 class PlatformAuthenticationError(RuntimeError):
@@ -136,6 +137,7 @@ class HmacPlatformAuthenticationAuthority:
             user_id=self._identifier("actor.userId", payload.actor.user_id),
             session_id=self._identifier("actor.sessionId", payload.actor.session_id),
             memberships=memberships,
+            expires_at=expires_at,
         )
 
     def _membership(

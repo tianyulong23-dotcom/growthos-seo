@@ -1,5 +1,6 @@
 import { allowedOutreachTargetSql } from "./outreach-target-predicate.js";
 import { verifiedPublicContactSql } from "./verified-public-contact.sql.js";
+import { observedContactPageSql } from "./observed-contact-page.sql.js";
 import type {
   NormalizedRecommendationFeedFilters,
   RecommendationFeedBinding,
@@ -308,10 +309,11 @@ function visibleCte(): string {
              WHEN NULLIF(trim(COALESCE(item.contact_email_at_release,
                contact.normalized_email)), '') IS NOT NULL THEN 2
              WHEN NULLIF(trim(COALESCE(contact.source_url,
-               item.contact_page_url_at_release)), '') IS NOT NULL THEN 1
+               item.contact_page_url_at_release,contact_page.observed_page_url)), '') IS NOT NULL THEN 1
              ELSE 0
            END contact_priority,
-           COALESCE(contact.source_url,item.contact_page_url_at_release)
+           COALESCE(contact.source_url,item.contact_page_url_at_release,
+             contact_page.observed_page_url)
              contact_page_url_at_release,
            CASE WHEN contact.normalized_email IS NOT NULL
                 THEN 'PUBLIC_EMAIL_FOUND'
@@ -346,6 +348,9 @@ function visibleCte(): string {
         -- Later contact retries may enrich the feed without rewriting release facts.
         ${verifiedPublicContactSql("item")}
       ) contact ON item.contact_email_at_release IS NULL
+      LEFT JOIN LATERAL (
+        ${observedContactPageSql("item", "item.contact_terminal_reason_at_release")}
+      ) contact_page ON item.contact_page_url_at_release IS NULL
       LEFT JOIN LATERAL (
         SELECT action.action_type
           FROM backlink_recommendation_user_item_actions action

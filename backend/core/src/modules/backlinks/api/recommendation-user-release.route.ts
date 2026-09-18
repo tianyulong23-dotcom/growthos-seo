@@ -55,7 +55,7 @@ const statusResponse = z
   .object({
     state: z.enum(["PUBLISHED", "NOT_PUBLISHED"]),
     currentBatchOrdinal: z.number().int().positive().nullable(),
-    requiredOpportunityCount: z.number().int().positive().nullable(),
+    requiredOpportunityCount: z.number().int().nonnegative().nullable(),
     successfulOpportunityCount: z.number().int().nonnegative(),
     unlockAt: z.string().datetime().nullable(),
     unlockReason: z.enum(["OPPORTUNITY_RATIO", "ELAPSED_18H", "NO_GATE"]).nullable(),

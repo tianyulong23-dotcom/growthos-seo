@@ -89,7 +89,7 @@ import {
   type BacklinkTransactionClient,
 } from "../db/tenant-transaction.js";
 import type {
-  ResolvedProjectContext,
+  ResolvedMailboxContext,
 } from "../ports/project-context.port.js";
 import {
   secretKinds,
@@ -118,7 +118,7 @@ type SyncScope = Readonly<{
 }>;
 
 type SyncContext = Readonly<{
-  resolved: ResolvedProjectContext;
+  resolved: ResolvedMailboxContext;
   primaryEmail: string;
 }>;
 
@@ -1368,7 +1368,7 @@ export function createLocalProductGmailPollingSyncCommands(options: Readonly<{
     scope: SyncScope,
     connectionId: string,
   ): string => gmailConnectionPollingWorkflowId(scope, connectionId);
-  const assertActorCanSync = (context: ResolvedProjectContext): void => {
+  const assertActorCanSync = (context: ResolvedMailboxContext): void => {
     if (!context.actor.roles.some((role) =>
       ["owner", "admin", "member"].includes(role))) {
       throw new BacklinkError({

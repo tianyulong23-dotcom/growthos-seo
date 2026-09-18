@@ -573,27 +573,7 @@ func applySynthesizedProfile(result *crawler.Result, profile crawler.SiteProfile
 }
 
 func aiSynthesisFailureReason(err error) string {
-	if err == nil {
-		return "模型服务暂时不可用"
-	}
-	reason := strings.ToLower(err.Error())
-	switch {
-	case errors.Is(err, context.DeadlineExceeded),
-		strings.Contains(reason, "timeout"),
-		strings.Contains(reason, "deadline exceeded"):
-		return "模型请求超时"
-	case strings.Contains(reason, "http 401"),
-		strings.Contains(reason, "http 403"):
-		return "模型服务鉴权失败"
-	case strings.Contains(reason, "http 429"):
-		return "模型服务请求过多"
-	case strings.Contains(reason, "decode"),
-		strings.Contains(reason, "no choices"),
-		strings.Contains(reason, "empty json object"):
-		return "模型返回格式无效"
-	default:
-		return "模型服务暂时不可用"
-	}
+	return crawler.AIProfileFailureReason(err)
 }
 
 func (a *Activities) saveFailure(ctx context.Context, task crawler.Task, message string) {

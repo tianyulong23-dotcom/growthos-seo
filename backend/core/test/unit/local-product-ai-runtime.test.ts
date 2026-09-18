@@ -4,6 +4,9 @@ import type {
   BacklinkTenantPool,
 } from "../../src/modules/backlinks/db/tenant-transaction.js";
 import {
+  AiCapabilityBudgetError,
+} from "../../src/modules/backlinks/db/repositories/ai-capability-budget.repository.js";
+import {
   createLocalProductAiRuntime,
   readLocalProductAiConfiguration,
 } from "../../src/modules/backlinks/runtime/local-product-ai-runtime.js";
@@ -226,5 +229,38 @@ describe("LOCAL_PRODUCT AI runtime", () => {
         outreachDraftMaxCalls: 1,
       },
     })).toThrow("BACKLINKS_AI_BUDGET_CONFIGURATION_INVALID");
+  });
+
+  it("reports a provider-call ceiling as a budget error, not content policy", async () => {
+    const base = killSwitchPool(false);
+    const runtime = createLocalProductAiRuntime({
+      pool: {
+        async connect() {
+          const client = await base.connect();
+          return {
+            ...client,
+            async query(text, values) {
+              if (text.includes("pg_advisory_xact_lock")) {
+                throw new AiCapabilityBudgetError(
+                  "PROVIDER_CALL_LIMIT_EXCEEDED",
+                  "AI_OUTREACH_DRAFT provider-call limit is exceeded.",
+                );
+              }
+              return client.query(text, values);
+            },
+          };
+        },
+      },
+      secretStoreRoot: "C:\\GrowthOS\\secrets",
+      configuration,
+    });
+    await expect(runtime.budgetGate.assertAvailable({
+      ...scope,
+      operation: "draft_generation",
+    })).rejects.toMatchObject({
+      code: "BUDGET_EXCEEDED",
+      diagnosticCode: "AI_CAPABILITY_PROVIDER_CALL_LIMIT_EXCEEDED",
+      retryable: false,
+    });
   });
 });

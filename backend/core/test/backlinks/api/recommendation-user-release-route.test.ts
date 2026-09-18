@@ -112,6 +112,20 @@ describe("Phase 5 recommendation user release routes", () => {
       canGetMore: true,
       getMoreState: "RELEASE_NEXT",
     });
+    commands.getStatus.mockResolvedValueOnce({
+      ...await commands.getStatus({ context }),
+      requiredOpportunityCount: 0,
+      successfulOpportunityCount: 0,
+      unlockReason: "NO_GATE",
+    });
+    const ungated = await app.inject({
+      method: "GET",
+      url: "/api/v1/projects/project-key/backlinks/recommendation-user-release/status",
+    });
+    expect(ungated.statusCode).toBe(200);
+    expect(ungated.json()).toMatchObject({
+      requiredOpportunityCount: 0, unlockReason: "NO_GATE", canGetMore: true,
+    });
 
     const exhausted = await app.inject({
       method: "POST",

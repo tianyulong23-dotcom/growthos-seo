@@ -486,6 +486,7 @@ export function createAiSdkDraftTransport(
           ? {}
           : { fetch: options.providerFetch }),
       });
+      let providerCalls = 0;
       try {
         return await generateStructuredDraftWithRepair(
           async ({ repair }) => {
@@ -497,6 +498,7 @@ export function createAiSdkDraftTransport(
               modelId: input.modelId,
               attempt: repair === null ? 1 : 2,
             });
+            providerCalls += 1;
             const startedAt = now();
             const result = await generateProviderText({
               model,
@@ -555,8 +557,19 @@ export function createAiSdkDraftTransport(
           ),
         );
       } catch (error) {
-        if (error instanceof AiDraftError) throw error;
-        throw mapAiSdkProviderError(error);
+        const failure = error instanceof AiDraftError
+          ? error : mapAiSdkProviderError(error);
+        // The reservation covers generation plus one repair, not another pair.
+        if (providerCalls >= 2 && failure.retryable) {
+          throw new AiDraftError({
+            code: failure.code,
+            message: failure.message,
+            ...(failure.diagnosticCode === undefined
+              ? {} : { diagnosticCode: failure.diagnosticCode }),
+            retryable: false,
+          });
+        }
+        throw failure;
       }
     },
   });

@@ -19,7 +19,7 @@ import {
   OAuthAttemptService,
   gmailOAuthScopes,
 } from "../../domain/sending/oauth-attempt.js";
-import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
+import type { ResolvedMailboxContext } from "../../ports/project-context.port.js";
 import type {
   ActorContext,
   TenantContext,
@@ -41,7 +41,7 @@ type GmailConnectionCommandDependencies = Readonly<{
 }>;
 
 export type ConnectGmailInput = Readonly<{
-  context: ResolvedProjectContext;
+  context: ResolvedMailboxContext;
   websiteProjectKey: string;
   returnPath?: string | null;
 }>;
@@ -65,19 +65,19 @@ export type CompleteGmailConnectionResult = Readonly<{
 }>;
 
 export type SelectGmailConnectionInput = Readonly<{
-  context: ResolvedProjectContext;
+  context: ResolvedMailboxContext;
   connectionId: string;
 }>;
 
 export type DisconnectGmailConnectionInput = Readonly<{
-  context: ResolvedProjectContext;
+  context: ResolvedMailboxContext;
   connectionId: string;
   expectedVersion: number;
 }>;
 
 const connectionRoles = new Set(["owner", "admin", "member"]);
 
-function authorize(context: ResolvedProjectContext): void {
+function authorize(context: ResolvedMailboxContext): void {
   if (!context.actor.roles.some((role) => connectionRoles.has(role))) {
     throw new BacklinkError({
       code: backlinkErrorCodes.accessDenied,
@@ -87,7 +87,7 @@ function authorize(context: ResolvedProjectContext): void {
 }
 
 const oauthContext = (
-  context: ResolvedProjectContext,
+  context: ResolvedMailboxContext,
   websiteProjectKey: string,
 ) => ({
   organizationId: context.tenant.organizationId,

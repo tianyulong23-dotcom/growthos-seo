@@ -44,6 +44,7 @@ class ResolvedPlatformRequestContext:
     project: PlatformProject
     permissions: tuple[str, ...]
     correlation_id: str
+    authentication_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)

@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.retry import retry_database_read
+from app.modules.agent.backlinks_automation import BACKLINKS_READY_TRIGGER
 from app.modules.agent.context_tokens import estimate_json_tokens
 from app.modules.agent.models import (
     AgentAction,
@@ -1138,7 +1139,10 @@ class AgentRepository:
                 (
                     await session.scalars(
                         select(AgentSystemTrigger)
-                        .where(AgentSystemTrigger.status == "pending")
+                        .where(
+                            AgentSystemTrigger.status == "pending",
+                            AgentSystemTrigger.trigger != BACKLINKS_READY_TRIGGER,
+                        )
                         .order_by(
                             AgentSystemTrigger.created_at,
                             AgentSystemTrigger.id,

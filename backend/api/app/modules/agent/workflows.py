@@ -14,6 +14,7 @@ with workflow.unsafe.imports_passed_through():
     from app.modules.agent.lease import TOOL_HEARTBEAT_TIMEOUT_SECONDS
     from app.modules.agent.security import sanitize_text
     from app.modules.agent.tools import TOOL_DEFINITIONS
+    from app.modules.agent.task_handoff import pending_references
 
 
 CONTROL_ACTIVITY_RETRY = RetryPolicy(maximum_attempts=2)
@@ -62,7 +63,7 @@ def _bound_tool_history_result(
     compact_data = {
         key: data[key]
         for key in (
-            "id", "run_id", "status", "verified", "already_completed",
+            "id", "run_id", "status", "verified", "already_completed", "background_tasks",
             "operation_id", "requested_count", "completed_count", "failed_count",
             "record_ids", "completion",
         )
@@ -186,12 +187,16 @@ class AgentWorkflow:
     async def run(self, payload: dict[str, Any]) -> None:
         run_id = str(payload["run_id"])
         limits = dict(payload["limits"])
+        if limits.get("backlinks_continuation") is True or limits.get("backlinks_send_batch") is True:
+            await self._continue_backlinks(payload)
+            return
         execution_feedback: dict[str, Any] | None = None
         loop_detector = AgentLoopDetector()
         non_retryable_failures: dict[str, dict[str, Any]] = {}
         consecutive_failures = 0
         max_failures = int(limits.get("consecutive_failures", 3))
         open_turn: int | None = None
+        background_tasks: list[dict] = []
 
         await self._call(
             "agent_set_status",
@@ -287,6 +292,7 @@ class AgentWorkflow:
                             "status": "completed",
                             "error_code": None,
                             "error_message": None,
+                            "background_tasks": background_tasks,
                         },
                         limits,
                     )
@@ -348,6 +354,39 @@ class AgentWorkflow:
                         open_turn = None
                         await self._finish_stopped(run_id, stop_check, limits)
                         return
+                    denied = next((
+                        result for result in completed_results
+                        if not result["ok"] and not result.get("retryable", False)
+                        and result.get("error_code") in {
+                            "write_not_explicitly_requested",
+                            "BACKLINKS_CHAT_SEND_EXPLICIT_USER_COMMAND_REQUIRED",
+                        }
+                    ), None)
+                    if denied and workflow.patched("agent-command-authorization-stop-v1"):
+                        pending = scheduled_calls[max(index for index, _ in group):] + skipped_calls
+                        pending_ids = [str(call["tool_call_id"]) for call in pending
+                                       if call.get("tool_call_id")]
+                        if pending_ids:
+                            await self._call("agent_skip_tool_calls", {
+                                "run_id": run_id, "tool_call_ids": pending_ids,
+                            }, limits)
+                        await self._finish_turn(
+                            run_id, round_number, "error", limits,
+                            tool_result_count=len(round_results),
+                        )
+                        open_turn = None
+                        await self._call("agent_finish", {
+                            "run_id": run_id, "status": "failed",
+                            "answer": (
+                                "本次任务已停止：平台未能确认当前原始指令对该操作的授权。"
+                                "被拒绝的操作没有执行，重复查询或修改工具参数不能解除此限制。"
+                                "此前已完成的步骤以任务记录为准。"
+                            ),
+                            "error_code": denied["error_code"],
+                            "error_message": denied.get("summary", "原始命令授权未通过"),
+                            "evidence": [], "background_tasks": background_tasks,
+                        }, limits)
+                        return
                     for result in completed_results:
                         if result["ok"]:
                             consecutive_failures = 0
@@ -401,6 +440,16 @@ class AgentWorkflow:
                     loop_detector.reset()
                 else:
                     execution_feedback = loop_detector.record(round_results)
+                if limits.get("background_task_handoff") is True:
+                    background_tasks = pending_references(round_results)
+                    if background_tasks:
+                        await self._call("agent_finish", {
+                            "run_id": run_id, "status": "completed",
+                            "answer": "任务已提交后台，尚未完成。可以继续下达独立任务；后续依赖步骤只有在已有自动化流程接管时才会自动执行。",
+                            "evidence": [], "background_tasks": background_tasks,
+                            "error_code": None, "error_message": None,
+                        }, limits)
+                        return
 
             await self._finish_stopped(
                 run_id,
@@ -425,6 +474,7 @@ class AgentWorkflow:
                     "status": "failed",
                     "error_code": "agent_run_failed",
                     "error_message": "Agent 运行失败，本次任务已停止。",
+                    "background_tasks": background_tasks,
                 },
                 limits,
             )
@@ -636,6 +686,27 @@ class AgentWorkflow:
             non_retryable_failures[failure_key] = completed_result
         return completed_result
 
+    async def _continue_backlinks(self, payload: dict) -> None:
+        # The checkpoint and authority live in SQL, not model output or workflow arguments.
+        for _ in range(100):
+            result = await workflow.execute_activity(
+                "agent_backlinks_send_batch" if payload["limits"].get("backlinks_send_batch") is True
+                else "agent_backlinks_continue",
+                {"run_id": str(payload["run_id"])},
+                # Initial review plus two bounded repair/review rounds can take 475s.
+                start_to_close_timeout=timedelta(
+                    seconds=300 if payload["limits"].get("backlinks_send_batch") is True else 600,
+                ),
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=5),
+                    maximum_interval=timedelta(seconds=30),
+                ),
+            )
+            if result["done"]:
+                return
+            await workflow.sleep(max(1, min(30, int(result["wait_seconds"]))))
+        workflow.continue_as_new(payload)
+
     @staticmethod
     def _backoff_seconds(attempt: int) -> float:
         return float(min(2 ** max(0, attempt - 1), 8))
@@ -721,6 +792,9 @@ class AgentWorkflow:
                     180 if modifies_data else 60,
                 )
             )
+            if tool == "send_backlink_drafts":
+                # Three batched reviews + two batched repairs, each bounded to 95s.
+                timeout_seconds = max(timeout_seconds, 600)
         elif name != "agent_model_decide":
             timeout_seconds = 30
         retry_policy = CONTROL_ACTIVITY_RETRY

@@ -5,6 +5,7 @@ from typing import Annotated, AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
+from app.api.routes.agent_backlinks_consent import router as consent_router
 from app.modules.agent.schemas import (
     AgentActionResponse, AgentConversationCollection, AgentConversationDetail,
     AgentConversationResponse, AgentRunResponse, ApproveActionRequest,
@@ -20,9 +21,27 @@ from app.modules.agent.service import (
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/agent", tags=["agent"])
 
+router.include_router(consent_router)
 
-def get_agent_service() -> AgentService:
-    return build_agent_service()
+
+async def get_agent_service(request: Request, project_id: str) -> AgentService:
+    from app.core.backlinks_gateway import PlatformContextResolutionError
+    from app.modules.agent.delegation import issue_delegation
+
+    try:
+        resolved = await request.app.state.platform_context_resolver.resolve(
+            request=request, website_project_key=project_id,
+            required_permission="backlinks:read" if request.method == "GET" else "backlinks:write",
+        )
+    except PlatformContextResolutionError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from exc
+    service = build_agent_service()
+    service.settings = service.settings.model_copy(update={
+        "default_organization_id": resolved.tenant.organization_id,
+        "agent_actor_id": resolved.actor.user_id,
+    })
+    service.delegation = issue_delegation(service.settings, resolved)
+    return service
 
 
 def agent_error(exc: Exception) -> HTTPException:

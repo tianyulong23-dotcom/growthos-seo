@@ -18,7 +18,7 @@ import {
 } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { useNavigate, useParams } from "react-router"
+import { useNavigate, useParams, useSearchParams } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
 import { AgentActionCard } from "@/features/agent/agent-action-card"
+import { AgentTaskCards } from "@/features/agent/agent-task-cards"
 import {
   cleanAgentMessageContent,
   conversationTimelineItems,
@@ -49,7 +50,7 @@ import {
   shouldShowRunError,
   type BusinessProgressItem,
 } from "@/components/agent/agent-dock-utils"
-import { useAgentConversation } from "@/features/agent/use-agent-conversation"
+import { useAgentSession } from "@/features/agent/agent-session"
 import { ProjectFavicon } from "@/features/projects/project-favicon"
 import { useProjects } from "@/features/projects/project-context"
 import type {
@@ -599,7 +600,7 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
   const { getProject, refreshBusinessProfile } = useProjects()
   const { projectId = "" } = useParams()
   const project = getProject(projectId)
-  const agent = useAgentConversation(project.id, project.understandingStatus)
+  const agent = useAgentSession()
   const [draft, setDraft] = React.useState("")
   const [sending, setSending] = React.useState(false)
   const [editingMessageId, setEditingMessageId] = React.useState<string | null>(
@@ -732,7 +733,7 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
           </DropdownMenuTrigger>
           <DropdownMenuContent className="w-52" align="end" sideOffset={4}>
             <DropdownMenuItem
-              disabled={isRunActive || agent.awaitingRun || sending}
+              disabled={sending}
               onClick={() => void resetConversation()}
             >
               <Plus />
@@ -925,6 +926,9 @@ function AgentDockContent({ onClose }: AgentDockContentProps) {
           )
         )}
 
+        <AgentTaskCards projectId={projectId} references={messages.flatMap((message) =>
+          Array.isArray(message.metadata.background_tasks) ? message.metadata.background_tasks : []
+        )} />
         {agent.detail?.action && (
           <AgentActionCard action={agent.detail.action} />
         )}
@@ -1233,15 +1237,24 @@ export function AgentFailureNotice({
 }
 
 export function AgentDock() {
+  const { projectId } = useParams()
   return (
     <aside className="sticky top-0 hidden h-svh w-[364px] shrink-0 overflow-hidden border-r xl:block 2xl:w-[384px]">
-      <AgentDockContent />
+      <AgentDockContent key={projectId} />
     </aside>
   )
 }
 
 export function MobileAgentSheet() {
-  const [open, setOpen] = React.useState(false)
+  const { projectId } = useParams()
+  const [params] = useSearchParams()
+  const requestedConversation = params.get("agentConversation")
+  const requestKey = `${projectId}:${requestedConversation ?? ""}`
+  const [sheet, setSheet] = React.useState({ key: "", open: false })
+  const open = sheet.key === requestKey ? sheet.open : Boolean(
+    requestedConversation && !window.matchMedia("(min-width: 1280px)").matches
+  )
+  const setOpen = (next: boolean) => setSheet({ key: requestKey, open: next })
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
@@ -1267,7 +1280,7 @@ export function MobileAgentSheet() {
         <SheetDescription className="sr-only">
           当前项目的常驻 SEO Agent 工作区
         </SheetDescription>
-        <AgentDockContent onClose={() => setOpen(false)} />
+        <AgentDockContent key={projectId} onClose={() => setOpen(false)} />
       </SheetContent>
     </Sheet>
   )

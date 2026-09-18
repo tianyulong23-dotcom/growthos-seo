@@ -18,6 +18,90 @@ from sqlalchemy.sql import func
 from app.db.base import Base
 
 
+class AgentBacklinksConsent(Base):
+    __tablename__ = "agent_backlinks_consents"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "workspace_id", "project_id", "user_id",
+            "request_id", name="uq_agent_backlinks_consents_request",
+        ),
+        CheckConstraint("expires_at > created_at", name="ck_agent_backlinks_consents_expiry"),
+        Index(
+            "ix_agent_backlinks_consents_scope",
+            "organization_id", "workspace_id", "project_id", "user_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentBacklinksContinuation(Base):
+    __tablename__ = "agent_backlinks_continuations"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    consent_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_backlinks_consents.id", ondelete="CASCADE"), nullable=False, unique=True,
+    )
+    roles_json: Mapped[list] = mapped_column(JSONB, nullable=False)
+    request_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    checkpoint_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    lease_id: Mapped[str | None] = mapped_column(Text)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentBacklinksSendBatch(Base):
+    __tablename__ = "agent_backlinks_send_batches"
+    __table_args__ = (
+        UniqueConstraint("consent_id", "request_id", name="uq_agent_send_batch_request"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    consent_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_backlinks_consents.id", ondelete="CASCADE"), nullable=False,
+    )
+    request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), unique=True,
+    )
+    roles_json: Mapped[list] = mapped_column(JSONB, nullable=False)
+    request_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    items_json: Mapped[list] = mapped_column(JSONB, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_id: Mapped[str | None] = mapped_column(Text)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentBacklinksQualityReview(Base):
+    __tablename__ = "agent_backlinks_quality_reviews"
+
+    consent_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_backlinks_consents.id", ondelete="CASCADE"), primary_key=True,
+    )
+    draft_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(Text, primary_key=True)
+    version_id: Mapped[str] = mapped_column(Text, nullable=False)
+    report_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class AgentConversation(Base):
     __tablename__ = "agent_conversations"
     __table_args__ = (

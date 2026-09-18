@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest"
 import { AgentDock, AgentTimelineItem } from "./agent-dock"
 import { cleanAgentMessageContent } from "./agent-dock-utils"
 import type { AgentConversationDetail } from "@/features/agent/types"
+import { AgentSessionProvider } from "@/features/agent/agent-session"
 
 const state = vi.hoisted(() => ({
   detail: null as AgentConversationDetail | null,
@@ -123,7 +124,7 @@ it("follows successive runtime deltas, respects scroll-away, and resets for anot
   }
   const ui = () => (
     <MemoryRouter>
-      <AgentDock />
+      <AgentSessionProvider><AgentDock /></AgentSessionProvider>
     </MemoryRouter>
   )
   const { container, rerender } = render(ui())

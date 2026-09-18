@@ -73,35 +73,57 @@ export function RecommendationProjectGate({
 
   React.useEffect(() => {
     const controller = new AbortController()
-
-    getProjectOutreachReadiness(project.id, controller.signal)
-      .then((result) => {
+    let timer: number | undefined
+    let pending = false
+    const schedule = (delay = 5_000) => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => void refresh(), delay)
+    }
+    const refresh = async () => {
+      if (controller.signal.aborted || pending) return
+      if (document.visibilityState === "hidden") {
+        schedule()
+        return
+      }
+      window.clearTimeout(timer)
+      pending = true
+      try {
+        const result = await getProjectOutreachReadiness(project.id, controller.signal)
         if (controller.signal.aborted) return
         if (result.websiteProjectId !== project.id) {
           setReadinessError("项目状态不匹配，请重新读取。")
+          schedule()
           return
         }
         setReadiness(result)
         setReadinessError(null)
-      })
-      .catch((error: unknown) => {
+        // Agent confirmation can happen while this form remains open.
+        if (result.status !== "READY") {
+          schedule(result.status === "REFRESHING" ? 2_000 : 5_000)
+        }
+      } catch (error: unknown) {
         if (!controller.signal.aborted) {
           setReadiness(null)
           setReadinessError(errorMessage(error))
+          schedule()
         }
-      })
-
-    return () => controller.abort()
+      } finally {
+        pending = false
+      }
+    }
+    const onVisible = () => {
+      if (document.visibilityState !== "hidden") void refresh()
+    }
+    void refresh()
+    window.addEventListener("focus", onVisible)
+    document.addEventListener("visibilitychange", onVisible)
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+      window.removeEventListener("focus", onVisible)
+      document.removeEventListener("visibilitychange", onVisible)
+    }
   }, [project.id, reloadVersion])
-
-  React.useEffect(() => {
-    if (readiness?.status !== "REFRESHING") return
-    const timer = window.setTimeout(
-      () => setReloadVersion((current) => current + 1),
-      2_000
-    )
-    return () => window.clearTimeout(timer)
-  }, [readiness?.fingerprint, readiness?.status, reloadVersion])
 
   React.useEffect(() => {
     if (readiness?.status !== "READY") return

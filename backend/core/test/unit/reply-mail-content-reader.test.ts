@@ -24,6 +24,21 @@ const rawObjectKey = [
 ].join("/");
 
 describe("BL-AI-139 sanitized reply mail content reader", () => {
+  it("preserves an explicit Reply-To for reply addressing", async () => {
+    const reader = createSanitizedReplyMailContentReader({
+      rawObjectReader: { get: async () => Buffer.from([
+        "From: Bruno <bruno@example.test>",
+        "Reply-To: Partnerships <partnerships@example.test>",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        "Obrigado.",
+      ].join("\r\n")) },
+    });
+    const body = await reader.read({ ...scope, rawObjectKey });
+    expect(body.replyToAddresses).toEqual(["partnerships@example.test"]);
+    expect(body.plainText).toContain("Obrigado.");
+  });
+
   it("parses MIME and exposes only sanitized HTML", async () => {
     const raw = [
       "From: Reply <reply@example.test>",

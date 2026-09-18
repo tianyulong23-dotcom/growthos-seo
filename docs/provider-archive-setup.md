@@ -1,5 +1,60 @@
 # Central provider response archive
 
+## Local database quick start
+
+The native Windows workflow can provision an isolated archive database inside
+the existing local PostgreSQL instance. From the repository root:
+
+```powershell
+./scripts/provider-archive-local.ps1 -Action setup
+./scripts/provider-archive-local.ps1 -Action start
+./scripts/provider-archive-local.ps1 -Action verify
+./scripts/provider-archive-local.ps1 -Action status
+```
+
+Build Core first if `backend/core/dist` is absent or stale. Setup reads the
+existing local PostgreSQL settings from `deploy/compose/.env`, creates
+`growthos_provider_archive` and a restricted runtime login, and generates random
+archive tokens. It never migrates project business tables. Repeating setup
+reuses verified configuration; it refuses to adopt an existing database or role
+without that configuration. After a partially failed setup, inspect the error
+and existing database/role instead of deleting or overwriting them.
+
+Local secrets, spools and verification evidence live in the Git-ignored
+`storage/provider-archive` directory, restricted to the current Windows account.
+Use `-DataDirectory` to choose a different persistent location. Environment
+overrides for setup are `PROVIDER_ARCHIVE_LOCAL_ADMIN_URL` (loopback only),
+`PROVIDER_ARCHIVE_LOCAL_DATABASE`, `PROVIDER_ARCHIVE_PORT`, and
+`PROVIDER_ARCHIVE_PROJECT_ENV`. Do not put administrator credentials in Git.
+
+When this local configuration exists, `scripts/dev-up.ps1` enables local capture
+and starts the archive processes before its native business producers. An
+explicit `PROVIDER_ARCHIVE_ENABLED=false` disables this automatic integration;
+an explicit `PROVIDER_ARCHIVE_CENTER_URL` uses the existing remote configuration
+instead. For a custom directory set `PROVIDER_ARCHIVE_LOCAL_DIR` in the project's
+environment file too. Business processes already running do not acquire new
+environment variables until restarted. Manual producer launches must still load
+the capture settings and shared Python module path themselves.
+
+`verify` uses synthetic responses, never real DataForSEO requests. It preserves
+clearly labeled `local-acceptance-fixture` history, checks lost-receipt retries,
+and tests delivery through the independently running uploader. `status` checks
+that the latest verification's records are still stored. Fixture rows are not
+real website research. No earlier response data is backfilled by this command.
+
+Stop only these native archive processes with:
+
+```powershell
+./scripts/provider-archive-local.ps1 -Action stop
+```
+
+The database remains on PostgreSQL's persistent volume. Do not delete that
+volume. The archive runs independently of `dev-down.ps1`; after a machine reboot,
+start it with `start` or use the project's normal `dev-up.ps1` entry. This is
+local development lifecycle management, not an installed Windows service or a
+cloud availability guarantee. The local address is loopback-only and cannot
+serve other computers until a separate secure network deployment is configured.
+
 ## Status and scope
 
 This is an additive archive, not a replacement for the recommendation pool or

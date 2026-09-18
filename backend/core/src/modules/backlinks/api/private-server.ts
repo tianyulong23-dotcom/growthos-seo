@@ -1,4 +1,5 @@
 import Fastify, { LogController, type FastifyInstance } from "fastify";
+import { registerBacklinksAutomationBudgetRoute } from "./automation-budget.route.js";
 
 import type { BacklinksModule } from "../application/backlinks.module.js";
 import type { createContactCommands } from "../application/commands/contacts.command.js";
@@ -74,6 +75,8 @@ import { registerBacklinksRecommendationUserReleaseRoutes } from "./recommendati
 import { registerBacklinksRecommendationsRoute } from "./recommendations.route.js";
 import { registerBacklinksResourceLibraryRoute } from "./resource-library.route.js";
 import { registerBacklinksReplyMailRoutes } from "./reply-mail.route.js";
+import { registerMailReplyRoutes } from "./mail-reply.route.js";
+import type { MailReplyService } from "../application/services/mail-reply.service.js";
 import { registerBacklinksReplyMatchRoutes } from "./reply-match.route.js";
 import { registerBacklinksReportExportRoutes } from "./reports/report-export.route.js";
 import { registerBacklinksReportOverviewRoute } from "./reports/report-overview.route.js";
@@ -123,6 +126,7 @@ export type BacklinksPrivateApiDependencies = Readonly<{
   contactCommands: ContactCommands;
   contactEnrichmentCommands: ContactEnrichmentCommands;
   draftCommands: DraftCommands;
+  automationDraftReservationUsd?: number | null;
   draftEditingCommands: DraftEditingCommands;
   gmailConnectionCommands: GmailConnectionCommands;
   gmailConnectionQuery: GmailConnectionQuery;
@@ -142,6 +146,7 @@ export type BacklinksPrivateApiDependencies = Readonly<{
   replyMatchCommands: ReplyMatchCommands;
   negotiationFactsService?: NegotiationFactsService;
   sendIntentCommands: SendIntentCommands;
+  mailReplyService?: MailReplyService;
   settingsGovernanceService: BacklinksSettingsGovernanceService;
   backlinkProfileService: BacklinkProfileService;
   projectContextProjectionCommand?: ProjectContextProjectionCommand;
@@ -321,6 +326,10 @@ export async function createBacklinksPrivateApi(
     module: options.dependencies.module,
     commands: options.dependencies.draftCommands,
   });
+  registerBacklinksAutomationBudgetRoute(app, {
+    module: options.dependencies.module,
+    draftReservationUsd: options.dependencies.automationDraftReservationUsd ?? null,
+  });
   registerBacklinksDraftEditingRoutes(app, {
     module: options.dependencies.module,
     commands: options.dependencies.draftEditingCommands,
@@ -351,6 +360,12 @@ export async function createBacklinksPrivateApi(
   registerBacklinksReplyMailRoutes(app, {
     module: options.dependencies.module,
   });
+  if (options.dependencies.mailReplyService) {
+    registerMailReplyRoutes(app, {
+      module: options.dependencies.module,
+      service: options.dependencies.mailReplyService,
+    });
+  }
   registerBacklinksGmailMailPushRoute(app, {
     webhook:
       options.dependencies.gmailPushWebhook ?? createDisabledGmailPushWebhook(),

@@ -597,6 +597,50 @@ function Invoke-PostgresScalar {
     return ([string]($output | Select-Object -Last 1)).Trim()
 }
 
+function Invoke-BacklinksMigrations {
+    param([string]$Start, [string]$Target)
+
+    $renderedMigrationJson = (
+        & node $backlinksDeploymentManifestRenderer --start $Start --target $Target 2>&1
+    ) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0) {
+        throw "BACKLINKS_MANIFEST_RENDER_FAILED: $renderedMigrationJson"
+    }
+    foreach ($migration in @($renderedMigrationJson | ConvertFrom-Json)) {
+        Write-Host "Applying $($migration.fileName)"
+        Invoke-PostgresSql ([string]$migration.sql)
+    }
+}
+
+function Repair-BacklinksHybridSchemaGap {
+    # A later migration marker does not prove that its prerequisites exist.
+    $probe = @"
+SELECT CASE
+  WHEN to_regclass('backlinks.backlink_project_domain_ratings') IS NOT NULL
+    THEN 'ready'
+  WHEN EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'backlinks'
+      AND table_name = 'backlink_recommendation_release_batch_items'
+      AND column_name = 'resource_library_snapshot'
+  )
+    THEN 'missing-0099'
+  ELSE 'before-hybrid'
+END;
+"@
+    $state = Invoke-PostgresScalar $probe
+    if ($state -eq "missing-0099") {
+        Write-Host "Repairing missing Backlinks 0099 prerequisite..."
+        Invoke-BacklinksMigrations -Start "0099" -Target "0099"
+        if ((Invoke-PostgresScalar $probe) -ne "ready") {
+            throw "BACKLINKS_SCHEMA_REPAIR_INCOMPLETE: missing 0099 prerequisite"
+        }
+    }
+    elseif ($state -notin @("ready", "before-hybrid")) {
+        throw "BACKLINKS_SCHEMA_UNKNOWN_HYBRID_STATE"
+    }
+}
+
 function Set-ProcessEnvironment {
     param([hashtable]$Values)
 
@@ -860,6 +904,10 @@ $workerExecutionMode = Get-LocalSetting `
 $platformBackgroundDispatchEnabled = Get-LocalSetting `
     "PLATFORM_BACKGROUND_DISPATCH_ENABLED" `
     $desiredPlatformBackgroundDispatchEnabled
+$agentBackgroundDispatchEnabled = Get-LocalSetting `
+    "AGENT_BACKGROUND_DISPATCH_ENABLED" "false"
+$agentSystemTriggerDispatchEnabled = Get-LocalSetting `
+    "AGENT_SYSTEM_TRIGGER_DISPATCH_ENABLED" "true"
 $backlinksProjectProjectionEnabled = Get-LocalSetting `
     "BACKLINKS_PROJECT_PROJECTION_ENABLED" `
     $desiredBacklinksProjectProjectionEnabled
@@ -1261,10 +1309,27 @@ try {
         Pop-Location
     }
 
+    Repair-BacklinksHybridSchemaGap
     $backlinksHead = Invoke-PostgresScalar @"
   SELECT CASE
     WHEN to_regclass('backlinks.backlink_generation_input_pins') IS NULL
       THEN 'missing'
+    WHEN (
+      SELECT count(*) = 2 FROM information_schema.columns
+      WHERE table_schema = 'backlinks'
+        AND table_name = 'backlink_contact_enrichment_pages'
+        AND column_name IN ('observed_page_url','contact_page_kind')
+    )
+      THEN '0103'
+    WHEN to_regclass('backlinks.backlink_mail_reply_drafts') IS NOT NULL
+      THEN '0102'
+    WHEN EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'backlinks'
+        AND table_name = 'provider_batch_requests'
+        AND column_name = 'recommendation_job_id'
+    )
+      THEN '0101'
     WHEN EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = 'backlinks'
@@ -1605,21 +1670,7 @@ END;
     }
     if ($null -ne $backlinksMigrationStart) {
         Write-Host "Applying Backlinks migrations from $backlinksMigrationStart through $backlinksTargetHead..."
-        $renderedMigrationJson = (
-            & node $backlinksDeploymentManifestRenderer `
-                --start $backlinksMigrationStart `
-                --target $backlinksTargetHead 2>&1
-        ) -join [Environment]::NewLine
-        if ($LASTEXITCODE -ne 0) {
-            throw "BACKLINKS_MANIFEST_RENDER_FAILED: $renderedMigrationJson"
-        }
-        $renderedMigrations = @(
-            $renderedMigrationJson | ConvertFrom-Json
-        )
-        foreach ($migration in $renderedMigrations) {
-            Write-Host "Applying $($migration.fileName)"
-            Invoke-PostgresSql ([string]$migration.sql)
-        }
+        Invoke-BacklinksMigrations -Start $backlinksMigrationStart -Target $backlinksTargetHead
     }
 
     if ($platformLocalDevelopmentAuthEnabled -eq "true") {
@@ -1710,6 +1761,7 @@ ALTER ROLE growthos_backlinks_local
 
     $providerEnvironment = @{
         BACKLINKS_RUNTIME_MODE = "LOCAL_PRODUCT"
+        BACKLINKS_PROFILE_SYNC_MODE = Get-LocalSetting "BACKLINKS_PROFILE_SYNC_MODE" "automatic"
         DATAFORSEO_ENABLED = $dataForSeoEnabled
         DATAFORSEO_EXTERNAL_AVAILABILITY = $dataForSeoAvailability
         DATAFORSEO_EXTERNAL_UNAVAILABLE_REASON = (
@@ -1828,6 +1880,19 @@ ALTER ROLE growthos_backlinks_local
     }
     Set-ProcessEnvironment $providerEnvironment
     Set-ProcessEnvironment $coreEnvironment
+    $archiveLocalDirectory = Get-LocalSetting "PROVIDER_ARCHIVE_LOCAL_DIR" (
+        Join-Path $root "storage\provider-archive"
+    )
+    $archiveLocalConfigPath = Join-Path $archiveLocalDirectory "local-config.json"
+    $archiveLocalConfig = $null
+    if (
+        (Test-Path -LiteralPath $archiveLocalConfigPath) -and
+        -not (Get-LocalSetting "PROVIDER_ARCHIVE_CENTER_URL") -and
+        (Get-LocalSetting "PROVIDER_ARCHIVE_ENABLED") -ne "false"
+    ) {
+        $archiveLocalConfig = Get-Content -LiteralPath $archiveLocalConfigPath -Raw |
+            ConvertFrom-Json
+    }
     $archiveEnvironment = @{
         PROVIDER_ARCHIVE_ENABLED = Get-LocalSetting "PROVIDER_ARCHIVE_ENABLED" "false"
         PROVIDER_ARCHIVE_DEPLOYMENT_ID = Get-LocalSetting "PROVIDER_ARCHIVE_DEPLOYMENT_ID"
@@ -1842,11 +1907,24 @@ ALTER ROLE growthos_backlinks_local
         PROVIDER_ARCHIVE_RETRY_MAX_MS = Get-LocalSetting "PROVIDER_ARCHIVE_RETRY_MAX_MS" "300000"
         PROVIDER_ARCHIVE_UPLOAD_INTERVAL_MS = Get-LocalSetting "PROVIDER_ARCHIVE_UPLOAD_INTERVAL_MS" "5000"
     }
+    if ($archiveLocalConfig) {
+        foreach ($key in @(
+            "PROVIDER_ARCHIVE_ENABLED", "PROVIDER_ARCHIVE_DEPLOYMENT_ID",
+            "PROVIDER_ARCHIVE_SPOOL_DIR", "PROVIDER_ARCHIVE_CENTER_URL",
+            "PROVIDER_ARCHIVE_UPLOAD_TOKEN_FILE"
+        )) {
+            $archiveEnvironment[$key] = [string]$archiveLocalConfig.$key
+        }
+    }
     Set-ProcessEnvironment $archiveEnvironment
     $archivePythonPath = Join-Path $root "backend\provider_archive"
     $pythonPaths = @($archivePythonPath, $env:PYTHONPATH) | Where-Object { $_ }
     $env:PYTHONPATH = $pythonPaths -join [IO.Path]::PathSeparator
-    if ($archiveEnvironment.PROVIDER_ARCHIVE_ENABLED -eq "true") {
+    if ($archiveLocalConfig -and $archiveEnvironment.PROVIDER_ARCHIVE_ENABLED -eq "true") {
+        & (Join-Path $root "scripts\provider-archive-local.ps1") `
+            -Action start -DataDirectory $archiveLocalDirectory
+    }
+    elseif ($archiveEnvironment.PROVIDER_ARCHIVE_ENABLED -eq "true") {
         $archiveErrorLog = Join-Path $runtimeDir "provider-archive.stderr.log"
         $archiveProcess = Start-Process `
             -FilePath (Get-Command node).Source `
@@ -1920,6 +1998,8 @@ ALTER ROLE growthos_backlinks_local
         PLATFORM_BACKGROUND_DISPATCH_ENABLED = (
             $platformBackgroundDispatchEnabled
         )
+        AGENT_BACKGROUND_DISPATCH_ENABLED = $agentBackgroundDispatchEnabled
+        AGENT_SYSTEM_TRIGGER_DISPATCH_ENABLED = $agentSystemTriggerDispatchEnabled
         PLATFORM_LOCAL_DEVELOPMENT_AUTH_ENABLED = (
             $platformLocalDevelopmentAuthEnabled
         )
@@ -1964,7 +2044,7 @@ ALTER ROLE growthos_backlinks_local
         DATAFORSEO_PASSWORD = ""
         BUSINESS_PROFILE_AI_BASE_URL = Get-LocalSetting "BUSINESS_PROFILE_AI_BASE_URL"
         BUSINESS_PROFILE_AI_API_KEY = Get-LocalSetting "BUSINESS_PROFILE_AI_API_KEY"
-        BUSINESS_PROFILE_AI_MODEL = Get-LocalSetting "BUSINESS_PROFILE_AI_MODEL" "gpt-5.4-mini"
+        BUSINESS_PROFILE_AI_MODEL = Get-LocalSetting "BUSINESS_PROFILE_AI_MODEL" "gpt-5.5"
         BUSINESS_PROFILE_AI_MAX_RETRIES = Get-LocalSetting "BUSINESS_PROFILE_AI_MAX_RETRIES" "1"
         ARTICLE_RESEARCH_PROVIDER = ""
         ARTICLE_RESEARCH_API_KEY = ""
@@ -1997,6 +2077,24 @@ ALTER ROLE growthos_backlinks_local
         -Name "Platform API" `
         -Process $platformApiProcess `
         -StandardErrorPath $platformApiErrorLog
+
+    $agentWorkerErrorLog = Join-Path $runtimeDir "agent-worker.stderr.log"
+    $agentWorkerProcess = Start-Process `
+        -FilePath $platformPython `
+        -ArgumentList @("-m", "app.workflows.agent_worker") `
+        -WorkingDirectory $apiDir `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $runtimeDir "agent-worker.stdout.log") `
+        -RedirectStandardError $agentWorkerErrorLog `
+        -PassThru
+    Register-ManagedProcess `
+        -Name "Agent Worker" `
+        -Process $agentWorkerProcess `
+        -ExpectedCommand "-m app.workflows.agent_worker"
+    Assert-ManagedProcessRunning `
+        -Name "Agent Worker" `
+        -Process $agentWorkerProcess `
+        -StandardErrorPath $agentWorkerErrorLog
 
     if (-not (Test-Path -LiteralPath (Join-Path $frontendDir "node_modules"))) {
         Push-Location $frontendDir

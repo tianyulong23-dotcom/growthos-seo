@@ -26,6 +26,7 @@ export type CommercialQualificationRequestAcquireResult =
 export interface CommercialQualificationRequestStore {
   acquire(input: Readonly<{
     context: ProviderRequestContext;
+    recommendationLineage?: Readonly<{ generationContractId: string; jobId: string }>;
     call: CommercialQualificationBulkCall;
     estimatedCostMicros: number;
     startedAt: Date;
@@ -81,6 +82,7 @@ export function createGovernedCommercialQualificationRuntime(
       "requestId" | "idempotencyKey" | "budgetReservationId"
     >;
     operationId: string;
+    recommendationLineage?: Readonly<{ generationContractId: string; jobId: string }>;
     budgetReservationPrefix: string;
     estimatedCostMicros: number;
     provider: CommercialQualificationBulkRuntime;
@@ -139,6 +141,7 @@ export function createGovernedCommercialQualificationRuntime(
       }
       const acquired = await input.store.acquire({
         context,
+        ...(input.recommendationLineage === undefined ? {} : { recommendationLineage: input.recommendationLineage }),
         call,
         estimatedCostMicros: input.estimatedCostMicros,
         startedAt: now(),
@@ -155,12 +158,14 @@ export function createGovernedCommercialQualificationRuntime(
         });
       }
 
+      let dispatched = false;
       try {
         await input.gate.authorize({
           context,
           requestFingerprint: call.requestFingerprint,
           estimatedCostMicros: input.estimatedCostMicros,
         });
+        dispatched = true;
         const response = await input.provider.execute(call);
         if (response.status === "unknown_charge") {
           await input.store.fail({
@@ -194,7 +199,7 @@ export function createGovernedCommercialQualificationRuntime(
         await input.store.fail({
           context,
           batchRequestId: acquired.batchRequestId,
-          status: "failed",
+          status: dispatched ? "unknown_charge" : "failed",
           failureCode: error instanceof Error
             ? error.message
             : "DATAFORSEO_QUALIFICATION_FAILED",

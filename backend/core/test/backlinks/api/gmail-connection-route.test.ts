@@ -152,6 +152,8 @@ function setup(options?: Readonly<{
   verifiedSendIdentity?: boolean;
   sendRuntimeEnabled?: boolean;
   syncRuntimeEnabled?: boolean;
+  missingBusinessSnapshot?: boolean;
+  missingProjectAuthorization?: boolean;
 }>) {
   const repository = new FakeOAuthAttemptRepository();
   let randomValue = 1;
@@ -394,7 +396,12 @@ function setup(options?: Readonly<{
             roles: request.actor.roles,
           },
           tenant,
-          project: null,
+          project: options?.missingProjectAuthorization ? null : {
+            websiteProjectKey: request.url.includes("/other-project/")
+              ? "other-project" : "project-key",
+            websiteProjectId: request.url.includes("/other-project/")
+              ? id(30) : project.websiteProjectId,
+          },
           permissions: ["backlinks.gmail:manage"],
         };
       });
@@ -402,6 +409,12 @@ function setup(options?: Readonly<{
         module: createBacklinksModule({
           projectContext: {
             async resolve({ actor, websiteProjectKey }) {
+              if (options?.missingBusinessSnapshot) {
+                throw new BacklinkError({
+                  code: backlinkErrorCodes.notFound,
+                  message: "Website Project is not active in Backlinks Core.",
+                });
+              }
               if (websiteProjectKey === "foreign") {
                 throw new BacklinkError({
                   code: backlinkErrorCodes.accessDenied,
@@ -430,6 +443,35 @@ function setup(options?: Readonly<{
 }
 
 describe("BL-AI-103 Gmail connection APIs", () => {
+  it("connects and reads mailbox status without a business snapshot", async () => {
+    const test = setup({ missingBusinessSnapshot: true });
+    await test.ready();
+    const status = await test.app.inject({
+      method: "GET", url: `${routeBase}/status`,
+    });
+    expect(status.statusCode).toBe(200);
+    const connect = await test.app.inject({
+      method: "POST", url: `${routeBase}/connect`, payload: { returnPath },
+    });
+    expect(connect.statusCode).toBe(200);
+    expect(test.authorizeCalls).toHaveLength(1);
+    expect(connect.json().meta.websiteProjectId).toBe(project.websiteProjectId);
+  });
+
+  it("rejects mailbox access without authorized project identity", async () => {
+    const test = setup({ missingProjectAuthorization: true });
+    await test.ready();
+    for (const method of ["GET", "POST"] as const) {
+      const response = await test.app.inject({
+        method,
+        url: `${routeBase}/${method === "GET" ? "status" : "connect"}`,
+        ...(method === "POST" ? { payload: { returnPath } } : {}),
+      });
+      expect(response.statusCode).toBe(403);
+    }
+    expect(test.authorizeCalls).toHaveLength(0);
+  });
+
   it("binds connect and callback to state, PKCE, session, and project context", async () => {
     const test = setup();
     await test.ready();

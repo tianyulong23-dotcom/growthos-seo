@@ -1,4 +1,4 @@
-import { validateDraftOutputPolicy } from
+import { DraftOutputPolicyError, validateDraftOutputPolicy } from
   "../../domain/drafts/evidence-policy.js";
 import type { AiDraftPort, AiDraftResult } from
   "../../ports/ai-draft.port.js";
@@ -28,7 +28,7 @@ const canRetry = (
   attemptCount: number,
 ): error is AiDraftError =>
   error instanceof AiDraftError
-  && (error.retryable || error.code === "MALFORMED_OUTPUT")
+  && error.retryable
   && attemptCount < 2;
 
 export async function runDraftGenerationWorkflow(
@@ -72,6 +72,7 @@ export async function runDraftGenerationWorkflow(
       throw new AiDraftError({
         code: "POLICY_VIOLATION",
         message: "Draft generation context does not match the Job.",
+        diagnosticCode: "DRAFT_CONTEXT_MISMATCH",
         retryable: false,
       });
     }
@@ -140,6 +141,8 @@ export async function runDraftGenerationWorkflow(
         message: error instanceof Error
           ? error.message
           : "Draft output violated policy.",
+        diagnosticCode: error instanceof DraftOutputPolicyError
+          ? error.diagnosticCode : "DRAFT_OUTPUT_POLICY",
         retryable: false,
       });
     }

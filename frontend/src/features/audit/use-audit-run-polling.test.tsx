@@ -17,6 +17,42 @@ afterEach(() => {
 })
 
 describe("useAuditRunPolling", () => {
+  it("resumes polling after a temporary read failure and stops at completion", async () => {
+    vi.useFakeTimers()
+    const completed = { ...runningAudit, status: "completed" } as AuditRun
+    const fetchRun = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(completed)
+    const onRunChange = vi.fn()
+    const onTerminal = vi.fn()
+    const onError = vi.fn()
+    renderHook(() =>
+      useAuditRunPolling({
+        run: runningAudit,
+        fetchRun,
+        onRunChange,
+        onTerminal,
+        onError,
+        intervalMs: 10,
+      })
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10)
+    })
+    expect(onError).toHaveBeenCalledWith("offline")
+    expect(onRunChange).not.toHaveBeenCalled()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10)
+    })
+    expect(onRunChange).toHaveBeenCalledWith(completed)
+    expect(onTerminal).toHaveBeenCalledOnce()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100)
+    })
+    expect(fetchRun).toHaveBeenCalledTimes(2)
+  })
+
   it("keeps the current audit when a poll temporarily fails", async () => {
     vi.useFakeTimers()
     const onRunChange = vi.fn()

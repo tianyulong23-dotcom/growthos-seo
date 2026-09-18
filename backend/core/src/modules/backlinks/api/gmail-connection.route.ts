@@ -19,6 +19,7 @@ import {
   isBacklinkError,
 } from "../domain/errors/backlink-error.js";
 import { GoogleAuthError } from "../ports/google-auth.port.js";
+import type { ResolvedMailboxContext } from "../ports/project-context.port.js";
 import {
   backlinkProblemContentType,
   backlinkProblemDetailsSchema,
@@ -108,9 +109,7 @@ const meta = (
 });
 
 const projectScope = (
-  context: Awaited<
-    ReturnType<BacklinksModule["projectContext"]["resolve"]>
-  >,
+  context: ResolvedMailboxContext,
 ) => ({
   organizationId: context.tenant.organizationId,
   workspaceId: context.tenant.workspaceId,
@@ -146,6 +145,29 @@ const serializeReadiness = (
       : { ...readiness.primaryBlocker },
 });
 
+function resolveMailboxContext(
+  request: FastifyRequest,
+  websiteProjectKey: string,
+): ResolvedMailboxContext {
+  // The platform middleware verifies the signed tenant/project authorization.
+  // Business snapshots are intentionally not a prerequisite for connecting mail.
+  const platform = request.platformContext;
+  if (
+    platform.project === null
+    || platform.project.websiteProjectKey !== websiteProjectKey
+  ) {
+    throw new BacklinkError({
+      code: backlinkErrorCodes.accessDenied,
+      message: "Project access denied.",
+    });
+  }
+  return {
+    actor: request.actor,
+    tenant: platform.tenant,
+    project: { websiteProjectId: platform.project.websiteProjectId },
+  };
+}
+
 export function registerBacklinksGmailConnectionRoutes(
   app: FastifyInstance,
   options: Readonly<{
@@ -168,10 +190,7 @@ export function registerBacklinksGmailConnectionRoutes(
     },
     errorHandler: sendGmailConnectionError,
   }, async (request) => {
-    const context = await options.module.projectContext.resolve({
-      actor: request.actor,
-      websiteProjectKey: request.params.websiteProjectKey,
-    });
+    const context = resolveMailboxContext(request, request.params.websiteProjectKey);
     const result = await options.commands.connect(
       request.body.returnPath === undefined
         ? {
@@ -239,10 +258,7 @@ export function registerBacklinksGmailConnectionRoutes(
     },
     errorHandler: sendGmailConnectionError,
   }, async (request) => {
-    const context = await options.module.projectContext.resolve({
-      actor: request.actor,
-      websiteProjectKey: request.params.websiteProjectKey,
-    });
+    const context = resolveMailboxContext(request, request.params.websiteProjectKey);
     const state = await options.query.getStatus(context);
     return {
       connection: serializeOptionalConnection(state.selectedConnection),
@@ -261,10 +277,7 @@ export function registerBacklinksGmailConnectionRoutes(
     },
     errorHandler: sendGmailConnectionError,
   }, async (request) => {
-    const context = await options.module.projectContext.resolve({
-      actor: request.actor,
-      websiteProjectKey: request.params.websiteProjectKey,
-    });
+    const context = resolveMailboxContext(request, request.params.websiteProjectKey);
     await options.commands.select({
       context,
       connectionId: request.body.connectionId,
@@ -287,10 +300,7 @@ export function registerBacklinksGmailConnectionRoutes(
     },
     errorHandler: sendGmailConnectionError,
   }, async (request) => {
-    const context = await options.module.projectContext.resolve({
-      actor: request.actor,
-      websiteProjectKey: request.params.websiteProjectKey,
-    });
+    const context = resolveMailboxContext(request, request.params.websiteProjectKey);
     const result = await options.commands.disconnect({
       context,
       connectionId: request.params.connectionId,
@@ -311,10 +321,7 @@ export function registerBacklinksGmailConnectionRoutes(
     },
     errorHandler: sendGmailConnectionError,
   }, async (request, reply) => {
-    const context = await options.module.projectContext.resolve({
-      actor: request.actor,
-      websiteProjectKey: request.params.websiteProjectKey,
-    });
+    const context = resolveMailboxContext(request, request.params.websiteProjectKey);
     const result = await options.syncCommands.start({
       context,
       connectionId: request.params.connectionId,
@@ -336,10 +343,7 @@ export function registerBacklinksGmailConnectionRoutes(
     },
     errorHandler: sendGmailConnectionError,
   }, async (request) => {
-    const context = await options.module.projectContext.resolve({
-      actor: request.actor,
-      websiteProjectKey: request.params.websiteProjectKey,
-    });
+    const context = resolveMailboxContext(request, request.params.websiteProjectKey);
     const status = await options.syncCommands.status({
       context,
       connectionId: request.params.connectionId,

@@ -119,8 +119,8 @@ const commonPaths = [
 ] as const;
 const decoder = new TextDecoder("utf-8", { fatal: false });
 const priorityPath =
-  /(?:contact|about|team|editor|advert|partner|write-for-us|author|press|media)/iu;
-const contactPath = /\/(?:contact|advertis|partner)[^/]*(?:\/|$)/iu;
+  /(?:contact|contato|fale[-_]conosco|sobre|equipe|anuncie|publicidade|parceria|imprensa|about|team|editor|advert|partner|write-for-us|author|press|media)/iu;
+const contactPath = /\/(?:contact|contato|fale[-_]conosco|anuncie|publicidade|parceria|advertis|partner)[^/]*(?:\/|$)/iu;
 
 type CrawlSignals = {
   -readonly [Key in keyof ContactConvergenceSignals]:
@@ -169,9 +169,8 @@ export function inspectContactHtml(html: string): Readonly<{
   return {
     contactForm: $("form").filter((_, form) => {
       const node = $(form);
-      return node.find(
-        "input[type='email'],input[name*='email'],textarea,button[type='submit']",
-      ).length > 0;
+      if (node.find("input[type='password']").length > 0) return false;
+      return node.find("textarea,input[name*='message'],input[name*='mensagem']").length > 0;
     }).length > 0,
     loginRequired:
       loginForm
@@ -188,6 +187,7 @@ function normalizePageUrl(value: string, base: string): string | null {
   try {
     const parsed = new URL(value, base);
     if (!["http:", "https:"].includes(parsed.protocol)) return null;
+    if (parsed.username || parsed.password) return null;
     parsed.hash = "";
     for (const parameter of [...parsed.searchParams.keys()]) {
       if (/^utm_/iu.test(parameter)) parsed.searchParams.delete(parameter);
@@ -198,9 +198,28 @@ function normalizePageUrl(value: string, base: string): string | null {
   }
 }
 
+export function observedContactPage(
+  finalUrl: string,
+  rootUrl: string,
+  status: number,
+  signals: ReturnType<typeof inspectContactHtml>,
+): Readonly<{ observedPageUrl?: string; contactPageKind?: string }> {
+  if (!/^https?:\/\//iu.test(finalUrl)) return {};
+  const url = normalizePageUrl(finalUrl, rootUrl);
+  if (url === null || !sameSite(url, rootUrl)) return {};
+  const kind = signals.challenge ? "CAPTCHA_OR_BOT_CHALLENGE"
+    : status === 401 || signals.loginRequired ? "LOGIN_REQUIRED"
+    : status === 403 ? "ACCESS_DENIED"
+    : status >= 200 && status < 300 && signals.contactForm
+      ? "CONTACT_FORM_ONLY" : null;
+  return kind === null ? {} : { observedPageUrl: url, contactPageKind: kind };
+}
+
 function sameSite(left: string, right: string): boolean {
-  return getDomain(new URL(left).hostname, { allowPrivateDomains: true })
-    === getDomain(new URL(right).hostname, { allowPrivateDomains: true });
+  const leftHost = new URL(left).hostname;
+  const rightHost = new URL(right).hostname;
+  return (getDomain(leftHost, { allowPrivateDomains: true }) ?? leftHost)
+    === (getDomain(rightHost, { allowPrivateDomains: true }) ?? rightHost);
 }
 
 function discoverLinks(
@@ -268,15 +287,18 @@ async function recordPage(
     candidateCount?: number;
     contentSha256?: string;
     errorCode?: string;
+    observedPageUrl?: string;
+    contactPageKind?: string;
   }>,
 ): Promise<void> {
   await withBacklinkTenantTransaction(pool, input, (client) => client.query(
     `INSERT INTO backlink_contact_enrichment_pages (
        id,organization_id,workspace_id,website_project_id,job_id,page_url,
        depth,discovery_source,status,http_status,browser_rendered,
-       candidate_count,content_sha256,error_code,created_by
+       candidate_count,content_sha256,error_code,created_by,
+       observed_page_url,contact_page_kind
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
      )
      ON CONFLICT (
        organization_id,workspace_id,website_project_id,job_id,page_url
@@ -285,7 +307,14 @@ async function recordPage(
        browser_rendered=EXCLUDED.browser_rendered,
        candidate_count=EXCLUDED.candidate_count,
        content_sha256=EXCLUDED.content_sha256,
-       error_code=EXCLUDED.error_code,observed_at=now()`,
+       error_code=EXCLUDED.error_code,
+       observed_page_url=CASE WHEN EXCLUDED.http_status IS NOT NULL
+         THEN EXCLUDED.observed_page_url
+         ELSE backlink_contact_enrichment_pages.observed_page_url END,
+       contact_page_kind=CASE WHEN EXCLUDED.http_status IS NOT NULL
+         THEN EXCLUDED.contact_page_kind
+         ELSE backlink_contact_enrichment_pages.contact_page_kind END,
+       observed_at=now()`,
     [
       randomUUID(),
       input.organizationId,
@@ -302,6 +331,8 @@ async function recordPage(
       result.contentSha256 ?? null,
       result.errorCode ?? null,
       input.actorId,
+      result.observedPageUrl ?? null,
+      result.contactPageKind ?? null,
     ],
   ));
 }
@@ -727,6 +758,9 @@ export function createContactEnrichmentActivity(options: Readonly<{
         browserUsed = true;
         const html = decoder.decode(rendered.body);
         const renderedSignals = inspectContactHtml(html);
+        const pageEvidence = observedContactPage(
+          rendered.finalUrl, job.rootUrl, rendered.status, renderedSignals,
+        );
         signals.challenge ||= renderedSignals.challenge;
         signals.loginRequired ||= renderedSignals.loginRequired;
         signals.contactForm ||= renderedSignals.contactForm;
@@ -738,6 +772,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
           await record(page, {
             status: "browser_failed", httpStatus: rendered.status,
             browserRendered: true, errorCode: lastErrorCode,
+            ...pageEvidence,
           });
           return;
         }
@@ -760,6 +795,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
           httpStatus: 200,
           browserRendered: true,
           candidateCount: browserDiscovery.candidateCount,
+          ...pageEvidence,
         });
       } catch (error) {
         failures += 1;
@@ -824,6 +860,9 @@ export function createContactEnrichmentActivity(options: Readonly<{
             status: "fetch_failed",
             httpStatus: fetched.status,
             errorCode: lastErrorCode,
+            ...observedContactPage(
+              fetched.finalUrl, job.rootUrl, fetched.status, pageSignals,
+            ),
           });
           if (shouldAttemptContactBrowserFallback({
             browserAuthorized,
@@ -838,6 +877,9 @@ export function createContactEnrichmentActivity(options: Readonly<{
         pagesVisited += 1;
         const html = decoder.decode(fetched.body);
         const pageSignals = inspectContactHtml(html);
+        const pageEvidence = observedContactPage(
+          fetched.finalUrl, job.rootUrl, fetched.status, pageSignals,
+        );
         signals.contactForm ||= pageSignals.contactForm;
         signals.loginRequired ||= pageSignals.loginRequired;
         signals.challenge ||= pageSignals.challenge;
@@ -863,6 +905,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
             status: "unsupported_content",
             httpStatus: fetched.status,
             errorCode: lastErrorCode,
+            ...pageEvidence,
           });
           continue;
         }
@@ -870,6 +913,7 @@ export function createContactEnrichmentActivity(options: Readonly<{
           status: "fetched",
           httpStatus: fetched.status,
           candidateCount: discovered.candidateCount,
+          ...pageEvidence,
         });
         signals.parsedPages += 1;
         enqueueLinks(html, fetched.finalUrl, page.depth);

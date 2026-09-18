@@ -115,12 +115,18 @@ async def reconcile_keyword_workflows(
         await asyncio.sleep(max(interval_seconds, 1))
 
 
-async def dispatch_agent_workflows() -> None:
+async def dispatch_agent_workflows(*, materialize_system_triggers: bool = True) -> None:
     service = build_agent_service()
+    materialize_system_triggers = (
+        materialize_system_triggers
+        and get_settings().agent_system_trigger_dispatch_enabled
+    )
     last_alert_signature: tuple | None = None
     while True:
         try:
-            await service.dispatch_queued()
+            await service.dispatch_queued(
+                materialize_system_triggers=materialize_system_triggers,
+            )
             summary = await service.operation_summary()
             alert_signature = (
                 tuple(sorted(str(item.get("run_id")) for item in summary.stuck_runs)),
@@ -241,9 +247,17 @@ async def lifespan(application: FastAPI):
     if settings.crawler_worker_start_on_boot:
         await worker_launcher.ensure_started()
     if not settings.platform_background_dispatch_enabled:
+        agent_dispatch_task = (
+            asyncio.create_task(dispatch_agent_workflows(materialize_system_triggers=False))
+            if settings.agent_background_dispatch_enabled else None
+        )
         try:
             yield
         finally:
+            if agent_dispatch_task is not None:
+                agent_dispatch_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await agent_dispatch_task
             await worker_launcher.stop()
             owned_gateway = getattr(
                 application.state,

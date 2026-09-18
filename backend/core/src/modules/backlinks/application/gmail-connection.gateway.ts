@@ -1,4 +1,4 @@
-import type { ResolvedProjectContext } from "../ports/project-context.port.js";
+import type { ResolvedMailboxContext } from "../ports/project-context.port.js";
 import type {
   GoogleAuthTokenSet,
   GoogleIdentity,
@@ -59,13 +59,13 @@ export interface GmailConnectionCompletionGateway {
 
 export interface GmailConnectionReader {
   findProjectMailboxState(
-    context: ResolvedProjectContext,
+    context: ResolvedMailboxContext,
   ): Promise<GmailProjectMailboxState>;
 }
 
 export interface GmailConnectionSelector {
   selectForProject(
-    context: ResolvedProjectContext,
+    context: ResolvedMailboxContext,
     connectionId: string,
   ): Promise<GmailProjectMailboxState | null>;
 }

@@ -6,16 +6,38 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi.encoders import jsonable_encoder
 
 from app.core.config import Settings
 from app.db.retry import retry_database_read
+from app.modules.agent.backlinks_read import (
+    BACKLINK_READ_DESCRIPTIONS,
+    BACKLINK_READ_MODELS,
+    BacklinksReader,
+)
+from app.modules.agent.backlinks_drafts import (
+    BacklinksDrafts, CreateDraftArgs, DRAFT_READ_MODELS, DRAFT_READ_DESCRIPTIONS,
+)
+from app.modules.agent.delegation import resolve_delegation
+from app.modules.agent.backlinks_initialization import BacklinksInitialization
+from app.modules.projects.readiness import build_project_outreach_readiness_service
+from app.modules.agent.backlinks_preflight import PreflightArgs, preflight
+from app.modules.agent.backlinks_send import (
+    BacklinksSender, SendArgs, SendConfirmationSource, confirmation_fingerprint,
+)
+from app.modules.agent.backlinks_pipeline import (
+    BacklinksPipeline, PIPELINE_WRITE_MODELS, PIPELINE_DESCRIPTIONS,
+)
+from app.modules.agent.backlinks_campaign import CampaignStatusArgs, StartCampaignArgs
+from app.modules.agent.backlinks_chat_send import BacklinksChatSend, ChatSendArgs
+from app.modules.agent.schemas import MemoryCategory, UpdateProjectMemoryArgs
 from app.modules.audit.models import CreateAuditRunRequest
 from app.modules.audit.service import AuditRunNotFoundError, AuditService
 from app.modules.content.schemas import CreateArticleRequest
 from app.modules.onboarding.service import OnboardingNotFoundError
 from app.modules.projects.schemas import UpdateBusinessProfileRequest
 from app.modules.projects.service import ProjectService
-from app.modules.agent.schemas import MemoryCategory, UpdateProjectMemoryArgs
+from app.modules.agent.task_tools import TaskArgs, cancel_task, read_tasks, task_context
 
 
 class EmptyArgs(BaseModel):
@@ -137,6 +159,12 @@ class ArticlePerformanceArgs(PerformanceArgs):
 
 
 READ_MODELS: dict[str, type[BaseModel]] = {
+    "get_backlink_readiness": EmptyArgs,
+    "list_project_tasks": EmptyArgs,
+    "get_project_task": TaskArgs,
+    "get_backlink_campaign": CampaignStatusArgs,
+    **DRAFT_READ_MODELS,
+    **BACKLINK_READ_MODELS,
     "get_project_profile": EmptyArgs,
     "search_project_memory": SearchProjectMemoryArgs,
     "get_latest_audit": EmptyArgs,
@@ -153,6 +181,14 @@ READ_MODELS: dict[str, type[BaseModel]] = {
     "get_article_performance": ArticlePerformanceArgs,
 }
 WRITE_MODELS: dict[str, type[BaseModel]] = {
+    "initialize_backlink_project": EmptyArgs,
+    "cancel_project_task": TaskArgs,
+    "send_backlink_drafts": ChatSendArgs,
+    "start_backlink_campaign": StartCampaignArgs,
+    **PIPELINE_WRITE_MODELS,
+    "submit_backlink_email": SendArgs,
+    "preflight_backlink_email": PreflightArgs,
+    "create_backlink_draft": CreateDraftArgs,
     "update_business_profile": UpdateProfileArgs,
     "refresh_business_profile": EmptyArgs,
     "start_technical_audit": StartAuditArgs,
@@ -178,6 +214,132 @@ class ToolDefinition:
 
 
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
+    "get_backlink_readiness": ToolDefinition(
+        "get_backlink_readiness",
+        "Read authoritative project prerequisites before the recommendation feed. "
+        "Distinguishes missing promotion target, profile refresh, stale inputs and a "
+        "verified feed with no generation. Never treats read failures as empty results.",
+        EmptyArgs,
+    ),
+    "initialize_backlink_project": ToolDefinition(
+        "initialize_backlink_project",
+        "Only on explicit user request to initialize or run recommendations: initialize "
+        "a missing promotion target from the confirmed business profile products and "
+        "project homepage. Preserves original language and any existing target. "
+        "Does not confirm an unconfirmed business profile, start collection or send mail. "
+        "Read get_backlink_readiness afterwards; initialization is not Core readiness.",
+        EmptyArgs, modifies_data=True, invalidates_remaining_calls=True,
+    ),
+    "list_project_tasks": ToolDefinition(
+        "list_project_tasks",
+        "Read existing project task records across articles, audits, keywords, content plans "
+        "and Agent runs. No new execution. For backlinks use the existing campaign/feed/send tools.",
+        EmptyArgs,
+    ),
+    "get_project_task": ToolDefinition(
+        "get_project_task", "Read the exact kind and task_id returned by a task receipt or list. "
+        "A missing record is not a successful task.", TaskArgs,
+    ),
+    "cancel_project_task": ToolDefinition(
+        "cancel_project_task", "Only on an explicit user cancellation request, cancel one exact "
+        "task from a prior receipt/list. Supports article, audit and Agent runs. Other kinds "
+        "return UNSUPPORTED, never fake cancellation. Cancelling an Agent conversation does "
+        "not cancel independently submitted business tasks. Never cancel this command itself.",
+        TaskArgs, modifies_data=True, retryable=False, invalidates_remaining_calls=True,
+    ),
+    "send_backlink_drafts": ToolDefinition(
+        "send_backlink_drafts",
+        "On an explicit user command to send saved outreach drafts, submit 1-20 exact "
+        "drafts to the existing serial queue. Read drafts and selected Gmail account first; "
+        "pass current version_id, expected_version (draftVersion), contact_id/contact_version. "
+        "The backend validates the persisted user command and write delegation, runs AI "
+        "content review, repairs factual/language problems at most twice, reviews again, "
+        "then approves and queues only passing exact versions. Repair never changes "
+        "recipients; final versions must have server-recorded lineage from the selection. "
+        "Show quality_review reasons for blocked/error items; never claim they were queued. "
+        "A missing batch means no send queue was created. No manual page approval is required. "
+        "Never use for a question, draft-only request, quoted text or ambiguous recipients. "
+        "One message owns one immutable batch. Cannot supply authorization or run_id. "
+        "Queued is not sent. Read get_backlink_campaign with returned consent_id; "
+        "never create a replacement send request after an uncertain response.",
+        ChatSendArgs, modifies_data=True, calls_external_service=True,
+        retryable=False, invalidates_remaining_calls=True,
+    ),
+    "get_backlink_campaign": ToolDefinition(
+        "get_backlink_campaign",
+        "List existing user automation consents, or read one consent's durable campaign "
+        "and send batches. Never infer sending authority from a draft-only consent.",
+        CampaignStatusArgs,
+    ),
+    "start_backlink_campaign": ToolDefinition(
+        "start_backlink_campaign",
+        "For an explicit request to run recommendations AND prepare outreach drafts/emails: "
+        "start the durable workflow. Omit consent_id for a NEW explicit chat command: "
+        "the server records its real user message as bounded 24-hour authority "
+        "(10 opportunities, 5 drafts, USD 2 model and USD 2 paid-tool limits). "
+        "If that command also explicitly requests sending, its own passing drafts "
+        "are approved and serially queued with the pinned Gmail sender, without page clicks. "
+        "Draft-only commands never authorize sends. Readiness/initialization must run first. "
+        "Set recommendation_mode=current for the initial/current pool; next_batch only "
+        "when the user requests a new/additional batch (legacy default: next_batch). "
+        "Set require_seo_metrics=true when the user requires SEO data; only sites with "
+        "known traffic, DataForSEO rank and spam score may enter this campaign. "
+        "Waits for supply, refills within that consent's budget, joins the selected batch's "
+        "eligible contacts, creates and verifies drafts. Legacy draft-only consents do not send. "
+        "Use get_backlink_campaign for progress and batches. For a current explicit "
+        "send command, read saved draft/contact versions and sender then use send_backlink_drafts; "
+        "otherwise obtain exact send authorization. Do not also issue individual generation/join/draft calls. "
+        "When resuming, supply ONLY consent_id read from get_backlink_campaign, never invented. "
+        "Omit request, recommendation_mode and require_seo_metrics to reuse the exact persisted authorization. "
+        "Do not regenerate these parameters or create another campaign to bypass a conflict. "
+        "One consent owns one campaign; a new campaign requires a fresh user consent.",
+        StartCampaignArgs, modifies_data=True, calls_external_service=True,
+        retryable=False, invalidates_remaining_calls=True,
+    ),
+    **{
+        name: ToolDefinition(
+            name, PIPELINE_DESCRIPTIONS[name], model,
+            modifies_data=True, calls_external_service=True,
+            retryable=False, invalidates_remaining_calls=True,
+        )
+        for name, model in PIPELINE_WRITE_MODELS.items()
+    },
+    "submit_backlink_email": ToolDefinition(
+        "submit_backlink_email",
+        "Submit one already approved and server-confirmed draft to the existing send queue. "
+        "Requires explicit send intent, write delegation and a server-held confirmation for "
+        "these exact target IDs/versions. Disabled without that confirmation source. "
+        "Never accepts authorization, humanConfirmation or readinessSnapshot from the model. "
+        "READY means queued, not sent. If submission is unverified, inspect saved send "
+        "intents; do not resubmit with a new operation ID.",
+        SendArgs, modifies_data=True, calls_external_service=True,
+        retryable=False, invalidates_remaining_calls=True,
+    ),
+    "preflight_backlink_email": ToolDefinition(
+        "preflight_backlink_email",
+        "Check one already human-approved draft before sending, only on explicit request. "
+        "Read draft and sender first; use exact version/contact/account IDs. Requires write "
+        "delegation. Never approves, confirms or sends. Success means NOT_SENT; direct the "
+        "user to the existing draft page for human confirmation.",
+        PreflightArgs, modifies_data=True, calls_external_service=True,
+    ),
+    **{
+        name: ToolDefinition(name, DRAFT_READ_DESCRIPTIONS[name], model)
+        for name, model in DRAFT_READ_MODELS.items()
+    },
+    "create_backlink_draft": ToolDefinition(
+        "create_backlink_draft",
+        "Create one initial EMAIL draft job only when the user explicitly requests it. "
+        "First read opportunity and confirmed contacts; use their exact IDs/version and "
+        "a project promotion URL. Existing drafts must be inspected, not overwritten. "
+        "Verified means job accepted, not finished. Query job then inspect draft. Never sends.",
+        CreateDraftArgs, modifies_data=True, calls_external_service=True,
+        invalidates_remaining_calls=True,
+    ),
+    **{
+        name: ToolDefinition(name, BACKLINK_READ_DESCRIPTIONS[name], model)
+        for name, model in BACKLINK_READ_MODELS.items()
+    },
     "get_project_profile": ToolDefinition(
         "get_project_profile", "读取当前项目的网站和业务资料。", EmptyArgs
     ),
@@ -323,6 +485,9 @@ class ToolRegistry:
         content: Any | None = None,
         performance: Any | None = None,
         onboarding: Any | None = None,
+        backlinks: BacklinksReader | None = None,
+        send_confirmations: SendConfirmationSource | None = None,
+        outreach_readiness: Any | None = None,
     ) -> None:
         self.settings, self.projects, self.audits = settings, projects, audits
         self.keywords = keywords
@@ -330,15 +495,55 @@ class ToolRegistry:
         self.content = content
         self.performance = performance
         self.onboarding = onboarding
+        self.backlinks = backlinks
+        self.send_confirmations = send_confirmations
+        self.outreach_readiness = outreach_readiness or build_project_outreach_readiness_service()
 
     @retry_database_read
-    async def execute_read(self, project_id: str, name: str, arguments: dict) -> dict:
+    async def execute_read(
+        self, project_id: str, name: str, arguments: dict, *, organization_id: str = "",
+        delegation: dict | None = None,
+    ) -> dict:
         model = READ_MODELS.get(name)
         if model is None:
             raise ValueError("不允许调用这个只读工具")
         args = model.model_validate(arguments)
+        if name == "get_backlink_readiness":
+            return await BacklinksInitialization(self).read(
+                project_id, organization_id, delegation,
+            )
+        if name in {"list_project_tasks", "get_project_task"}:
+            return await read_tasks(self, project_id, organization_id, delegation, arguments)
+        if name == "get_backlink_campaign":
+            self._require_service(self.backlinks, name)
+            from app.db.session import session_factory
+            from app.modules.agent.backlinks_campaign import BacklinksCampaign
+            return jsonable_encoder(await BacklinksCampaign(self.backlinks, session_factory, {}).status(
+                project_id, organization_id, delegation, args.consent_id,
+            ))
+        if name in DRAFT_READ_MODELS:
+            self._require_service(self.backlinks, name)
+            return await BacklinksDrafts(self.backlinks).read(
+                project_id, organization_id, delegation, name, arguments,
+            )
+        if name in BACKLINK_READ_MODELS:
+            self._require_service(self.backlinks, name)
+            return await self.backlinks.read(
+                project_id, organization_id, name, args.model_dump(mode="json", exclude_none=True),
+                **({"delegation": delegation} if delegation is not None else {}),
+            )
         if name == "get_project_profile":
-            project = await self.projects.get(project_id)
+            scope = {"organization_id": organization_id} if organization_id else {}
+            if delegation is not None:
+                self._require_service(self.backlinks, name)
+                resolved = await resolve_delegation(
+                    self.settings, self.backlinks.projects, delegation,
+                    project_id, organization_id,
+                )
+                scope["workspace_id"] = resolved.tenant.workspace_id
+            project = await self.projects.get(
+                project_id, **scope,
+            )
             if project is None:
                 raise LookupError("项目不存在")
             return project.model_dump(mode="json")
@@ -537,13 +742,106 @@ class ToolRegistry:
 
     @retry_database_read
     async def prepare_write(
-        self, project_id: str, name: str, arguments: dict, operation_id: str
+        self, project_id: str, name: str, arguments: dict, operation_id: str,
+        *, organization_id: str = "", delegation: dict | None = None,
+        run_id: str | None = None,
     ) -> PreparedWrite:
         model = WRITE_MODELS.get(name)
         if model is None:
             raise ValueError("不允许调用这个写工具")
         parsed = model.model_validate(arguments)
         validated = parsed.model_dump(mode="json")
+        if name == "initialize_backlink_project":
+            before = await BacklinksInitialization(self).prepare(
+                project_id, organization_id, delegation,
+            )
+            validated["operation_id"] = operation_id
+            return PreparedWrite(validated, before, action_hash(name, validated, before), 0.0)
+        if name == "cancel_project_task":
+            permission = {"article": "content:write", "audit": "projects:write", "agent": "backlinks:write"}.get(validated["kind"])
+            if permission is None:
+                raise ValueError("TASK_CANCELLATION_UNSUPPORTED")
+            await task_context(self, project_id, organization_id, delegation, permission)
+            await read_tasks(self, project_id, organization_id, delegation, validated)
+            validated["operation_id"] = operation_id
+            return PreparedWrite(validated, {}, action_hash(name, validated, {}), 0.0)
+        if name == "send_backlink_drafts":
+            self._require_service(self.backlinks, name)
+            from app.db.session import session_factory
+            await BacklinksChatSend(self.backlinks, session_factory, {}).authorize(
+                project_id, organization_id, delegation, run_id,
+            )
+            validated["operation_id"] = operation_id
+            before = {"source_run_id": run_id}
+            return PreparedWrite(validated, before, action_hash(name, validated, before), 0.0)
+        if name == "start_backlink_campaign":
+            self._require_service(self.backlinks, name)
+            await self.backlinks.resolve_write_context(
+                project_id, organization_id, delegation, write=True,
+            )
+            validated["operation_id"] = operation_id
+            before = {}
+            if validated.get("consent_id") is None:
+                from app.db.session import session_factory
+                from app.modules.agent.backlinks_chat_campaign import explicit_campaign
+                await BacklinksChatSend(self.backlinks, session_factory, {}).authorize(
+                    project_id, organization_id, delegation, run_id, command_check=explicit_campaign,
+                )
+                before = {"source_run_id": run_id}
+            return PreparedWrite(validated, before, action_hash(name, validated, before), 0.0)
+        if name in PIPELINE_WRITE_MODELS:
+            self._require_service(self.backlinks, name)
+            await resolve_delegation(
+                self.settings, self.backlinks.projects, delegation,
+                project_id, organization_id, write=True,
+            )
+            if name == "start_backlink_recommendations" and validated["mode"] == "initial":
+                feed = await self.backlinks.read(
+                    project_id, organization_id, "list_backlink_recommendations",
+                    {"limit": 1}, delegation=delegation,
+                )
+                if feed["data"].get("latestGeneration") is not None:
+                    raise ValueError("BACKLINKS_GENERATION_EXISTS: inspect the existing generation")
+            validated["operation_id"] = operation_id
+            return PreparedWrite(validated, {}, action_hash(name, validated, {}), 0.0)
+        if name == "submit_backlink_email":
+            self._require_service(self.backlinks, name)
+            command = await BacklinksSender(
+                BacklinksDrafts(self.backlinks), self.send_confirmations,
+            ).authorized_command(
+                project_id, organization_id, delegation, validated, operation_id,
+            )
+            validated["operation_id"] = operation_id
+            before = {"confirmation_hash": confirmation_fingerprint(command)}
+            return PreparedWrite(validated, before, action_hash(name, validated, before), 0.0)
+        if name == "preflight_backlink_email":
+            self._require_service(self.backlinks, name)
+            await resolve_delegation(
+                self.settings, self.backlinks.projects, delegation,
+                project_id, organization_id, write=True,
+            )
+            validated["operation_id"] = operation_id
+            return PreparedWrite(validated, {}, action_hash(name, validated, {}), 0.0)
+        if name == "create_backlink_draft":
+            self._require_service(self.backlinks, name)
+            await resolve_delegation(
+                self.settings, self.backlinks.projects, delegation,
+                project_id, organization_id, write=True,
+            )
+            detail = await self.backlinks.read(
+                project_id, organization_id, "get_backlink_opportunity",
+                {"opportunityId": validated["opportunityId"]}, delegation=delegation,
+            )
+            item = detail["data"]["item"]
+            action = item.get("primaryNextAction") or {}
+            if (
+                item.get("draftId") is not None
+                or action.get("kind") != "CREATE_EMAIL_DRAFT"
+                or action.get("enabled") is not True
+            ):
+                raise ValueError("BACKLINKS_DRAFT_NOT_READY: inspect existing draft or blockers")
+            validated["operation_id"] = operation_id
+            return PreparedWrite(validated, {}, action_hash(name, validated, {}), 0.0)
         project = await self.projects.get(project_id)
         if project is None:
             raise LookupError("项目不存在")
@@ -575,7 +873,83 @@ class ToolRegistry:
             TOOL_DEFINITIONS[name].estimated_cost,
         )
 
-    async def execute_write(self, project_id: str, name: str, arguments: dict, before: dict, expected_hash: str) -> dict:
+    async def execute_write(
+        self, project_id: str, name: str, arguments: dict, before: dict, expected_hash: str,
+        *, organization_id: str = "", delegation: dict | None = None,
+        run_id: str | None = None,
+    ) -> dict:
+        if name == "initialize_backlink_project":
+            if action_hash(name, arguments, before) != expected_hash:
+                raise ValueError("BACKLINKS_INITIALIZATION_PARAMETERS_CHANGED")
+            return await BacklinksInitialization(self).execute(
+                project_id, organization_id, delegation, before,
+            )
+        if name == "cancel_project_task":
+            if action_hash(name, arguments, before) != expected_hash:
+                raise ValueError("TASK_PARAMETERS_CHANGED")
+            return await cancel_task(
+                self, project_id, organization_id, delegation, arguments, run_id,
+            )
+        if name == "send_backlink_drafts":
+            self._require_service(self.backlinks, name)
+            if (
+                not run_id or before.get("source_run_id") != run_id
+                or action_hash(name, arguments, before) != expected_hash
+            ):
+                raise ValueError("BACKLINKS_CHAT_SEND_PARAMETERS_CHANGED")
+            from app.db.session import session_factory
+            from app.modules.agent.service import build_agent_service
+            return await BacklinksChatSend(
+                self.backlinks, session_factory, build_agent_service().limits,
+            ).submit(project_id, organization_id, delegation, run_id, {
+                key: value for key, value in arguments.items() if key != "operation_id"
+            })
+        if name == "start_backlink_campaign":
+            self._require_service(self.backlinks, name)
+            if action_hash(name, arguments, before) != expected_hash:
+                raise ValueError("BACKLINKS_CAMPAIGN_PARAMETERS_CHANGED")
+            if arguments.get("consent_id") is None and (
+                not run_id or before.get("source_run_id") != run_id
+            ):
+                raise ValueError("BACKLINKS_CAMPAIGN_SOURCE_CHANGED")
+            from app.db.session import session_factory
+            from app.modules.agent.backlinks_campaign import BacklinksCampaign
+            from app.modules.agent.service import build_agent_service
+            return await BacklinksCampaign(
+                self.backlinks, session_factory, build_agent_service().limits,
+            ).start(project_id, organization_id, delegation, {
+                key: value for key, value in arguments.items() if key != "operation_id"
+            }, **({"run_id": run_id} if arguments.get("consent_id") is None else {}))
+        if name in PIPELINE_WRITE_MODELS:
+            self._require_service(self.backlinks, name)
+            if action_hash(name, arguments, before) != expected_hash:
+                raise ValueError("BACKLINKS_PIPELINE_PARAMETERS_CHANGED")
+            return await BacklinksPipeline(BacklinksDrafts(self.backlinks)).execute(
+                project_id, organization_id, delegation, name, arguments,
+            )
+        if name == "submit_backlink_email":
+            self._require_service(self.backlinks, name)
+            if action_hash(name, arguments, before) != expected_hash:
+                raise ValueError("BACKLINKS_SEND_PARAMETERS_CHANGED")
+            return await BacklinksSender(
+                BacklinksDrafts(self.backlinks), self.send_confirmations,
+            ).submit(
+                project_id, organization_id, delegation, arguments, before["confirmation_hash"],
+            )
+        if name == "preflight_backlink_email":
+            self._require_service(self.backlinks, name)
+            if action_hash(name, arguments, before) != expected_hash:
+                raise ValueError("BACKLINKS_PREFLIGHT_PARAMETERS_CHANGED")
+            return await preflight(
+                BacklinksDrafts(self.backlinks), project_id, organization_id, delegation, arguments,
+            )
+        if name == "create_backlink_draft":
+            self._require_service(self.backlinks, name)
+            if action_hash(name, arguments, before) != expected_hash:
+                raise ValueError("BACKLINKS_DRAFT_PARAMETERS_CHANGED")
+            return await BacklinksDrafts(self.backlinks).create(
+                project_id, organization_id, delegation, arguments,
+            )
         current = await self._get_project(project_id)
         if current is None:
             raise LookupError("项目不存在")

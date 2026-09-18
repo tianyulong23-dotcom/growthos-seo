@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { ReplyAssistant } from "./reply-assistant"
 import {
   CheckCircle2,
   ChevronDown,
@@ -19,6 +20,7 @@ import {
 import { isOutreachOffline } from "@/features/outreach/shared/outreach-network-state"
 import { OutreachStandardStateView } from "@/features/outreach/shared/outreach-standard-state"
 import { getRuntimeStatus } from "@/runtime-status"
+import { isMailSyncWorkerRunning } from "./sync-worker-status"
 
 import {
   confirmReplyMatchCandidate,
@@ -116,7 +118,7 @@ function StateNotice({
 function MailBody({ message }: { message: MailThread["messages"][number] }) {
   if (message.body.plainText) {
     return (
-      <pre className="mt-3 font-sans text-sm leading-6 break-words whitespace-pre-wrap">
+      <pre className="mail-message-body mt-3 font-sans text-sm leading-6 break-words whitespace-pre-wrap">
         {message.body.plainText}
       </pre>
     )
@@ -218,9 +220,12 @@ export function MailCenter({
     null
   )
   const [syncStatusState, setSyncStatusState] = useState<LoadState>("loading")
-  const [businessConsumersRunning, setBusinessConsumersRunning] = useState<
+  const [platformConsumersRunning, setBusinessConsumersRunning] = useState<
     boolean | null
   >(null)
+  const businessConsumersRunning = isMailSyncWorkerRunning(
+    syncStatus, platformConsumersRunning
+  )
   const syncOperational = businessConsumersRunning === true && gmailSyncReady
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
     null
@@ -405,6 +410,33 @@ export function MailCenter({
       backlinksProjectQueries.invalidate(listKey)
     }
   }, [filter, listKey, websiteProjectKey])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    async function refreshSavedMail() {
+      try {
+        const response = await listReplyMailMessages(websiteProjectKey, {
+          matchStatus: filter === "ALL" ? undefined : filter, limit: 25,
+        }, controller.signal)
+        if (controller.signal.aborted) return
+        // Preserve the selected conversation and previously loaded older pages.
+        setItems((previous) => {
+          const updated = new Map(response.items.map((item) => [item.id, item]))
+          return [...response.items, ...previous.filter((item) => !updated.has(item.id))]
+        })
+        if (response.items.length) setListState("ready")
+        await loadSyncStatus()
+      } catch {
+        // Existing correspondence remains readable during a transient refresh failure.
+      } finally {
+        if (!controller.signal.aborted)
+          timer = setTimeout(() => void refreshSavedMail(), 15_000)
+      }
+    }
+    timer = setTimeout(() => void refreshSavedMail(), 15_000)
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [filter, websiteProjectKey, loadSyncStatus])
 
   const changeFilter = (value: MatchFilter) => {
     if (value === filter) return
@@ -671,8 +703,8 @@ export function MailCenter({
   }
 
   return (
-    <section aria-labelledby="mail-center-title">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+    <section className="mail-correspondence" aria-labelledby="mail-center-title">
+      <div className="mail-view-toolbar flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <Mail className="size-5 text-primary" />
@@ -824,8 +856,8 @@ export function MailCenter({
         </div>
       </details>
 
-      <div className="mt-4 grid min-h-[34rem] overflow-hidden rounded-lg border border-border/80 shadow-sm lg:grid-cols-[minmax(18rem,0.78fr)_minmax(0,1.55fr)]">
-        <div className="min-w-0 border-b lg:border-r lg:border-b-0">
+      <div className="mail-split-view mt-4 grid min-h-[34rem] overflow-hidden rounded-lg border border-border/80 shadow-sm lg:grid-cols-[minmax(18rem,0.78fr)_minmax(0,1.55fr)]">
+        <div className="mail-message-list min-w-0 border-b lg:border-r lg:border-b-0">
           <div className="flex h-12 items-center justify-between border-b bg-muted/20 px-3">
             <div className="min-w-0">
               <span className="text-xs font-medium text-muted-foreground">
@@ -866,7 +898,7 @@ export function MailCenter({
                 {items.map((item) => (
                   <button
                     key={item.id}
-                    className={`block min-h-24 w-full border-l-[3px] px-3 py-3 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset ${
+                    className={`mail-message-item block min-h-24 w-full border-l-[3px] px-3 py-3 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset ${
                       selectedMessageId === item.id
                         ? "border-l-primary bg-primary/5"
                         : "border-l-transparent"
@@ -877,7 +909,7 @@ export function MailCenter({
                     }
                     onClick={() => void openMessage(item)}
                   >
-                    <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="mail-message-subject flex min-w-0 items-start justify-between gap-3">
                       <span className="truncate text-sm font-medium">
                         {item.subject || "（无主题）"}
                       </span>
@@ -953,10 +985,10 @@ export function MailCenter({
           )}
         </div>
 
-        <div className="min-w-0">
+        <div className="mail-reader min-w-0">
           {threadState === "ready" && thread ? (
             <div>
-              <header className="border-b px-4 py-3">
+              <header className="mail-reader-header border-b px-4 py-3">
                 <div className="min-w-0">
                   <div className="text-sm font-semibold">
                     {selectedMessage?.subject || "（无主题）"}
@@ -971,9 +1003,18 @@ export function MailCenter({
                 </div>
               </header>
 
+              {selectedMessage?.direction === "INBOUND" && (
+                <ReplyAssistant
+                  websiteProjectKey={websiteProjectKey}
+                  messageId={selectedMessage.id}
+                  messageVersion={selectedMessage.version}
+                  connectionId={connectionId}
+                />
+              )}
+
               <div className="divide-y">
                 {thread.messages.map((message) => (
-                  <article className="px-4 py-4" key={message.id}>
+                  <article className="mail-message px-4 py-4" key={message.id}>
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0 text-xs">
                         <div className="font-medium">
@@ -1226,7 +1267,7 @@ export function MailCenter({
               ) : null}
             </div>
           ) : threadState === "empty" && selectedMessageId === null ? (
-            <div className="flex min-h-72 flex-col items-center justify-center px-4 text-center">
+            <div className="mail-reader-empty flex min-h-72 flex-col items-center justify-center px-4 text-center">
               <Mail className="mb-3 size-6 text-muted-foreground" />
               <div className="text-sm font-medium">选择一封邮件查看对话</div>
               <div className="mt-1 text-xs text-muted-foreground">

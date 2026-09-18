@@ -42,6 +42,20 @@ class FakeSettingsService:
         return self.record
 
 
+def test_model_settings_use_run_organization_without_default_fallback(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    service = AsyncMock()
+    service.effective_record_for_organization.return_value = FakeSettingsService().record
+    monkeypatch.setattr(model_gateway, "build_ai_settings_service", lambda: service)
+
+    record = asyncio.run(ModelGateway(organization_id="run-org")._effective_record())
+
+    assert record.model == "test-model"
+    service.effective_record_for_organization.assert_awaited_once_with("run-org")
+    service.effective_record.assert_not_awaited()
+
+
 class FakeHTTPResponse:
     def __init__(self, body: bytes = b"", lines: list[bytes] | None = None) -> None:
         self.body = body
@@ -525,6 +539,26 @@ def test_system_prompt_separates_direct_and_planned_article_generation() -> None
 def test_system_prompt_does_not_treat_read_requests_as_write_permission() -> None:
     assert "latest request explicitly asks" in SYSTEM_PROMPT
     assert "Reading, checking, analysing" in SYSTEM_PROMPT
+
+
+def test_email_read_prompt_reports_paused_sync_and_send_blockers() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+
+    assert "killSwitchOpen=true means the sync gate permits execution" in prompt
+    assert "killSwitchOpen=false as sync blocked" in prompt
+    assert "WAITING_FOR_ACCEPTED_SEND means waiting for an accepted send" in prompt
+    assert "Connection readiness does not establish send readiness" in prompt
+    assert "readiness.send.ready=false and its blockers explicitly" in prompt
+
+
+def test_email_read_prompt_reuses_latest_evidence_without_verification_loop() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+
+    assert "latest returned evidence and timestamp, not an older tool result" in prompt
+    assert "do not repeat identical reads" in prompt
+    assert "unless the user requests a refresh" in prompt
+    assert "a relevant mutation occurred, or evidence is missing" in prompt
+    assert "answer without another verification loop" in prompt
 
 
 def test_gateway_records_usage_without_putting_key_in_messages(monkeypatch: Any) -> None:

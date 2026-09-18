@@ -235,8 +235,7 @@ const setConnectionAndLock = async (
   await transaction.query(
     `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
     [
-      `gmail-send:${input.organizationId}:${input.gmailConnectionId}:`
-      + input.websiteProjectId,
+      `gmail-send:${input.organizationId}:${input.gmailConnectionId}`,
     ],
   );
 };

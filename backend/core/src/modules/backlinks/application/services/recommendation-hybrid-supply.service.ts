@@ -20,6 +20,7 @@ export type RecommendationHybridSupplyFacts = Readonly<{
   admittedCount: number;
   dataForSeoCount: number;
   discoveryStarted?: boolean;
+  libraryBatchCounts?: Readonly<Record<number, number>>;
 }>;
 
 export type RecommendationHybridSupplyOutcome = Readonly<{
@@ -28,16 +29,24 @@ export type RecommendationHybridSupplyOutcome = Readonly<{
   reason?: string;
 }>;
 
-export function resourceSupplyDeficits(facts: RecommendationHybridSupplyFacts): readonly number[] {
+function resourceSupplyDemands(facts: RecommendationHybridSupplyFacts) {
   if (facts.finalized) return [];
   if (!Number.isSafeInteger(facts.admittedCount) || facts.admittedCount < 0 || facts.admittedCount > 1_000
     || !Number.isSafeInteger(facts.dataForSeoCount) || facts.dataForSeoCount < 0
     || facts.dataForSeoCount > facts.admittedCount) throw new TypeError("Hybrid supply counts are invalid");
   if (facts.admittedCount === 1_000) return [];
   const dfs = facts.dataForSeoCount;
-  return dfs < 200
-    ? [100 - Math.ceil(dfs / 2), 100 - Math.floor(dfs / 2)].filter((value) => value > 0)
-    : [(100 - dfs % 100) % 100].filter((value) => value > 0);
+  const limits = dfs < 200
+    ? [100 - Math.ceil(dfs / 2), 100 - Math.floor(dfs / 2)]
+    : [(100 - dfs % 100) % 100];
+  return limits.map((limit, index) => {
+    const ordinal = dfs < 200 ? index + 1 : Math.ceil(dfs / 100);
+    return { ordinal, limit: Math.max(0, limit - (facts.libraryBatchCounts?.[ordinal] ?? 0)) };
+  }).filter(({ limit }) => limit > 0);
+}
+
+export function resourceSupplyDeficits(facts: RecommendationHybridSupplyFacts): readonly number[] {
+  return resourceSupplyDemands(facts).map(({ limit }) => limit);
 }
 
 export function createRecommendationHybridSupplyService(options: Readonly<{
@@ -50,16 +59,16 @@ export function createRecommendationHybridSupplyService(options: Readonly<{
     async prepare(facts: RecommendationHybridSupplyFacts): Promise<RecommendationHybridSupplyOutcome> {
       if (facts.finalized) return { status: "ALREADY_FINALIZED", admittedCount: 0 };
       // Supply requirements only. Canonical batch selection remains the finalizer's job.
-      const deficits = resourceSupplyDeficits(facts);
+      const demands = resourceSupplyDemands(facts);
       let capacity = 1_000 - facts.admittedCount;
-      if (capacity === 0 || deficits.every((value) => value === 0)) {
+      if (capacity === 0 || demands.length === 0) {
         return { status: "NOT_NEEDED", admittedCount: 0 };
       }
       let selected: (ResourceLibraryPublisher & { releaseBatchOrdinal: number })[] = [];
       try {
         const rating = await options.getRating(facts.projectDomain);
-        for (const [index, deficit] of deficits.entries()) {
-          const limit = Math.min(deficit, capacity);
+        for (const demand of demands) {
+          const limit = Math.min(demand.limit, capacity);
           if (limit === 0) continue;
           const matches = await options.library.match({
             projectDomain: facts.projectDomain,
@@ -69,11 +78,8 @@ export function createRecommendationHybridSupplyService(options: Readonly<{
             excludedDomains: [...facts.excludedDomains, ...selected.map((row) => row.canonicalDomain)],
             limit,
           });
-          const releaseBatchOrdinal = facts.dataForSeoCount < 200
-            ? index + (Math.ceil(facts.dataForSeoCount / 2) === 100 ? 2 : 1)
-            : Math.ceil(facts.dataForSeoCount / 100);
           selected = [...selected, ...matches.map((publisher) => ({
-            ...publisher, releaseBatchOrdinal,
+            ...publisher, releaseBatchOrdinal: demand.ordinal,
           }))];
           capacity -= matches.length;
         }

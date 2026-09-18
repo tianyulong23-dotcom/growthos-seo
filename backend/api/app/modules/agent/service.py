@@ -67,7 +67,7 @@ class AgentWorkflowState(StrEnum):
 
 
 class WorkflowController(Protocol):
-    async def start(self, run_id: str, limits: dict[str, Any]) -> None: ...
+    async def start(self, run_id: str, limits: dict[str, Any], *, workflow_id: str | None = None) -> None: ...
     async def cancel(self, workflow_id: str) -> None: ...
     async def status(self, workflow_id: str) -> AgentWorkflowState: ...
 
@@ -76,7 +76,7 @@ class TemporalAgentController:
     def __init__(self, task_queue: str) -> None:
         self.task_queue = task_queue
 
-    async def start(self, run_id: str, limits: dict[str, Any]) -> None:
+    async def start(self, run_id: str, limits: dict[str, Any], *, workflow_id: str | None = None) -> None:
         client = await connect_temporal()
         cleanup_grace = max(
             int(limits["model_timeout_seconds"]),
@@ -85,7 +85,7 @@ class TemporalAgentController:
         try:
             await client.start_workflow(
                 "AgentWorkflow", {"run_id": run_id, "limits": limits},
-                id=f"agent:{run_id}", task_queue=self.task_queue,
+                id=workflow_id or f"agent:{run_id}", task_queue=self.task_queue,
                 run_timeout=timedelta(
                     seconds=int(limits["run_timeout_seconds"]) + cleanup_grace
                 ),
@@ -121,11 +121,20 @@ class TemporalAgentController:
 
 class AgentService:
     def __init__(self, settings: Settings, repository: AgentRepository, controller: WorkflowController) -> None:
+        if settings.app_env != "production" and settings.platform_local_development_auth_enabled:
+            # Match the explicitly enabled local platform identity without mutating shared settings.
+            settings = settings.model_copy(update={
+                "default_organization_id": settings.local_product_organization_id,
+                "agent_actor_id": settings.local_product_user_id,
+            })
         self.settings, self.repository, self.controller = settings, repository, controller
+        self.delegation: dict | None = None
 
     @property
     def limits(self) -> dict[str, Any]:
         return {
+            **({"backlinks_delegation": self.delegation} if self.delegation else {}),
+            "background_task_handoff": True,
             "model_rounds": self.settings.agent_max_model_rounds,
             "consecutive_failures": self.settings.agent_max_consecutive_failures,
             "model_cost": self.settings.agent_max_model_cost_usd,
@@ -566,9 +575,10 @@ class AgentService:
     async def reject(self, project_id: str, action_id: str) -> AgentActionResponse:
         return await self._legacy_action_conflict(project_id, action_id)
 
-    async def dispatch_queued(self) -> int:
+    async def dispatch_queued(self, *, materialize_system_triggers: bool = True) -> int:
         count = 0
-        await self.repository.materialize_pending_system_triggers(self.limits)
+        if materialize_system_triggers:
+            await self.repository.materialize_pending_system_triggers(self.limits)
         for run in await self.repository.list_pending_dispatches():
             try:
                 if await self._start(run):
@@ -639,7 +649,8 @@ class AgentService:
                 if pending_run is None:
                     return False
                 await self.controller.start(
-                    pending_run.id, dict(pending_run.limits_json)
+                    pending_run.id, dict(pending_run.limits_json),
+                    workflow_id=pending_run.workflow_id,
                 )
                 return True
         except Exception as exc:

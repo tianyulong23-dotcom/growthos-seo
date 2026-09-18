@@ -135,6 +135,7 @@ async def _cleanup(
 ) -> None:
     async with sessions() as session, session.begin():
         for table in (
+            "public.agent_system_triggers",
             "platform.project_outbox_events",
             "platform.project_audit_events",
             "platform.promotion_target_versions",
@@ -520,6 +521,45 @@ def test_projection_is_transactional_idempotent_and_retries_exact_event() -> Non
             assert project["context_version"] == 3
             assert project["current_profile_version_id"]
             assert project["current_promotion_target_version_id"]
+
+            # A historical successful projection predates the readiness trigger.
+            async with sessions() as session, session.begin():
+                await session.execute(
+                    text("DELETE FROM public.agent_system_triggers WHERE project_id = :id"),
+                    {"id": project_id},
+                )
+            recovered = await dispatcher.reconcile_ready_project(resolved)
+            repeated = await dispatcher.reconcile_ready_project(resolved)
+            assert recovered == repeated
+            assert recovered.event_id == independent_change.event_id
+            assert len(publisher.calls) == 4
+            async with sessions() as session:
+                assert await session.scalar(text("""
+                    SELECT count(*) FROM public.agent_system_triggers
+                     WHERE project_id = :id AND trigger = 'backlinks_project_ready'
+                       AND status = 'pending' AND trusted_write_tools_json = '[]'::jsonb
+                """), {"id": project_id}) == 1
+            repository = SQLAlchemyProjectRepository(sessions, projector=projector)
+            archived = await repository.set_lifecycle(
+                resolved.tenant.organization_id, resolved.tenant.workspace_id,
+                project_id, 1, "ARCHIVED", "projection-test",
+            )
+            assert archived.lifecycle_version == 2
+            paused_projection = await projector.ensure_projected(resolved)
+            async with sessions() as session:
+                payload = await session.scalar(
+                    text("SELECT payload FROM platform.project_outbox_events WHERE id = :id"),
+                    {"id": paused_projection.event_id},
+                )
+                assert payload["request"]["projectStatus"] == "PAUSED"
+            restored = await repository.set_lifecycle(
+                resolved.tenant.organization_id, resolved.tenant.workspace_id,
+                project_id, 2, "ACTIVE", None,
+            )
+            assert restored.lifecycle_version == 3
+            active_projection = await projector.ensure_projected(resolved)
+            assert active_projection.event_id != paused_projection.event_id
+            assert active_projection.outbox_status == "pending"
         finally:
             await _cleanup(sessions, project_id)
             await engine.dispose()

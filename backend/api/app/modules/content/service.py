@@ -934,10 +934,12 @@ class ContentService:
         article_id: str,
         *,
         organization_id: str | None = None,
+        expected_run_id: str | None = None,
     ) -> ArticleResponse:
         organization_id = organization_id or self.settings.default_organization_id
         result = await self.repository.cancel_article(
-            organization_id, project_id, article_id
+            organization_id, project_id, article_id,
+            **({"expected_run_id": expected_run_id} if expected_run_id is not None else {}),
         )
         if result is None:
             raise ContentNotFoundError

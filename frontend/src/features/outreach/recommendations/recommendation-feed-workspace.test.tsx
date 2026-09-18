@@ -309,6 +309,55 @@ function renderWorkspace(feedResponse: RecommendationFeedResponse = response, op
 }
 
 describe("RecommendationFeedWorkspace", () => {
+  it.each([
+    ["CONTACT_FORM_ONLY", "仅找到联系表单"],
+    ["COMPLETED_PARTIAL", "联系信息检查未完整完成"],
+    ["MANUAL_REVIEW_REQUIRED", "联系信息需要人工核查"],
+    ["LOGIN_REQUIRED", "需要登录才能查看"],
+    ["UNKNOWN", "联系信息状态待确认"],
+  ])("does not present %s as a completed no-email search", (outcome, label) => {
+    renderWorkspace({
+      ...completedResponse,
+      items: [{
+        ...response.items[0]!,
+        recommended: false,
+        reasons: ["RELEVANCE_EVIDENCE_MISSING"],
+        contact: { email: null, contactPage: null, outcome },
+      }],
+    }, false)
+    expect(screen.getByText(label)).toBeTruthy()
+    expect(screen.getByText("尚未确认与项目的相关性")).toBeTruthy()
+    expect(screen.queryByText("未找到公开邮箱")).toBeNull()
+    expect(screen.queryByText("其他推荐依据")).toBeNull()
+  })
+
+  it("distinguishes historical results from the current unpublished generation", () => {
+    renderWorkspace({
+      ...response,
+      latestGeneration: { ...response.latestGeneration, contactPreparation: "IN_PROGRESS" },
+    }, false)
+    const status = screen.getByRole("status", { name: "本轮推荐发布状态" })
+    expect(within(status).getByText(/第 3 轮尚未发布/)).toBeTruthy()
+    expect(within(status).getByText(/下方仍是历史已发布结果/)).toBeTruthy()
+    expect(screen.getByText("候选网站")).toBeTruthy()
+    expect(screen.queryByText("已入推荐池")).toBeNull()
+    expect(generateRecommendationPool).not.toHaveBeenCalled()
+  })
+
+  it("does not label partially released current results as history", () => {
+    renderWorkspace({
+      ...response,
+      latestGeneration: { ...response.latestGeneration, releasedCount: 1 },
+    }, false)
+    expect(screen.queryByRole("status", { name: "本轮推荐发布状态" })).toBeNull()
+  })
+
+  it("does not claim history exists before the first publication", () => {
+    renderWorkspace({ ...response, items: [], totalCount: 0 }, false)
+    expect(screen.getByRole("status", { name: "本轮推荐发布状态" })).toBeTruthy()
+    expect(screen.queryByText(/下方仍是历史已发布结果/)).toBeNull()
+  })
+
   it("shows an ungenerated project without errors, indefinite loading or automatic work", () => {
     renderWorkspace({
       ...response, items: [], latestGeneration: null, totalCount: 0, nextCursor: null,
@@ -726,6 +775,40 @@ describe("RecommendationFeedWorkspace", () => {
     )
     expect(invalidateRecommendationFeed).toHaveBeenCalledWith("project-a")
   })
+
+  it.each([
+    ["CONTACT_FORM_ONLY", "打开联系表单"],
+    ["LOGIN_REQUIRED", "打开登录受限页面"],
+    ["CAPTCHA_OR_BOT_CHALLENGE", "打开验证页面"],
+    ["ACCESS_DENIED", "打开受限页面"],
+  ])("links the observed page for %s", (outcome, label) => {
+    renderWorkspace({
+      ...completedResponse,
+      items: [{
+        ...response.items[0],
+        contact: { email: null, contactPage: "https://publisher.example/fale-conosco/", outcome },
+      }],
+    }, false)
+    const link = screen.getByRole("link", { name: label })
+    expect(link.getAttribute("href")).toBe("https://publisher.example/fale-conosco/")
+    expect(link.getAttribute("target")).toBe("_blank")
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer")
+  })
+
+  it.each([null, "javascript:alert(1)", "https://user:secret@publisher.example/login"])(
+    "does not invent a form URL when evidence is missing or unsafe: %s", contactPage => {
+      renderWorkspace({
+        ...completedResponse,
+        items: [{
+          ...response.items[0],
+          contact: { email: null, contactPage, outcome: "CONTACT_FORM_ONLY" },
+        }],
+      }, false)
+      expect(screen.queryByRole("link", { name: "打开联系表单" })).toBeNull()
+      expect(screen.getByRole("link", { name: "访问网站" }).getAttribute("href"))
+        .toBe(response.items[0].displayUrl)
+    }
+  )
 
   it("keeps non-retryable failed generations fail-closed", () => {
     renderWorkspace({

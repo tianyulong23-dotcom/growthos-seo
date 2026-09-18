@@ -147,6 +147,7 @@ let streamError: (() => void) | undefined
 let closeStream: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
+  sessionStorage.clear()
   const current = detail()
   streamEvent = undefined
   streamError = undefined
@@ -173,6 +174,46 @@ afterEach(() => {
   cleanup()
   vi.useRealTimers()
   vi.clearAllMocks()
+})
+
+describe("background conversation ownership", () => {
+  it("can open an independent conversation while the old run continues", async () => {
+    const { result } = renderHook(() => useAgentConversation("project-1"))
+    await waitFor(() => expect(result.current.detail?.run?.id).toBe("run-1"))
+    const oldEvent = streamEvent
+    const independent = { ...detail(), conversation: { ...detail().conversation, id: "independent" }, run: null }
+    agentApi.createAgentConversation.mockResolvedValueOnce(independent.conversation)
+    agentApi.getAgentConversation.mockResolvedValueOnce(independent)
+    await act(async () => { await result.current.create() })
+    act(() => oldEvent?.({ type: "snapshot", detail: detail(), eventId: "late" }))
+    expect(result.current.detail?.conversation.id).toBe("independent")
+    expect(agentApi.cancelAgentRun).not.toHaveBeenCalled()
+  })
+
+  it("ignores a late history selection from a different project", async () => {
+    const { result, rerender } = renderHook(({ id }) => useAgentConversation(id), { initialProps: { id: "project-1" } })
+    await waitFor(() => expect(result.current.detail).not.toBeNull())
+    let resolveOld!: (value: AgentConversationDetail) => void
+    agentApi.getAgentConversation.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve }))
+    let selecting!: Promise<void>
+    act(() => { selecting = result.current.selectConversation("old-history") })
+    const other = { ...detail(), conversation: { ...detail().conversation, id: "other", projectId: "project-2" }, run: null }
+    agentApi.listAgentConversations.mockResolvedValueOnce([other.conversation])
+    agentApi.getAgentConversation.mockResolvedValueOnce(other)
+    rerender({ id: "project-2" })
+    await waitFor(() => expect(result.current.detail?.conversation.id).toBe("other"))
+    await act(async () => { resolveOld(detail()); await selecting })
+    expect(result.current.detail?.conversation.projectId).toBe("project-2")
+    expect(agentApi.cancelAgentRun).not.toHaveBeenCalled()
+  })
+
+  it("restores an explicit task conversation instead of the latest conversation", async () => {
+    const restored = { ...detail(), conversation: { ...detail().conversation, id: "task-conversation" } }
+    agentApi.getAgentConversation.mockResolvedValueOnce(restored)
+    const { result } = renderHook(() => useAgentConversation("project-1", undefined, "task-conversation"))
+    await waitFor(() => expect(result.current.detail?.conversation.id).toBe("task-conversation"))
+    expect(agentApi.getAgentConversation).toHaveBeenCalledWith("project-1", "task-conversation")
+  })
 })
 
 describe("mergeAgentStreamEvent", () => {
@@ -798,6 +839,61 @@ describe("useAgentConversation pending run", () => {
 })
 
 describe("useAgentConversation stream recovery", () => {
+  it("preserves streaming content during watchdog reads and stops reads on unmount", async () => {
+    const idle = detail()
+    idle.run = { ...idle.run!, status: "completed" }
+    agentApi.getAgentConversation.mockResolvedValue(idle)
+    const { result, unmount } = renderHook(() => useAgentConversation("project-1"))
+    await waitFor(() => expect(result.current.detail?.run?.status).toBe("completed"))
+    vi.useFakeTimers()
+    agentApi.getAgentConversation.mockResolvedValue(detail())
+    act(() => {
+      streamEvent?.({ type: "snapshot", detail: detail(), eventId: "active" })
+      streamEvent?.(messageStart())
+      streamEvent?.(messageUpdate(
+        { kind: "text_delta", delta: "正在检查本批任务" },
+        { eventId: "2-0", eventKey: "run-1:final:update:1", sequence: 2 }
+      ))
+    })
+    const streaming = result.current.detail?.runtime?.messages.at(-1)
+    expect(streaming?.status).toBe("streaming")
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(result.current.detail?.runtime?.messages.at(-1)).toEqual(streaming)
+    const reads = agentApi.getAgentConversation.mock.calls.length
+    unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+    expect(agentApi.getAgentConversation).toHaveBeenCalledTimes(reads)
+  })
+
+  it("reconciles a terminal run even when SSE stays connected but misses its end event", async () => {
+    const idle = detail()
+    idle.run = { ...idle.run!, status: "completed" }
+    agentApi.getAgentConversation.mockResolvedValue(idle)
+    const { result } = renderHook(() => useAgentConversation("project-1"))
+    await waitFor(() => expect(result.current.detail?.run?.status).toBe("completed"))
+    vi.useFakeTimers()
+    act(() => {
+      streamEvent?.({ type: "snapshot", detail: detail(), eventId: "active" })
+      streamEvent?.(messageStart())
+    })
+    const failed = detail()
+    failed.run = { ...failed.run!, status: "failed", errorCode: "write_not_explicitly_requested" }
+    failed.messages.push({
+      id: "failure-reply", role: "assistant", runId: "run-1",
+      content: "授权校验失败", metadata: {}, sequence: 2,
+      createdAt: "2026-07-31T08:01:00Z",
+    })
+    agentApi.getAgentConversation.mockResolvedValue(failed)
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(result.current.detail?.run?.status).toBe("failed")
+    expect(result.current.detail?.messages.at(-1)?.content).toBe("授权校验失败")
+    expect(result.current.detail?.messages.some((message) => message.streaming)).toBe(false)
+    const reads = agentApi.getAgentConversation.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+    expect(agentApi.getAgentConversation).toHaveBeenCalledTimes(reads)
+    expect(closeStream).not.toHaveBeenCalled()
+  })
+
   it("reconciles an active onboarding timeline while SSE remains healthy", async () => {
     const runningDetail = { ...detail(), run: null }
     const completedTimeline = [

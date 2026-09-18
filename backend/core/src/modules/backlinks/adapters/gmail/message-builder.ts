@@ -56,6 +56,8 @@ export type GmailMimeBuildInput = Readonly<{
   rfcMessageId: string;
   subject: string;
   bodyText: string;
+  inReplyTo?: string;
+  references?: readonly string[];
 }>;
 
 export type GmailMimeMessage = Readonly<{
@@ -81,6 +83,8 @@ type MailComposerOptions = {
   messageId: string;
   subject: string;
   text: string;
+  inReplyTo?: string;
+  references?: string[];
 };
 
 type MailComposerMessage = {
@@ -249,6 +253,10 @@ export async function buildGmailMimeMessage(
     messageId: normalizeMessageId(input.rfcMessageId),
     subject: normalizeSubject(input.subject),
     text: normalizeBody(input.bodyText),
+    ...(input.inReplyTo === undefined ? {} : {
+      inReplyTo: normalizeMessageId(input.inReplyTo),
+      references: (input.references ?? []).map(normalizeMessageId),
+    }),
   } as const;
   const options: MailComposerOptions = replyToAddress === null
     ? baseOptions

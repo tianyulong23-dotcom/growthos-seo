@@ -112,6 +112,27 @@ describe("BL-AI-068 SafeFetch adapter", () => {
     });
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it("does not let one stalled address consume the timeout for every approved address", async () => {
+    let firstSignal: AbortSignal | undefined;
+    const transport = vi.fn<SafeHttpTransport>().mockImplementation(async ({ address, signal }) => {
+      if (address.address === "8.8.8.8") {
+        firstSignal = signal;
+        return new Promise((_resolve, reject) => signal.addEventListener(
+          "abort", () => reject(new Error("aborted stalled address")), { once: true },
+        ));
+      }
+      return reply();
+    });
+    const result = await new SafeFetchAdapter({
+      timeoutMs: 200, transport,
+      resolver: async () => [
+        { address: "8.8.8.8", family: 4 }, { address: "1.1.1.1", family: 4 },
+      ],
+    }).fetch(request);
+    expect(result.status).toBe(200);
+    expect(firstSignal?.aborted).toBe(true);
+    expect(result.resolvedIps).toEqual(["8.8.8.8", "1.1.1.1"]);
+  });
   it("enforces maxRedirects and total timeout", async () => {
     const redirect = vi.fn<SafeHttpTransport>().mockResolvedValue(
       reply({ status: 302, location: "/again" }),

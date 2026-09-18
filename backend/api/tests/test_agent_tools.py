@@ -875,6 +875,15 @@ def test_state_changing_tools_invalidate_remaining_calls() -> None:
     }
 
     assert invalidating == {
+        "initialize_backlink_project",
+        "cancel_project_task",
+        "start_backlink_campaign",
+        "start_backlink_recommendations",
+        "join_backlink_recommendations",
+        "create_backlink_drafts",
+        "submit_backlink_email",
+        "send_backlink_drafts",
+        "create_backlink_draft",
         "update_business_profile",
         "refresh_business_profile",
         "start_technical_audit",

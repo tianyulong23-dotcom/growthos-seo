@@ -15,6 +15,13 @@ export type ResolvedProjectContext = Readonly<{
   project: ProjectContext;
 }>;
 
+// Mailbox ownership does not require recommendation or promotion metadata.
+export type ResolvedMailboxContext = Readonly<{
+  actor: ActorContext;
+  tenant: TenantContext;
+  project: Pick<ProjectContext, "websiteProjectId">;
+}>;
+
 export interface ProjectContextPort {
   resolve(
     request: ResolveProjectContextRequest,

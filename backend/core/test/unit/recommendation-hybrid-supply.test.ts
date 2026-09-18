@@ -77,4 +77,22 @@ describe("hybrid supply before canonical finalization", () => {
     s.match.mockResolvedValue([]);
     expect(await s.service.prepare(facts)).toEqual({ status: "EXHAUSTED", admittedCount: 0 });
   });
+  it("does not admit extra library candidates after a metric retry", async () => {
+    const s = subject();
+    expect(await s.service.prepare({
+      ...facts, admittedCount: 200, dataForSeoCount: 0, libraryBatchCounts: { 1: 100, 2: 100 },
+    })).toEqual({ status: "NOT_NEEDED", admittedCount: 0 });
+    expect(s.match).not.toHaveBeenCalled();
+    expect(s.ingest).not.toHaveBeenCalled();
+  });
+  it("preserves batch ordinal when only the second library batch needs filling", async () => {
+    const s = subject();
+    await s.service.prepare({
+      ...facts, admittedCount: 180, libraryBatchCounts: { 1: 40, 2: 20 },
+    });
+    expect(s.match.mock.calls.map(([input]) => input.limit)).toEqual([20]);
+    expect(s.ingest.mock.calls[0]?.[0].candidates.every((candidate: {
+      resourceLibrary: { releaseBatchOrdinal: number };
+    }) => candidate.resourceLibrary.releaseBatchOrdinal === 2)).toBe(true);
+  });
 });

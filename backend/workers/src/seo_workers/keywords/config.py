@@ -16,7 +16,7 @@ class KeywordWorkerSettings(BaseSettings):
     business_profile_ai_base_url: str = ""
     business_profile_ai_api_key: str = ""
     business_profile_ai_api_protocol: str = "chat_completions"
-    business_profile_ai_model: str = "gpt-5.4-mini"
+    business_profile_ai_model: str = "gpt-5.5"
     business_profile_ai_timeout: str = "90s"
     business_profile_ai_max_retries: int = 1
     keyword_initial_filter_ai_model: str = "gpt-5.6-luna"

@@ -11,7 +11,7 @@ import {
   BacklinkError,
   backlinkErrorCodes,
 } from "../../domain/errors/backlink-error.js";
-import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
+import type { ResolvedMailboxContext } from "../../ports/project-context.port.js";
 import type { SecretStoreReference } from "../../ports/secret-store.port.js";
 
 type GmailConnectionQueryDependencies = Readonly<{
@@ -27,7 +27,7 @@ type GmailConnectionQueryDependencies = Readonly<{
       tokenSecretReference: SecretStoreReference;
     }>): Promise<boolean>;
     syncStatus(input: Readonly<{
-      context: ResolvedProjectContext;
+      context: ResolvedMailboxContext;
       connectionId: string;
     }>): Promise<Readonly<{
       state: "BLOCKED" | "WAITING_FOR_ACCEPTED_SEND" | "POLLING";
@@ -45,7 +45,7 @@ export type GmailConnectionStatusProjection = GmailProjectMailboxState &
 const connectionRoles = new Set(["owner", "admin", "member"]);
 const defaultReadinessTimeoutMilliseconds = 1_500;
 
-function authorize(context: ResolvedProjectContext): void {
+function authorize(context: ResolvedMailboxContext): void {
   if (!context.actor.roles.some((role) => connectionRoles.has(role))) {
     throw new BacklinkError({
       code: backlinkErrorCodes.accessDenied,
@@ -78,7 +78,7 @@ export function createGmailConnectionQuery(
 ) {
   return {
     async getStatus(
-      context: ResolvedProjectContext,
+      context: ResolvedMailboxContext,
     ): Promise<GmailConnectionStatusProjection> {
       authorize(context);
       const state = await dependencies.reader.findProjectMailboxState(context);

@@ -13,6 +13,7 @@ class AuthoritativeWebsiteProject:
     website_project_key: str
     organization_id: str
     workspace_id: str
+    status: str = "ACTIVE"
 
 
 class WebsiteProjectAuthority(Protocol):
@@ -47,4 +48,5 @@ class SQLAlchemyWebsiteProjectAuthority:
             website_project_key=project.project_key or project.id,
             organization_id=project.organization_id,
             workspace_id=project.workspace_id or "local",
+            status=project.status,
         )

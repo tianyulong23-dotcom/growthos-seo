@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -81,10 +82,92 @@ const confirmedTarget: PromotionTargetVersion = {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
+  vi.restoreAllMocks()
   vi.clearAllMocks()
 })
 
 describe("RecommendationProjectGate", () => {
+  it("automatically leaves an open setup form after Agent confirmation", async () => {
+    vi.useFakeTimers()
+    getReadiness.mockResolvedValue(readiness())
+    getInventory.mockResolvedValue({} as never)
+    render(
+      <MemoryRouter>
+        <RecommendationProjectGate project={project}>
+          {() => <div>V2 pool</div>}
+        </RecommendationProjectGate>
+      </MemoryRouter>
+    )
+    await act(async () => {})
+    expect(screen.getByText("设置本次外链推广目标")).toBeTruthy()
+    getReadiness.mockResolvedValue(readiness({
+      status: "READY", fingerprint: "agent-confirmed",
+      promotionTargetVersionId: "target-5", inputRequired: [],
+      primaryRecoveryAction: "OPEN_RECOMMENDATIONS",
+    }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(screen.getByText("V2 pool")).toBeTruthy()
+    expect(screen.queryByText("设置本次外链推广目标")).toBeNull()
+    expect(confirmTarget).not.toHaveBeenCalled()
+    const calls = getReadiness.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(getReadiness).toHaveBeenCalledTimes(calls)
+  })
+
+  it("rechecks on focus without overwriting an unsubmitted form", async () => {
+    getReadiness.mockResolvedValue(readiness())
+    const view = render(
+      <MemoryRouter>
+        <RecommendationProjectGate project={project}>
+          {() => <div>V2 pool</div>}
+        </RecommendationProjectGate>
+      </MemoryRouter>
+    )
+    await screen.findByText("设置本次外链推广目标")
+    const input = screen.getByDisplayValue("projector reviews")
+    fireEvent.change(input, { target: { value: "edited topic" } })
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(getReadiness).toHaveBeenCalledTimes(2))
+    expect(screen.getByDisplayValue("edited topic")).toBeTruthy()
+    expect(confirmTarget).not.toHaveBeenCalled()
+    view.unmount()
+    fireEvent(window, new Event("focus"))
+    expect(getReadiness).toHaveBeenCalledTimes(2)
+  })
+
+  it("pauses hidden-page polling and rechecks when visible again", async () => {
+    vi.useFakeTimers()
+    const visibility = vi.spyOn(document, "visibilityState", "get")
+    visibility.mockReturnValue("visible")
+    getReadiness.mockResolvedValue(readiness())
+    getInventory.mockResolvedValue({} as never)
+    const view = render(
+      <MemoryRouter>
+        <RecommendationProjectGate project={project}>
+          {() => <div>V2 pool</div>}
+        </RecommendationProjectGate>
+      </MemoryRouter>
+    )
+    await act(async () => {})
+    visibility.mockReturnValue("hidden")
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(getReadiness).toHaveBeenCalledTimes(1)
+    getReadiness.mockResolvedValue(readiness({
+      status: "READY", fingerprint: "agent-confirmed",
+      inputRequired: [], primaryRecoveryAction: "OPEN_RECOMMENDATIONS",
+    }))
+    visibility.mockReturnValue("visible")
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+    expect(screen.getByText("V2 pool")).toBeTruthy()
+    view.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(getReadiness).toHaveBeenCalledTimes(2)
+    expect(confirmTarget).not.toHaveBeenCalled()
+  })
+
   it("explains archived projects without requesting a feed or editing their data", async () => {
     getReadiness.mockResolvedValueOnce(readiness({
       primaryRecoveryAction: "RESTORE_PROJECT",

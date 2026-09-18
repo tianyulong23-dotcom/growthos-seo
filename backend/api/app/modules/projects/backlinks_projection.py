@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from fastapi.responses import Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from app.modules.agent.backlinks_automation import BACKLINKS_READY_TRIGGER, record_backlinks_ready
 
 from app.core.platform_request_context import (
     PlatformActor,
@@ -1060,6 +1061,49 @@ class ProjectContextProjectionDispatcher:
         self._sessions = sessions
         self._publisher = publisher
 
+    async def reconcile_ready_project(
+        self, resolved: ResolvedPlatformRequestContext,
+    ) -> ProjectContextProjection:
+        # Re-evaluate current authoritative facts under the projector's project lock.
+        # Old delivery receipts alone cannot establish readiness after profile edits.
+        async with self._sessions() as session, session.begin():
+            projection = await ProjectContextProjector(self._sessions).ensure_projected(
+                resolved, session=session,
+            )
+            if projection.input_complete and projection.outbox_status == "published":
+                payload = await session.scalar(
+                    text("SELECT payload FROM platform.project_outbox_events WHERE id = :id"),
+                    {"id": projection.event_id},
+                )
+                await record_backlinks_ready(session, resolved, payload["request"])
+            return projection
+
+    async def reconcile_ready_projects(self, *, limit: int = 25) -> None:
+        async with self._sessions() as session:
+            contexts = (await session.execute(text("""
+                SELECT latest.payload->'context' AS context
+                  FROM platform.projects project
+                  JOIN LATERAL (
+                    SELECT payload, status
+                      FROM platform.project_outbox_events event
+                     WHERE event.project_id = project.id AND event.event_type = :event_type
+                     ORDER BY event.aggregate_version DESC LIMIT 1
+                  ) latest ON latest.status = 'published'
+                 WHERE project.status = 'ACTIVE'
+                   AND project.current_profile_version_id IS NOT NULL
+                   AND project.current_promotion_target_version_id IS NOT NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM public.agent_system_triggers intent
+                      WHERE intent.project_id = project.id
+                        AND intent.organization_id = project.organization_id
+                        AND intent.trigger = :trigger
+                   )
+                 ORDER BY project.id LIMIT :limit
+            """), {"event_type": PROJECT_CONTEXT_EVENT_TYPE,
+                   "trigger": BACKLINKS_READY_TRIGGER, "limit": limit})).mappings().all()
+        for row in contexts:
+            await self.reconcile_ready_project(_deserialize_context(row["context"]))
+
     async def dispatch_event(self, event_id: str) -> ProjectContextDispatch:
         async with self._sessions() as session, session.begin():
             locked = await session.scalar(
@@ -1124,6 +1168,7 @@ class ProjectContextProjectionDispatcher:
                 )
                 return ProjectContextDispatch(event_id=event_id, status="failed")
             if 200 <= response.status_code < 300:
+                await record_backlinks_ready(session, resolved, request_payload)
                 await session.execute(
                     text(
                         """
@@ -1209,6 +1254,7 @@ class ProjectContextProjectionDispatcher:
         )
 
     async def dispatch_pending(self, *, limit: int = 25) -> None:
+        await self.reconcile_ready_projects(limit=limit)
         async with self._sessions() as session:
             event_ids = (
                 await session.execute(

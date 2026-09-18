@@ -11,7 +11,9 @@ import {
   RotateCcw,
   Save,
   Search,
+  Handshake,
 } from "lucide-react"
+import "../shared/discovery-workspace.css"
 import { Link, useSearchParams } from "react-router"
 
 import {
@@ -334,8 +336,8 @@ function DomainCell({
   email: string | null
 }) {
   return (
-    <div className="flex items-center gap-3">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
+    <div className="opportunity-domain flex items-center gap-3">
+      <span className="opportunity-avatar flex size-8 shrink-0 items-center justify-center rounded-md text-xs font-semibold">
         {domain.slice(0, 1).toUpperCase()}
       </span>
       <span className="min-w-0">
@@ -758,8 +760,12 @@ export function OpportunitiesWorkspace({
   }
 
   return (
-    <div>
-      <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="discovery-workspace opportunity-workspace">
+      <header className="discovery-heading">
+        <h1><Handshake aria-hidden="true" />外链机会</h1>
+        <span className="opportunity-scope">当前列表概览</span>
+      </header>
+      <div className="opportunity-overview">
         {[
           [
             "活跃机会",
@@ -770,26 +776,26 @@ export function OpportunitiesWorkspace({
             items.filter(
               (item) =>
                 item.engagementChannel === "EMAIL" &&
-                ["JOINED", "CONTACT_PREPARING"].includes(item.businessStage)
+                item.engagementPathState === "CONTACT_PENDING"
             ).length,
           ],
           [
-            "可联系",
-            items.filter((item) => item.businessStage === "READY_TO_CONTACT")
-              .length,
+            "邮件联系人就绪",
+            items.filter(
+              (item) =>
+                item.engagementChannel === "EMAIL" &&
+                item.engagementPathState === "EMAIL_READY"
+            ).length,
           ],
           [
             "回复与洽谈",
             items.filter((item) => item.businessStage === "NEGOTIATING").length,
           ],
         ].map(([label, value]) => (
-          <Card key={label} size="sm">
-            <CardContent>
+          <div key={label} className="opportunity-stat">
               <div className="text-sm text-muted-foreground">{label}</div>
               <div className="mt-2 text-2xl font-semibold">{value}</div>
-              <div className="mt-1 text-xs text-muted-foreground">当前项目</div>
-            </CardContent>
-          </Card>
+          </div>
         ))}
       </div>
 
@@ -798,8 +804,8 @@ export function OpportunitiesWorkspace({
       )}
 
       {(listStatus === "data" || listStatus === "empty") && (
-        <Card className="overflow-hidden">
-          <div className="flex flex-col gap-3 border-b p-4 xl:flex-row xl:items-center">
+        <section className="opportunity-list" aria-label="外链机会列表">
+          <div className="opportunity-filters">
             <div className="relative flex-1">
               <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -809,7 +815,7 @@ export function OpportunitiesWorkspace({
                 className="pl-9 sm:max-w-sm"
               />
             </div>
-            <div className="grid w-full gap-2 sm:grid-cols-2 xl:w-auto xl:grid-cols-4">
+            <div className="opportunity-filter-options">
               <Select
                 value={stageFilter}
                 onValueChange={(value) =>
@@ -919,7 +925,7 @@ export function OpportunitiesWorkspace({
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table>
+            <Table className="opportunity-table">
               <TableHeader>
                 <TableRow>
                   <TableHead>网站</TableHead>
@@ -933,7 +939,7 @@ export function OpportunitiesWorkspace({
               </TableHeader>
               <TableBody>
                 {items.map((item) => (
-                  <TableRow key={item.id}>
+                  <TableRow key={item.id} data-stage={item.businessStage}>
                     <TableCell>
                       <DomainCell
                         channel={item.engagementChannel}
@@ -941,23 +947,23 @@ export function OpportunitiesWorkspace({
                         email={item.contactEmail}
                       />
                     </TableCell>
-                    <TableCell>
+                    <TableCell data-label="当前阶段">
                       <Badge variant={stageMeta[item.businessStage].variant}>
                         {stageMeta[item.businessStage].label}
                       </Badge>
                     </TableCell>
-                    <TableCell>
+                    <TableCell data-label="管理状态">
                       <Badge
                         variant={managementMeta[item.managementStatus].variant}
                       >
                         {managementMeta[item.managementStatus].label}
                       </Badge>
                     </TableCell>
-                    <TableCell>{outcomeLabels[item.outcomeStatus]}</TableCell>
-                    <TableCell>
+                    <TableCell data-label="结果">{outcomeLabels[item.outcomeStatus]}</TableCell>
+                    <TableCell data-label="履约">
                       {fulfillmentLabels[item.fulfillmentStatus]}
                     </TableCell>
-                    <TableCell className="text-muted-foreground">
+                    <TableCell data-label="更新时间" className="text-muted-foreground">
                       {formatUpdatedAt(item.updatedAt)}
                     </TableCell>
                     <TableCell>
@@ -1047,7 +1053,7 @@ export function OpportunitiesWorkspace({
               刷新
             </Button>
           </div>
-        </Card>
+        </section>
       )}
 
       <Sheet
@@ -1064,7 +1070,7 @@ export function OpportunitiesWorkspace({
           }
         }}
       >
-        <SheetContent className="overflow-y-auto sm:max-w-lg [&_[data-slot=select-trigger]]:rounded-md [&_textarea]:rounded-md">
+        <SheetContent className="opportunity-detail overflow-y-auto sm:max-w-lg [&_[data-slot=select-trigger]]:rounded-md [&_textarea]:rounded-md">
           <SheetHeader>
             <SheetTitle>{detail?.targetHostAscii ?? "外链机会详情"}</SheetTitle>
             <SheetDescription>

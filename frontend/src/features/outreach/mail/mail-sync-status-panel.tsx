@@ -1,19 +1,25 @@
 import {
   AlertCircle,
   CheckCircle2,
+  FilePenLine,
   KeyRound,
   LoaderCircle,
   Mail,
+  Workflow,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { GmailAccountSelector } from "@/features/outreach/gmail/gmail-account-selector"
+import { AutomationPanel } from "@/features/outreach/automation/automation-panel"
 import { GmailReadinessBlockers } from "@/features/outreach/gmail/gmail-readiness"
 import type { GmailConnectionController } from "@/features/outreach/gmail/use-gmail-connection"
 
 import { MailCenter } from "./mail-center"
+import { DraftInbox } from "./draft-inbox"
 import { getWebsiteProjectKeyFromPathname } from "./project-key"
+import "./mail-workspace.css"
 
 function ConnectionStatus({
   controller,
@@ -23,7 +29,8 @@ function ConnectionStatus({
   const isLoading =
     controller.status === "loading" || controller.status === "idle"
   const readiness = controller.readiness
-  const isConnected = readiness?.connection.ready === true
+  const isConnected =
+    controller.status !== "error" && readiness?.connection.ready === true
   const isSendReady = readiness?.send.ready === true
   const isSyncReady = readiness?.sync.ready === true
   const needsAuthorization =
@@ -60,7 +67,7 @@ function ConnectionStatus({
               : null
 
   return (
-    <div className="rounded-lg border border-border/80 bg-background px-4 py-4 shadow-sm">
+    <div className="mail-account-bar">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center">
         <span
           className={
@@ -98,7 +105,9 @@ function ConnectionStatus({
                 className="rounded-md"
                 variant={isConnected ? "secondary" : "outline"}
               >
-                {isConnected ? "Gmail 已连接" : "Gmail 未连接"}
+                {controller.status === "error"
+                  ? "Gmail 状态未知"
+                  : isConnected ? "Gmail 已连接" : "Gmail 未连接"}
               </Badge>
             ) : null}
           </div>
@@ -126,7 +135,8 @@ function ConnectionStatus({
             >
               重新检查
             </Button>
-          ) : needsAuthorization && !isLoading ? (
+          ) : null}
+          {(needsAuthorization || controller.status === "error") && !isLoading ? (
             <Button
               size="sm"
               variant={controller.accounts.length > 0 ? "outline" : "default"}
@@ -181,21 +191,60 @@ export function MailSyncStatusPanel({
       : getWebsiteProjectKeyFromPathname(window.location.pathname)
 
   return (
-    <section className="space-y-4" aria-label="邮件中心">
-      <ConnectionStatus controller={controller} />
+    <section className="mail-workspace" aria-label="邮件中心">
       {websiteProjectKey ? (
-        <MailCenter
-          websiteProjectKey={websiteProjectKey}
-          connectionId={controller.connection?.connectionId ?? null}
-          gmailSyncReady={controller.readiness?.sync.ready === true}
-        />
+        <Tabs
+          defaultValue="drafts"
+          key={websiteProjectKey}
+          className="mail-workspace-tabs"
+        >
+          <header className="mail-workspace-heading">
+            <span className="mail-workspace-mark">
+              <Mail aria-hidden="true" />
+            </span>
+            <h2>邮件中心</h2>
+            <TabsList
+              variant="line"
+              aria-label="邮件视图"
+              className="mail-workspace-nav"
+            >
+              <TabsTrigger value="drafts">
+                <FilePenLine aria-hidden="true" />草稿
+              </TabsTrigger>
+              <TabsTrigger value="mail">
+                <Mail aria-hidden="true" />邮件往来
+              </TabsTrigger>
+              <TabsTrigger value="automation">
+                <Workflow aria-hidden="true" />自动化
+              </TabsTrigger>
+            </TabsList>
+          </header>
+          <ConnectionStatus controller={controller} />
+          <TabsContent value="drafts">
+            <DraftInbox websiteProjectKey={websiteProjectKey} />
+          </TabsContent>
+          <TabsContent value="mail">
+            <MailCenter
+              websiteProjectKey={websiteProjectKey}
+              connectionId={controller.connection?.connectionId ?? null}
+              gmailSyncReady={controller.readiness?.sync.ready === true}
+            />
+          </TabsContent>
+          <TabsContent value="automation">
+            <AutomationPanel websiteProjectKey={websiteProjectKey}
+              gmailConnectionId={controller.connection?.connectionId ?? null} />
+          </TabsContent>
+        </Tabs>
       ) : (
-        <div className="rounded-xl border px-4 py-8 text-center" role="alert">
-          <div className="text-sm font-medium">当前项目无法打开邮件中心</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            请返回项目列表后重新进入。
+        <>
+          <ConnectionStatus controller={controller} />
+          <div className="rounded-xl border px-4 py-8 text-center" role="alert">
+            <div className="text-sm font-medium">当前项目无法打开邮件中心</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              请返回项目列表后重新进入。
+            </div>
           </div>
-        </div>
+        </>
       )}
     </section>
   )

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { observedContactPageSql } from "./observed-contact-page.sql.js";
 
 import {
   finalizeRecommendationGeneration,
@@ -1208,7 +1209,7 @@ export function createRecommendationPoolV2Repository(
       `WITH terminal AS (
          SELECT item.id,job.terminal_reason_code,job.completed_at,
                 candidate.normalized_email,
-                inventory.default_contact_source_url
+                contact_page.observed_page_url
            FROM backlinks.backlink_recommendation_release_batch_items AS item
            JOIN backlinks.backlink_recommendation_release_batches AS batch
              ON batch.organization_id=item.organization_id
@@ -1258,6 +1259,9 @@ export function createRecommendationPoolV2Repository(
             AND candidate.workspace_id=snapshot.workspace_id
             AND candidate.website_project_id=snapshot.website_project_id
             AND candidate.id=snapshot.contact_candidate_id
+           LEFT JOIN LATERAL (
+             ${observedContactPageSql("item", "job.terminal_reason_code")}
+           ) contact_page ON true
           WHERE item.organization_id=$1 AND item.workspace_id=$2
             AND item.website_project_id=$3
             AND item.generation_contract_id=$4
@@ -1304,9 +1308,7 @@ export function createRecommendationPoolV2Repository(
                 CASE
                   WHEN item.contact_terminal_reason_at_release IS NOT NULL
                     THEN item.contact_page_url_at_release
-                  WHEN terminal.terminal_reason_code='CONTACT_FORM_ONLY'
-                    THEN terminal.default_contact_source_url
-                  ELSE NULL
+                  ELSE terminal.observed_page_url
                 END,
               contact_completed_at_release=COALESCE(
                 item.contact_completed_at_release,

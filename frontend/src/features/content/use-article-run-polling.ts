@@ -35,24 +35,28 @@ export function useArticleRunPolling({
     if (!run || !ACTIVE_STATUSES.has(run.status)) return
 
     let active = true
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const nextRun = await fetchRun(projectId, articleId)
-          if (!active || selectionKeyRef.current !== selectionKey) return
-          onRunChange(nextRun)
-          onError("")
-          if (!ACTIVE_STATUSES.has(nextRun.status)) {
-            await onTerminal(nextRun)
-          }
-        } catch (error) {
-          if (!active || selectionKeyRef.current !== selectionKey) return
-          onError(
-            error instanceof Error ? error.message : "读取文章生成进度失败"
-          )
+    let timer: number
+    let polling = true
+    const poll = async () => {
+      try {
+        const nextRun = await fetchRun(projectId, articleId)
+        if (!active || selectionKeyRef.current !== selectionKey) return
+        polling = ACTIVE_STATUSES.has(nextRun.status)
+        onRunChange(nextRun)
+        onError("")
+        if (!ACTIVE_STATUSES.has(nextRun.status)) {
+          await onTerminal(nextRun)
         }
-      })()
-    }, intervalMs)
+      } catch (error) {
+        if (!active || selectionKeyRef.current !== selectionKey) return
+        onError(error instanceof Error ? error.message : "读取文章生成进度失败")
+      } finally {
+        if (active && polling && selectionKeyRef.current === selectionKey) {
+          timer = window.setTimeout(() => void poll(), intervalMs)
+        }
+      }
+    }
+    timer = window.setTimeout(() => void poll(), intervalMs)
 
     return () => {
       active = false

@@ -12,6 +12,8 @@ class Settings(BaseSettings):
         "MAINTENANCE"
     )
     platform_background_dispatch_enabled: bool = False
+    agent_background_dispatch_enabled: bool = False
+    agent_system_trigger_dispatch_enabled: bool = True
     api_prefix: str = "/api/v1"
     cors_origins: list[str] = [
         "http://localhost:5173",
@@ -168,7 +170,7 @@ class Settings(BaseSettings):
     business_profile_ai_api_protocol: Literal[
         "chat_completions", "responses"
     ] = "chat_completions"
-    business_profile_ai_model: str = "gpt-5.4-mini"
+    business_profile_ai_model: str = "gpt-5.5"
     business_profile_ai_timeout: str = "90s"
     business_profile_ai_max_retries: int = 4
     ai_settings_encryption_key: str | None = None

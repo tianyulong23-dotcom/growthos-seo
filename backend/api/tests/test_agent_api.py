@@ -39,6 +39,41 @@ from app.modules.agent.service import (
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    ("environment", "enabled", "expected_org", "expected_actor"),
+    [
+        ("development", True, "test-org", "platform-user"),
+        ("development", False, "legacy-org", "legacy-user"),
+        ("production", True, "legacy-org", "legacy-user"),
+    ],
+)
+def test_agent_local_platform_identity_is_explicit_and_isolated(
+    environment: str, enabled: bool, expected_org: str, expected_actor: str
+) -> None:
+    from unittest.mock import AsyncMock
+
+    settings = Settings(
+        app_env=environment,
+        platform_local_development_auth_enabled=enabled,
+        default_organization_id="legacy-org",
+        agent_actor_id="legacy-user",
+        local_product_organization_id="test-org",
+        local_product_user_id="platform-user",
+    )
+    repository = AsyncMock()
+    repository.project_exists.return_value = True
+    repository.list_conversations.return_value = ([], 0)
+    service = AgentService(settings, repository, FakeController())
+
+    asyncio.run(service.list_conversations("project-id", 1, 20))
+
+    repository.project_exists.assert_awaited_once_with(expected_org, "project-id")
+    repository.list_conversations.assert_awaited_once_with(expected_org, "project-id", 1, 20)
+    assert service.settings.agent_actor_id == expected_actor
+    assert settings.default_organization_id == "legacy-org"
+    assert settings.agent_actor_id == "legacy-user"
+
+
 def test_run_step_response_accepts_paid_tool_budget_reservations() -> None:
     step = AgentRunStepResponse(
         sequence=1,
@@ -83,7 +118,7 @@ class FakeController:
         self.close_on_cancel = True
         self.fail_start_for: set[str] = set()
 
-    async def start(self, run_id: str, limits: dict[str, int]) -> None:
+    async def start(self, run_id: str, limits: dict[str, int], *, workflow_id: str | None = None) -> None:
         self.started.append(run_id)
         if run_id in self.fail_start_for:
             raise ConnectionError("Temporal unavailable")
@@ -780,8 +815,9 @@ def test_agent_limits_include_model_output_token_cap() -> None:
     assert service.limits["max_output_tokens"] == 4_000
 
 
+@pytest.mark.parametrize("workflow_id", [None, "agent:run-1:resume:attempt-2"])
 def test_temporal_agent_workflow_uses_extended_task_timeout(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, workflow_id,
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -796,9 +832,11 @@ def test_temporal_agent_workflow_uses_extended_task_timeout(
     monkeypatch.setattr(agent_service, "connect_temporal", connect)
     service, _, _ = build_service()
 
-    asyncio.run(TemporalAgentController("agent-ai").start("run-1", service.limits))
+    asyncio.run(TemporalAgentController("agent-ai").start(
+        "run-1", service.limits, workflow_id=workflow_id,
+    ))
 
-    assert captured["id"] == "agent:run-1"
+    assert captured["id"] == (workflow_id or "agent:run-1")
     assert captured["task_queue"] == "agent-ai"
     assert captured["task_timeout"] == timedelta(seconds=30)
 
@@ -1688,9 +1726,9 @@ def test_failed_immediate_dispatch_is_persisted_and_retried() -> None:
 
     original_start = controller.start
 
-    async def fail_first_start(run_id: str, limits: dict[str, int]) -> None:
+    async def fail_first_start(run_id: str, limits: dict[str, int], *, workflow_id: str | None = None) -> None:
         controller.fail_start_for.add(run_id)
-        await original_start(run_id, limits)
+        await original_start(run_id, limits, workflow_id=workflow_id)
 
     controller.start = fail_first_start  # type: ignore[method-assign]
     with pytest.raises(Exception, match="Agent 服务暂时不可用"):

@@ -5,7 +5,7 @@ import {
   googleAuthTokenSetSchema,
   type GoogleAuthPort,
 } from "../../ports/google-auth.port.js";
-import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
+import type { ResolvedMailboxContext } from "../../ports/project-context.port.js";
 import type {
   SecretStorePort,
   SecretStoreReference,
@@ -72,7 +72,7 @@ export interface GmailConnectionRevocationRetryScheduler {
 }
 
 export type DisconnectGmailConnectionInput = Readonly<{
-  context: ResolvedProjectContext;
+  context: ResolvedMailboxContext;
   connectionId: string;
   expectedVersion: number;
 }>;
@@ -111,7 +111,7 @@ type GmailConnectionDisconnectWorkflowDependencies = Readonly<{
 }>;
 
 const scopeFromContext = (
-  context: ResolvedProjectContext,
+  context: ResolvedMailboxContext,
   connectionId: string,
 ): GmailConnectionRevocationScope => ({
   organizationId: context.tenant.organizationId,

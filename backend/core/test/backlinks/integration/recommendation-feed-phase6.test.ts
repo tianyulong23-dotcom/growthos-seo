@@ -658,6 +658,11 @@ describe("Phase 6 released recommendation feed PostgreSQL boundary", () => {
       startRevision: "0100",
       targetRevision: "0100",
     });
+    await applyBacklinksDeploymentManifest({
+      query: (sql) => client.query(sql),
+      startRevision: "0103",
+      targetRevision: "0103",
+    });
     await client.query("SET search_path = backlinks, pg_catalog");
     pool = new PgPool({
       connectionString: harness.connectionString,

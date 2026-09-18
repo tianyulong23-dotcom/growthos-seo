@@ -841,6 +841,48 @@ def test_identical_non_retryable_failure_is_not_executed_again() -> None:
     assert executed == [{"run_id": "run-1", "tool_call_id": "run-1:1:1"}]
 
 
+@pytest.mark.parametrize("patched", [True, False])
+@pytest.mark.parametrize("error_code", [
+    "write_not_explicitly_requested",
+    "BACKLINKS_CHAT_SEND_EXPLICIT_USER_COMMAND_REQUIRED",
+])
+def test_command_authorization_denial_finishes_without_read_retry_loop(
+    monkeypatch, error_code, patched,
+) -> None:
+    monkeypatch.setattr(agent_workflows.workflow, "patched", lambda _: patched)
+    instance = AgentWorkflow()
+    calls = []
+
+    async def call(name, payload, limits, **kwargs):
+        calls.append((name, payload))
+        if name == "agent_check_run":
+            return {"allowed": True}
+        if name == "agent_model_decide":
+            return {"type": "tool_calls", "tool_calls": [
+                {"tool": "start_backlink_campaign", "tool_call_id": "campaign",
+                 "arguments_hash": "hash", "arguments": {}},
+                {"tool": "get_backlink_readiness", "tool_call_id": "read",
+                 "arguments_hash": "hash", "arguments": {}},
+            ]}
+        if name == "agent_execute_tool":
+            return {
+                "tool": kwargs["tool"], "ok": False, "retryable": False,
+                "error_code": error_code, "summary": "原始命令授权未通过", "data": {},
+            }
+
+    instance._call = call
+    asyncio.run(instance.run({"run_id": "run-1", "limits": LIMITS}))
+    assert sum(name == "agent_model_decide" for name, _ in calls) == (1 if patched else 3)
+    assert sum(name == "agent_execute_tool" for name, _ in calls) == 1
+    assert calls[-1][0] == "agent_finish"
+    assert calls[-1][1]["status"] == "failed"
+    assert calls[-1][1]["error_code"] == (error_code if patched else "agent_consecutive_failures")
+    if patched:
+        assert "授权" in calls[-1][1]["answer"]
+    assert any(name == "agent_skip_tool_calls" and payload["tool_call_ids"] == ["read"]
+               for name, payload in calls)
+
+
 def test_non_retryable_failure_with_changed_arguments_is_executed() -> None:
     workflow = AgentWorkflow()
     executed: list[dict[str, Any]] = []

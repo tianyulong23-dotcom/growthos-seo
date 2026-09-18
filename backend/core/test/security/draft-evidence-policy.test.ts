@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   approveDraftEvidence,
   containsInternalDraftMetadataMarker,
+  DraftOutputPolicyError,
   validateDraftOutputPolicy,
 } from "../../src/modules/backlinks/domain/drafts/evidence-policy.js";
 
@@ -107,6 +108,8 @@ describe("BL-AI-092 Draft evidence boundary", () => {
       error = caught;
     }
     expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(DraftOutputPolicyError);
+    expect((error as DraftOutputPolicyError).diagnosticCode).toBe("DRAFT_DATA_BOUNDARY");
     expect((error as Error).message).toBe("Draft output violated a data boundary.");
     expect((error as Error).message).not.toContain(name);
   });

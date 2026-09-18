@@ -30,19 +30,21 @@ const finalization = {
 function setup() {
   const supply = vi.fn().mockResolvedValue({ status: "MATCHED", admittedCount: 200 });
   const prepare = vi.fn().mockResolvedValue(supply);
+  const enrich = vi.fn().mockResolvedValue(undefined);
   const activities = createRecommendationPoolV2Activities({
     pool: { connect: async () => ({ query: mocks.query, release: mocks.release }) },
     discoveryRoundExecutor: vi.fn(),
     contactEnrichmentOptions: {},
     prepareResourceSupply: prepare,
+    enrichMetrics: enrich,
   });
-  return { activities, supply, prepare };
+  return { activities, supply, prepare, enrich };
 }
 
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.load.mockResolvedValue({ status: "ready" });
-  mocks.facts.mockResolvedValue({ admittedCount: 0, discoveryStarted: false });
+  mocks.facts.mockResolvedValue({ admittedCount: 0, dataForSeoCount: 0, discoveryStarted: false });
   mocks.finalize.mockResolvedValue(finalization);
   mocks.query.mockResolvedValue({ rows: [], rowCount: 0 });
 });
@@ -69,7 +71,7 @@ describe("hybrid supply activity compatibility", () => {
   it.each([
     { admittedCount: 50, discoveryStarted: true },
     { admittedCount: 0, discoveryStarted: true },
-    { admittedCount: 5, discoveryStarted: false },
+    { admittedCount: 5, dataForSeoCount: 5, discoveryStarted: false },
   ])("preserves resumed discovery and its costs: %j", async (facts) => {
     mocks.facts.mockResolvedValue(facts);
     const { activities, prepare } = setup();
@@ -92,5 +94,28 @@ describe("hybrid supply activity compatibility", () => {
     await expect(activities.loadGeneration(input)).rejects.toThrow("LIBRARY_UNAVAILABLE");
     expect(mocks.query).toHaveBeenCalledWith("ROLLBACK");
     expect(mocks.finalize).not.toHaveBeenCalled();
+  });
+
+  it.each(["shortcut", "discovery"])("enriches all admitted candidates before %s publication", async (path) => {
+    const { activities, supply, enrich } = setup();
+    if (path === "shortcut") await activities.loadGeneration(input);
+    else await activities.finalizeGeneration({
+      ...input, terminalReason: "PATHS_EXHAUSTED", totalSettledCostMicros: 100,
+      hardCandidateLimit: 1000,
+    });
+    expect(supply.mock.invocationCallOrder[0]).toBeLessThan(enrich.mock.invocationCallOrder[0]);
+    expect(enrich.mock.invocationCallOrder[0]).toBeLessThan(mocks.finalize.mock.invocationCallOrder[0]);
+  });
+
+  it("blocks publication on metric failure and resumes committed library supply", async () => {
+    const { activities, supply, enrich } = setup();
+    enrich.mockRejectedValueOnce(new Error("RECOMMENDATION_METRICS_UNKNOWN_CHARGE"));
+    await expect(activities.loadGeneration(input)).rejects.toThrow("RECOMMENDATION_METRICS_UNKNOWN_CHARGE");
+    expect(mocks.finalize).not.toHaveBeenCalled();
+    mocks.facts.mockResolvedValue({ admittedCount: 200, dataForSeoCount: 0, discoveryStarted: false });
+    supply.mockResolvedValue({ status: "NOT_NEEDED", admittedCount: 0 });
+    expect(await activities.loadGeneration(input)).toEqual({ status: "already_completed", finalization });
+    expect(enrich).toHaveBeenCalledTimes(2);
+    expect(mocks.finalize).toHaveBeenCalledOnce();
   });
 });

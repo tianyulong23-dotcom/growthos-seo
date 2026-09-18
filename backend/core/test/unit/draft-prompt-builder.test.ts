@@ -52,6 +52,18 @@ const input = () => ({
 });
 
 describe("BL-AI-093 Draft Prompt Builder", () => {
+  it("uses generic English outreach when website evidence is unavailable", () => {
+    const raw = input();
+    raw.opportunity.targetPublicContent = "";
+    raw.preferences.language = "zh";
+    const prompt = buildDraftPrompt(raw);
+    expect(prompt.userContext.opportunity.targetPublicContent).toBe("");
+    expect(prompt.systemInstruction).toContain("do not require another website crawl");
+    expect(prompt.systemInstruction).toContain("write a generic cooperation inquiry");
+    expect(prompt.systemInstruction).toContain("Target markets do not establish company location");
+    expect(prompt.systemInstruction).toContain("must be English even if preferences");
+    expect(prompt.systemInstruction).not.toContain("mutual fit");
+  });
   it("produces stable messages for the same input and template version", () => {
     expect(buildDraftPrompt(input())).toEqual(buildDraftPrompt(input()));
   });

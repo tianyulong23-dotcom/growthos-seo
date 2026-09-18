@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -100,6 +101,22 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+})
+
+it("refreshes active plan progress, survives a read failure and stops after leaving", async () => {
+  contentPlanApi.listContentPlanItems
+    .mockResolvedValueOnce({ items: [{ ...summary, status: "generating" }], total: 1 })
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue({ items: [{ ...summary, status: "generated", article_id: "article-1" }], total: 1 })
+  const page = render(<ContentPlan projectId="project-1" onOpenArticle={vi.fn()} />)
+  await waitFor(() => expect(screen.getAllByText("test-title").length).toBeGreaterThan(0))
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+  expect(contentPlanApi.listContentPlanItems).toHaveBeenCalledTimes(2)
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+  expect(contentPlanApi.listContentPlanItems).toHaveBeenCalledTimes(3)
+  page.unmount()
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+  expect(contentPlanApi.listContentPlanItems).toHaveBeenCalledTimes(3)
 })
 
 describe("ContentPlan", () => {

@@ -96,9 +96,77 @@ afterEach(() => {
   cleanup()
   listMock.mockReset()
   backlinksProjectQueries.invalidateProject("project-a")
+  backlinksProjectQueries.invalidateProject("project-b")
 })
 
 describe("useRecommendationFeed", () => {
+  it("never exposes the previous project's progress while loading or on failure", async () => {
+    const next = deferred<RecommendationFeedResponse>()
+    listMock
+      .mockResolvedValueOnce(feed("project-a.example", "a"))
+      .mockReturnValueOnce(next.promise)
+    const hook = renderHook(
+      ({ project }) =>
+        useRecommendationFeed(
+          project,
+          "actor-session-a",
+          1,
+          filters,
+          null,
+          true
+        ),
+      { initialProps: { project: "project-a" } }
+    )
+    await waitFor(() => expect(hook.result.current.response).not.toBeNull())
+    hook.rerender({ project: "project-b" })
+    expect(hook.result.current.response).toBeNull()
+    expect(hook.result.current.state).toBe("loading")
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      next.resolve(feed("project-b.example", "b"))
+    })
+    expect(hook.result.current.response?.items[0].domain).toBe(
+      "project-b.example"
+    )
+    listMock.mockRejectedValueOnce(new Error("offline"))
+    hook.rerender({ project: "project-a" })
+    await waitFor(() => expect(hook.result.current.state).toBe("error"))
+    expect(hook.result.current.response).toBeNull()
+  })
+
+  it("retains running progress on a transient poll failure and recovers", async () => {
+    const running = feed("running.example", "running")
+    running.latestGeneration!.jobState = "RUNNING"
+    listMock
+      .mockResolvedValueOnce(running)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(feed("completed.example", "completed"))
+    const hook = renderHook(() =>
+      useRecommendationFeed(
+        "project-a",
+        "actor-session-a",
+        1,
+        filters,
+        null,
+        true
+      )
+    )
+    await waitFor(() => expect(hook.result.current.response).toEqual(running))
+    await act(async () => {
+      await hook.result.current.poll()
+    })
+    expect(hook.result.current.response?.latestGeneration?.jobState).toBe(
+      "RUNNING"
+    )
+    expect(hook.result.current.state).toBe("error")
+    await act(async () => {
+      await hook.result.current.poll()
+    })
+    expect(hook.result.current.response?.items[0].domain).toBe(
+      "completed.example"
+    )
+  })
+
   it("rejects a late response from a superseded project context", async () => {
     const oldRequest = deferred<RecommendationFeedResponse>()
     const currentRequest = deferred<RecommendationFeedResponse>()

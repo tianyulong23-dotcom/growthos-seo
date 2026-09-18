@@ -1715,7 +1715,7 @@ function scopeFrom(
   };
 }
 
-function createLocalProductDataForSeoGate(
+export function createLocalProductDataForSeoGate(
   input: Readonly<{
     pool: BacklinkTenantPool;
     scope: BacklinkTenantContext;

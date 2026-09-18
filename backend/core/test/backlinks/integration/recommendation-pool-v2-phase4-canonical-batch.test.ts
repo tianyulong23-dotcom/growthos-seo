@@ -137,7 +137,7 @@ async function installMigrations(client: Client): Promise<void> {
   await applyBacklinksDeploymentManifest({
     query: (sql) => client.query(sql),
     startRevision: "0001",
-    targetRevision: "0100",
+    targetRevision: "0103",
   });
 }
 
@@ -1566,6 +1566,31 @@ describe("Phase 4 canonical batch persistence", () => {
         pendingRecommendation,
       ],
     );
+    const pageEvidenceKinds = [
+      "CONTACT_FORM_ONLY", "LOGIN_REQUIRED", "CAPTCHA_OR_BOT_CHALLENGE", "ACCESS_DENIED",
+    ];
+    for (const [index, kind] of pageEvidenceKinds.entries()) {
+      const recommendationId = selectedRecommendations.rows[index].recommendationId;
+      await admin.query(
+        `UPDATE backlinks.backlink_contact_enrichment_jobs
+            SET terminal_reason_code=$5
+          WHERE organization_id=$1 AND workspace_id=$2 AND website_project_id=$3
+            AND recommendation_id=$4`,
+        [organizationId, workspaceId, projectA.websiteProjectId, recommendationId, kind],
+      );
+      await admin.query(
+        `INSERT INTO backlinks.backlink_contact_enrichment_pages (
+           id,organization_id,workspace_id,website_project_id,job_id,page_url,
+           depth,discovery_source,status,http_status,created_by,observed_page_url,contact_page_kind
+         ) SELECT gen_random_uuid(),organization_id,workspace_id,website_project_id,id,
+                  root_url,0,'homepage','fetched',200,$6,$7,$5
+             FROM backlinks.backlink_contact_enrichment_jobs
+            WHERE organization_id=$1 AND workspace_id=$2 AND website_project_id=$3
+              AND recommendation_id=$4`,
+        [organizationId, workspaceId, projectA.websiteProjectId, recommendationId, kind,
+          actorId, `https://publisher.test/observed/${kind}`],
+      );
+    }
     const preparationInput = {
       ...scope,
       generationContractId: projectA.generationId,
@@ -1589,6 +1614,19 @@ describe("Phase 4 canonical batch persistence", () => {
       terminalBatchCount: 1,
       totalBatchCount: 2,
     });
+    const frozenPages = await admin.query(
+      `SELECT contact_terminal_reason_at_release reason,contact_page_url_at_release url
+         FROM backlinks.backlink_recommendation_release_batch_items
+        WHERE organization_id=$1 AND workspace_id=$2 AND website_project_id=$3
+          AND contact_page_url_at_release IS NOT NULL`,
+      [organizationId, workspaceId, projectA.websiteProjectId],
+    );
+    expect(frozenPages.rows).toHaveLength(4);
+    for (const kind of pageEvidenceKinds) {
+      expect(frozenPages.rows).toContainEqual({
+        reason: kind, url: `https://publisher.test/observed/${kind}`,
+      });
+    }
     await expect(
       admin.query(
         `UPDATE backlinks.backlink_recommendation_release_batches

@@ -1,6 +1,6 @@
 import type { GmailConnectionView } from "../gmail-connection.gateway.js";
 import { gmailMailReadScope } from "../../domain/sending/oauth-attempt.js";
-import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
+import type { ResolvedMailboxContext } from "../../ports/project-context.port.js";
 import type { SecretStoreReference } from "../../ports/secret-store.port.js";
 
 export const gmailSendScope =
@@ -120,7 +120,7 @@ export type GmailProjectReadinessInfrastructure = Readonly<{
 
 export interface GmailProjectReadinessInfrastructureReader {
   findProjectReadinessInfrastructure(
-    context: ResolvedProjectContext,
+    context: ResolvedMailboxContext,
     connectionId: string,
   ): Promise<GmailProjectReadinessInfrastructure | null>;
 }

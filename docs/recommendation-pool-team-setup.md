@@ -158,6 +158,40 @@ Core API/Worker 就绪。然后验证项目资料、推荐生成、35 条分页�
 
 ## 提交前避免遗漏
 
+### SEO 与联系人页面地址
+
+推荐生成的正式 Worker 在冻结发布快照前调用 V2 批量指标服务，
+不依赖 `.codex-checkpoints` 中的诊断或恢复脚本。DataForSEO 的三个 bulk
+端点必须保留在 `deploy/compose/.env` 的 allowlist 中，且部署需有自己的有效凭据、
+预算和请求授权。请求来源、缓存、幂等及未知扣费保护仍然生效。
+自然搜索 ETV、DataForSEO Rank 与资源库 Ahrefs DR 是不同指标，不能相互冒充。
+供应商未收录的网站可以返回空值，不能填入假数值；迁移也不会重写旧发布批次的空值。
+
+数据库迁移 `0103` 将抓取后实际页面地址及页面类型保存在原有租户隔离的页面证据表中。
+静态抓取和已获准的浏览器抓取都记录最终跳转地址，发布快照和列表共用该证据。
+联系表单、登录、访问验证和拒绝访问分别展示对应入口；搜索框和订阅框不是联系表单。
+历史记录只有状态、没有页面证据时，界面仅提供“访问网站”，不会猜测 `/contact` 等路径。
+更新后产生的新抓取证据才能提供直接页面入口，数据库迁移本身不会重新爬取网站。
+
+升级顺序为备份、按 deployment manifest 迁移、构建并统一启动 Core API/Worker、
+再检查前端。不要把新 Core 代码接到尚未执行 `0103` 的旧结构上。
+`scripts/dev-up.ps1` 识别 `0102` 和 `0103`，不会把已完成迁移当成旧版本再次执行。
+运行迁移或恢复 Worker 可能唤醒原有业务任务，须先检查队列，不要为验证链接自动重跑付费任务。
+
+不消耗供应商额度的回归入口：
+
+```powershell
+npm --prefix backend/core run migration:backlinks:check
+npm --prefix backend/core run resource-library:check
+cd backend/core
+npx vitest run test/unit/contact-enrichment-activity.test.ts test/unit/recommendation-pool-v2-metric-runtime.test.ts test/unit/recommendation-portability.test.ts --maxWorkers=1
+npx vitest run test/backlinks/integration/recommendation-pool-v2-phase4-canonical-batch.test.ts test/backlinks/integration/recommendation-feed-phase6.test.ts --maxWorkers=1
+```
+
+集成测试使用随机名称的隔离数据库，不连接业务项目；需要 Docker 测试容器，
+或给 `BACKLINKS_TEST_POSTGRES_ADMIN_URL` 配置允许创建测试库的独立 PostgreSQL。
+上述是源码和数据库回归，不代表已在另一台机器完成真实供应商验收。
+
 只在本机存在的未跟踪文件不会自动进入 GitHub。不能只提交资源库或前端：
 需要把相应后端实现、迁移、契约、生成客户端、启动工具、数据文件和锁文件一起审查提交。
 当前工作区还有其他任务的大量修改，不能不经审查执行 `git add .`。

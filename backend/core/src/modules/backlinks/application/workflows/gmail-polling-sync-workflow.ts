@@ -139,7 +139,7 @@ export const isGmailPollingSyncCapabilityPausedResult = (
 export type GmailPollingSyncCommands = Readonly<{
   start(input: Readonly<{
     context: import("../../ports/project-context.port.js")
-      .ResolvedProjectContext;
+      .ResolvedMailboxContext;
     connectionId: string;
   }>): Promise<Readonly<{
     status: "ACCEPTED";
@@ -147,7 +147,7 @@ export type GmailPollingSyncCommands = Readonly<{
   }>>;
   status(input: Readonly<{
     context: import("../../ports/project-context.port.js")
-      .ResolvedProjectContext;
+      .ResolvedMailboxContext;
     connectionId: string;
   }>): Promise<Readonly<{
     state: "BLOCKED" | "WAITING_FOR_ACCEPTED_SEND" | "POLLING";

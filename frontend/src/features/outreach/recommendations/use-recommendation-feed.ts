@@ -35,8 +35,10 @@ export function useRecommendationFeed(
   cursor: string | null,
   enabled: boolean
 ) {
-  const [response, setResponse] =
-    React.useState<RecommendationFeedResponse | null>(null)
+  const [data, setData] = React.useState<{
+    key: ReturnType<typeof recommendationFeedQueryKey>
+    value: RecommendationFeedResponse
+  } | null>(null)
   const [state, setState] =
     React.useState<RecommendationFeedLoadState>("loading")
   const key = React.useMemo(
@@ -50,9 +52,21 @@ export function useRecommendationFeed(
       ),
     [actorScope, contextVersion, cursor, filters, websiteProjectKey]
   )
+  const [loadedKey, setLoadedKey] = React.useState<typeof key | null>(null)
+  const selection = React.useRef<typeof key | null>(key)
+  const requestId = React.useRef(0)
+  React.useLayoutEffect(() => {
+    selection.current = key
+    return () => {
+      selection.current = null
+      requestId.current += 1
+    }
+  }, [key])
 
   const load = React.useCallback(
     async (foreground: boolean) => {
+      if (selection.current !== key) return null
+      const id = ++requestId.current
       if (foreground) setState("loading")
       activateRecommendationFeedContext(
         websiteProjectKey,
@@ -63,14 +77,20 @@ export function useRecommendationFeed(
         const result = await backlinksProjectQueries.fetch(key, (signal) =>
           listRecommendationFeed(websiteProjectKey, filters, cursor, signal)
         )
-        setResponse(result)
+        if (selection.current !== key || requestId.current !== id) return null
+        setLoadedKey(key)
+        setData({ key, value: result })
         setState(result.items.length === 0 ? "empty" : "data")
         return result
       } catch (error) {
+        if (selection.current !== key || requestId.current !== id) return null
         if (error instanceof DOMException && error.name === "AbortError") {
           return null
         }
-        setResponse(null)
+        if (error instanceof ApiError && [403, 409].includes(error.status)) {
+          setData(null)
+        }
+        setLoadedKey(key)
         setState(loadErrorState(error))
         return null
       }
@@ -100,7 +120,12 @@ export function useRecommendationFeed(
     return load(false)
   }, [key, load])
 
-  return { response, state, refresh, poll }
+  return {
+    response: data?.key === key ? data.value : null,
+    state: loadedKey === key ? state : ("loading" as const),
+    refresh,
+    poll,
+  }
 }
 
 export function useRecommendationFeedStatus(
@@ -109,9 +134,10 @@ export function useRecommendationFeedStatus(
   contextVersion: number,
   enabled: boolean
 ) {
-  const [status, setStatus] = React.useState<RecommendationFeedStatus | null>(
-    null
-  )
+  const [data, setData] = React.useState<{
+    key: ReturnType<typeof recommendationFeedStatusQueryKey>
+    value: RecommendationFeedStatus
+  } | null>(null)
   const [state, setState] =
     React.useState<RecommendationFeedLoadState>("loading")
   const key = React.useMemo(
@@ -123,9 +149,21 @@ export function useRecommendationFeedStatus(
       ),
     [actorScope, contextVersion, websiteProjectKey]
   )
+  const [loadedKey, setLoadedKey] = React.useState<typeof key | null>(null)
+  const selection = React.useRef<typeof key | null>(key)
+  const requestId = React.useRef(0)
+  React.useLayoutEffect(() => {
+    selection.current = key
+    return () => {
+      selection.current = null
+      requestId.current += 1
+    }
+  }, [key])
 
   const load = React.useCallback(
     async (foreground: boolean) => {
+      if (selection.current !== key) return null
+      const id = ++requestId.current
       if (foreground) setState("loading")
       activateRecommendationFeedContext(
         websiteProjectKey,
@@ -136,14 +174,20 @@ export function useRecommendationFeedStatus(
         const result = await backlinksProjectQueries.fetch(key, (signal) =>
           getRecommendationFeedStatus(websiteProjectKey, signal)
         )
-        setStatus(result)
+        if (selection.current !== key || requestId.current !== id) return null
+        setLoadedKey(key)
+        setData({ key, value: result })
         setState("data")
         return result
       } catch (error) {
+        if (selection.current !== key || requestId.current !== id) return null
         if (error instanceof DOMException && error.name === "AbortError") {
           return null
         }
-        setStatus(null)
+        if (error instanceof ApiError && [403, 409].includes(error.status)) {
+          setData(null)
+        }
+        setLoadedKey(key)
         setState(loadErrorState(error))
         return null
       }
@@ -173,5 +217,10 @@ export function useRecommendationFeedStatus(
     return load(false)
   }, [key, load])
 
-  return { status, state, refresh, poll }
+  return {
+    status: data?.key === key ? data.value : null,
+    state: loadedKey === key ? state : ("loading" as const),
+    refresh,
+    poll,
+  }
 }

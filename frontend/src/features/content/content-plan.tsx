@@ -368,6 +368,30 @@ export function ContentPlan({ projectId, onOpenArticle }: ContentPlanProps) {
     return () => window.clearInterval(timer)
   }, [openPlan, selectedPlan])
 
+  const hasActivePlans = plans.some((plan) =>
+    plan.status === "triggering" || plan.status === "generating" ||
+    plan.edit_state === "repreparing"
+  )
+  React.useEffect(() => {
+    if (!hasActivePlans) return
+    let active = true
+    let timer: ReturnType<typeof setTimeout>
+    async function poll() {
+      try {
+        const collection = await fetchMonth()
+        if (!active) return
+        setPlans(collection.items)
+        setLoadError("")
+      } catch (error) {
+        if (active) setLoadError(errorText(error))
+      } finally {
+        if (active) timer = setTimeout(() => void poll(), 3000)
+      }
+    }
+    timer = setTimeout(() => void poll(), 3000)
+    return () => { active = false; clearTimeout(timer) }
+  }, [fetchMonth, hasActivePlans])
+
   const visiblePlans = plans.filter((plan) => {
     const query = search.trim().toLocaleLowerCase()
     return (

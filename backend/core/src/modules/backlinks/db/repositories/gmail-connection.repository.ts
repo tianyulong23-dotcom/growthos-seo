@@ -25,7 +25,7 @@ import type {
   PendingGmailConnectionRevocation,
 } from "../../application/workflows/gmail-connection-disconnect.workflow.js";
 import { gmailOAuthScopes } from "../../domain/sending/oauth-attempt.js";
-import type { ResolvedProjectContext } from "../../ports/project-context.port.js";
+import type { ResolvedMailboxContext } from "../../ports/project-context.port.js";
 import {
   secretKinds,
   type SecretStoreReference,
@@ -523,7 +523,7 @@ export class PostgresqlGmailConnectionRepository
   }
 
   async findProjectMailboxState(
-    context: ResolvedProjectContext,
+    context: ResolvedMailboxContext,
   ): Promise<GmailProjectMailboxState> {
     return withGmailTenantTransaction(
       this.#pool,
@@ -647,7 +647,7 @@ export class PostgresqlGmailConnectionRepository
   }
 
   async findProjectReadinessInfrastructure(
-    context: ResolvedProjectContext,
+    context: ResolvedMailboxContext,
     connectionId: string,
   ): Promise<GmailProjectReadinessInfrastructure | null> {
     return withGmailTenantTransaction(
@@ -730,7 +730,7 @@ export class PostgresqlGmailConnectionRepository
   }
 
   async selectForProject(
-    context: ResolvedProjectContext,
+    context: ResolvedMailboxContext,
     connectionId: string,
   ): Promise<GmailProjectMailboxState | null> {
     const selected = await withGmailTenantTransaction(

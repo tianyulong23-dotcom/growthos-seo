@@ -1,10 +1,8 @@
 import * as React from "react"
 import {
   Bell,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  ListTodo,
   LoaderCircle,
   LogOut,
   Moon,
@@ -18,7 +16,6 @@ import { Link, Navigate, Outlet, useLocation, useParams } from "react-router"
 import { AgentDock, MobileAgentSheet } from "@/components/agent/agent-dock"
 import { useTheme } from "@/components/theme-provider"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -51,6 +48,8 @@ import { modules } from "@/data/mock-data"
 import { BusinessProfileOnboardingController } from "@/features/projects/business-profile-onboarding"
 import { useProjects } from "@/features/projects/project-context"
 import { ProjectSwitcher } from "@/features/projects/project-switcher"
+import { TaskCenter } from "@/features/tasks/task-center"
+import { AgentSessionProvider } from "@/features/agent/agent-session"
 
 function getModulePath(projectId: string, moduleId: string) {
   const currentModule = modules.find((item) => item.id === moduleId)
@@ -177,52 +176,11 @@ function AppSidebar() {
 
 function HeaderActions() {
   const { theme, setTheme } = useTheme()
-  const [tasks, setTasks] = React.useState([
-    { id: 1, title: "全站技术审计", detail: "已完成 8,472 / 8,472 页" },
-    { id: 2, title: "关键词排名更新", detail: "已完成 328 / 420 个" },
-  ])
   const [notifications, setNotifications] = React.useState(3)
 
   return (
     <div className="flex items-center gap-1">
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="hidden sm:inline-flex"
-              aria-label="任务中心"
-              title="任务中心"
-            />
-          }
-        >
-          <ListTodo />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-80">
-          <DropdownMenuGroup>
-            <DropdownMenuLabel className="flex items-center justify-between">
-              任务中心
-              <Badge variant="secondary">{tasks.length} 个任务</Badge>
-            </DropdownMenuLabel>
-            {tasks.map((task) => (
-              <DropdownMenuItem key={task.id} className="items-start">
-                <CheckCircle2 className="mt-0.5 text-emerald-600" />
-                <span className="flex-1">
-                  <span className="block">{task.title}</span>
-                  <span className="block text-xs font-normal text-muted-foreground">
-                    {task.detail}
-                  </span>
-                </span>
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => setTasks([])}>
-            清除已完成任务
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <TaskCenter />
 
       <DropdownMenu>
         <DropdownMenuTrigger
@@ -333,6 +291,7 @@ function HeaderActions() {
 function ProjectAppShell() {
   return (
     <TooltipProvider>
+      <AgentSessionProvider>
       <BusinessProfileOnboardingController />
       <SidebarProvider
         defaultOpen={false}
@@ -366,6 +325,7 @@ function ProjectAppShell() {
           <Outlet />
         </SidebarInset>
       </SidebarProvider>
+      </AgentSessionProvider>
     </TooltipProvider>
   )
 }

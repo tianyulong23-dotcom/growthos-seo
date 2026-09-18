@@ -34,6 +34,13 @@ type DraftOutput = Readonly<{
   canAutoSend: boolean;
 }>;
 
+export class DraftOutputPolicyError extends Error {
+  constructor(message: string, readonly diagnosticCode: string) {
+    super(message);
+    this.name = "DraftOutputPolicyError";
+  }
+}
+
 const subjectStopWords = new Set([
   "about",
   "hello",
@@ -178,7 +185,9 @@ export function validateDraftOutputPolicy(input: Readonly<{
       || claim.evidenceIds.some((evidenceId) => !approvedIds.has(evidenceId)),
   );
   if (referencesUnapprovedEvidence) {
-    throw new Error("Draft output references unapproved Evidence.");
+    throw new DraftOutputPolicyError(
+      "Draft output references unapproved Evidence.", "DRAFT_UNAPPROVED_EVIDENCE",
+    );
   }
 
   const outputText = [
@@ -191,14 +200,18 @@ export function validateDraftOutputPolicy(input: Readonly<{
     input.forbiddenValues.some((value) =>
       value.length > 0 && outputText.includes(value))
   ) {
-    throw new Error("Draft output violated a data boundary.");
+    throw new DraftOutputPolicyError(
+      "Draft output violated a data boundary.", "DRAFT_DATA_BOUNDARY",
+    );
   }
 
   if (
     input.output.requiresUserConfirmation !== true
     || input.output.canAutoSend !== false
   ) {
-    throw new Error("Draft output violated the human-approval policy.");
+    throw new DraftOutputPolicyError(
+      "Draft output violated the human-approval policy.", "DRAFT_APPROVAL_POLICY",
+    );
   }
 
   const contentPolicyIssue = draftOutputContentPolicyIssues(
@@ -206,7 +219,19 @@ export function validateDraftOutputPolicy(input: Readonly<{
     input.approvedEvidence.map((item) => item.id),
   )[0];
   if (contentPolicyIssue?.startsWith("bodyText ") === true) {
-    throw new Error("Draft output violated the length policy.");
+    throw new DraftOutputPolicyError(
+      "Draft output violated the length policy.", "DRAFT_LENGTH_POLICY",
+    );
   }
-  if (contentPolicyIssue !== undefined) throw new Error(contentPolicyIssue);
+  if (contentPolicyIssue !== undefined) {
+    const diagnostics: Readonly<Record<string, string>> = {
+      "Draft output contains a placeholder.": "DRAFT_PLACEHOLDER",
+      "Draft output contains a prohibited promise.": "DRAFT_PROHIBITED_PROMISE",
+      "Draft output contains internal evidence metadata.": "DRAFT_INTERNAL_METADATA",
+      "Draft output subject is not coherent with the body.": "DRAFT_SUBJECT_MISMATCH",
+    };
+    throw new DraftOutputPolicyError(
+      contentPolicyIssue, diagnostics[contentPolicyIssue] ?? "DRAFT_CONTENT_POLICY",
+    );
+  }
 }

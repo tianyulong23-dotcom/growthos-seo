@@ -110,6 +110,7 @@ type AiRunScope = BacklinkTenantContext & Readonly<{
 }>;
 
 export type LocalProductAiRuntime = Readonly<{
+  draftReservationUsd: number;
   blueprint: AiCommercialDiscoveryBlueprintPort;
   budgetGate: DraftBudgetGate;
   draft(input: AiRunScope): AiDraftPort;
@@ -263,6 +264,7 @@ const mapBudgetError = (error: unknown): never => {
     throw new AiDraftError({
       code: "BUDGET_EXCEEDED",
       message: error.message,
+      diagnosticCode: "AI_CAPABILITY_BUDGET_EXCEEDED",
       retryable: false,
     });
   }
@@ -270,14 +272,17 @@ const mapBudgetError = (error: unknown): never => {
     throw new AiDraftError({
       code: "UNAVAILABLE",
       message: error.message,
+      diagnosticCode: "AI_CAPABILITY_CONCURRENCY_EXHAUSTED",
       retryable: true,
     });
   }
   throw new AiDraftError({
     code: error.reason === "RESERVATION_MISSING"
       ? "MISCONFIGURED"
-      : "POLICY_VIOLATION",
+      : error.reason === "PROVIDER_CALL_LIMIT_EXCEEDED"
+        ? "BUDGET_EXCEEDED" : "POLICY_VIOLATION",
     message: error.message,
+    diagnosticCode: `AI_CAPABILITY_${error.reason}`,
     retryable: false,
   });
 };
@@ -574,6 +579,7 @@ export function createLocalProductAiRuntime(options: Readonly<{
   return Object.freeze({
     blueprint,
     budgetGate,
+    draftReservationUsd,
     draft(input) {
       const transport = createAiSdkDraftTransport({
         providerBaseUrl: configuration.baseUrl,

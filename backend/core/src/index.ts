@@ -37,6 +37,10 @@ import {
   type LocalProductRuntimeBuildIdentity,
 } from "./runtime-build-identity.js";
 import { assertBacklinksOutboundProxyReady } from "./runtime-outbound-proxy.js";
+import {
+  installDatabaseErrorHandlers,
+  type DatabasePoolEvents,
+} from "./runtime-database-errors.js";
 
 export * from "./modules/backlinks/api/index.js";
 
@@ -89,7 +93,7 @@ const postgres = require("pg") as Readonly<{
     max: number;
     idleTimeoutMillis: number;
     connectionTimeoutMillis: number;
-  }>) => RuntimePool;
+  }>) => RuntimePool & DatabasePoolEvents;
 }>;
 
 const positiveIntegerStringSchema = z
@@ -371,6 +375,7 @@ async function createRuntimeResources(
     idleTimeoutMillis: environment.BACKLINK_DB_IDLE_TIMEOUT_MS,
     connectionTimeoutMillis: environment.BACKLINK_DB_CONNECT_TIMEOUT_MS,
   });
+  installDatabaseErrorHandlers(pool, runtimeProcess);
   const temporalConfig = backlinksTemporalConfigSchema.parse({
     BACKLINKS_WORKER_ENABLED: environment.BACKLINKS_WORKER_ENABLED,
     TEMPORAL_ADDRESS: environment.TEMPORAL_ADDRESS,

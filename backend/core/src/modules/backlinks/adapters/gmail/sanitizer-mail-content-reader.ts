@@ -78,6 +78,9 @@ export function createSanitizedReplyMailContentReader(
         : sanitizeGmailHtml(message.body.html.content);
       return Object.freeze({
         plainText: message.body.text,
+        ...(message.replyTo.length > 0
+          ? { replyToAddresses: message.replyTo.map((address) => address.address) }
+          : {}),
         sanitizedHtml: sanitized === null
           ? null
           : Object.freeze({

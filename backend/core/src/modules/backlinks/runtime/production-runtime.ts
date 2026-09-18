@@ -8,6 +8,7 @@ import type {
 } from "../../../index.js";
 import { createBacklinksModule } from "../application/backlinks.module.js";
 import { createContactCommands } from "../application/commands/contacts.command.js";
+import { createRecommendationPoolV2MetricRuntime } from "./recommendation-pool-v2-metric-runtime.js";
 import {
   createContactEnrichmentCommands,
   ensureReadyContactEnrichmentJobs,
@@ -225,6 +226,7 @@ import {
   createLocalProductGmailPollingSyncRuntime,
 } from "./local-product-gmail-sync-runtime.js";
 import { createLocalProductReplyMailContentReader } from "./local-product-mail-store.js";
+import { createMailReplyService } from "../application/services/mail-reply.service.js";
 
 export const gmailTokenHealthMaximumRetryDelaySeconds = 3_600;
 
@@ -1760,6 +1762,7 @@ async function createApiDependencies(
     contactCommands,
     contactEnrichmentCommands,
     draftCommands,
+    automationDraftReservationUsd: aiRuntime?.draftReservationUsd ?? null,
     draftEditingCommands,
     gmailConnectionCommands,
     gmailConnectionQuery,
@@ -1780,6 +1783,9 @@ async function createApiDependencies(
     replyMatchCommands,
     negotiationFactsService,
     sendIntentCommands,
+    mailReplyService: createMailReplyService({
+      pool, contentReader: replyMailContentReader, sendIntents: sendIntentCommands,
+    }),
     settingsGovernanceService: createSettingsGovernanceService(pool),
     backlinkProfileService,
     projectContextProjectionCommand: createProjectContextProjectionCommand(
@@ -2048,6 +2054,11 @@ async function createWorkerRegistrations(
   });
   const recommendationPoolV2Activities = createRecommendationPoolV2Activities({
     pool,
+    ...(dataForSeoAvailable && dataForSeoConfiguration !== null && dataForSeoSecretStoreRoot !== null
+      ? { enrichMetrics: createRecommendationPoolV2MetricRuntime({
+          pool, configuration: dataForSeoConfiguration, secretStoreRoot: dataForSeoSecretStoreRoot,
+        }) }
+      : {}),
     discoveryRoundExecutor:
       createRecommendationPoolV2DataForSeoDiscoveryRoundExecutor({
         pool,
